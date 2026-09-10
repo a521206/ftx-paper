@@ -146,4 +146,7 @@ def test_independent_live_engine_has_one_evaluation_per_bundle() -> None:
             "vix": MarketBar(vix, minute, 15, 16, 14, 15),
         }, ("futures", "vix"))
         events = engine.evaluate(bundle)
-        assert sum(item.event_type == "CANDIDATE" for item in events) == 1
+        if index < 2:
+            assert [item.event_type for item in events] == ["WARMUP"]
+        else:
+            assert all(item.event_type != "CANDIDATE" for item in events)

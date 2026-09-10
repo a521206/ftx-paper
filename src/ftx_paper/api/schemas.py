@@ -14,7 +14,7 @@ def openapi_document() -> dict[str, Any]:
         "properties": {
             "event_type": {
                 "type": "string",
-                "enum": ["BUNDLE_CREATED", "BUNDLE_INCOMPLETE", "CANDIDATE", "REJECTEDDECISION", "ACCEPTEDDECISION", "SIZING_REJECTED", "EXECUTEDDECISION"],
+                "enum": ["WARMUP", "REJECTEDDECISION", "ACCEPTEDDECISION", "SIZING_REJECTED", "EXECUTEDDECISION"],
             },
             "payload": {"type": "object", "additionalProperties": True},
             "created_at": {"type": "string", "format": "date-time"},

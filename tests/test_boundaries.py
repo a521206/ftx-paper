@@ -62,6 +62,7 @@ def test_api_exposes_decisions_and_logs_as_projections(tmp_path: Path) -> None:
     decisions = client.get("/api/v1/decisions").get_json()["decisions"]
     assert len(decisions) == 1
     assert decisions[0]["payload"]["decision_id"] == "d1"
+    assert client.get("/api/v1/bundles").status_code == 404
     assert len(client.get("/api/v1/logs").get_json()["logs"]) == 3
 
 

@@ -487,16 +487,26 @@
 
       return rows
         .map(
-          (raw) => { const x = { ...(raw.payload || {}), ...raw };
-            const outcome = x.outcome || (x.event_type === 'ACCEPTEDDECISION' ? 'Accepted' : x.event_type === 'REJECTEDDECISION' ? 'Policy rejection' : x.event_type === 'SIZING_REJECTED' ? 'Sizing rejection' : x.event_type === 'EXECUTEDDECISION' ? 'Executed' : x.event_type === 'BUNDLE_INCOMPLETE' ? 'Incomplete bundle' : x.event_type === 'BUNDLE_CREATED' ? 'Bundle created' : x.event_type === 'ENGINE_EVENT' ? 'Observed' : x.event_type === 'CANDIDATE' ? 'Candidate' : 'No qualifying setup');
-            const outcomeTone = ['Accepted', 'Executed'].includes(outcome) ? 'good' : ['Policy rejection', 'Sizing rejection', 'Incomplete bundle'].includes(outcome) ? 'warn' : 'subtle';
+          (raw) => {
+            const payload = raw.payload && typeof raw.payload === 'object' ? raw.payload : {};
+            const x = { ...raw, ...payload, event_type: raw.event_type || payload.event_type };
+            const eventType = String(x.event_type || '').toUpperCase();
+            // Use payload fields for decision time, falling back to created_at only if not in payload
+            const timestamp = x.minute || x.decision_minute || x.created_at;
+            // Get decision-relevant fields exclusively from payload when available
+            const cell = payload.cell || payload.zone || payload.location || payload.symbol;
+            const direction = payload.direction || payload.side;
+            const detail = payload.reason || payload.detail || payload.setup_type || (payload.close != null ? `Close ${payload.close}` : '—');
+            const outcome = payload.outcome || (eventType === 'ACCEPTEDDECISION' ? 'Accepted' : eventType === 'REJECTEDDECISION' ? 'Policy rejection' : eventType === 'SIZING_REJECTED' ? 'Sizing rejection' : eventType === 'EXECUTEDDECISION' ? 'Executed' : eventType === 'ENGINE_EVENT' ? 'Observed' : 'No qualifying setup');
+            const outcomeLabel = String(outcome).replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+            const outcomeTone = ['Accepted', 'Executed'].includes(outcomeLabel) ? 'good' : ['Policy Rejection', 'Sizing Rejection', 'Incomplete Bundle'].includes(outcomeLabel) ? 'warn' : 'subtle';
             return `<details>
             <summary class="decision-row">
-              <span>${date(x.timestamp || x.minute || x.created_at)}</span>
-              <span>${esc(x.cell || x.symbol || '—')}</span>
-              <span>${badge(x.direction || '—', x.direction === 'long' ? 'good' : 'bad')}</span>
-              <span>${esc(x.reason || x.detail || x.setup_type || (x.close != null ? `Close ${x.close}` : '—'))}</span>
-              <span>${badge(outcome, outcomeTone)}</span>
+              <span>${date(timestamp)}</span>
+              <span>${esc(cell || '—')}</span>
+              <span>${badge(direction || '—', direction === 'long' ? 'good' : direction === 'short' ? 'bad' : 'subtle')}</span>
+              <span>${esc(detail)}</span>
+              <span>${badge(outcomeLabel, outcomeTone)}</span>
             </summary>
             <div class="payload"><strong>Entry price:</strong> ${esc(x.entry_price ?? '—')} · <strong>Score:</strong> ${esc(x.score ?? x.setup_score ?? '—')} · <strong>Setup type:</strong> ${esc(x.setup_type || '—')}<br><strong>Stop basis:</strong> ${esc(x.stop_basis ?? x.stop_bp ?? '—')} · <strong>VIX:</strong> ${esc(x.vix_at_event ?? x.vix ?? '—')} · <strong>PCR:</strong> ${esc(x.pcr_at_event ?? x.pcr ?? '—')}<br><strong>Sequence:</strong> ${esc(x.sequence ?? '—')} · <strong>Decision source:</strong> ${esc(x.decision_source || '—')} · <strong>Decision ID:</strong> ${esc(x.decision_id || '—')}</div>
           </details>`; }

@@ -40,7 +40,7 @@ class IndependentLiveDecisionEngine:
                 "strategy_version": self.version, "config_hash": self.config_hash,
                 "required_input_availability": {r: r not in bundle.missing_roles for r in bundle.required_roles}}
         if not bundle.complete:
-            return (LiveDecision("BUNDLE_INCOMPLETE", {**base, "reason": "missing_" + "+".join(bundle.missing_roles)}),)
+            return ()
         vix_bar = bundle.bars.get("vix")
         if vix_bar is None:
             decision_id = sha256(f"{bundle.bundle_id}:missing_vix".encode()).hexdigest()[:24]
@@ -48,7 +48,7 @@ class IndependentLiveDecisionEngine:
         futures = bundle.bars["futures"]
         self._futures.append(futures)
         if len(self._futures) < 3:
-            return (LiveDecision("CANDIDATE", {**base, "outcome": "no qualifying setup", "reason": "warmup", "feature_values": {}}),)
+            return (LiveDecision("WARMUP", {**base, "reason": "insufficient_history", "feature_values": {}}),)
         prior = self._futures[:-1]
         vwap = sum(((b.high + b.low + b.close) / 3) * (b.volume or 0) for b in prior) / max(sum(b.volume or 0 for b in prior), 1e-12)
         session_high, session_low = max(b.high for b in prior), min(b.low for b in prior)
@@ -61,12 +61,14 @@ class IndependentLiveDecisionEngine:
                           "vix": vix_bar.close}
         location = "VWAP_ZONE" if abs(current - vwap) <= 15 else "SESSION_HIGH" if abs(current - session_high) <= 15 else "SESSION_LOW" if abs(current - session_low) <= 15 else None
         cell = location or "NONE"
+        if location is None:
+            return ()
         direction = "long" if current >= vwap else "short"
         candidate_id = sha256(f"{bundle.bundle_id}:{cell}".encode()).hexdigest()[:24]
         candidate = {**base, "decision_id": candidate_id, "cell": cell, "direction": direction,
                      "setup_type": "reversal_at_" + cell.lower() if location else "Skip",
                      "feature_values": feature_values, "entry_price": current, "outcome": "candidate"}
-        events = [LiveDecision("CANDIDATE", candidate)]
+        events = []
         reason = None
         if location is None:
             reason = "no_qualifying_setup"

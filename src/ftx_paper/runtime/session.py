@@ -110,10 +110,6 @@ class RuntimeSession:
                         payload.update(strategy_version=metadata.version, config_hash=metadata.config_hash)
                     self.store.append_event(event_type, payload, f"{event_type}:{bar.timestamp.isoformat()}:{self.engine.bars_seen}")
             for bundle, bundle_result in zip(bundles, results):
-                self.store.append_event("BUNDLE_CREATED" if bundle.complete else "BUNDLE_INCOMPLETE", {
-                    "bundle_id": bundle.bundle_id, "decision_minute": bundle.minute,
-                    "missing_inputs": list(bundle.missing_roles), "required_input_availability": {r: r not in bundle.missing_roles for r in bundle.required_roles},
-                }, f"bundle:{bundle.bundle_id}")
                 self.store.patch_status({"last_completed_bundle_minute": bundle.minute, "last_strategy_evaluation_minute": bundle.minute})
                 for event in bundle_result.events:
                     event_type = str(event.pop("event_type", "ENGINE_EVENT"))
