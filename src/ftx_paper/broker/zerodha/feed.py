@@ -23,14 +23,30 @@ def create_kite_socket(api_key: str, access_token: str) -> TickerSocket:
     ticker = KiteTicker(api_key, access_token)
 
     class Socket:
+        def __init__(self):
+            self._tokens: list[int] = []
+            self._connected = False
+
         def connect(self, on_message, on_close):
+            self._connected = False
             ticker.on_ticks = lambda _ws, payload: [on_message(item) for item in payload]
             ticker.on_close = lambda *_args: on_close()
+            ticker.on_connect = lambda *_args: self._on_connect()
             ticker.connect(threaded=True)
 
         def subscribe(self, tokens):
-            ticker.subscribe(tokens)
-            ticker.set_mode(ticker.MODE_QUOTE, tokens)
+            self._tokens = [int(token) for token in tokens]
+            if self._connected:
+                self._send_subscription()
+
+        def _on_connect(self):
+            self._connected = True
+            self._send_subscription()
+
+        def _send_subscription(self):
+            if self._tokens:
+                ticker.subscribe(self._tokens)
+                ticker.set_mode(ticker.MODE_QUOTE, self._tokens)
 
         def close(self):
             ticker.close()

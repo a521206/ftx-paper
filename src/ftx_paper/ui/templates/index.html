@@ -522,7 +522,7 @@
       <div class="status-strip">
         ${[
           ['Zerodha', data.broker.authenticated ? 'Connected' : 'Not connected', data.broker.authenticated ? 'good' : 'warn'],
-          ['Worker', runtime.state || 'Unknown', runtime.state === 'RUNNING' ? 'good' : 'warn'],
+          ['Runtime session', runtime.state || 'Unknown', runtime.state === 'RUNNING' ? 'good' : 'warn'],
           ['Feed', runtime.feed_connected ? 'Healthy' : 'Not connected', runtime.feed_connected ? 'good' : 'bad'],
           ['Last bar', date(runtime.last_bar_at), ''],
           ['Heartbeat', date(runtime.last_heartbeat_at), runtime.last_heartbeat_at ? 'good' : 'warn'],
@@ -653,7 +653,7 @@
         button.onclick = async () => {
           try {
             await get('/api/v1/runtime/' + button.dataset.cmd, { method: 'POST' });
-            flash('Runtime command accepted');
+            flash('Runtime action accepted');
             refresh();
           } catch (e) {
             flash(e.message);

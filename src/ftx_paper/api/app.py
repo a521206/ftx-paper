@@ -3,13 +3,16 @@ from __future__ import annotations
 from flask import Flask, jsonify, request
 from typing import Any
 
-from ftx_paper.runtime import RuntimeController, RuntimeStore
+from ftx_paper.runtime import RuntimeController, RuntimeSession, RuntimeStore
 from .schemas import error_payload, openapi_document
 
 
-def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token: str | None = None) -> Flask:
+def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token: str | None = None,
+               controller: RuntimeController | None = None, session: RuntimeSession | None = None) -> Flask:
     app = Flask(__name__)
-    controller = RuntimeController(store)
+    store.recover_interrupted()
+    session = session or RuntimeSession(store, zerodha_auth, [])
+    controller = controller or RuntimeController(store, session)
 
     @app.after_request
     def add_cors_headers(response):
@@ -89,7 +92,7 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
         if action is None:
             return jsonify({"error": {"code": "unknown_command", "message": command}}), 404
         if command in {"start", "restart"} and zerodha_auth is not None and zerodha_auth.access_token() is None:
-            return jsonify({"error": {"code": "auth_required", "message": "Connect Zerodha before starting the worker", "login_url": zerodha_auth.login_url()}}), 409
+            return jsonify({"error": {"code": "auth_required", "message": "Connect Zerodha before starting the runtime session", "login_url": zerodha_auth.login_url()}}), 409
         action()
         return jsonify(store.read_status()), 202
 

@@ -7,7 +7,7 @@
 - [x] Runtime SQLite boundary
 - [x] Versioned backend API skeleton
 - [x] Separate UI server
-- [x] Worker and execution-ledger boundary
+- [x] Runtime session and execution-ledger boundary
 
 ## Core engine
 
@@ -24,7 +24,7 @@
 - [x] Implement Zerodha authentication API routes
 - [x] Implement Zerodha WebSocket feed and reconnect policy
 - [x] Implement order acknowledgement and fill polling
-- [x] Add worker command queue and process supervision
+- [x] Add serialized runtime lifecycle
 - [x] Add crash recovery and idempotency keys
 - [x] Persist complete decision/order/fill/position audit records
 
@@ -42,3 +42,8 @@
 - [x] Switch `scripts.ftx.run_ftx_web` to `ftx-paper`
 - [ ] Remove live implementation from NiftyZoning
 - [x] Add standalone deployment and upgrade documentation
+# Tasks
+
+- [x] In-process push-feed runtime session
+- [x] Serialized start/stop/restart lifecycle
+- [x] Remove subprocess worker and command queue

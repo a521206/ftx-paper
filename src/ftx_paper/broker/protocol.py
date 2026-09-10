@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Protocol
 
-from ftx_paper.contracts import Instrument, MarketBar, OrderAck, OrderIntent
+from ftx_paper.contracts import Instrument, OrderAck, OrderIntent
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,7 +16,11 @@ class Fill:
 
 
 class MarketFeed(Protocol):
-    def bars(self) -> Iterator[MarketBar]: ...
+    def start(self) -> None: ...
+
+    def stop(self) -> None: ...
+
+    def flush(self) -> None: ...
 
 
 class Broker(Protocol):

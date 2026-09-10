@@ -14,7 +14,6 @@ zerodha = ["kiteconnect>=5"]
 
 [project.scripts]
 ftx-paper-api = "ftx_paper.cli:api_main"
-ftx-paper-worker = "ftx_paper.cli:worker_main"
 ftx-web = "ftx_paper.cli:api_main"
 ftx-paper-ui = "ftx_paper.cli:ui_main"
 

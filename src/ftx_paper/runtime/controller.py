@@ -1,25 +1,20 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 from .store import RuntimeStore
+from .session import RuntimeSession
 
 
 class RuntimeController:
-    """Command boundary used by the API; process supervision is added here."""
+    """Serialized lifecycle boundary used by the API."""
 
-    def __init__(self, store: RuntimeStore) -> None:
-        self.store = store
+    def __init__(self, store: RuntimeStore, session: RuntimeSession) -> None:
+        self.store, self.session = store, session
 
     def request_start(self) -> None:
-        self._request("START")
+        self.session.start()
 
     def request_stop(self) -> None:
-        self._request("STOP")
+        self.session.stop()
 
     def request_restart(self) -> None:
-        self._request("RESTART")
-
-    def _request(self, command: str) -> None:
-        self.store.enqueue_command(command)
-        self.store.write_status({"state": f"{command}_REQUESTED", "at": datetime.now(timezone.utc).isoformat()})
+        self.session.restart()

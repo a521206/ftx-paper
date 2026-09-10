@@ -8,7 +8,7 @@ from typing import Any
 
 
 class RuntimeStore:
-    """Persistence boundary for the worker and API; no strategy logic belongs here."""
+    """Persistence boundary for the runtime session and API."""
 
     def __init__(self, runtime_dir: str | Path) -> None:
         self.root = Path(runtime_dir)
@@ -29,13 +29,20 @@ class RuntimeStore:
                     created_at TEXT NOT NULL,
                     idempotency_key TEXT UNIQUE
                 );
-                CREATE TABLE IF NOT EXISTS runtime_commands (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    command TEXT NOT NULL,
-                    consumed_at TEXT
-                );
                 """
             )
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(runtime_events)")}
+            if "idempotency_key" not in columns:
+                connection.execute("ALTER TABLE runtime_events ADD COLUMN idempotency_key TEXT")
+            connection.execute(
+                "DELETE FROM runtime_events WHERE idempotency_key IS NOT NULL AND rowid NOT IN "
+                "(SELECT MIN(rowid) FROM runtime_events WHERE idempotency_key IS NOT NULL GROUP BY idempotency_key)"
+            )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_runtime_events_idempotency "
+                "ON runtime_events(idempotency_key) WHERE idempotency_key IS NOT NULL"
+            )
+            connection.execute("DROP TABLE IF EXISTS runtime_commands")
 
     def read_status(self) -> dict[str, Any]:
         with sqlite3.connect(self.database) as connection:
@@ -68,10 +75,11 @@ class RuntimeStore:
 
     def recover_interrupted(self) -> bool:
         status = self.read_status()
-        if status.get("state") != "RUNNING":
+        if status.get("state") not in {"RUNNING", "STARTING", "START_REQUESTED"}:
             return False
-        self.patch_status({"state": "RECOVERY_REQUIRED"})
-        self.append_event("RUNTIME_RECOVERY", {"previous_state": "RUNNING"}, "recovery:running")
+        previous_state = status.get("state")
+        self.patch_status({"state": "RECOVERY_REQUIRED", "recovered_from": previous_state})
+        self.append_event("RUNTIME_RECOVERY", {"previous_state": previous_state}, "recovery:interrupted")
         return True
 
     def read_events(self, limit: int = 100) -> list[dict[str, Any]]:
@@ -86,16 +94,3 @@ class RuntimeStore:
             {"event_type": event_type, "payload": json.loads(payload), "created_at": created_at}
             for event_type, payload, created_at in rows
         ]
-
-    def enqueue_command(self, command: str) -> int:
-        with sqlite3.connect(self.database) as connection:
-            cursor = connection.execute("INSERT INTO runtime_commands(command) VALUES (?)", (command,))
-            return int(cursor.lastrowid)
-
-    def claim_commands(self, limit: int = 10) -> list[dict[str, Any]]:
-        now = datetime.now(timezone.utc).isoformat()
-        with sqlite3.connect(self.database) as connection:
-            rows = connection.execute("SELECT id, command FROM runtime_commands WHERE consumed_at IS NULL ORDER BY id LIMIT ?", (limit,)).fetchall()
-            for command_id, _ in rows:
-                connection.execute("UPDATE runtime_commands SET consumed_at=? WHERE id=?", (now, command_id))
-        return [{"id": command_id, "command": command} for command_id, command in rows]

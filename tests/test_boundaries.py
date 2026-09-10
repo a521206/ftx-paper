@@ -41,18 +41,22 @@ def test_api_exposes_persisted_events(tmp_path: Path) -> None:
 def test_api_exposes_decisions_and_logs_as_projections(tmp_path: Path) -> None:
     store = RuntimeStore(tmp_path)
     store.append_event("ENGINE_EVENT", {"bar": 1})
-    store.append_event("WORKER_LOG", {"message": "started"})
+    store.append_event("RUNTIME_LOG", {"message": "started"})
     client = create_app(store).test_client()
     assert client.get("/api/v1/decisions").get_json()["decisions"][0]["payload"] == {"bar": 1}
     assert len(client.get("/api/v1/logs").get_json()["logs"]) == 2
 
 
-def test_runtime_commands_are_api_boundaries(tmp_path: Path) -> None:
+def test_runtime_actions_are_api_boundaries(tmp_path: Path) -> None:
     store = RuntimeStore(tmp_path)
-    response = create_app(store).test_client().post("/api/v1/runtime/start")
+    class FakeController:
+        def request_start(self): store.patch_status({"state": "STARTING"})
+        def request_stop(self): pass
+        def request_restart(self): pass
+    response = create_app(store, controller=FakeController()).test_client().post("/api/v1/runtime/start")
 
     assert response.status_code == 202
-    assert store.read_status()["state"] == "START_REQUESTED"
+    assert store.read_status()["state"] == "STARTING"
 
 
 def test_ui_is_a_separate_http_client() -> None:
@@ -84,7 +88,11 @@ def test_zerodha_auth_routes_use_injected_adapter() -> None:
         def access_token(self):
             return "access"
 
-    client = create_app(RuntimeStore(Path(".")), FakeAuth()).test_client()
+    class FakeController:
+        def request_start(self): pass
+        def request_stop(self): pass
+        def request_restart(self): pass
+    client = create_app(RuntimeStore(Path(".")), FakeAuth(), controller=FakeController()).test_client()
     assert client.get("/api/v1/broker/zerodha/login").get_json()["login_url"] == "https://kite.test/login"
     response = client.post("/api/v1/broker/zerodha/callback", json={"request_token": "token"})
     assert response.status_code == 200
@@ -218,3 +226,42 @@ def test_zerodha_ack_is_distinct_from_polled_fill() -> None:
     fill = broker.poll_fill(order, ack.broker_order_id)
     assert ack.status == "ACCEPTED"
     assert fill is not None and fill.price == 101 and fill.quantity == 2
+
+
+def test_zerodha_socket_defers_subscription_until_connected(monkeypatch) -> None:
+    import kiteconnect
+    from ftx_paper.broker.zerodha import create_kite_socket
+
+    created = {}
+
+    class FakeTicker:
+        MODE_QUOTE = 2
+
+        def __init__(self, *args, **kwargs):
+            self.ws = None
+            self.subscribed = []
+            created["ticker"] = self
+
+        def connect(self, threaded=False, **kwargs):
+            pass
+
+        def subscribe(self, tokens):
+            assert self.ws is not None
+            self.subscribed.append(list(tokens))
+
+        def set_mode(self, mode, tokens):
+            assert self.ws is not None
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(kiteconnect, "KiteTicker", FakeTicker)
+    socket = create_kite_socket("key", "token")
+    socket.connect(lambda _message: None, lambda *_args: None)
+    socket.subscribe([1, 2])
+
+    ticker = created["ticker"]
+    assert ticker.subscribed == []
+    ticker.ws = object()
+    ticker.on_connect(ticker.ws, {})
+    assert ticker.subscribed == [[1, 2]]
