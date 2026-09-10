@@ -45,7 +45,8 @@ class CompletedBarAggregator:
         self._pending: dict[tuple[str, str], dict[str, MarketBar]] = defaultdict(dict)
         self._emitted: set[tuple[str, str]] = set()
         self._first_seen_monotonic: dict[tuple[str, str], float] = {}
-        self._previous: dict[str, MarketBar] = {}
+        self._latest: dict[str, MarketBar] = {}
+        self._latest_trading_date: str | None = None
 
     def ingest(self, bar: MarketBar) -> DecisionBundle | None:
         role = self._roles.get((bar.instrument.exchange, bar.instrument.symbol))
@@ -54,6 +55,13 @@ class CompletedBarAggregator:
         if role not in self.required_roles and role not in self._supporting_roles:
             return None
         key = market_minute_key(bar.timestamp)
+        trading_date, _ = key
+        if self._latest_trading_date is not None and trading_date < self._latest_trading_date:
+            return None
+        if self._latest_trading_date != trading_date:
+            self._latest.clear()
+            self._latest_trading_date = trading_date
+        self._latest[role] = bar
         if key in self._emitted:
             return None
         self._pending[key][role] = bar
@@ -116,7 +124,7 @@ class CompletedBarAggregator:
             if role in bars:
                 continue
             missing_same_minute.append(role)
-            previous = self._previous.get(role)
+            previous = self._latest.get(role)
             if previous is None:
                 unavailable_inputs.append(role)
                 continue
@@ -124,8 +132,6 @@ class CompletedBarAggregator:
             sources[role] = "carried_forward"
         missing = tuple(role for role in self.required_roles if role not in bars)
         trading_date, minute = key
-        for role, bar in bars.items():
-            self._previous[role] = bar
         bundle = DecisionBundle(
             bundle_id=f"{trading_date}:{minute}", trading_date=trading_date, minute=minute,
             bars={role: bar for role, bar in bars.items() if role in self.required_roles},
