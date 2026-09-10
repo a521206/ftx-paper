@@ -52,7 +52,16 @@ class RuntimeSession:
             client = self.client_factory() if self.client_factory else self.auth.authenticated_client()
             resolved: list[ZerodhaInstrument] = resolve_instruments(client, self.specifications)
             roles = classify_runtime_roles(resolved)
-            role_map = {(str(item["exchange"]), str(item["symbol"])): str(item.get("role") or "") for item in resolved}
+            inferred_roles = {
+                (str(roles.futures["exchange"]), str(roles.futures["symbol"])): "futures",
+                (str(roles.vix["exchange"]), str(roles.vix["symbol"])): "vix",
+            }
+            role_map = {
+                (str(item["exchange"]), str(item["symbol"])): inferred_roles.get(
+                    (str(item["exchange"]), str(item["symbol"])), str(item.get("role") or "").strip().lower()
+                )
+                for item in resolved
+            }
             self._aggregator = CompletedBarAggregator(role_map, required_roles=("futures", "vix"))
             for bar in load_startup_backfill(client, [roles.futures, roles.vix]):
                 self.engine.on_bar(bar)
