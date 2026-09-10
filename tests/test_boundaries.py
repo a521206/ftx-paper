@@ -165,6 +165,24 @@ def test_zerodha_feed_emits_only_closed_minute_bars() -> None:
     assert emitted == [first, second]
 
 
+def test_zerodha_feed_tracks_per_instrument_health() -> None:
+    class Socket:
+        def connect(self, on_message, on_close): self.on_message = on_message
+        def subscribe(self, tokens): pass
+        def close(self): pass
+    instrument = Instrument("NIFTY", "NSE", "INDEX")
+    first = MarketBar(instrument, datetime(2026, 1, 1, 10, 0), 100, 101, 99, 100)
+    second = MarketBar(instrument, datetime(2026, 1, 1, 10, 1), 101, 102, 100, 101)
+    feed = ZerodhaFeed(Socket(), [1], lambda payload: payload, lambda bar: None, watchdog_interval_seconds=60)
+    feed.start()
+    feed.socket.on_message(first)
+    feed.socket.on_message(second)
+    health = feed.health_snapshot()
+    feed.stop()
+    assert health["instruments"]["NSE:NIFTY"]["tick_count"] == 2
+    assert health["instruments"]["NSE:NIFTY"]["last_closed_bar_at"].startswith("2026-01-01T10:00")
+
+
 def test_api_requires_bearer_token_except_health(tmp_path: Path) -> None:
     app = create_app(RuntimeStore(tmp_path), auth_token="secret")
     client = app.test_client()

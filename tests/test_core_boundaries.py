@@ -137,6 +137,23 @@ def test_completed_bars_emit_one_bundle_only_after_required_roles_arrive() -> No
     assert aggregator.ingest(future) is None
 
 
+def test_supporting_role_is_ignored_and_expired_bundle_has_diagnostics() -> None:
+    future = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    spot = Instrument("NIFTY", "NSE", "INDEX")
+    aggregator = CompletedBarAggregator({
+        ("NFO", "NIFTYFUT"): "futures",
+        ("NSE", "INDIA VIX"): "vix",
+        ("NSE", "NIFTY"): "spot",
+    })
+    minute = datetime(2026, 1, 1, 10, 20, tzinfo=timezone.utc)
+    assert aggregator.ingest(MarketBar(spot, minute, 1, 1, 1, 1)) is None
+    assert aggregator.ingest(MarketBar(future, minute, 100, 101, 99, 100)) is None
+    expired = aggregator.expire(now=minute.replace(second=11))
+    assert len(expired) == 1
+    assert expired[0].missing_roles == ("vix",)
+    assert expired[0].bars["futures"].timestamp == minute
+
+
 def test_independent_live_engine_has_one_evaluation_per_bundle() -> None:
     instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
     vix = Instrument("INDIA VIX", "NSE", "VIX")

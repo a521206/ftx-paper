@@ -33,7 +33,7 @@ def test_closed_bar_is_processed_under_session_lifecycle(tmp_path):
     bar = MarketBar(Instrument("NIFTY", "NSE", "INDEX"), datetime.now(timezone.utc), 1, 2, 0, 1)
     session.on_closed_bar(bar)
     assert session.engine.bars_seen == 1
-    assert store.read_events()[0]["event_type"] == "ENGINE_EVENT"
+    assert any(event["event_type"] == "ENGINE_EVENT" for event in store.read_events())
 
 
 def test_stop_orders_feed_cleanup_before_broker(tmp_path):
@@ -65,10 +65,13 @@ def test_incomplete_bundle_is_diagnosed_without_advancing_completion(tmp_path):
     status = store.read_status()
     assert status["pending_bundle_minutes"] == ["10:20"]
     assert status["pending_bundle_details"] == [{
-        "minute": "10:20", "missing_roles": ["vix"], "roles_present": ["futures"]
+        "trading_date": "2026-01-01", "bundle_id": "2026-01-01:10:20",
+        "minute": "10:20", "required_roles": ["futures", "vix"],
+        "missing_roles": ["vix"], "roles_present": ["futures"],
+        "last_bar_by_role": {"futures": "2026-01-01T10:20:00+00:00"},
     }]
     assert "last_completed_bundle_minute" not in status
-    assert store.read_events() == []
+    assert all(event["event_type"] not in {"BUNDLE_INCOMPLETE", "BUNDLE_COMPLETE"} for event in store.read_events())
 
     next_bar = MarketBar(
         Instrument("NIFTYFUT", "NFO", "FUTURES"),
