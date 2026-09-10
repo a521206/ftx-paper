@@ -1,10 +1,28 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
+
+
+class ProcessAlreadyRunningError(RuntimeError):
+    """Raised when another live process owns a runtime service lease."""
+
+
+def _pid_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 class RuntimeStore:
@@ -30,6 +48,12 @@ class RuntimeStore:
                     created_at TEXT NOT NULL,
                     idempotency_key TEXT UNIQUE
                 );
+                CREATE TABLE IF NOT EXISTS process_leases (
+                    service TEXT PRIMARY KEY,
+                    pid INTEGER NOT NULL,
+                    started_at TEXT NOT NULL,
+                    instance_id TEXT NOT NULL
+                );
                 """
             )
             columns = {row[1] for row in connection.execute("PRAGMA table_info(runtime_events)")}
@@ -44,6 +68,39 @@ class RuntimeStore:
                 "ON runtime_events(idempotency_key) WHERE idempotency_key IS NOT NULL"
             )
             connection.execute("DROP TABLE IF EXISTS runtime_commands")
+
+    def acquire_process_lease(self, service: str) -> str:
+        """Atomically claim a service lease, removing leases for dead PIDs."""
+        pid = os.getpid()
+        instance_id = str(uuid4())
+        started_at = datetime.now(timezone.utc).isoformat()
+        with sqlite3.connect(self.database, timeout=10) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT pid FROM process_leases WHERE service = ?", (service,)
+            ).fetchone()
+            if row is not None:
+                existing_pid = int(row[0])
+                if _pid_is_alive(existing_pid):
+                    connection.rollback()
+                    raise ProcessAlreadyRunningError(
+                        f"{service} process already running with PID {existing_pid}"
+                    )
+                connection.execute("DELETE FROM process_leases WHERE service = ?", (service,))
+            connection.execute(
+                "INSERT INTO process_leases(service, pid, started_at, instance_id) VALUES (?, ?, ?, ?)",
+                (service, pid, started_at, instance_id),
+            )
+            connection.commit()
+        return instance_id
+
+    def release_process_lease(self, service: str, instance_id: str) -> None:
+        """Release only the lease owned by this process instance."""
+        with sqlite3.connect(self.database, timeout=10) as connection:
+            connection.execute(
+                "DELETE FROM process_leases WHERE service = ? AND pid = ? AND instance_id = ?",
+                (service, os.getpid(), instance_id),
+            )
 
     def read_status(self) -> dict[str, Any]:
         with sqlite3.connect(self.database) as connection:

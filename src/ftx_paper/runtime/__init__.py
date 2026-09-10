@@ -1,5 +1,5 @@
-from .store import RuntimeStore
+from .store import ProcessAlreadyRunningError, RuntimeStore
 from .controller import RuntimeController
 from .session import RuntimeSession
 
-__all__ = ["RuntimeController", "RuntimeSession", "RuntimeStore"]
+__all__ = ["ProcessAlreadyRunningError", "RuntimeController", "RuntimeSession", "RuntimeStore"]
