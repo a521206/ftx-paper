@@ -61,6 +61,15 @@ class CompletedBarAggregator:
                 result.append(self._emit(key))
         return tuple(result)
 
+    def pending(self) -> tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...]:
+        """Inspect incomplete minutes without changing aggregation state."""
+        result = []
+        for (_, minute), bars in sorted(self._pending.items()):
+            missing = tuple(role for role in self.required_roles if role not in bars)
+            present = tuple(role for role in self.required_roles if role in bars)
+            result.append((minute, missing, present))
+        return tuple(result)
+
     def _emit(self, key: tuple[str, str]) -> DecisionBundle:
         bars = self._pending.pop(key)
         missing = tuple(role for role in self.required_roles if role not in bars)

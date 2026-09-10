@@ -130,8 +130,10 @@ def test_completed_bars_emit_one_bundle_only_after_required_roles_arrive() -> No
     future = MarketBar(instrument, minute, 100, 102, 99, 101)
     vix_bar = MarketBar(vix, minute, 15, 16, 14, 15)
     assert aggregator.ingest(future) is None
+    assert aggregator.pending() == (("10:20", ("vix",), ("futures",)),)
     bundle = aggregator.ingest(vix_bar)
     assert bundle is not None and bundle.complete
+    assert aggregator.pending() == ()
     assert aggregator.ingest(future) is None
 
 

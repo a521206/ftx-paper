@@ -36,7 +36,8 @@ class RuntimeSession:
                 return
             self._stopping = False
             self._started.clear()
-            self.store.patch_status({"state": "STARTING", "error": None, "started_at": datetime.now(timezone.utc).isoformat()})
+            self.store.patch_status({"state": "STARTING", "error": None, "started_at": datetime.now(timezone.utc).isoformat(),
+                                     "pending_bundle_minutes": [], "pending_bundle_details": []})
             self._thread = threading.Thread(target=self._start_impl, daemon=True, name="ftx-paper-runtime")
             self._thread.start()
 
@@ -100,6 +101,25 @@ class RuntimeSession:
                 bundle = self._aggregator.ingest(bar)
                 bundles = (bundle,) if bundle is not None else ()
                 result = None
+                pending = self._aggregator.pending()
+                self.store.patch_status({
+                    "pending_bundle_minutes": [minute for minute, _, _ in pending],
+                    "pending_bundle_details": [
+                        {"minute": minute, "missing_roles": list(missing), "roles_present": list(present)}
+                        for minute, missing, present in pending
+                    ],
+                })
+                current_minute = bar.timestamp.strftime("%H:%M")
+                for minute, missing, present in pending:
+                    if minute == current_minute:
+                        continue
+                    self.store.append_event(
+                        "BUNDLE_INCOMPLETE",
+                        {"minute": minute, "missing_roles": list(missing),
+                         "required_roles": list(self._aggregator.required_roles),
+                         "roles_present": list(present)},
+                        f"bundle_incomplete:{minute}",
+                    )
             metadata = self.engine.strategy_metadata
             results = [self.engine.on_bundle(bundle) for bundle in bundles] if result is None else [result]
             if result is not None:
@@ -141,7 +161,8 @@ class RuntimeSession:
                 self.feed.stop()
             if self.broker:
                 self.broker.close()
-            self.store.patch_status({"state": "STOPPED", "bars_seen": self.engine.bars_seen})
+            self.store.patch_status({"state": "STOPPED", "bars_seen": self.engine.bars_seen,
+                                     "pending_bundle_minutes": [], "pending_bundle_details": []})
         if startup and startup is not threading.current_thread():
             startup.join()
         with self._lock:
