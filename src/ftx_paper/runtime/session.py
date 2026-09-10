@@ -12,6 +12,7 @@ from ftx_paper.contracts import (
 )
 from ftx_paper.core import CompletedBarAggregator, PaperEngine
 from ftx_paper.execution import PositionLedger
+from .events import is_decision_event
 from .store import RuntimeStore
 
 if TYPE_CHECKING:
@@ -160,11 +161,13 @@ class RuntimeSession:
             self._process_bundle(bundle, source="replay")
 
     def _persist_engine_event(self, event: dict[str, object], *, source: str, bundle_id: str,
-                              session_date: str, timestamp: str) -> None:
+                              session_date: str, minute: str, timestamp: str) -> None:
         event_type = str(event.get("event_type", "ENGINE_EVENT"))
         payload = {**event, "decision_source": source, "session_date": session_date,
                    "execution_allowed": source == "live"}
         payload.pop("event_type", None)
+        if is_decision_event(event_type):
+            payload["minute"] = minute
         metadata = self.engine.strategy_metadata
         if metadata:
             payload.update(strategy_version=metadata.version, config_hash=metadata.config_hash)
@@ -177,7 +180,7 @@ class RuntimeSession:
         timestamp = _bundle_timestamp(bundle.trading_date, bundle.minute)
         for event in result.events:
             self._persist_engine_event(event, source=source, bundle_id=bundle.bundle_id,
-                                        session_date=bundle.trading_date, timestamp=timestamp)
+                                        session_date=bundle.trading_date, minute=timestamp, timestamp=timestamp)
         outcome_types = [str(event.get("event_type", "ENGINE_EVENT")) for event in result.events]
         self.store.append_event("BUNDLE_COMPLETE", {
             "bundle_id": bundle.bundle_id, "minute": bundle.minute,
@@ -292,7 +295,7 @@ class RuntimeSession:
                 for event in result.events:
                     self._persist_engine_event(event, source="live", bundle_id=bar.timestamp.isoformat(),
                                                 session_date=bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat(),
-                                                timestamp=bar.timestamp.isoformat())
+                                                minute=bar.timestamp.isoformat(), timestamp=bar.timestamp.isoformat())
                 for order in result.orders:
                     self._execute_paper_order(
                         order,

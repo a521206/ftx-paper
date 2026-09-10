@@ -1,4 +1,6 @@
+import json
 from pathlib import Path
+import sqlite3
 
 from ftx_paper.api import create_app
 from ftx_paper.runtime import RuntimeStore
@@ -39,8 +41,8 @@ def test_api_exposes_persisted_events(tmp_path: Path) -> None:
     event = response.get_json()["events"][0]
     assert event["payload"] == {"value": 1}
     assert event["category"] == "runtime"
-    assert event["timestamp"]
-    assert "created_at" not in event
+    assert event["created_at"]
+    assert "timestamp" not in event
 
 
 def test_interrupted_paper_session_returns_to_stopped(tmp_path: Path) -> None:
@@ -73,7 +75,9 @@ def test_api_exposes_decisions_and_logs_as_projections(tmp_path: Path) -> None:
 
 def test_decision_projection_includes_execution_outcome(tmp_path: Path) -> None:
     store = RuntimeStore(tmp_path)
-    store.append_event("ACCEPTEDDECISION", {"decision_id": "d1", "decision_source": "live"})
+    store.append_event("ACCEPTEDDECISION", {
+        "decision_id": "d1", "decision_source": "live", "minute": "2026-09-10T10:20:00+05:30",
+    })
     store.append_event("ORDER_ACK", {"decision_id": "d1", "status": "FILLED"})
     store.append_event("FILL", {"decision_id": "d1", "price": 101.5})
 
@@ -86,7 +90,7 @@ def test_decision_projection_includes_execution_outcome(tmp_path: Path) -> None:
 
 def test_decision_projection_attaches_risk_without_counting_it_as_a_decision(tmp_path: Path) -> None:
     store = RuntimeStore(tmp_path)
-    store.append_event("ACCEPTEDDECISION", {"decision_id": "d1"})
+    store.append_event("ACCEPTEDDECISION", {"decision_id": "d1", "minute": "2026-09-10T10:20:00+05:30"})
     store.append_event("SIZING_REJECTED", {"decision_id": "d1", "reason": "insufficient_capital"})
     store.append_event("STRATEGY_EVALUATION", {"bundle_id": "b1"})
 
@@ -96,6 +100,43 @@ def test_decision_projection_attaches_risk_without_counting_it_as_a_decision(tmp
     assert decisions[0]["category"] == "decision"
     assert decisions[0]["payload"]["risk_status"] == "sizing_rejected"
     assert decisions[0]["payload"]["risk_event"]["event_type"] == "SIZING_REJECTED"
+
+
+def test_new_decisions_store_only_minute_for_decision_time(tmp_path: Path) -> None:
+    store = RuntimeStore(tmp_path)
+    store.append_event("ACCEPTEDDECISION", {
+        "decision_id": "d1", "minute": "2026-09-10T10:20:00+05:30",
+        "bar_datetime": "2026-09-10T10:21:00+05:30", "event_time": "2026-09-10T10:22:00+05:30",
+    })
+
+    event = store.read_events()[0]
+    assert event["payload"]["minute"] == "2026-09-10T10:20:00+05:30"
+    assert not {"bar_datetime", "bar_timestamp", "event_time", "decision_minute", "timestamp"} & event["payload"].keys()
+    assert event["created_at"] != event["payload"]["minute"]
+
+
+def test_legacy_decision_timestamps_migrate_without_overwriting_minute(tmp_path: Path) -> None:
+    database = tmp_path / "runtime.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            "CREATE TABLE runtime_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT NOT NULL, "
+            "payload TEXT NOT NULL, timestamp TEXT NOT NULL, idempotency_key TEXT UNIQUE);"
+        )
+        connection.execute(
+            "INSERT INTO runtime_events(event_type, payload, timestamp) VALUES (?, ?, ?)",
+            ("ACCEPTEDDECISION", json.dumps({"bar_datetime": "2026-09-10T10:20:00+05:30"}), "2026-09-10T15:00:00Z"),
+        )
+        connection.execute(
+            "INSERT INTO runtime_events(event_type, payload, timestamp) VALUES (?, ?, ?)",
+            ("REJECTEDDECISION", json.dumps({"minute": "2026-09-10T10:21:00+05:30", "event_time": "bad"}), "2026-09-10T15:00:00Z"),
+        )
+
+    store = RuntimeStore(tmp_path)
+    events = {event["event_type"]: event for event in store.read_events()}
+    assert events["ACCEPTEDDECISION"]["payload"]["minute"] == "2026-09-10T10:20:00+05:30"
+    assert events["REJECTEDDECISION"]["payload"]["minute"] == "2026-09-10T10:21:00+05:30"
+    assert "event_time" not in events["REJECTEDDECISION"]["payload"]
+    assert store.decision_timestamp_migration == {"migrated": 1, "unmigratable": 0}
 
 
 def test_runtime_actions_are_api_boundaries(tmp_path: Path) -> None:

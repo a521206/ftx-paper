@@ -43,7 +43,7 @@ class IndependentLiveDecisionEngine:
             self._futures.clear()
             self._last_decision = None
             self._trading_date = bundle.trading_date
-        base = {"decision_minute": bundle.minute, "minute": bundle.minute, "bundle_id": bundle.bundle_id,
+        base = {"minute": bundle.minute, "bundle_id": bundle.bundle_id,
                 "strategy_version": self.version, "config_hash": self.config_hash,
                 "required_input_availability": {r: r not in bundle.missing_roles for r in bundle.required_roles}}
         if not bundle.complete:

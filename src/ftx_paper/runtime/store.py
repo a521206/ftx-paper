@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from .events import event_category
+from .events import DECISION_EVENT_TYPES, LEGACY_DECISION_TIME_FIELDS, event_category, is_decision_event
 
 
 class ProcessAlreadyRunningError(RuntimeError):
@@ -39,6 +39,7 @@ class RuntimeStore:
         self.root.mkdir(parents=True, exist_ok=True)
         self.database = self.root / "runtime.sqlite3"
         self._event_counts_cache: dict[str, Any] | None = None
+        self.decision_timestamp_migration: dict[str, int] = {"migrated": 0, "unmigratable": 0}
         with sqlite3.connect(self.database) as connection:
             connection.executescript(
                 """
@@ -51,7 +52,7 @@ class RuntimeStore:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     event_type TEXT NOT NULL,
                     payload TEXT NOT NULL,
-                    timestamp TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
                     idempotency_key TEXT UNIQUE
                 );
                 CREATE TABLE IF NOT EXISTS process_leases (
@@ -63,10 +64,17 @@ class RuntimeStore:
                 """
             )
             columns = {row[1] for row in connection.execute("PRAGMA table_info(runtime_events)")}
-            if "created_at" in columns and "timestamp" not in columns:
-                connection.execute("ALTER TABLE runtime_events RENAME COLUMN created_at TO timestamp")
-                columns.remove("created_at")
-                columns.add("timestamp")
+            if "timestamp" in columns and "created_at" not in columns:
+                connection.execute("ALTER TABLE runtime_events RENAME COLUMN timestamp TO created_at")
+                columns.remove("timestamp")
+                columns.add("created_at")
+            elif "timestamp" in columns and "created_at" in columns:
+                connection.execute(
+                    "UPDATE runtime_events SET created_at = COALESCE(created_at, timestamp) "
+                    "WHERE created_at IS NULL"
+                )
+                connection.execute("ALTER TABLE runtime_events DROP COLUMN timestamp")
+                columns.remove("timestamp")
             if "idempotency_key" not in columns:
                 connection.execute("ALTER TABLE runtime_events ADD COLUMN idempotency_key TEXT")
             connection.execute(
@@ -78,6 +86,77 @@ class RuntimeStore:
                 "ON runtime_events(idempotency_key) WHERE idempotency_key IS NOT NULL"
             )
             connection.execute("DROP TABLE IF EXISTS runtime_commands")
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS runtime_migrations ("
+                "name TEXT PRIMARY KEY, applied_at TEXT NOT NULL, migrated_rows INTEGER NOT NULL, "
+                "unmigratable_rows INTEGER NOT NULL)"
+            )
+            self._migrate_decision_minutes(connection)
+
+    def _migrate_decision_minutes(self, connection: sqlite3.Connection) -> None:
+        """Copy legacy decision timestamps into ``minute`` exactly once."""
+        marker = connection.execute(
+            "SELECT 1 FROM runtime_migrations WHERE name = 'decision-minute-v1'"
+        ).fetchone()
+        if marker is not None:
+            row = connection.execute(
+                "SELECT migrated_rows, unmigratable_rows FROM runtime_migrations "
+                "WHERE name = 'decision-minute-v1'"
+            ).fetchone()
+            if row is not None:
+                self.decision_timestamp_migration = {"migrated": int(row[0]), "unmigratable": int(row[1])}
+            return
+
+        migrated = 0
+        unmigratable = 0
+        placeholders = ", ".join("?" for _ in DECISION_EVENT_TYPES)
+        rows = connection.execute(
+            f"SELECT id, payload FROM runtime_events WHERE event_type IN ({placeholders})",
+            tuple(sorted(DECISION_EVENT_TYPES)),
+        ).fetchall()
+        for row in rows:
+            payload = json.loads(row[1])
+            minute = payload.get("minute")
+            if not isinstance(minute, str) or not minute.strip():
+                minute = next(
+                    (payload.get(name) for name in LEGACY_DECISION_TIME_FIELDS
+                     if isinstance(payload.get(name), str) and payload.get(name).strip()),
+                    None,
+                )
+                if minute is None:
+                    unmigratable += 1
+                    continue
+                payload["minute"] = minute
+                migrated += 1
+            normalized = self._normalize_decision_minute(payload)
+            if normalized != payload.get("minute"):
+                payload["minute"] = normalized
+                migrated += 1
+            for name in LEGACY_DECISION_TIME_FIELDS:
+                payload.pop(name, None)
+            connection.execute(
+                "UPDATE runtime_events SET payload = ? WHERE id = ?",
+                (json.dumps(payload), row[0]),
+            )
+        applied_at = datetime.now(timezone.utc).isoformat()
+        connection.execute(
+            "INSERT INTO runtime_migrations(name, applied_at, migrated_rows, unmigratable_rows) "
+            "VALUES ('decision-minute-v1', ?, ?, ?)",
+            (applied_at, migrated, unmigratable),
+        )
+        self.decision_timestamp_migration = {"migrated": migrated, "unmigratable": unmigratable}
+
+    @staticmethod
+    def _normalize_decision_minute(payload: dict[str, Any]) -> str | None:
+        """Expand a legacy time-only minute using its persisted session date."""
+        minute = payload.get("minute")
+        session_date = payload.get("session_date")
+        if not isinstance(minute, str) or "T" in minute or not isinstance(session_date, str):
+            return minute if isinstance(minute, str) else None
+        value = minute.strip()
+        if len(value) == 5:
+            return f"{session_date}T{value}:00+05:30"
+        return minute
 
     def acquire_process_lease(self, service: str) -> str:
         """Atomically claim a service lease, removing leases for dead PIDs."""
@@ -135,10 +214,20 @@ class RuntimeStore:
 
     def append_event(self, event_type: str, payload: dict[str, Any], idempotency_key: str | None = None,
                      *, timestamp: str | None = None) -> bool:
-        event_timestamp = timestamp or datetime.now(timezone.utc).isoformat()
+        event_type = str(event_type).upper()
+        payload = dict(payload)
+        if is_decision_event(event_type):
+            if not isinstance(payload.get("minute"), str) or not payload["minute"].strip():
+                raise ValueError("decision events require canonical payload field 'minute'")
+            payload["minute"] = self._normalize_decision_minute(payload)
+            for name in LEGACY_DECISION_TIME_FIELDS:
+                payload.pop(name, None)
+        # ``timestamp`` is retained as a source-compatibility argument only;
+        # it must never become the persistence timestamp or decision time.
+        event_timestamp = datetime.now(timezone.utc).isoformat()
         with sqlite3.connect(self.database) as connection:
             cursor = connection.execute(
-                "INSERT OR IGNORE INTO runtime_events(event_type, payload, timestamp, idempotency_key) VALUES (?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO runtime_events(event_type, payload, created_at, idempotency_key) VALUES (?, ?, ?, ?)",
                 (event_type, json.dumps(payload), event_timestamp, idempotency_key),
             )
             inserted = cursor.rowcount == 1
@@ -183,13 +272,13 @@ class RuntimeStore:
             return []
         with sqlite3.connect(self.database) as connection:
             rows = connection.execute(
-                "SELECT event_type, payload, timestamp FROM runtime_events ORDER BY id DESC LIMIT ?",
+                "SELECT event_type, payload, created_at FROM runtime_events ORDER BY id DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         return [
             {"event_type": event_type, "category": event_category(event_type),
-             "payload": json.loads(payload), "timestamp": timestamp}
-            for event_type, payload, timestamp in rows
+             "payload": json.loads(payload), "created_at": created_at}
+            for event_type, payload, created_at in rows
         ]
 
     def event_counts(self) -> dict[str, Any]:

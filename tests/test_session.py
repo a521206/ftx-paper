@@ -156,7 +156,7 @@ def test_live_order_reaches_paper_broker_and_persists_fill(tmp_path):
     assert fill["payload"]["decision_id"] == "live-order"
     assert fill["payload"]["price"] == 101.5
     assert fill["payload"]["outcome"] == "filled"
-    assert fill["timestamp"] == "2026-01-01T10:20:00+05:30"
+    assert fill["created_at"] != "2026-01-01T10:20:00+05:30"
 
 
 def test_session_restores_ledger_from_runtime_status(tmp_path):

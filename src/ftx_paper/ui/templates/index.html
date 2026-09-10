@@ -591,6 +591,7 @@
     const session = (s) => {
       if (!s) return 'Post';
       const d = new Date(s);
+      if (isNaN(d)) return 'Post';
       const parts = new Intl.DateTimeFormat('en-IN', {
         timeZone: 'Asia/Kolkata',
         hour: '2-digit',
@@ -623,7 +624,7 @@
     function decisionRecord(raw) {
       const payload = raw?.payload && typeof raw.payload === 'object' ? raw.payload : {};
       const eventType = String(raw?.event_type || payload.event_type || '').toUpperCase();
-      const decisionTime = raw?.timestamp;
+      const decisionTime = payload.minute;
       const sessionTime = decisionTime;
       const source = String(payload.decision_source || '').toLowerCase();
       const executionStatus = String(payload.execution_status || '').toLowerCase();
@@ -710,7 +711,7 @@
           ${rows
             .map(
               (x) => `<tr>
-                <td>${date(x.timestamp)}</td>
+                <td>${date(x.created_at)}</td>
                 <td>${badge(x.event_type)}</td>
                 <td>
                   <details>
@@ -748,7 +749,7 @@
       return rows.map((raw) => {
         const type = String(raw.event_type || 'UNKNOWN').toUpperCase();
         const category = activityCategory(raw);
-        const created = raw.timestamp;
+        const created = raw.created_at;
         const dateKey = activityDateKey(created);
         return `<details class="activity-item" data-activity-type="${esc(type.toLowerCase())}" data-activity-category="${esc(category.toLowerCase())}" data-activity-session="${esc(session(created).toLowerCase())}" data-activity-date="${esc(dateKey)}">
           <summary class="activity-row">
@@ -765,7 +766,7 @@
 
     function activityPage(rows) {
       const types = [...new Set(rows.map((x) => String(x.event_type || 'UNKNOWN').toLowerCase()))].sort();
-      const dates = [...new Set(rows.map((x) => activityDateKey(x.timestamp)).filter(Boolean))].sort().reverse();
+      const dates = [...new Set(rows.map((x) => activityDateKey(x.created_at)).filter(Boolean))].sort().reverse();
       const counts = rows.reduce((result, row) => {
         const category = activityCategory(row);
         result[category] = (result[category] || 0) + 1;
@@ -825,7 +826,7 @@
             const payload = raw.payload && typeof raw.payload === 'object' ? raw.payload : {};
             const x = { ...raw, ...payload, event_type: raw.event_type || payload.event_type };
             const eventType = String(x.event_type || '').toUpperCase();
-            const timestamp = raw.timestamp;
+            const timestamp = payload.minute;
             // Get decision-relevant fields exclusively from payload when available
             const cell = payload.cell || payload.zone || payload.location || payload.symbol;
             const direction = payload.direction || payload.side;

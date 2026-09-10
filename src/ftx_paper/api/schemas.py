@@ -10,7 +10,7 @@ def error_payload(code: str, message: str) -> dict[str, dict[str, str]]:
 def openapi_document() -> dict[str, Any]:
     decision_event_schema = {
         "type": "object",
-        "required": ["event_type", "category", "payload", "timestamp"],
+        "required": ["event_type", "category", "payload", "created_at"],
         "properties": {
             "event_type": {
                 "type": "string",
@@ -18,7 +18,7 @@ def openapi_document() -> dict[str, Any]:
             },
             "category": {"type": "string", "enum": ["decision"]},
             "payload": {"type": "object", "additionalProperties": True},
-            "timestamp": {"type": "string", "format": "date-time"},
+            "created_at": {"type": "string", "format": "date-time"},
         },
     }
     return {

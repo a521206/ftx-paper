@@ -25,6 +25,15 @@ translates broker requests and order acknowledgements into package contracts.
 Fill reconciliation and paper-position state belong to the session/execution
 layer. `OrderAck` and `Fill` are deliberately separate types.
 
+## Event timestamp contract
+
+`minute` is the sole decision-bar timestamp field in event payloads. Replay and
+live decision events write their evaluated bar time to `minute`; API
+projections, UI rendering, and filters read only that field. `created_at` is
+the SQLite persistence timestamp and is never used as a decision time. The
+runtime store performs a one-time migration of legacy decision bar-time fields
+and records any rows that could not be migrated.
+
 ## Deliberate duplication
 
 The live strategy is copied from the research code at an explicitly recorded

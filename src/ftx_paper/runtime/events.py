@@ -9,6 +9,12 @@ DECISION_EVENT_TYPES = frozenset({
     "REJECTEDDECISION",
 })
 
+# These names are migration-only compatibility inputs.  New decision events
+# must use ``minute`` and application code must never read these fields.
+LEGACY_DECISION_TIME_FIELDS = (
+    "bar_datetime", "bar_timestamp", "event_time", "decision_minute", "timestamp",
+)
+
 RISK_EVENT_TYPES = frozenset({"SIZING_REJECTED"})
 
 EXECUTION_EVENT_TYPES = frozenset({

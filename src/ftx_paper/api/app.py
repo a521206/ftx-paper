@@ -91,7 +91,8 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
 
     @app.get("/api/v1/diagnostics")
     def diagnostics():
-        return jsonify({"status": store.read_status(), "event_counts": store.event_counts()})
+        return jsonify({"status": store.read_status(), "event_counts": store.event_counts(),
+                        "decision_timestamp_migration": store.decision_timestamp_migration})
 
     @app.post("/api/v1/runtime/<command>")
     def runtime_command(command: str):
@@ -156,9 +157,12 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
                 payload["execution_status"] = "replayed"
             return {**event, "category": "decision", "payload": payload}
 
-        return jsonify({
-            "decisions": [enrich(event) for event in events if is_decision_event(event.get("event_type", ""))]
-        })
+        decision_events = [
+            event for event in events
+            if is_decision_event(event.get("event_type", ""))
+            and isinstance(event.get("payload", {}).get("minute"), str)
+        ]
+        return jsonify({"decisions": [enrich(event) for event in decision_events]})
 
     @app.get("/api/v1/logs")
     def logs():
