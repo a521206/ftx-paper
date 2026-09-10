@@ -4,6 +4,7 @@ from flask import Flask, jsonify, request
 from typing import Any
 
 from ftx_paper.runtime import RuntimeController, RuntimeSession, RuntimeStore
+from ftx_paper.runtime.events import EXECUTION_EVENT_TYPES, RISK_EVENT_TYPES, is_decision_event
 from .schemas import error_payload, openapi_document
 
 
@@ -114,44 +115,49 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
     @app.get("/api/v1/decisions")
     def decisions():
         events = store.read_events(1000)
-        decision_types = {"CANDIDATEDECISION", "ACCEPTEDDECISION", "REJECTEDDECISION"}
-        execution_types = {
-            "ORDER_SUPPRESSED", "ORDER_ACK", "EXECUTEDDECISION", "FILL",
-            "ORDER_UNFILLED", "EXECUTION_ERROR", "SIZING_REJECTED",
-        }
+        execution_types = EXECUTION_EVENT_TYPES
+        risk_types = RISK_EVENT_TYPES
         executions_by_decision: dict[str, list[dict[str, Any]]] = {}
+        risks_by_decision: dict[str, list[dict[str, Any]]] = {}
         for event in events:
-            if str(event.get("event_type", "")).upper() not in execution_types:
-                continue
+            event_type = str(event.get("event_type", "")).upper()
             decision_id = event.get("payload", {}).get("decision_id")
-            if decision_id:
+            if not decision_id:
+                continue
+            if event_type in execution_types:
                 executions_by_decision.setdefault(str(decision_id), []).append(event)
+            elif event_type in risk_types:
+                risks_by_decision.setdefault(str(decision_id), []).append(event)
 
         def enrich(event: dict[str, Any]) -> dict[str, Any]:
             payload = dict(event.get("payload", {}))
             decision_id = payload.get("decision_id")
             lifecycle = executions_by_decision.get(str(decision_id), []) if decision_id else []
+            risks = risks_by_decision.get(str(decision_id), []) if decision_id else []
             execution = lifecycle[0] if lifecycle else None
+            risk = risks[0] if risks else None
             if execution is not None:
                 execution_type = str(execution["event_type"]).upper()
                 status = {
                     "ORDER_SUPPRESSED": "replayed",
                     "ORDER_ACK": "acknowledged",
-                    "EXECUTEDDECISION": "executed",
-                    "FILL": "executed",
+                    "EXECUTEDDECISION": "filled",
+                    "FILL": "filled",
                     "ORDER_UNFILLED": "unfilled",
                     "EXECUTION_ERROR": "execution_error",
-                    "SIZING_REJECTED": "sizing_rejected",
                 }.get(execution_type, "unknown")
                 payload["execution_status"] = status
                 payload["execution_event_type"] = execution_type
                 payload["execution"] = execution
-            elif str(payload.get("decision_source", "")).lower() == "replay":
+            if risk is not None:
+                payload["risk_status"] = "sizing_rejected"
+                payload["risk_event"] = risk
+            if execution is None and str(payload.get("decision_source", "")).lower() == "replay":
                 payload["execution_status"] = "replayed"
-            return {**event, "payload": payload}
+            return {**event, "category": "decision", "payload": payload}
 
         return jsonify({
-            "decisions": [enrich(event) for event in events if str(event.get("event_type", "")).upper() in decision_types]
+            "decisions": [enrich(event) for event in events if is_decision_event(event.get("event_type", ""))]
         })
 
     @app.get("/api/v1/logs")

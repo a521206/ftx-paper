@@ -148,11 +148,15 @@ def test_live_order_reaches_paper_broker_and_persists_fill(tmp_path):
 
     events = store.read_events(20)
     event_types = {event["event_type"] for event in events}
-    assert {"ORDER_ACK", "EXECUTEDDECISION", "FILL"}.issubset(event_types)
+    assert {"ORDER_ACK", "FILL"}.issubset(event_types)
+    assert "EXECUTEDDECISION" not in event_types
+    assert "STRATEGY_EVALUATION" in event_types
     assert "ORDER_SUPPRESSED" not in event_types
     fill = next(event for event in events if event["event_type"] == "FILL")
     assert fill["payload"]["decision_id"] == "live-order"
     assert fill["payload"]["price"] == 101.5
+    assert fill["payload"]["outcome"] == "filled"
+    assert fill["timestamp"] == "2026-01-01T10:20:00+05:30"
 
 
 def test_session_restores_ledger_from_runtime_status(tmp_path):

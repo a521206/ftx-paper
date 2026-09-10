@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from .events import event_category
+
 
 class ProcessAlreadyRunningError(RuntimeError):
     """Raised when another live process owns a runtime service lease."""
@@ -49,7 +51,7 @@ class RuntimeStore:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     event_type TEXT NOT NULL,
                     payload TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
                     idempotency_key TEXT UNIQUE
                 );
                 CREATE TABLE IF NOT EXISTS process_leases (
@@ -61,6 +63,10 @@ class RuntimeStore:
                 """
             )
             columns = {row[1] for row in connection.execute("PRAGMA table_info(runtime_events)")}
+            if "created_at" in columns and "timestamp" not in columns:
+                connection.execute("ALTER TABLE runtime_events RENAME COLUMN created_at TO timestamp")
+                columns.remove("created_at")
+                columns.add("timestamp")
             if "idempotency_key" not in columns:
                 connection.execute("ALTER TABLE runtime_events ADD COLUMN idempotency_key TEXT")
             connection.execute(
@@ -127,11 +133,13 @@ class RuntimeStore:
         current.update(updates)
         self.write_status(current)
 
-    def append_event(self, event_type: str, payload: dict[str, Any], idempotency_key: str | None = None) -> bool:
+    def append_event(self, event_type: str, payload: dict[str, Any], idempotency_key: str | None = None,
+                     *, timestamp: str | None = None) -> bool:
+        event_timestamp = timestamp or datetime.now(timezone.utc).isoformat()
         with sqlite3.connect(self.database) as connection:
             cursor = connection.execute(
-                "INSERT OR IGNORE INTO runtime_events(event_type, payload, created_at, idempotency_key) VALUES (?, ?, ?, ?)",
-                (event_type, json.dumps(payload), datetime.now(timezone.utc).isoformat(), idempotency_key),
+                "INSERT OR IGNORE INTO runtime_events(event_type, payload, timestamp, idempotency_key) VALUES (?, ?, ?, ?)",
+                (event_type, json.dumps(payload), event_timestamp, idempotency_key),
             )
             inserted = cursor.rowcount == 1
         if inserted:
@@ -175,12 +183,13 @@ class RuntimeStore:
             return []
         with sqlite3.connect(self.database) as connection:
             rows = connection.execute(
-                "SELECT event_type, payload, created_at FROM runtime_events ORDER BY id DESC LIMIT ?",
+                "SELECT event_type, payload, timestamp FROM runtime_events ORDER BY id DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         return [
-            {"event_type": event_type, "payload": json.loads(payload), "created_at": created_at}
-            for event_type, payload, created_at in rows
+            {"event_type": event_type, "category": event_category(event_type),
+             "payload": json.loads(payload), "timestamp": timestamp}
+            for event_type, payload, timestamp in rows
         ]
 
     def event_counts(self) -> dict[str, Any]:

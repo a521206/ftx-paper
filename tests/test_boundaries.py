@@ -35,7 +35,11 @@ def test_api_exposes_persisted_events(tmp_path: Path) -> None:
     response = create_app(store).test_client().get("/api/v1/events?limit=10")
 
     assert response.status_code == 200
-    assert response.get_json()["events"][0]["payload"] == {"value": 1}
+    event = response.get_json()["events"][0]
+    assert event["payload"] == {"value": 1}
+    assert event["category"] == "runtime"
+    assert event["timestamp"]
+    assert "created_at" not in event
 
 
 def test_interrupted_paper_session_returns_to_stopped(tmp_path: Path) -> None:
@@ -75,8 +79,22 @@ def test_decision_projection_includes_execution_outcome(tmp_path: Path) -> None:
     decisions = create_app(store).test_client().get("/api/v1/decisions").get_json()["decisions"]
 
     assert len(decisions) == 1
-    assert decisions[0]["payload"]["execution_status"] == "executed"
+    assert decisions[0]["payload"]["execution_status"] == "filled"
     assert decisions[0]["payload"]["execution_event_type"] == "FILL"
+
+
+def test_decision_projection_attaches_risk_without_counting_it_as_a_decision(tmp_path: Path) -> None:
+    store = RuntimeStore(tmp_path)
+    store.append_event("ACCEPTEDDECISION", {"decision_id": "d1"})
+    store.append_event("SIZING_REJECTED", {"decision_id": "d1", "reason": "insufficient_capital"})
+    store.append_event("STRATEGY_EVALUATION", {"bundle_id": "b1"})
+
+    decisions = create_app(store).test_client().get("/api/v1/decisions").get_json()["decisions"]
+
+    assert len(decisions) == 1
+    assert decisions[0]["category"] == "decision"
+    assert decisions[0]["payload"]["risk_status"] == "sizing_rejected"
+    assert decisions[0]["payload"]["risk_event"]["event_type"] == "SIZING_REJECTED"
 
 
 def test_runtime_actions_are_api_boundaries(tmp_path: Path) -> None:

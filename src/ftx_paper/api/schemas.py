@@ -10,14 +10,15 @@ def error_payload(code: str, message: str) -> dict[str, dict[str, str]]:
 def openapi_document() -> dict[str, Any]:
     decision_event_schema = {
         "type": "object",
-        "required": ["event_type", "payload", "created_at"],
+        "required": ["event_type", "category", "payload", "timestamp"],
         "properties": {
             "event_type": {
                 "type": "string",
                 "enum": ["CANDIDATEDECISION", "REJECTEDDECISION", "ACCEPTEDDECISION"],
             },
+            "category": {"type": "string", "enum": ["decision"]},
             "payload": {"type": "object", "additionalProperties": True},
-            "created_at": {"type": "string", "format": "date-time"},
+            "timestamp": {"type": "string", "format": "date-time"},
         },
     }
     return {
@@ -29,7 +30,7 @@ def openapi_document() -> dict[str, Any]:
             "/api/v1/diagnostics": {"get": {"responses": {"200": {"description": "Cached runtime event and rejection counts"}}}},
             "/api/v1/events": {"get": {"responses": {"200": {"description": "Runtime events"}}}},
             "/api/v1/decisions": {"get": {"responses": {"200": {
-                "description": "Persisted live decision lifecycle events",
+                "description": "Strategy decisions with optional risk and execution outcomes",
                 "content": {"application/json": {"schema": {
                     "type": "object",
                     "required": ["decisions"],

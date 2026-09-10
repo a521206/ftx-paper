@@ -18,6 +18,15 @@ if TYPE_CHECKING:
     from ftx_paper.broker.zerodha import ZerodhaInstrument
 
 
+def _bundle_timestamp(session_date: str, minute: str) -> str:
+    """Return the canonical event time for a completed trading bundle."""
+    value = minute if "T" in minute else f"{session_date}T{minute}"
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+    return parsed.isoformat()
+
+
 class RuntimeSession:
     """Single in-process owner of live market, execution, and runtime state."""
 
@@ -150,7 +159,8 @@ class RuntimeSession:
         for bundle in self._aggregator.flush(incomplete=False):
             self._process_bundle(bundle, source="replay")
 
-    def _persist_engine_event(self, event: dict[str, object], *, source: str, bundle_id: str, session_date: str) -> None:
+    def _persist_engine_event(self, event: dict[str, object], *, source: str, bundle_id: str,
+                              session_date: str, timestamp: str) -> None:
         event_type = str(event.get("event_type", "ENGINE_EVENT"))
         payload = {**event, "decision_source": source, "session_date": session_date,
                    "execution_allowed": source == "live"}
@@ -159,36 +169,39 @@ class RuntimeSession:
         if metadata:
             payload.update(strategy_version=metadata.version, config_hash=metadata.config_hash)
         self.store.append_event(event_type, payload,
-                                f"{event_type}:{source}:{bundle_id}:{payload.get('decision_id', '')}")
+                                f"{event_type}:{source}:{bundle_id}:{payload.get('decision_id', '')}",
+                                timestamp=timestamp)
 
     def _process_bundle(self, bundle, *, source: str) -> None:
         result = self.engine.on_bundle(bundle)
+        timestamp = _bundle_timestamp(bundle.trading_date, bundle.minute)
         for event in result.events:
             self._persist_engine_event(event, source=source, bundle_id=bundle.bundle_id,
-                                        session_date=bundle.trading_date)
+                                        session_date=bundle.trading_date, timestamp=timestamp)
         outcome_types = [str(event.get("event_type", "ENGINE_EVENT")) for event in result.events]
         self.store.append_event("BUNDLE_COMPLETE", {
             "bundle_id": bundle.bundle_id, "minute": bundle.minute,
             "required_roles": list(bundle.required_roles), "roles_present": sorted(bundle.bars),
             "decision_source": source, "session_date": bundle.trading_date,
             "execution_allowed": source == "live",
-        }, f"bundle_complete:{source}:{bundle.bundle_id}")
-        self.store.append_event("DECISION_EVALUATED", {
+        }, f"bundle_complete:{source}:{bundle.bundle_id}", timestamp=timestamp)
+        self.store.append_event("STRATEGY_EVALUATION", {
             "bundle_id": bundle.bundle_id, "minute": bundle.minute, "outcomes": outcome_types,
             "decision_source": source, "session_date": bundle.trading_date,
             "execution_allowed": source == "live",
-        }, f"decision_evaluated:{source}:{bundle.bundle_id}")
+        }, f"strategy_evaluation:{source}:{bundle.bundle_id}", timestamp=timestamp)
         for order in result.orders:
             if source == "replay":
                 self.store.append_event("ORDER_SUPPRESSED", {
                     "decision_id": order.client_order_id, "client_order_id": order.client_order_id,
                     "decision_source": "replay", "session_date": bundle.trading_date,
                     "execution_allowed": False, "reason": "startup_recovery",
-                }, f"order_suppressed:{bundle.trading_date}:{order.client_order_id}")
+                }, f"order_suppressed:{bundle.trading_date}:{order.client_order_id}", timestamp=timestamp)
             else:
-                self._execute_paper_order(order, session_date=bundle.trading_date)
+                self._execute_paper_order(order, session_date=bundle.trading_date, timestamp=timestamp)
 
-    def _execute_paper_order(self, order, *, session_date: str | None = None) -> None:
+    def _execute_paper_order(self, order, *, session_date: str | None = None,
+                             timestamp: str | None = None) -> None:
         context = {
             "decision_id": order.client_order_id,
             "client_order_id": order.client_order_id,
@@ -201,7 +214,7 @@ class RuntimeSession:
                                                          "outcome": "execution_error",
                                                          "phase": "submit",
                                                          "reason": "broker_unavailable"},
-                                    f"execution_error:submit:{order.client_order_id}")
+                                    f"execution_error:submit:{order.client_order_id}", timestamp=timestamp)
             return
         try:
             ack = self.broker.submit(order)
@@ -211,13 +224,13 @@ class RuntimeSession:
                                                          "phase": "submit",
                                                          "error_type": type(exc).__name__,
                                                          "reason": str(exc)},
-                                    f"execution_error:submit:{order.client_order_id}")
+                                    f"execution_error:submit:{order.client_order_id}", timestamp=timestamp)
             return
         self.store.append_event("ORDER_ACK", {**context,
                                                "client_order_id": ack.client_order_id,
                                                "broker_order_id": ack.broker_order_id,
                                                "status": ack.status,
-                                               "outcome": "acknowledged"}, f"order_ack:{ack.client_order_id}")
+                                               "outcome": "acknowledged"}, f"order_ack:{ack.client_order_id}", timestamp=timestamp)
         try:
             fill = self.broker.poll_fill(order, ack.broker_order_id)
         except Exception as exc:
@@ -227,17 +240,9 @@ class RuntimeSession:
                                                          "phase": "fill_poll",
                                                          "error_type": type(exc).__name__,
                                                          "reason": str(exc)},
-                                    f"execution_error:fill_poll:{order.client_order_id}")
+                                    f"execution_error:fill_poll:{order.client_order_id}", timestamp=timestamp)
             return
         if fill:
-            self.store.append_event("EXECUTEDDECISION", {**context,
-                                                          "client_order_id": fill.client_order_id,
-                                                          "broker_order_id": ack.broker_order_id,
-                                                          "status": "FILLED", "fill_price": fill.price,
-                                                          "quantity": fill.quantity,
-                                                          "outcome": "executed",
-                                                          "fill_timestamp": fill.timestamp},
-                                    f"executed:{fill.client_order_id}")
             position = None
             if self.ledger:
                 position = self.ledger.apply_fill(fill, order.side if order.side in (OrderSide.BUY, OrderSide.SELL) else OrderSide.BUY)
@@ -247,19 +252,19 @@ class RuntimeSession:
                                               "quantity": fill.quantity,
                                               "price": fill.price,
                                               "fill_timestamp": fill.timestamp,
-                                              "outcome": "executed",
+                                              "outcome": "filled",
                                               **({"position": {
                                                   "symbol": position.symbol,
                                                   "quantity": position.quantity,
                                                   "average_price": position.average_price,
-                                              }} if position else {})}, f"fill:{fill.client_order_id}")
+                                              }} if position else {})}, f"fill:{fill.client_order_id}", timestamp=timestamp)
         else:
             self.store.append_event("ORDER_UNFILLED", {**context,
                                                         "broker_order_id": ack.broker_order_id,
                                                         "status": ack.status,
                                                         "outcome": "unfilled",
                                                         "reason": "no_fill_available"},
-                                    f"order_unfilled:{order.client_order_id}")
+                                    f"order_unfilled:{order.client_order_id}", timestamp=timestamp)
         if fill and self.ledger:
             self.store.patch_status({"capital": self.ledger.cash, "open_positions": [
                 p.__dict__ if hasattr(p, "__dict__") else {"symbol": p.symbol, "quantity": p.quantity,
@@ -281,16 +286,18 @@ class RuntimeSession:
                 "instrument_type": bar.instrument.instrument_type,
                 "timestamp": bar.timestamp.isoformat(),
                 "close": bar.close,
-            }, f"bar_closed:{bar_key}")
+            }, f"bar_closed:{bar_key}", timestamp=bar.timestamp.isoformat())
             if self._aggregator is None:
                 result = self.engine.on_bar(bar)
                 for event in result.events:
                     self._persist_engine_event(event, source="live", bundle_id=bar.timestamp.isoformat(),
-                                                session_date=bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat())
+                                                session_date=bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat(),
+                                                timestamp=bar.timestamp.isoformat())
                 for order in result.orders:
                     self._execute_paper_order(
                         order,
                         session_date=bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat(),
+                        timestamp=bar.timestamp.isoformat(),
                     )
             else:
                 expired = self._aggregator.expire(now=time.monotonic())
@@ -306,12 +313,16 @@ class RuntimeSession:
     def _record_incomplete(self, bundle) -> None:
         payload = {
             "minute": bundle.minute,
+            "session_date": bundle.trading_date,
             "required_roles": list(bundle.required_roles),
             "roles_present": sorted(bundle.bars),
             "missing_roles": list(bundle.missing_roles),
             "last_bar_by_role": {role: bar.timestamp.isoformat() for role, bar in bundle.bars.items()},
         }
-        self.store.append_event("BUNDLE_INCOMPLETE", payload, f"bundle_incomplete:{bundle.bundle_id}")
+        self.store.append_event(
+            "BUNDLE_INCOMPLETE", payload, f"bundle_incomplete:{bundle.bundle_id}",
+            timestamp=_bundle_timestamp(bundle.trading_date, bundle.minute),
+        )
 
     def _refresh_pending_status(self) -> None:
         if self._aggregator is None:

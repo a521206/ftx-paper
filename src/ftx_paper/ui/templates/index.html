@@ -623,18 +623,14 @@
     function decisionRecord(raw) {
       const payload = raw?.payload && typeof raw.payload === 'object' ? raw.payload : {};
       const eventType = String(raw?.event_type || payload.event_type || '').toUpperCase();
-      const decisionTime = payload.minute || payload.decision_minute || raw?.timestamp || raw?.created_at;
-      // Runtime decisions persist a time-only minute; created_at keeps the
-      // session filter correct when the payload does not include the date.
-      const sessionTime = typeof decisionTime === 'string' && decisionTime.includes('T')
-        ? decisionTime
-        : raw?.created_at || decisionTime;
+      const decisionTime = raw?.timestamp;
+      const sessionTime = decisionTime;
       const source = String(payload.decision_source || '').toLowerCase();
       const executionStatus = String(payload.execution_status || '').toLowerCase();
       const outcome = String(source === 'replay' ? 'replayed' : (executionStatus || payload.outcome || (
         eventType === 'ACCEPTEDDECISION' ? 'accepted' :
         eventType === 'REJECTEDDECISION' ? 'rejected' :
-        eventType === 'EXECUTEDDECISION' ? 'executed' : ''
+        eventType === 'FILL' ? 'filled' : ''
       ))).toLowerCase();
       return { payload, eventType, decisionTime, sessionTime, outcome, source, executionStatus };
     }
@@ -650,9 +646,9 @@
         const item = decisionRecord(raw);
         const isCandidate = item.eventType.includes('CANDIDATE') || item.outcome === 'candidate';
         const isReplayed = item.source === 'replay' || item.outcome === 'replayed';
-        const isExecuted = item.eventType === 'EXECUTEDDECISION' || item.executionStatus === 'executed' || item.outcome === 'executed';
+        const isExecuted = item.executionStatus === 'filled' || item.executionStatus === 'executed' || item.outcome === 'filled' || item.outcome === 'executed';
         const isAccepted = item.eventType === 'ACCEPTEDDECISION' || item.outcome === 'accepted';
-        const isRejected = item.eventType === 'REJECTEDDECISION' || item.eventType === 'SIZING_REJECTED' || item.outcome.includes('rejection') || item.outcome === 'rejected';
+        const isRejected = item.eventType === 'REJECTEDDECISION' || item.outcome.includes('rejection') || item.outcome === 'rejected';
         if (isCandidate) stats.candidates += 1;
         if (isReplayed) stats.replayed += 1;
         if (isExecuted) stats.executed += 1;
@@ -703,7 +699,7 @@
           ${rows
             .map(
               (x) => `<tr>
-                <td>${date(x.timestamp || x.minute || x.created_at)}</td>
+                <td>${date(x.timestamp)}</td>
                 <td>${badge(x.event_type)}</td>
                 <td>
                   <details>
@@ -719,10 +715,8 @@
     }
 
     function activityCategory(raw) {
-      const type = String(raw?.event_type || '').toUpperCase();
-      if (type.includes('DECISION') || type.includes('CANDIDATE') || type.includes('REJECTED') || type.includes('ACCEPTED') || type.includes('SIZING')) return 'Decision';
-      if (type.includes('ORDER') || type === 'FILL' || type === 'TRADE' || type.includes('POSITION')) return 'Execution';
-      return 'Runtime';
+      const category = String(raw?.category || '').toLowerCase();
+      return { decision: 'Decision', risk: 'Risk', execution: 'Execution', runtime: 'Runtime' }[category] || 'Runtime';
     }
 
     function activityDateKey(value) {
@@ -743,7 +737,7 @@
       return rows.map((raw) => {
         const type = String(raw.event_type || 'UNKNOWN').toUpperCase();
         const category = activityCategory(raw);
-        const created = raw.created_at || raw.timestamp;
+        const created = raw.timestamp;
         const dateKey = activityDateKey(created);
         return `<details class="activity-item" data-activity-type="${esc(type.toLowerCase())}" data-activity-category="${esc(category.toLowerCase())}" data-activity-session="${esc(session(created).toLowerCase())}" data-activity-date="${esc(dateKey)}">
           <summary class="activity-row">
@@ -760,7 +754,7 @@
 
     function activityPage(rows) {
       const types = [...new Set(rows.map((x) => String(x.event_type || 'UNKNOWN').toLowerCase()))].sort();
-      const dates = [...new Set(rows.map((x) => activityDateKey(x.created_at)).filter(Boolean))].sort().reverse();
+      const dates = [...new Set(rows.map((x) => activityDateKey(x.timestamp)).filter(Boolean))].sort().reverse();
       const counts = rows.reduce((result, row) => {
         const category = activityCategory(row);
         result[category] = (result[category] || 0) + 1;
@@ -773,14 +767,14 @@
           <button id="refresh-activity" class="secondary">Refresh now</button>
         </div>
         <div class="activity-summary">
-          ${[['All activity', rows.length], ['Decisions', counts.Decision || 0], ['Execution', counts.Execution || 0], ['Runtime', counts.Runtime || 0]].map((x) => `<span class="badge"><strong>${x[1]}</strong> ${x[0]}</span>`).join('')}
+          ${[['All activity', rows.length], ['Decisions', counts.Decision || 0], ['Risk', counts.Risk || 0], ['Execution', counts.Execution || 0], ['Runtime', counts.Runtime || 0]].map((x) => `<span class="badge"><strong>${x[1]}</strong> ${x[0]}</span>`).join('')}
           <span class="badge"><strong id="activity-visible-count">${rows.length}</strong> shown</span>
         </div>
         <div class="activity-toolbar">
           <input id="activity-search" type="search" placeholder="Search type, reason, cell, or payload…" aria-label="Search runtime activity">
           <select id="activity-date" aria-label="Filter by date"><option value="">All dates</option>${dates.map((x) => option(x)).join('')}</select>
           <select id="activity-session" aria-label="Filter by session"><option value="">All sessions</option>${['Pre', 'Morning', 'Mid', 'Afternoon', 'Post'].map((x) => option(x)).join('')}</select>
-          <select id="activity-category" aria-label="Filter by category"><option value="">All categories</option>${['Decision', 'Execution', 'Runtime'].map((x) => option(x)).join('')}</select>
+          <select id="activity-category" aria-label="Filter by category"><option value="">All categories</option>${['Decision', 'Risk', 'Execution', 'Runtime'].map((x) => option(x)).join('')}</select>
           <select id="activity-type" aria-label="Filter by event type"><option value="">All event types</option>${types.map((x) => option(x, x.toUpperCase())).join('')}</select>
         </div>
         <div id="activity-list">${activityStream(rows)}</div>
@@ -820,21 +814,22 @@
             const payload = raw.payload && typeof raw.payload === 'object' ? raw.payload : {};
             const x = { ...raw, ...payload, event_type: raw.event_type || payload.event_type };
             const eventType = String(x.event_type || '').toUpperCase();
-            // Use payload fields for decision time, falling back to created_at only if not in payload
-            const timestamp = x.minute || x.decision_minute || x.created_at;
+            const timestamp = raw.timestamp;
             // Get decision-relevant fields exclusively from payload when available
             const cell = payload.cell || payload.zone || payload.location || payload.symbol;
             const direction = payload.direction || payload.side;
             const detail = payload.reason || payload.detail || payload.setup_type || (payload.close != null ? `Close ${payload.close}` : '—');
-            const outcome = String(payload.decision_source || '').toLowerCase() === 'replay' ? 'Replayed' : (payload.execution_status || payload.outcome || (eventType === 'ACCEPTEDDECISION' ? 'Accepted' : eventType === 'REJECTEDDECISION' ? 'Policy rejection' : eventType === 'SIZING_REJECTED' ? 'Sizing rejection' : eventType === 'EXECUTEDDECISION' ? 'Executed' : eventType === 'ENGINE_EVENT' ? 'Observed' : 'No qualifying setup'));
+            const riskDetail = payload.risk_status ? `Risk: ${payload.risk_status.replaceAll('_', ' ')}` : '';
+            const displayDetail = [detail, riskDetail].filter(Boolean).join(' · ');
+            const outcome = String(payload.decision_source || '').toLowerCase() === 'replay' ? 'Replayed' : (payload.execution_status || payload.outcome || (eventType === 'ACCEPTEDDECISION' ? 'Accepted' : eventType === 'REJECTEDDECISION' ? 'Policy rejection' : 'No qualifying setup'));
             const outcomeLabel = String(outcome).replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
-            const outcomeTone = ['Accepted', 'Executed'].includes(outcomeLabel) ? 'good' : ['Policy Rejection', 'Sizing Rejection', 'Incomplete Bundle', 'Replayed', 'Unfilled', 'Execution Error'].includes(outcomeLabel) ? 'warn' : 'subtle';
+            const outcomeTone = ['Accepted', 'Filled'].includes(outcomeLabel) ? 'good' : ['Policy Rejection', 'Sizing Rejection', 'Incomplete Bundle', 'Replayed', 'Unfilled', 'Execution Error'].includes(outcomeLabel) ? 'warn' : 'subtle';
             return `<details>
             <summary class="decision-row">
               <span>${date(timestamp)}</span>
               <span>${esc(cell || '—')}</span>
               <span>${badge(direction || '—', direction === 'long' ? 'good' : direction === 'short' ? 'bad' : 'subtle')}</span>
-              <span>${esc(detail)}</span>
+              <span>${esc(displayDetail)}</span>
               <span>${badge(outcomeLabel, outcomeTone)}</span>
             </summary>
             <div class="payload"><strong>Entry price:</strong> ${esc(x.entry_price ?? '—')} · <strong>Score:</strong> ${esc(x.score ?? x.setup_score ?? '—')} · <strong>Setup type:</strong> ${esc(x.setup_type || '—')}<br><strong>Stop basis:</strong> ${esc(x.stop_basis ?? x.stop_bp ?? '—')} · <strong>VIX:</strong> ${esc(x.vix_at_event ?? x.vix ?? '—')} · <strong>PCR:</strong> ${esc(x.pcr_at_event ?? x.pcr ?? '—')}<br><strong>Sequence:</strong> ${esc(x.sequence ?? '—')} · <strong>Decision source:</strong> ${esc(x.decision_source || '—')} · <strong>Decision ID:</strong> ${esc(x.decision_id || '—')}</div>
