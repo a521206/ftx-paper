@@ -15,3 +15,16 @@ def test_ledger_reconciles_buy_and_sell_fills() -> None:
     assert position.quantity == 1
     assert ledger.cash == 920
     assert ledger.positions()[0].average_price == 80
+
+
+def test_ledger_restores_persisted_position_before_next_fill() -> None:
+    instrument = Instrument("NIFTY", "NSE", "INDEX")
+    ledger = PositionLedger(1000)
+
+    ledger.restore_state(cash=800, positions=[{"symbol": "NIFTY", "quantity": 2, "average_price": 100}])
+    position = ledger.apply_fill(
+        Fill("2", instrument, 1, 120, datetime.now(timezone.utc).isoformat()), OrderSide.SELL
+    )
+
+    assert position.quantity == 1
+    assert ledger.cash == 920

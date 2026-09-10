@@ -27,6 +27,7 @@ class RuntimeSession:
                  client_factory: Callable[[], Any] | None = None, normalize_payload: Callable[..., Any] | None = None) -> None:
         self.store, self.auth, self.specifications = store, auth, specifications
         self.engine, self.ledger = engine or PaperEngine(), ledger
+        self._restore_ledger_state()
         self.feed_factory, self.broker_factory = feed_factory, broker_factory
         self.client_factory, self.normalize_payload = client_factory, normalize_payload
         self.feed = None
@@ -38,6 +39,18 @@ class RuntimeSession:
         self._aggregator: CompletedBarAggregator | None = None
         self._replaying = False
         self._replay_date: str | None = None
+
+    def _restore_ledger_state(self) -> None:
+        if self.ledger is None:
+            return
+        status = self.store.read_status()
+        raw_cash = status.get("capital", self.ledger.cash)
+        if isinstance(raw_cash, dict):
+            raw_cash = raw_cash.get("capital", raw_cash.get("current_equity", self.ledger.cash))
+        raw_positions = status.get("open_positions", ())
+        if not isinstance(raw_positions, (list, tuple)):
+            raw_positions = ()
+        self.ledger.restore_state(cash=float(raw_cash), positions=raw_positions)
 
     def start(self) -> None:
         with self._lock:
@@ -69,6 +82,7 @@ class RuntimeSession:
                 for item in resolved
             }
             self._aggregator = CompletedBarAggregator(role_map, required_roles=("futures", "vix"))
+            self.broker = (self.broker_factory or (lambda _client: PaperBroker()))(client)
             self._replay_date = datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
             self._replaying = True
             self.store.patch_status({"phase": "REPLAYING", "execution_enabled": False,
@@ -79,7 +93,6 @@ class RuntimeSession:
             normalize = self.normalize_payload or self._make_normalizer(resolved)
             socket = create_kite_socket(self.auth.api_key, self.auth.access_token())
             feed_type = self.feed_factory or ZerodhaFeed
-            self.broker = (self.broker_factory or (lambda _client: PaperBroker()))(client)
             self.feed = feed_type(
                 socket, [int(item["instrument_token"]) for item in resolved], normalize,
                 self.on_closed_bar,
@@ -100,6 +113,8 @@ class RuntimeSession:
                 self._started.set()
         except Exception as exc:
             self._replaying = False
+            if self.broker is not None:
+                self.broker.close()
             self.store.patch_status({"state": "ERROR", "error": str(exc)})
             self._started.set()
 
@@ -171,33 +186,81 @@ class RuntimeSession:
                     "execution_allowed": False, "reason": "startup_recovery",
                 }, f"order_suppressed:{bundle.trading_date}:{order.client_order_id}")
             else:
-                self._execute_paper_order(order)
+                self._execute_paper_order(order, session_date=bundle.trading_date)
 
-    def _execute_paper_order(self, order) -> None:
+    def _execute_paper_order(self, order, *, session_date: str | None = None) -> None:
+        context = {
+            "decision_id": order.client_order_id,
+            "client_order_id": order.client_order_id,
+            "decision_source": "live",
+            "session_date": session_date,
+            "execution_allowed": True,
+        }
         if self.broker is None:
-            self.store.append_event("SIZING_REJECTED", {"decision_id": order.client_order_id,
+            self.store.append_event("EXECUTION_ERROR", {**context,
+                                                         "outcome": "execution_error",
+                                                         "phase": "submit",
                                                          "reason": "broker_unavailable"},
-                                    f"sizing:{order.client_order_id}")
+                                    f"execution_error:submit:{order.client_order_id}")
             return
-        ack = self.broker.submit(order)
-        self.store.append_event("ORDER_ACK", {"decision_id": order.client_order_id,
+        try:
+            ack = self.broker.submit(order)
+        except Exception as exc:
+            self.store.append_event("EXECUTION_ERROR", {**context,
+                                                         "outcome": "execution_error",
+                                                         "phase": "submit",
+                                                         "error_type": type(exc).__name__,
+                                                         "reason": str(exc)},
+                                    f"execution_error:submit:{order.client_order_id}")
+            return
+        self.store.append_event("ORDER_ACK", {**context,
                                                "client_order_id": ack.client_order_id,
                                                "broker_order_id": ack.broker_order_id,
-                                               "status": ack.status}, f"order_ack:{ack.client_order_id}")
-        fill = self.broker.poll_fill(order, ack.broker_order_id)
+                                               "status": ack.status,
+                                               "outcome": "acknowledged"}, f"order_ack:{ack.client_order_id}")
+        try:
+            fill = self.broker.poll_fill(order, ack.broker_order_id)
+        except Exception as exc:
+            self.store.append_event("EXECUTION_ERROR", {**context,
+                                                         "broker_order_id": ack.broker_order_id,
+                                                         "outcome": "execution_error",
+                                                         "phase": "fill_poll",
+                                                         "error_type": type(exc).__name__,
+                                                         "reason": str(exc)},
+                                    f"execution_error:fill_poll:{order.client_order_id}")
+            return
         if fill:
-            self.store.append_event("EXECUTEDDECISION", {"decision_id": order.client_order_id,
+            self.store.append_event("EXECUTEDDECISION", {**context,
                                                           "client_order_id": fill.client_order_id,
+                                                          "broker_order_id": ack.broker_order_id,
                                                           "status": "FILLED", "fill_price": fill.price,
                                                           "quantity": fill.quantity,
-                                                          "decision_source": "live",
-                                                          "execution_allowed": True},
+                                                          "outcome": "executed",
+                                                          "fill_timestamp": fill.timestamp},
                                     f"executed:{fill.client_order_id}")
+            position = None
+            if self.ledger:
+                position = self.ledger.apply_fill(fill, order.side if order.side in (OrderSide.BUY, OrderSide.SELL) else OrderSide.BUY)
+            self.store.append_event("FILL", {**context,
+                                              "broker_order_id": ack.broker_order_id,
+                                              "symbol": fill.instrument.symbol,
+                                              "quantity": fill.quantity,
+                                              "price": fill.price,
+                                              "fill_timestamp": fill.timestamp,
+                                              "outcome": "executed",
+                                              **({"position": {
+                                                  "symbol": position.symbol,
+                                                  "quantity": position.quantity,
+                                                  "average_price": position.average_price,
+                                              }} if position else {})}, f"fill:{fill.client_order_id}")
+        else:
+            self.store.append_event("ORDER_UNFILLED", {**context,
+                                                        "broker_order_id": ack.broker_order_id,
+                                                        "status": ack.status,
+                                                        "outcome": "unfilled",
+                                                        "reason": "no_fill_available"},
+                                    f"order_unfilled:{order.client_order_id}")
         if fill and self.ledger:
-            position = self.ledger.apply_fill(fill, order.side if order.side in (OrderSide.BUY, OrderSide.SELL) else OrderSide.BUY)
-            self.store.append_event("FILL", {"client_order_id": fill.client_order_id,
-                                              "symbol": position.symbol, "quantity": position.quantity,
-                                              "average_price": position.average_price}, f"fill:{fill.client_order_id}")
             self.store.patch_status({"capital": self.ledger.cash, "open_positions": [
                 p.__dict__ if hasattr(p, "__dict__") else {"symbol": p.symbol, "quantity": p.quantity,
                 "average_price": p.average_price} for p in self.ledger.positions()]})
@@ -225,7 +288,10 @@ class RuntimeSession:
                     self._persist_engine_event(event, source="live", bundle_id=bar.timestamp.isoformat(),
                                                 session_date=bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat())
                 for order in result.orders:
-                    self._execute_paper_order(order)
+                    self._execute_paper_order(
+                        order,
+                        session_date=bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat(),
+                    )
             else:
                 expired = self._aggregator.expire(now=time.monotonic())
                 for incomplete in expired:

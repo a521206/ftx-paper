@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
 
 from ftx_paper.broker import Fill
 from ftx_paper.contracts import OrderSide
@@ -20,6 +21,26 @@ class PositionLedger:
         self.cash = starting_capital
         self._quantities: dict[str, int] = {}
         self._costs: dict[str, float] = {}
+
+    def restore_state(self, *, cash: float, positions: Iterable[Mapping[str, object]]) -> None:
+        """Restore persisted cash and position snapshots before live trading."""
+        restored_quantities: dict[str, int] = {}
+        restored_costs: dict[str, float] = {}
+        for raw in positions:
+            symbol = str(raw.get("symbol", "")).strip()
+            quantity = int(raw.get("quantity", 0))
+            average_price = float(raw.get("average_price", 0.0))
+            if not symbol:
+                raise ValueError("persisted position is missing a symbol")
+            if quantity == 0:
+                continue
+            if average_price < 0:
+                raise ValueError("persisted position has a negative average price")
+            restored_quantities[symbol] = quantity
+            restored_costs[symbol] = quantity * average_price
+        self.cash = float(cash)
+        self._quantities = restored_quantities
+        self._costs = restored_costs
 
     def apply_fill(self, fill: Fill, side: OrderSide) -> PositionSnapshot:
         signed_quantity = fill.quantity if side == OrderSide.BUY else -fill.quantity

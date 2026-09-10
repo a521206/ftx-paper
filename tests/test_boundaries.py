@@ -66,6 +66,19 @@ def test_api_exposes_decisions_and_logs_as_projections(tmp_path: Path) -> None:
     assert len(client.get("/api/v1/logs").get_json()["logs"]) == 3
 
 
+def test_decision_projection_includes_execution_outcome(tmp_path: Path) -> None:
+    store = RuntimeStore(tmp_path)
+    store.append_event("ACCEPTEDDECISION", {"decision_id": "d1", "decision_source": "live"})
+    store.append_event("ORDER_ACK", {"decision_id": "d1", "status": "FILLED"})
+    store.append_event("FILL", {"decision_id": "d1", "price": 101.5})
+
+    decisions = create_app(store).test_client().get("/api/v1/decisions").get_json()["decisions"]
+
+    assert len(decisions) == 1
+    assert decisions[0]["payload"]["execution_status"] == "executed"
+    assert decisions[0]["payload"]["execution_event_type"] == "FILL"
+
+
 def test_runtime_actions_are_api_boundaries(tmp_path: Path) -> None:
     store = RuntimeStore(tmp_path)
     class FakeController:
@@ -86,6 +99,23 @@ def test_ui_is_a_separate_http_client() -> None:
     assert b"/api/v1/positions" in response.data
     assert b"/api/v1/capital" in response.data
     assert b"Connect Zerodha" in response.data
+
+
+def test_events_and_logs_redirect_to_combined_activity_page() -> None:
+    client = create_ui_app("http://api.test").test_client()
+
+    for legacy_page in ("events", "logs"):
+        response = client.get(f"/{legacy_page}")
+        assert response.status_code == 302
+        assert response.headers["Location"] == "/activity"
+
+    activity = client.get("/activity")
+    assert activity.status_code == 200
+    html = activity.get_data(as_text=True)
+    assert "Runtime activity" in html
+    assert "activity-session" in html
+    assert "activity-category" in html
+    assert "activity-type" in html
 
 
 def test_browser_smoke_dashboard_contains_live_api_sections() -> None:

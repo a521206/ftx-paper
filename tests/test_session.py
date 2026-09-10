@@ -5,6 +5,7 @@ from ftx_paper.contracts import Instrument, MarketBar, OrderIntent, OrderSide
 from ftx_paper.core import EngineResult, PaperEngine
 from ftx_paper.core import CompletedBarAggregator
 from ftx_paper.runtime import RuntimeSession, RuntimeStore
+from ftx_paper.execution import PositionLedger
 
 
 class Feed:
@@ -52,7 +53,7 @@ def test_incomplete_bundle_is_diagnosed_without_advancing_completion(tmp_path):
     session._aggregator = CompletedBarAggregator({
         ("NFO", "NIFTYFUT"): "futures",
         ("NSE", "INDIA VIX"): "vix",
-    })
+    }, deadline_seconds=0)
     store.write_status({"state": "RUNNING"})
 
     bar = MarketBar(
@@ -63,10 +64,10 @@ def test_incomplete_bundle_is_diagnosed_without_advancing_completion(tmp_path):
     session.on_closed_bar(bar)
 
     status = store.read_status()
-    assert status["pending_bundle_minutes"] == ["10:20"]
+    assert status["pending_bundle_minutes"] == ["15:50"]
     assert status["pending_bundle_details"] == [{
-        "trading_date": "2026-01-01", "bundle_id": "2026-01-01:10:20",
-        "minute": "10:20", "required_roles": ["futures", "vix"],
+        "trading_date": "2026-01-01", "bundle_id": "2026-01-01:15:50",
+        "minute": "15:50", "required_roles": ["futures", "vix"],
         "missing_roles": ["vix"], "roles_present": ["futures"],
         "last_bar_by_role": {"futures": "2026-01-01T10:20:00+00:00"},
     }]
@@ -82,7 +83,7 @@ def test_incomplete_bundle_is_diagnosed_without_advancing_completion(tmp_path):
 
     events = store.read_events()
     assert events[0]["event_type"] == "BUNDLE_INCOMPLETE"
-    assert events[0]["payload"]["minute"] == "10:20"
+    assert events[0]["payload"]["minute"] == "15:50"
 
 
 def test_replay_suppresses_orders_and_tags_events(tmp_path):
@@ -116,3 +117,54 @@ def test_replay_suppresses_orders_and_tags_events(tmp_path):
     assert all(event["payload"].get("decision_source") == "replay" for event in events)
     assert not session.broker.fills
     assert any(event["event_type"] == "ORDER_SUPPRESSED" for event in events)
+
+
+def test_live_order_reaches_paper_broker_and_persists_fill(tmp_path):
+    store = RuntimeStore(tmp_path)
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+
+    class Engine:
+        bars_seen = 0
+        strategy_metadata = None
+
+        def on_bundle(self, bundle):
+            return EngineResult(
+                orders=(OrderIntent("live-order", instrument, OrderSide.BUY, 2),),
+                events=({"event_type": "ACCEPTEDDECISION", "decision_id": "live-order"},),
+            )
+
+    session = RuntimeSession(store, None, [], engine=Engine())
+    session.broker = PaperBroker({"NIFTYFUT": 101.5})
+    session._process_bundle(
+        type("Bundle", (), {
+            "bundle_id": "2026-01-01:10:20",
+            "trading_date": "2026-01-01",
+            "minute": "10:20",
+            "required_roles": ("futures", "vix"),
+            "bars": {"futures": object(), "vix": object()},
+        })(),
+        source="live",
+    )
+
+    events = store.read_events(20)
+    event_types = {event["event_type"] for event in events}
+    assert {"ORDER_ACK", "EXECUTEDDECISION", "FILL"}.issubset(event_types)
+    assert "ORDER_SUPPRESSED" not in event_types
+    fill = next(event for event in events if event["event_type"] == "FILL")
+    assert fill["payload"]["decision_id"] == "live-order"
+    assert fill["payload"]["price"] == 101.5
+
+
+def test_session_restores_ledger_from_runtime_status(tmp_path):
+    store = RuntimeStore(tmp_path)
+    store.write_status({
+        "state": "STOPPED",
+        "capital": 800.0,
+        "open_positions": [{"symbol": "NIFTYFUT", "quantity": 2, "average_price": 100.0}],
+    })
+
+    ledger = PositionLedger(1000.0)
+    RuntimeSession(store, None, [], ledger=ledger)
+
+    assert ledger.cash == 800.0
+    assert ledger.positions()[0].quantity == 2

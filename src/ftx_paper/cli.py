@@ -6,6 +6,7 @@ from ftx_paper.config import PaperConfig
 from ftx_paper.runtime import ProcessAlreadyRunningError, RuntimeSession, RuntimeStore
 from ftx_paper.strategy import ConfiguredLiveStrategy
 from ftx_paper.core import PaperEngine
+from ftx_paper.execution import PositionLedger
 from ftx_paper.ui import create_ui_app
 from ftx_paper.broker.zerodha import ZerodhaAuth
 
@@ -24,7 +25,13 @@ def api_main() -> None:
             auth = None
         import json
         raw = json.loads(config.zerodha_config.read_text(encoding="utf-8")) if config.zerodha_config.exists() else {}
-        session = RuntimeSession(store, auth, list(raw.get("instruments", ())), engine=PaperEngine(ConfiguredLiveStrategy()))
+        session = RuntimeSession(
+            store,
+            auth,
+            list(raw.get("instruments", ())),
+            engine=PaperEngine(ConfiguredLiveStrategy()),
+            ledger=PositionLedger(100_000.0),
+        )
         create_app(store, zerodha_auth=auth, session=session).run(host=config.host, port=config.port, debug=False, use_reloader=False)
     finally:
         store.release_process_lease("api", instance_id)

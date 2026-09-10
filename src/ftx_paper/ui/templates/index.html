@@ -369,6 +369,54 @@
       cursor: pointer;
     }
 
+    .activity-summary {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 0 0 16px;
+    }
+
+    .activity-summary .badge {
+      background: var(--md-surface-container);
+    }
+
+    .activity-toolbar {
+      display: grid;
+      grid-template-columns: minmax(220px, 2fr) repeat(4, minmax(130px, 1fr));
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+
+    .activity-toolbar input,
+    .activity-toolbar select {
+      border: 1px solid var(--md-outline-variant);
+      border-radius: 8px;
+      background: var(--md-surface);
+      color: var(--md-on-surface);
+      min-height: 40px;
+      padding: 8px 10px;
+      font: inherit;
+      min-width: 0;
+    }
+
+    .activity-item[hidden] {
+      display: none;
+    }
+
+    .activity-row {
+      display: grid;
+      grid-template-columns: minmax(155px, 1.2fr) 110px minmax(150px, 0.8fr) 2fr auto;
+      gap: 14px;
+      align-items: center;
+      padding: 10px 0;
+    }
+
+    .activity-row small {
+      display: block;
+      color: var(--md-on-surface-variant);
+      margin-top: 3px;
+    }
+
     .event-row {
       display: grid;
       grid-template-columns: minmax(170px, 1.2fr) minmax(150px, 0.7fr) 2fr auto;
@@ -444,6 +492,14 @@
         grid-template-columns: 1fr 1fr;
       }
 
+      .activity-toolbar {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .activity-row {
+        grid-template-columns: 1fr 1fr;
+      }
+
       header {
         align-items: flex-start;
         gap: 12px;
@@ -454,6 +510,12 @@
       .status-strip,
       .metric-grid,
       .session-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 480px) {
+      .activity-toolbar {
         grid-template-columns: 1fr;
       }
     }
@@ -477,8 +539,7 @@
         ('positions', 'Positions'),
         ('trades', 'Trades'),
         ('capital', 'Capital'),
-        ('events', 'Events'),
-        ('logs', 'Logs')
+        ('activity', 'Activity')
       ] %}
         <a class="{% if page == item[0] %}active{% endif %}"
            href="{% if item[0] == 'dashboard' %}/{% else %}/{{ item[0] }}{% endif %}">
@@ -569,12 +630,13 @@
         ? decisionTime
         : raw?.created_at || decisionTime;
       const source = String(payload.decision_source || '').toLowerCase();
-      const outcome = String(source === 'replay' ? 'replayed' : (payload.outcome || (
+      const executionStatus = String(payload.execution_status || '').toLowerCase();
+      const outcome = String(source === 'replay' ? 'replayed' : (executionStatus || payload.outcome || (
         eventType === 'ACCEPTEDDECISION' ? 'accepted' :
         eventType === 'REJECTEDDECISION' ? 'rejected' :
         eventType === 'EXECUTEDDECISION' ? 'executed' : ''
       ))).toLowerCase();
-      return { payload, eventType, decisionTime, sessionTime, outcome, source };
+      return { payload, eventType, decisionTime, sessionTime, outcome, source, executionStatus };
     }
 
     function decisionSession(raw) {
@@ -588,7 +650,7 @@
         const item = decisionRecord(raw);
         const isCandidate = item.eventType.includes('CANDIDATE') || item.outcome === 'candidate';
         const isReplayed = item.source === 'replay' || item.outcome === 'replayed';
-        const isExecuted = item.eventType === 'EXECUTEDDECISION' || item.outcome === 'executed';
+        const isExecuted = item.eventType === 'EXECUTEDDECISION' || item.executionStatus === 'executed' || item.outcome === 'executed';
         const isAccepted = item.eventType === 'ACCEPTEDDECISION' || item.outcome === 'accepted';
         const isRejected = item.eventType === 'REJECTEDDECISION' || item.eventType === 'SIZING_REJECTED' || item.outcome.includes('rejection') || item.outcome === 'rejected';
         if (isCandidate) stats.candidates += 1;
@@ -656,55 +718,95 @@
       </table>`;
     }
 
-    function eventStream(rows) {
-      if (!rows?.length) {
-        return '<div class="empty">No runtime events recorded</div>';
-      }
-
-      const counts = rows.reduce((result, row) => {
-        const type = row.event_type || 'UNKNOWN';
-        result[type] = (result[type] || 0) + 1;
-        return result;
-      }, {});
-      const filters = Object.entries(counts)
-        .sort((a, b) => b[1] - a[1])
-        .map(([type, count]) => `<span class="badge" data-event-filter="${esc(type)}">${esc(type)} · ${count}</span>`)
-        .join('');
-
-      return `<div class="event-summary">${filters}</div>
-        <div id="event-list">
-          ${rows.map((x) => `<details class="event-item" data-event-type="${esc(x.event_type || 'UNKNOWN').toLowerCase()}">
-            <summary class="event-row">
-              <span><strong>${esc(x.event_type || 'UNKNOWN')}</strong><small>${date(x.created_at)}</small></span>
-              <span>${badge(session(x.created_at))}</span>
-              <span>${esc(x.payload?.message || x.payload?.reason || x.payload?.detail || 'Runtime event')}</span>
-              <span>View payload</span>
-            </summary>
-            <div class="payload">${esc(JSON.stringify(x.payload || {}, null, 2))}</div>
-          </details>`).join('')}
-        </div>`;
+    function activityCategory(raw) {
+      const type = String(raw?.event_type || '').toUpperCase();
+      if (type.includes('DECISION') || type.includes('CANDIDATE') || type.includes('REJECTED') || type.includes('ACCEPTED') || type.includes('SIZING')) return 'Decision';
+      if (type.includes('ORDER') || type === 'FILL' || type === 'TRADE' || type.includes('POSITION')) return 'Execution';
+      return 'Runtime';
     }
 
-    function wireEventPage(rows) {
-      const search = document.getElementById('event-search');
-      const type = document.getElementById('event-type');
+    function activityDateKey(value) {
+      if (!value) return '';
+      const parsed = new Date(value);
+      if (isNaN(parsed)) return '';
+      const parts = new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(parsed);
+      return `${parts.find((x) => x.type === 'year').value}-${parts.find((x) => x.type === 'month').value}-${parts.find((x) => x.type === 'day').value}`;
+    }
+
+    function activityMessage(raw) {
+      const payload = raw?.payload && typeof raw.payload === 'object' ? raw.payload : {};
+      return payload.message || payload.reason || payload.detail || payload.outcome || 'Runtime activity';
+    }
+
+    function activityStream(rows) {
+      if (!rows?.length) return '<div class="empty">No runtime activity recorded</div>';
+      return rows.map((raw) => {
+        const type = String(raw.event_type || 'UNKNOWN').toUpperCase();
+        const category = activityCategory(raw);
+        const created = raw.created_at || raw.timestamp;
+        const dateKey = activityDateKey(created);
+        return `<details class="activity-item" data-activity-type="${esc(type.toLowerCase())}" data-activity-category="${esc(category.toLowerCase())}" data-activity-session="${esc(session(created).toLowerCase())}" data-activity-date="${esc(dateKey)}">
+          <summary class="activity-row">
+            <span><strong>${esc(type)}</strong><small>${date(created)}</small></span>
+            <span>${badge(category, category === 'Decision' ? 'good' : category === 'Execution' ? 'warn' : '')}</span>
+            <span>${badge(session(created))}</span>
+            <span>${esc(activityMessage(raw))}</span>
+            <span>View details</span>
+          </summary>
+          <div class="payload">${esc(JSON.stringify(raw.payload || {}, null, 2))}</div>
+        </details>`;
+      }).join('');
+    }
+
+    function activityPage(rows) {
+      const types = [...new Set(rows.map((x) => String(x.event_type || 'UNKNOWN').toLowerCase()))].sort();
+      const dates = [...new Set(rows.map((x) => activityDateKey(x.created_at)).filter(Boolean))].sort().reverse();
+      const counts = rows.reduce((result, row) => {
+        const category = activityCategory(row);
+        result[category] = (result[category] || 0) + 1;
+        return result;
+      }, {});
+      const option = (value, label = value) => `<option value="${esc(value.toLowerCase())}">${esc(label)}</option>`;
+      return `<div class="card">
+        <div class="section-head">
+          <div><h2>Runtime activity</h2><div class="label">Decisions, execution, and operational events in one timeline</div></div>
+          <button id="refresh-activity" class="secondary">Refresh now</button>
+        </div>
+        <div class="activity-summary">
+          ${[['All activity', rows.length], ['Decisions', counts.Decision || 0], ['Execution', counts.Execution || 0], ['Runtime', counts.Runtime || 0]].map((x) => `<span class="badge"><strong>${x[1]}</strong> ${x[0]}</span>`).join('')}
+          <span class="badge"><strong id="activity-visible-count">${rows.length}</strong> shown</span>
+        </div>
+        <div class="activity-toolbar">
+          <input id="activity-search" type="search" placeholder="Search type, reason, cell, or payload…" aria-label="Search runtime activity">
+          <select id="activity-date" aria-label="Filter by date"><option value="">All dates</option>${dates.map((x) => option(x)).join('')}</select>
+          <select id="activity-session" aria-label="Filter by session"><option value="">All sessions</option>${['Pre', 'Morning', 'Mid', 'Afternoon', 'Post'].map((x) => option(x)).join('')}</select>
+          <select id="activity-category" aria-label="Filter by category"><option value="">All categories</option>${['Decision', 'Execution', 'Runtime'].map((x) => option(x)).join('')}</select>
+          <select id="activity-type" aria-label="Filter by event type"><option value="">All event types</option>${types.map((x) => option(x, x.toUpperCase())).join('')}</select>
+        </div>
+        <div id="activity-list">${activityStream(rows)}</div>
+      </div>`;
+    }
+
+    function wireActivityPage() {
+      const controls = ['activity-search', 'activity-date', 'activity-session', 'activity-category', 'activity-type'].map((id) => document.getElementById(id));
       const apply = () => {
+        const [search, dateFilter, sessionFilter, categoryFilter, typeFilter] = controls;
         const query = (search?.value || '').toLowerCase().trim();
-        const selected = type?.value || '';
-        document.querySelectorAll('.event-item').forEach((item) => {
-          const matchesType = !selected || item.dataset.eventType === selected;
-          const matchesQuery = !query || item.textContent.toLowerCase().includes(query);
-          item.hidden = !(matchesType && matchesQuery);
+        let shown = 0;
+        document.querySelectorAll('.activity-item').forEach((item) => {
+          const matches = (!query || item.textContent.toLowerCase().includes(query)) &&
+            (!dateFilter.value || item.dataset.activityDate === dateFilter.value) &&
+            (!sessionFilter.value || item.dataset.activitySession === sessionFilter.value) &&
+            (!categoryFilter.value || item.dataset.activityCategory === categoryFilter.value) &&
+            (!typeFilter.value || item.dataset.activityType === typeFilter.value);
+          item.hidden = !matches;
+          if (matches) shown += 1;
         });
+        const count = document.getElementById('activity-visible-count');
+        if (count) count.textContent = shown;
       };
-      search?.addEventListener('input', apply);
-      type?.addEventListener('change', apply);
-      document.querySelectorAll('[data-event-filter]').forEach((item) => {
-        item.addEventListener('click', () => {
-          if (type) type.value = item.dataset.eventFilter.toLowerCase();
-          apply();
-        });
-      });
+      controls.forEach((control) => control?.addEventListener(control.tagName === 'INPUT' ? 'input' : 'change', apply));
+      document.getElementById('refresh-activity')?.addEventListener('click', refresh);
     }
 
     function decisions(rows) {
@@ -724,9 +826,9 @@
             const cell = payload.cell || payload.zone || payload.location || payload.symbol;
             const direction = payload.direction || payload.side;
             const detail = payload.reason || payload.detail || payload.setup_type || (payload.close != null ? `Close ${payload.close}` : '—');
-            const outcome = String(payload.decision_source || '').toLowerCase() === 'replay' ? 'Replayed' : (payload.outcome || (eventType === 'ACCEPTEDDECISION' ? 'Accepted' : eventType === 'REJECTEDDECISION' ? 'Policy rejection' : eventType === 'SIZING_REJECTED' ? 'Sizing rejection' : eventType === 'EXECUTEDDECISION' ? 'Executed' : eventType === 'ENGINE_EVENT' ? 'Observed' : 'No qualifying setup'));
+            const outcome = String(payload.decision_source || '').toLowerCase() === 'replay' ? 'Replayed' : (payload.execution_status || payload.outcome || (eventType === 'ACCEPTEDDECISION' ? 'Accepted' : eventType === 'REJECTEDDECISION' ? 'Policy rejection' : eventType === 'SIZING_REJECTED' ? 'Sizing rejection' : eventType === 'EXECUTEDDECISION' ? 'Executed' : eventType === 'ENGINE_EVENT' ? 'Observed' : 'No qualifying setup'));
             const outcomeLabel = String(outcome).replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
-            const outcomeTone = ['Accepted', 'Executed'].includes(outcomeLabel) ? 'good' : ['Policy Rejection', 'Sizing Rejection', 'Incomplete Bundle', 'Replayed'].includes(outcomeLabel) ? 'warn' : 'subtle';
+            const outcomeTone = ['Accepted', 'Executed'].includes(outcomeLabel) ? 'good' : ['Policy Rejection', 'Sizing Rejection', 'Incomplete Bundle', 'Replayed', 'Unfilled', 'Execution Error'].includes(outcomeLabel) ? 'warn' : 'subtle';
             return `<details>
             <summary class="decision-row">
               <span>${date(timestamp)}</span>
@@ -880,22 +982,8 @@
           <h2>Trades</h2>
           ${table(data.trades.trades)}
         </div>`;
-      } else if (page === 'events') {
-        const types = [...new Set((data.events.events || []).map((x) => String(x.event_type || 'UNKNOWN').toLowerCase()))].sort();
-        body = `<div class="card">
-          <div class="section-head">
-            <div><h2>Event stream</h2><div class="label">Latest runtime events from /api/v1/events</div></div>
-            <button id="refresh-events" class="secondary">Refresh now</button>
-          </div>
-          <div class="event-toolbar">
-            <input id="event-search" type="search" placeholder="Search event type or payload…" aria-label="Search events">
-            <select id="event-type" aria-label="Filter by event type">
-              <option value="">All event types</option>
-              ${types.map((x) => `<option value="${esc(x)}">${esc(x.toUpperCase())}</option>`).join('')}
-            </select>
-          </div>
-          ${eventStream(data.events.events)}
-        </div>`;
+      } else if (page === 'activity') {
+        body = activityPage(data.events.events || []);
       } else {
         body = `<div class="card">
           <h2>${page[0].toUpperCase() + page.slice(1)}</h2>
@@ -905,7 +993,7 @@
 
       document.getElementById('app').innerHTML = top + body;
       wire();
-      if (page === 'events') wireEventPage(data.events.events || []);
+      if (page === 'activity') wireActivityPage();
     }
 
     function wire() {
@@ -930,7 +1018,6 @@
         };
       });
 
-      document.getElementById('refresh-events')?.addEventListener('click', refresh);
     }
 
     async function refresh() {

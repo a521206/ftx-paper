@@ -52,7 +52,10 @@ class PaperBroker:
         return order_ack
 
     def poll_fill(self, order: OrderIntent, broker_order_id: str) -> Fill | None:
-        return self.fills[-1] if self.fills else None
+        return next(
+            (fill for fill in reversed(self.fills) if fill.client_order_id == order.client_order_id),
+            None,
+        )
 
     def close(self) -> None:
         return None

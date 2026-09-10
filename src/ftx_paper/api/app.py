@@ -115,8 +115,43 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
     def decisions():
         events = store.read_events(1000)
         decision_types = {"CANDIDATEDECISION", "ACCEPTEDDECISION", "REJECTEDDECISION"}
+        execution_types = {
+            "ORDER_SUPPRESSED", "ORDER_ACK", "EXECUTEDDECISION", "FILL",
+            "ORDER_UNFILLED", "EXECUTION_ERROR", "SIZING_REJECTED",
+        }
+        executions_by_decision: dict[str, list[dict[str, Any]]] = {}
+        for event in events:
+            if str(event.get("event_type", "")).upper() not in execution_types:
+                continue
+            decision_id = event.get("payload", {}).get("decision_id")
+            if decision_id:
+                executions_by_decision.setdefault(str(decision_id), []).append(event)
+
+        def enrich(event: dict[str, Any]) -> dict[str, Any]:
+            payload = dict(event.get("payload", {}))
+            decision_id = payload.get("decision_id")
+            lifecycle = executions_by_decision.get(str(decision_id), []) if decision_id else []
+            execution = lifecycle[0] if lifecycle else None
+            if execution is not None:
+                execution_type = str(execution["event_type"]).upper()
+                status = {
+                    "ORDER_SUPPRESSED": "replayed",
+                    "ORDER_ACK": "acknowledged",
+                    "EXECUTEDDECISION": "executed",
+                    "FILL": "executed",
+                    "ORDER_UNFILLED": "unfilled",
+                    "EXECUTION_ERROR": "execution_error",
+                    "SIZING_REJECTED": "sizing_rejected",
+                }.get(execution_type, "unknown")
+                payload["execution_status"] = status
+                payload["execution_event_type"] = execution_type
+                payload["execution"] = execution
+            elif str(payload.get("decision_source", "")).lower() == "replay":
+                payload["execution_status"] = "replayed"
+            return {**event, "payload": payload}
+
         return jsonify({
-            "decisions": [event for event in events if str(event.get("event_type", "")).upper() in decision_types]
+            "decisions": [enrich(event) for event in events if str(event.get("event_type", "")).upper() in decision_types]
         })
 
     @app.get("/api/v1/logs")

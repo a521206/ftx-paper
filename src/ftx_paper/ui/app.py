@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 
-from flask import Flask, render_template
+from flask import Flask, redirect, render_template, url_for
 
 
 def create_ui_app(api_base_url: str | None = None) -> Flask:
@@ -13,7 +13,9 @@ def create_ui_app(api_base_url: str | None = None) -> Flask:
     @app.get("/")
     @app.get("/<page>")
     def index(page: str = "dashboard"):
-        pages = {"dashboard", "decisions", "positions", "trades", "events", "logs", "capital"}
+        if page in {"events", "logs"}:
+            return redirect(url_for("index", page="activity"))
+        pages = {"dashboard", "decisions", "positions", "trades", "activity", "capital"}
         if page not in pages:
             return "Not found", 404
         return render_template("index.html", api_base_url=configured_api.rstrip("/"), page=page)
