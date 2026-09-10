@@ -38,6 +38,10 @@ class PaperBroker:
         self.prices = prices or {}
         self.fills: list[Fill] = []
 
+    def update_price(self, symbol: str, price: float) -> None:
+        """Update the simulated fill price from the latest market bar."""
+        self.prices[symbol] = price
+
     def submit(self, order: OrderIntent) -> OrderAck:
         price = self.prices.get(order.instrument.symbol)
         if price is None:

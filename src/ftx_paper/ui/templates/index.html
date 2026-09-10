@@ -568,12 +568,12 @@
       const sessionTime = typeof decisionTime === 'string' && decisionTime.includes('T')
         ? decisionTime
         : raw?.created_at || decisionTime;
-      const outcome = String(payload.outcome || (
+      const source = String(payload.decision_source || '').toLowerCase();
+      const outcome = String(source === 'replay' ? 'replayed' : (payload.outcome || (
         eventType === 'ACCEPTEDDECISION' ? 'accepted' :
         eventType === 'REJECTEDDECISION' ? 'rejected' :
         eventType === 'EXECUTEDDECISION' ? 'executed' : ''
-      )).toLowerCase();
-      const source = String(payload.decision_source || '').toLowerCase();
+      ))).toLowerCase();
       return { payload, eventType, decisionTime, sessionTime, outcome, source };
     }
 
@@ -724,9 +724,9 @@
             const cell = payload.cell || payload.zone || payload.location || payload.symbol;
             const direction = payload.direction || payload.side;
             const detail = payload.reason || payload.detail || payload.setup_type || (payload.close != null ? `Close ${payload.close}` : '—');
-            const outcome = payload.outcome || (eventType === 'ACCEPTEDDECISION' ? 'Accepted' : eventType === 'REJECTEDDECISION' ? 'Policy rejection' : eventType === 'SIZING_REJECTED' ? 'Sizing rejection' : eventType === 'EXECUTEDDECISION' ? 'Executed' : eventType === 'ENGINE_EVENT' ? 'Observed' : 'No qualifying setup');
+            const outcome = String(payload.decision_source || '').toLowerCase() === 'replay' ? 'Replayed' : (payload.outcome || (eventType === 'ACCEPTEDDECISION' ? 'Accepted' : eventType === 'REJECTEDDECISION' ? 'Policy rejection' : eventType === 'SIZING_REJECTED' ? 'Sizing rejection' : eventType === 'EXECUTEDDECISION' ? 'Executed' : eventType === 'ENGINE_EVENT' ? 'Observed' : 'No qualifying setup'));
             const outcomeLabel = String(outcome).replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
-            const outcomeTone = ['Accepted', 'Executed'].includes(outcomeLabel) ? 'good' : ['Policy Rejection', 'Sizing Rejection', 'Incomplete Bundle'].includes(outcomeLabel) ? 'warn' : 'subtle';
+            const outcomeTone = ['Accepted', 'Executed'].includes(outcomeLabel) ? 'good' : ['Policy Rejection', 'Sizing Rejection', 'Incomplete Bundle', 'Replayed'].includes(outcomeLabel) ? 'warn' : 'subtle';
             return `<details>
             <summary class="decision-row">
               <span>${date(timestamp)}</span>

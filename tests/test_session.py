@@ -1,8 +1,8 @@
 from datetime import datetime, timezone
 
 from ftx_paper.broker import PaperBroker
-from ftx_paper.contracts import Instrument, MarketBar
-from ftx_paper.core import PaperEngine
+from ftx_paper.contracts import Instrument, MarketBar, OrderIntent, OrderSide
+from ftx_paper.core import EngineResult, PaperEngine
 from ftx_paper.core import CompletedBarAggregator
 from ftx_paper.runtime import RuntimeSession, RuntimeStore
 
@@ -83,3 +83,36 @@ def test_incomplete_bundle_is_diagnosed_without_advancing_completion(tmp_path):
     events = store.read_events()
     assert events[0]["event_type"] == "BUNDLE_INCOMPLETE"
     assert events[0]["payload"]["minute"] == "10:20"
+
+
+def test_replay_suppresses_orders_and_tags_events(tmp_path):
+    store = RuntimeStore(tmp_path)
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+
+    class Engine:
+        bars_seen = 0
+        strategy_metadata = None
+
+        def on_bundle(self, bundle):
+            return EngineResult(
+                orders=(OrderIntent("replay-order", instrument, OrderSide.BUY, 1),),
+                events=({"event_type": "ACCEPTEDDECISION", "decision_id": "replay-order"},),
+            )
+
+    session = RuntimeSession(store, None, [], engine=Engine())
+    session.broker = PaperBroker({"NIFTYFUT": 100.0})
+    session._replaying = True
+    session._process_bundle(
+        type("Bundle", (), {
+            "bundle_id": "2026-01-01:10:20",
+            "trading_date": "2026-01-01",
+            "minute": "10:20",
+            "required_roles": ("futures", "vix"),
+            "bars": {"futures": object()},
+        })(),
+        source="replay",
+    )
+    events = store.read_events(10)
+    assert all(event["payload"].get("decision_source") == "replay" for event in events)
+    assert not session.broker.fills
+    assert any(event["event_type"] == "ORDER_SUPPRESSED" for event in events)

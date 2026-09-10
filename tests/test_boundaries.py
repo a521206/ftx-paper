@@ -249,7 +249,7 @@ def test_zerodha_feed_reconnects_with_bounded_backoff() -> None:
     assert socket.connections == 3
 
 
-def test_zerodha_ack_is_distinct_from_polled_fill() -> None:
+def test_zerodha_order_submission_is_disabled_for_paper_runtime() -> None:
     class Client:
         def place_order(self, **kwargs):
             return "kite-1"
@@ -259,10 +259,12 @@ def test_zerodha_ack_is_distinct_from_polled_fill() -> None:
     instrument = Instrument("NIFTY", "NSE", "INDEX")
     order = OrderIntent("client-1", instrument, OrderSide.BUY, 2)
     broker = ZerodhaBroker(Client())
-    ack = broker.submit(order)
-    fill = broker.poll_fill(order, ack.broker_order_id)
-    assert ack.status == "ACCEPTED"
-    assert fill is not None and fill.price == 101 and fill.quantity == 2
+    try:
+        broker.submit(order)
+    except RuntimeError as exc:
+        assert "disabled" in str(exc)
+    else:
+        raise AssertionError("paper runtime submitted a real Zerodha order")
 
 
 def test_zerodha_socket_defers_subscription_until_connected(monkeypatch) -> None:

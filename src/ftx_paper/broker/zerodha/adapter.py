@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, TypedDict
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from ftx_paper.broker.protocol import Fill
 from ftx_paper.contracts import Instrument, MarketBar, OrderAck, OrderIntent
 
 KITE_EXCHANGE_MAP = {"NSE_INDEX": "NSE", "BSE_INDEX": "BSE"}
+IST = ZoneInfo("Asia/Kolkata")
 
 
 class ZerodhaInstrument(TypedDict):
@@ -66,7 +68,7 @@ def classify_runtime_roles(instruments: list[ZerodhaInstrument]) -> RuntimeRoles
 
 def load_startup_backfill(client: Any, instruments: list[ZerodhaInstrument], *, days: int = 2) -> tuple[MarketBar, ...]:
     """Fetch bounded one-minute warmup bars and normalize them at the broker edge."""
-    end = date.today()
+    end = datetime.now(IST).date()
     start = end - timedelta(days=max(1, days + 3))
     bars: list[MarketBar] = []
     for item in instruments:
@@ -85,28 +87,13 @@ def load_startup_backfill(client: Any, instruments: list[ZerodhaInstrument], *, 
 
 
 class ZerodhaBroker:
-    """Kite boundary. All optional Kite imports and response mapping stay here."""
+    """Disabled order boundary; ftx-paper is a simulated trading runtime."""
 
     def __init__(self, client: Any) -> None:
         self._client = client
 
     def submit(self, order: OrderIntent) -> OrderAck:
-        try:
-            from kiteconnect import KiteConnect
-        except ImportError as exc:
-            raise RuntimeError("Install ftx-paper[zerodha] to use Zerodha") from exc
-        transaction = getattr(KiteConnect, f"TRANSACTION_TYPE_{order.side.value}")
-        variety = getattr(KiteConnect, "VARIETY_REGULAR")
-        order_id = self._client.place_order(
-            variety=variety,
-            exchange=order.instrument.exchange,
-            tradingsymbol=order.instrument.symbol,
-            transaction_type=transaction,
-            quantity=order.quantity,
-            order_type=order.order_type.value,
-            product="MIS",
-        )
-        return OrderAck(order.client_order_id, str(order_id), "ACCEPTED")
+        raise RuntimeError("Real Zerodha order submission is disabled in ftx-paper")
 
     def close(self) -> None:
         return None

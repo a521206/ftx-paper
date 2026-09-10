@@ -138,6 +138,18 @@ class RuntimeStore:
             self._event_counts_cache = None
         return inserted
 
+    def clear_replay_events(self, session_date: str) -> int:
+        """Remove only startup-replay audit rows for one trading date."""
+        with sqlite3.connect(self.database) as connection:
+            cursor = connection.execute(
+                "DELETE FROM runtime_events WHERE json_extract(payload, '$.decision_source') = 'replay' "
+                "AND json_extract(payload, '$.session_date') = ?",
+                (session_date,),
+            )
+            deleted = cursor.rowcount
+        self._event_counts_cache = None
+        return deleted
+
     def recover_interrupted(self) -> bool:
         status = self.read_status()
         if status.get("state") not in {"RUNNING", "STARTING", "START_REQUESTED"}:
