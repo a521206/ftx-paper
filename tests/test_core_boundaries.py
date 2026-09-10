@@ -1,4 +1,6 @@
 from datetime import datetime, timezone
+import time
+from zoneinfo import ZoneInfo
 
 from ftx_paper.broker import PaperBroker
 from ftx_paper.contracts import Instrument, MarketBar, OrderSide
@@ -126,7 +128,7 @@ def test_completed_bars_emit_one_bundle_only_after_required_roles_arrive() -> No
     instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
     vix = Instrument("INDIA VIX", "NSE", "VIX")
     aggregator = CompletedBarAggregator({("NFO", "NIFTYFUT"): "futures", ("NSE", "INDIA VIX"): "vix"})
-    minute = datetime(2026, 1, 1, 10, 20, tzinfo=timezone.utc)
+    minute = datetime(2026, 1, 1, 10, 20, tzinfo=ZoneInfo("Asia/Kolkata"))
     future = MarketBar(instrument, minute, 100, 102, 99, 101)
     vix_bar = MarketBar(vix, minute, 15, 16, 14, 15)
     assert aggregator.ingest(future) is None
@@ -145,10 +147,10 @@ def test_supporting_role_is_ignored_and_expired_bundle_has_diagnostics() -> None
         ("NSE", "INDIA VIX"): "vix",
         ("NSE", "NIFTY"): "spot",
     })
-    minute = datetime(2026, 1, 1, 10, 20, tzinfo=timezone.utc)
+    minute = datetime(2026, 1, 1, 10, 20, tzinfo=ZoneInfo("Asia/Kolkata"))
     assert aggregator.ingest(MarketBar(spot, minute, 1, 1, 1, 1)) is None
     assert aggregator.ingest(MarketBar(future, minute, 100, 101, 99, 100)) is None
-    expired = aggregator.expire(now=minute.replace(second=11))
+    expired = aggregator.expire(now=time.monotonic() + 11)
     assert len(expired) == 1
     assert expired[0].missing_roles == ("vix",)
     assert expired[0].bars["futures"].timestamp == minute

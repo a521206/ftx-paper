@@ -6,7 +6,9 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from ftx_paper.broker.protocol import Fill
-from ftx_paper.contracts import Instrument, MarketBar, OrderAck, OrderIntent
+from ftx_paper.contracts import (
+    Instrument, MarketBar, OrderAck, OrderIntent, normalize_exchange_timestamp,
+)
 
 KITE_EXCHANGE_MAP = {"NSE_INDEX": "NSE", "BSE_INDEX": "BSE"}
 IST = ZoneInfo("Asia/Kolkata")
@@ -75,7 +77,7 @@ def load_startup_backfill(client: Any, instruments: list[ZerodhaInstrument], *, 
         rows = client.historical_data(int(item["instrument_token"]), start, end, "minute")
         for row in rows:
             timestamp = row.get("date")
-            parsed = timestamp if isinstance(timestamp, datetime) else datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+            parsed = normalize_exchange_timestamp(timestamp)
             bars.append(MarketBar(
                 instrument=Instrument(str(item["symbol"]), str(item["exchange"]), str(item.get("instrument_type", "INDEX"))),
                 timestamp=parsed,

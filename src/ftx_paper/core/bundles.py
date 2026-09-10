@@ -2,17 +2,10 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timezone
+import time
 from typing import Iterable, Mapping
 
-from ftx_paper.contracts import MarketBar
-
-
-def _utc(timestamp: datetime) -> datetime:
-    """Normalize replay/live timestamps before doing deadline arithmetic."""
-    if timestamp.tzinfo is None:
-        return timestamp.replace(tzinfo=timezone.utc)
-    return timestamp.astimezone(timezone.utc)
+from ftx_paper.contracts import MarketBar, market_minute_key
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,8 +29,8 @@ class CompletedBarAggregator:
     """Collect instrument bars and emit one bundle per date/minute.
 
     A minute is emitted immediately only when complete.  ``flush`` is the
-    explicit close policy for incomplete minutes, so late instrument delivery
-    cannot cause repeated strategy evaluations.
+    explicit close policy for incomplete minutes. Exchange timestamps identify
+    the minute; a private monotonic receipt clock controls the grace period.
     """
 
     def __init__(self, role_by_instrument: Mapping[tuple[str, str], str], *, required_roles: Iterable[str] = ("futures", "vix"), deadline_seconds: float = 10.0) -> None:
@@ -50,7 +43,7 @@ class CompletedBarAggregator:
             raise ValueError("instrument roles omit a required input")
         self._pending: dict[tuple[str, str], dict[str, MarketBar]] = defaultdict(dict)
         self._emitted: set[tuple[str, str]] = set()
-        self._first_seen: dict[tuple[str, str], datetime] = {}
+        self._first_seen_monotonic: dict[tuple[str, str], float] = {}
 
     def ingest(self, bar: MarketBar) -> DecisionBundle | None:
         role = self._roles.get((bar.instrument.exchange, bar.instrument.symbol))
@@ -58,13 +51,11 @@ class CompletedBarAggregator:
             return None
         if role not in self.required_roles:
             return None
-        key = (bar.timestamp.date().isoformat(), bar.timestamp.strftime("%H:%M"))
+        key = market_minute_key(bar.timestamp)
         if key in self._emitted:
             return None
         self._pending[key][role] = bar
-        # Exchange minute timestamps provide a deterministic clock for expiry;
-        # this also keeps replay and live behavior identical.
-        self._first_seen.setdefault(key, _utc(bar.timestamp))
+        self._first_seen_monotonic.setdefault(key, time.monotonic())
         if all(role in self._pending[key] for role in self.required_roles):
             return self._emit(key)
         return None
@@ -85,13 +76,13 @@ class CompletedBarAggregator:
             result.append((minute, missing, present))
         return tuple(result)
 
-    def expire(self, *, now: datetime | None = None) -> tuple[DecisionBundle, ...]:
+    def expire(self, *, now: float | None = None) -> tuple[DecisionBundle, ...]:
         """Emit incomplete bundles whose grace period has elapsed."""
-        now = _utc(now or datetime.now(timezone.utc))
+        now = now if now is not None else time.monotonic()
         result = []
         for key in sorted(tuple(self._pending)):
-            first_seen = _utc(self._first_seen.get(key, now))
-            if (now - first_seen).total_seconds() >= self.deadline_seconds:
+            first_seen = self._first_seen_monotonic.get(key, now)
+            if now - first_seen >= self.deadline_seconds:
                 result.append(self._emit(key))
         return tuple(result)
 
@@ -112,7 +103,7 @@ class CompletedBarAggregator:
 
     def _emit(self, key: tuple[str, str]) -> DecisionBundle:
         bars = self._pending.pop(key)
-        self._first_seen.pop(key, None)
+        self._first_seen_monotonic.pop(key, None)
         missing = tuple(role for role in self.required_roles if role not in bars)
         trading_date, minute = key
         bundle = DecisionBundle(

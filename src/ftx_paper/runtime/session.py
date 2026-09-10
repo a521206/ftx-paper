@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import threading
+import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable
 from zoneinfo import ZoneInfo
 
 from ftx_paper.broker import Broker, PaperBroker
-from ftx_paper.contracts import Instrument, MarketBar, OrderSide
+from ftx_paper.contracts import (
+    Instrument, MarketBar, OrderSide, normalize_exchange_timestamp,
+)
 from ftx_paper.core import CompletedBarAggregator, PaperEngine
 from ftx_paper.execution import PositionLedger
 from .store import RuntimeStore
@@ -107,9 +110,9 @@ class RuntimeSession:
         def normalize(payload):
             from datetime import datetime
             item = by_token[int(payload["instrument_token"])]
-            timestamp = payload.get("exchange_timestamp") or datetime.now().astimezone()
-            if isinstance(timestamp, str):
-                timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            timestamp = normalize_exchange_timestamp(
+                payload.get("exchange_timestamp") or datetime.now(ZoneInfo("Asia/Kolkata"))
+            )
             price = float(payload["last_price"])
             instrument = Instrument(str(item["symbol"]), str(item["exchange"]), str(item.get("instrument_type", "INDEX")))
             return MarketBar(instrument, timestamp.replace(second=0, microsecond=0), price, price, price, price, payload.get("volume_traded"), payload.get("oi"))
@@ -224,7 +227,7 @@ class RuntimeSession:
                 for order in result.orders:
                     self._execute_paper_order(order)
             else:
-                expired = self._aggregator.expire(now=bar.timestamp)
+                expired = self._aggregator.expire(now=time.monotonic())
                 for incomplete in expired:
                     self._record_incomplete(incomplete)
                 bundle = self._aggregator.ingest(bar)
@@ -259,8 +262,6 @@ class RuntimeSession:
             if self._stopping:
                 return
             if self._aggregator is not None:
-                for incomplete in self._aggregator.expire(now=datetime.now(timezone.utc)):
-                    self._record_incomplete(incomplete)
                 self._refresh_pending_status()
             self.store.patch_status({"feed_health": health, "feed_connected": bool(health.get("connected"))})
             sampled_at = datetime.now(timezone.utc)
