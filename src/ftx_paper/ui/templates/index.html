@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>FTX Paper Runtime</title>
+    <style>
+      :root{font-family:Roboto,system-ui,sans-serif;color:#1a1b1f;background:#f7f8fc;line-height:1.45}
+      body{max-width:1180px;margin:0 auto;padding:28px 20px;background:#f7f8fc}
+      h1{font-size:2rem;font-weight:500;margin:0 0 4px}h2{font-size:1.1rem;font-weight:500;margin:0 0 10px}
+      nav{display:flex;gap:8px;flex-wrap:wrap;margin:20px 0;padding:8px 0;border-bottom:1px solid #dde1ea}
+      nav a{color:#405f9f;text-decoration:none;padding:8px 12px;border-radius:20px}nav a:hover{background:#e5eafa}
+      section{background:#fff;border:1px solid #e1e3e8;border-radius:12px;padding:18px;margin:14px 0;box-shadow:0 1px 3px #1d263308}
+      .lede{color:#626774;margin-top:0}.status-strip{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:18px 0}.status-item,.metric-card{background:#fff;border:1px solid #e1e3e8;border-radius:10px;padding:14px}.status-label,.metric{font-size:.78rem;text-transform:uppercase;letter-spacing:.04em;color:#707581}.status-value,.value{font-size:1.05rem;margin-top:5px}.good{color:#27734b}.bad{color:#a52828}.warn{color:#946b12}.metric-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:14px 0}.value{font-size:1.35rem;font-weight:500}
+      pre{white-space:pre-wrap;word-break:break-word;color:#45474f;background:#fafbff;border-radius:8px;padding:12px;margin:0;font-size:.85rem}
+      button{font:inherit;padding:9px 16px;margin:4px 4px 14px 0;border:0;border-radius:20px;background:#5069a5;color:#fff;cursor:pointer;box-shadow:0 1px 2px #0002}
+      button:hover{background:#3f5790}.danger{background:#ba1a1a}.danger:hover{background:#8f1010}
+      #health{color:#42649e;font-size:.95rem}#broker-status{display:inline-block;margin:0 0 12px 8px;color:#555}
+      @media(max-width:650px){body{padding:18px 12px}h1{font-size:1.6rem}section{padding:14px}}
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Trading overview</h1>
+      <p class="lede">Operator control center · live paper-runtime monitoring</p>
+      <p id="health">Loading runtime health…</p>
+      <nav><a href="/">Dashboard</a><a href="/decisions">Decisions</a><a href="/positions">Positions</a><a href="/trades">Trades</a><a href="/events">Events</a><a href="/logs">Logs</a></nav>
+      <button id="connect-zerodha" type="button">Connect Zerodha</button>
+      <button data-command="start" type="button">Start worker</button><button data-command="restart" type="button">Restart worker</button><button class="danger" data-command="stop" type="button">Stop worker</button>
+      <p id="broker-status">Checking Zerodha connection…</p>
+      <div class="status-strip"><div class="status-item"><div class="status-label">Runtime</div><div id="runtime-state" class="status-value">Loading…</div></div><div class="status-item"><div class="status-label">Zerodha</div><div id="broker-state" class="status-value">Loading…</div></div><div class="status-item"><div class="status-label">Worker</div><div id="worker-state" class="status-value">Loading…</div></div><div class="status-item"><div class="status-label">Feed</div><div id="feed-state" class="status-value">Loading…</div></div></div>
+      <section aria-label="Runtime summary">
+        <h2 id="runtime">Runtime</h2><pre id="runtime-data">Loading…</pre>
+        <h2>Capital</h2><pre id="capital">Loading…</pre>
+        <h2 id="positions">Positions</h2><pre id="positions-data">Loading…</pre>
+        <h2 id="trades">Recent trades</h2><pre id="trades-data">Loading…</pre>
+        <h2 id="decisions">Decisions</h2><pre id="decisions-data">Loading…</pre>
+        <h2 id="events">Recent events</h2><pre id="events-data">Loading…</pre>
+        <h2 id="logs">Logs</h2><pre id="logs-data">Loading…</pre>
+      </section>
+    </main>
+    <script>
+      const apiBase = {{ api_base_url|tojson }};
+      const page = {{ page|tojson }};
+      async function readJson(url, options) {
+        const response = await fetch(url, options);
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error?.message || `Request failed (${response.status})`);
+        return body;
+      }
+      async function refresh() {
+        const health = document.getElementById("health");
+        const runtime = document.getElementById("runtime-data");
+        try {
+          const [healthData, runtimeData, capitalData, positionsData, tradesData, decisionsData, eventsData, logsData, brokerData] = await Promise.all([
+            readJson(`${apiBase}/api/v1/health`),
+            readJson(`${apiBase}/api/v1/runtime`),
+            readJson(`${apiBase}/api/v1/capital`),
+            readJson(`${apiBase}/api/v1/positions`),
+            readJson(`${apiBase}/api/v1/trades`),
+            readJson(`${apiBase}/api/v1/decisions`),
+            readJson(`${apiBase}/api/v1/events?limit=20`),
+            readJson(`${apiBase}/api/v1/logs`),
+            readJson(`${apiBase}/api/v1/broker/zerodha/status`),
+          ]);
+          health.textContent = `Health: ${healthData.status}`;
+          runtime.textContent = JSON.stringify(runtimeData, null, 2);
+          document.getElementById("runtime-state").textContent = runtimeData.state || "Unknown";
+          document.getElementById("worker-state").textContent = ["RUNNING","START_REQUESTED"].includes(runtimeData.state) ? "Running" : "Stopped";
+          document.getElementById("feed-state").textContent = runtimeData.feed_connected ? "Healthy" : "Not connected";
+          document.getElementById("capital").textContent = JSON.stringify(capitalData, null, 2);
+          document.getElementById("positions-data").textContent = JSON.stringify(positionsData, null, 2);
+          document.getElementById("trades-data").textContent = JSON.stringify(tradesData, null, 2);
+          document.getElementById("decisions-data").textContent = JSON.stringify(decisionsData, null, 2);
+          document.getElementById("events-data").textContent = JSON.stringify(eventsData, null, 2);
+          document.getElementById("logs-data").textContent = JSON.stringify(logsData, null, 2);
+          document.getElementById("broker-status").textContent = brokerData.authenticated
+            ? "Zerodha: connected"
+            : brokerData.configured
+              ? "Zerodha: not connected — click Connect Zerodha before starting the worker"
+              : "Zerodha: not configured — add broker configuration before connecting";
+          document.getElementById("broker-state").textContent = brokerData.authenticated ? "Connected" : brokerData.configured ? "Not connected" : "Not configured";
+        } catch (error) {
+          health.textContent = `API unavailable: ${error}`;
+        }
+      }
+      document.getElementById("connect-zerodha").addEventListener("click", async () => {
+        try {
+          const body = await readJson(`${apiBase}/api/v1/broker/zerodha/login`);
+          window.location.assign(body.login_url);
+        } catch (error) { document.getElementById("broker-status").textContent = `Zerodha: ${error.message}`; }
+      });
+      document.querySelectorAll("[data-command]").forEach(button => button.addEventListener("click", async () => {
+        try { await readJson(`${apiBase}/api/v1/runtime/${button.dataset.command}`, {method:"POST"}); await refresh(); }
+        catch (error) { document.getElementById("broker-status").textContent = `Runtime: ${error.message}`; }
+      }));
+      const sections = {dashboard: null, decisions: "decisions", positions: "positions", trades: "trades", events: "events", logs: "logs"};
+      if (sections[page]) {
+        const selected = document.getElementById(sections[page]);
+        document.querySelectorAll("section[aria-label='Runtime summary'] > h2, section[aria-label='Runtime summary'] > pre").forEach(node => {
+          if (node !== selected && node !== selected.nextElementSibling) node.hidden = true;
+        });
+        selected.scrollIntoView({block: "start"});
+      }
+      refresh();
+      setInterval(refresh, 5000);
+    </script>
+  </body>
+</html>

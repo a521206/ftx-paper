@@ -1,0 +1,34 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import StrEnum
+
+from .market import Instrument
+
+
+class OrderSide(StrEnum):
+    BUY = "BUY"
+    SELL = "SELL"
+
+
+class OrderType(StrEnum):
+    MARKET = "MARKET"
+    LIMIT = "LIMIT"
+
+
+@dataclass(frozen=True, slots=True)
+class OrderAck:
+    client_order_id: str
+    broker_order_id: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
+class OrderIntent:
+    client_order_id: str
+    instrument: Instrument
+    side: OrderSide
+    quantity: int
+    order_type: OrderType = OrderType.MARKET
+    limit_price: float | None = None
+    reason: str = ""
