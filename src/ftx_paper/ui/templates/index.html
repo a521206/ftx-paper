@@ -1,7 +1,665 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>FTX Paper Trading · {{ page|title }}</title><style>
-:root{--navy:#172033;--ink:#172033;--muted:#6b7280;--line:#e4e8ef;--bg:#f5f7fb;--green:#16845b;--red:#c43d4b;--yellow:#b27a16;--blue:#3564b8;--shadow:0 8px 24px #17203312;font:14px Inter,system-ui,sans-serif;color:var(--ink);background:var(--bg)}*{box-sizing:border-box}body{margin:0}header{background:var(--navy);color:#fff;padding:22px max(22px,calc((100% - 1240px)/2));display:flex;justify-content:space-between}header h1{font-size:20px;margin:0;font-weight:800}header p{margin:4px 0;color:#aeb8cb;font-size:12px}main{max-width:1240px;margin:auto;padding:26px 22px}nav{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:24px}nav a{color:#526078;text-decoration:none;padding:9px 12px;border-radius:7px;font-weight:600}nav a.active,nav a:hover{background:#e9eef8;color:var(--blue)}.card,.status-item,.metric,.session{background:#fff;border:1px solid var(--line);border-radius:12px;padding:18px;box-shadow:var(--shadow);margin-bottom:18px}.card h2{font-size:15px;margin:0 0 15px}.status-strip,.metric-grid,.session-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}.status-item,.metric,.session{padding:14px;margin:0;box-shadow:none}.metric-grid{grid-template-columns:repeat(4,1fr)}.label{text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-size:10px;font-weight:700}.status-value{font-weight:700;margin-top:7px}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--muted);margin-right:7px}.dot.good{background:var(--green)}.dot.bad{background:var(--red)}.dot.warn{background:var(--yellow)}.value{font-size:22px;font-weight:800;margin-top:8px}.positive{color:var(--green)}.negative{color:var(--red)}table{width:100%;border-collapse:collapse}th{text-align:left;color:var(--muted);font-size:10px;text-transform:uppercase;background:#f8f9fc}th,td{padding:12px 10px;border-bottom:1px solid var(--line);vertical-align:top}.badge{display:inline-block;border-radius:99px;padding:4px 9px;font-size:11px;font-weight:700;background:#edf1f7;color:#526078}.badge.good{background:#e5f6ee;color:var(--green)}.badge.bad{background:#fdebed;color:var(--red)}.badge.warn{background:#fff4d9;color:var(--yellow)}button{border:0;border-radius:7px;background:var(--blue);color:#fff;padding:9px 13px;font:inherit;font-weight:700;cursor:pointer;margin:0 5px 5px 0}button.secondary{background:#e9eef8;color:var(--blue)}button.danger{background:var(--red)}.toolbar,.section-head{display:flex;justify-content:space-between;align-items:center;gap:12px}.section-head a{color:var(--blue);font-size:12px}.empty{text-align:center;color:var(--muted);padding:24px}.payload{background:#f7f9fc;border:1px solid var(--line);border-radius:7px;padding:12px;margin-top:10px;color:#526078;font-size:12px;white-space:pre-wrap;overflow:auto}summary{cursor:pointer;list-style:none}.decision-row{display:grid;grid-template-columns:130px 1fr 110px 1fr 100px;gap:12px;align-items:center;padding:12px 0;border-bottom:1px solid var(--line)}.flash{background:#e5f6ee;color:var(--green);padding:11px 14px;border-radius:8px;margin-bottom:16px}@media(max-width:800px){.status-strip,.metric-grid,.session-grid{grid-template-columns:repeat(2,1fr)}.decision-row{grid-template-columns:1fr 1fr}}@media(max-width:480px){.status-strip,.metric-grid,.session-grid{grid-template-columns:1fr}}
-</style></head><body><header><div><h1>FTX Paper Trading</h1><p>Operator control center · live paper-runtime monitoring</p></div><span id="health"><span class="dot warn"></span>Connecting…</span></header><main><nav>{% for item in [('dashboard','Dashboard'),('decisions','Decision review'),('positions','Positions'),('trades','Trades'),('capital','Capital'),('events','Events'),('logs','Logs')] %}<a class="{% if page==item[0] %}active{% endif %}" href="{% if item[0]=='dashboard' %}/{% else %}/{{item[0]}}{% endif %}">{{item[1]}}</a>{% endfor %}</nav><div id="flash" class="flash" hidden></div><div id="app"><div class="card empty">Loading {{page|replace('-',' ')}}…</div></div></main><script>
-const api={{api_base_url|tojson}},page={{page|tojson}};const money=n=>n==null?'Not reported':`₹${Number(n).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2})}`;const esc=s=>String(s??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));const badge=(s,c='')=>`<span class="badge ${c}">${esc(s)}</span>`;const date=s=>{if(!s)return'Not reported';let d=new Date(s);return isNaN(d)?esc(s):new Intl.DateTimeFormat('en-IN',{timeZone:'Asia/Kolkata',dateStyle:'medium',timeStyle:'medium'}).format(d)+' IST'};const session=s=>{if(!s)return'Post';let d=new Date(s),p=new Intl.DateTimeFormat('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',hour12:false}).formatToParts(d),n=+p.find(x=>x.type==='hour').value*60 + +p.find(x=>x.type==='minute').value;return n<615?'Pre':n<675?'Morning':n<810?'Mid':n<855?'Afternoon':'Post'};async function get(p,o={}){let r=await fetch(api+p,{...o,headers:{Authorization:`Bearer ${sessionStorage.getItem('ftx_token')||''}`,...(o.headers||{})}}),b=await r.json().catch(()=>({}));if(!r.ok)throw Error(b.error?.message||`Request failed (${r.status})`);return b}function flash(s){let f=document.getElementById('flash');f.textContent=s;f.hidden=false;setTimeout(()=>f.hidden=true,3500)}function table(a){return a?.length?`<table><thead><tr><th>Time</th><th>Type</th><th>Details</th></tr></thead><tbody>${a.map(x=>`<tr><td>${date(x.timestamp||x.minute||x.created_at)}</td><td>${badge(x.event_type)}</td><td><details><summary>View details</summary><div class="payload">${esc(JSON.stringify(x.payload||x,null,2))}</div></details></td></tr>`).join('')}</tbody></table>`:'<div class="empty">Awaiting runtime data</div>'}function decisions(a){return a?.length?a.map(x=>`<details><summary class="decision-row"><span>${date(x.timestamp||x.minute||x.created_at)}</span><span>${esc(x.cell)}</span><span>${badge(x.direction||'—',x.direction==='long'?'good':'bad')}</span><span>${esc(x.reason||x.detail||x.setup_type||'—')}</span><span>${badge(x.event_type==='ACCEPTEDDECISION'?'Accepted':'Rejected',x.event_type==='ACCEPTEDDECISION'?'good':'warn')}</span></summary><div class="payload">${esc(JSON.stringify(x,null,2))}</div></details>`).join(''):'<div class="empty">Awaiting runtime data</div>'}
-function render(d){let r=d.runtime||{},c=d.capital||{},a=d.decisions.decisions||[],top=`<div class="card"><div class="toolbar"><strong>Runtime controls</strong><div><button id="connect">Connect Zerodha</button><button data-cmd="restart" class="secondary">Restart</button><button data-cmd="stop" class="danger">Stop</button></div></div></div><div class="status-strip">${[['Zerodha',d.broker.authenticated?'Connected':'Not connected',d.broker.authenticated?'good':'warn'],['Worker',r.state||'Unknown',r.state==='RUNNING'?'good':'warn'],['Feed',r.feed_connected?'Healthy':'Not connected',r.feed_connected?'good':'bad'],['Last bar',date(r.last_bar_at),''],['Heartbeat',date(r.last_heartbeat_at),r.last_heartbeat_at?'good':'warn']].map(x=>`<div class="status-item"><div class="label">${x[0]}</div><div class="status-value"><span class="dot ${x[2]}"></span>${esc(x[1])}</div></div>`).join('')}</div>`,body;if(page==='dashboard')body=`<div class="card"><div class="section-head"><h2>Session overview</h2><a href="/capital">View all</a></div><div class="metric-grid">${[['Current equity',c.current_equity??c.capital],['P&L',c.total_pnl??c.realized_pnl],['Positions',d.positions.positions?.length||0],['Session bars',r.bars_seen]].map(x=>`<div class="metric"><div class="label">${x[0]}</div><div class="value ${(x[1]??0)<0?'negative':'positive'}">${x[0].includes('equity')||x[0]==='P&L'?money(x[1]):(x[1]??'Not reported')}</div></div>`).join('')}</div></div><div class="card"><div class="section-head"><h2>Recent decisions</h2><a href="/decisions">View all</a></div>${decisions(a.slice(0,10))}</div>`;else if(page==='decisions')body=`<div class="card"><h2>Decision review</h2><div class="session-grid">${[['Pre','Before 10:15 IST'],['Morning','10:15–11:14 IST'],['Mid','11:15–13:29 IST'],['Afternoon','13:30–14:14 IST'],['Post','From 14:15 IST']].map(x=>{let n=a.filter(y=>session(y.timestamp||y.minute||y.created_at)===x[0]).length;return`<div class="session"><strong>${x[0]}</strong><div class="label">${x[1]}</div><p>${n} decisions</p>${badge(n?'Active':'Quiet',n?'good':'warn')}</div>`}).join('')}</div></div><div class="card"><h2>Decision rows</h2>${decisions(a)}</div>`;else if(page==='capital')body=`<div class="card"><h2>Capital</h2><div class="metric-grid">${[['Initial equity',c.initial_capital],['Current equity',c.current_equity??c.capital],['Realized P&L',c.realized_pnl??c.total_pnl],['Open margin',c.open_margin],['Drawdown',c.drawdown]].map(x=>`<div class="metric"><div class="label">${x[0]}</div><div class="value ${(x[1]??0)<0?'negative':''}">${x[0]==='Drawdown'?(x[1]==null?'Not reported':x[1]+'%'):money(x[1])}</div></div>`).join('')}</div></div>`;else if(page==='positions')body=`<div class="card"><h2>Open positions</h2>${table(d.positions.positions)}</div>`;else if(page==='trades')body=`<div class="card"><h2>Trades</h2>${table(d.trades.trades)}</div>`;else body=`<div class="card"><h2>${page[0].toUpperCase()+page.slice(1)}</h2>${table(d.events.events)}</div>`;document.getElementById('app').innerHTML=top+body;wire()}function wire(){document.getElementById('connect')?.addEventListener('click',async()=>{try{location.assign((await get('/api/v1/broker/zerodha/login')).login_url)}catch(e){flash(e.message)}});document.querySelectorAll('[data-cmd]').forEach(b=>b.onclick=async()=>{try{await get('/api/v1/runtime/'+b.dataset.cmd,{method:'POST'});flash('Runtime command accepted');refresh()}catch(e){flash(e.message)}})}async function refresh(){try{let [health,runtime,capital,positions,trades,decisionsData,events,broker]=await Promise.all(['/api/v1/health','/api/v1/runtime','/api/v1/capital','/api/v1/positions','/api/v1/trades','/api/v1/decisions','/api/v1/events?limit=100','/api/v1/broker/zerodha/status'].map(get));document.getElementById('health').innerHTML='<span class="dot good"></span>Healthy';render({runtime,capital,positions,trades,decisions:decisionsData,events,broker})}catch(e){document.getElementById('health').innerHTML='<span class="dot bad"></span>API unavailable';flash(e.message)}}refresh();setInterval(refresh,5000);
-</script></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FTX Paper Trading · {{ page|title }}</title>
+  <style>
+    :root {
+      --navy: #172033;
+      --ink: #172033;
+      --muted: #6b7280;
+      --line: #e4e8ef;
+      --bg: #f5f7fb;
+      --green: #16845b;
+      --red: #c43d4b;
+      --yellow: #b27a16;
+      --blue: #3564b8;
+      --shadow: 0 8px 24px #17203312;
+      font: 14px Inter, system-ui, sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+    }
+
+    header {
+      background: var(--navy);
+      color: #fff;
+      padding: 22px max(22px, calc((100% - 1240px) / 2));
+      display: flex;
+      justify-content: space-between;
+    }
+
+    header h1 {
+      font-size: 20px;
+      margin: 0;
+      font-weight: 800;
+    }
+
+    header p {
+      margin: 4px 0;
+      color: #aeb8cb;
+      font-size: 12px;
+    }
+
+    main {
+      max-width: 1240px;
+      margin: auto;
+      padding: 26px 22px;
+    }
+
+    nav {
+      display: flex;
+      gap: 4px;
+      flex-wrap: wrap;
+      margin-bottom: 24px;
+    }
+
+    nav a {
+      color: #526078;
+      text-decoration: none;
+      padding: 9px 12px;
+      border-radius: 7px;
+      font-weight: 600;
+    }
+
+    nav a.active,
+    nav a:hover {
+      background: #e9eef8;
+      color: var(--blue);
+    }
+
+    .card,
+    .status-item,
+    .metric,
+    .session {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 18px;
+      box-shadow: var(--shadow);
+      margin-bottom: 18px;
+    }
+
+    .card h2 {
+      font-size: 15px;
+      margin: 0 0 15px;
+    }
+
+    .status-strip,
+    .metric-grid,
+    .session-grid {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 10px;
+    }
+
+    .status-item,
+    .metric,
+    .session {
+      padding: 14px;
+      margin: 0;
+      box-shadow: none;
+    }
+
+    .metric-grid {
+      grid-template-columns: repeat(4, 1fr);
+    }
+
+    .label {
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 700;
+    }
+
+    .status-value {
+      font-weight: 700;
+      margin-top: 7px;
+    }
+
+    .dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--muted);
+      margin-right: 7px;
+    }
+
+    .dot.good {
+      background: var(--green);
+    }
+
+    .dot.bad {
+      background: var(--red);
+    }
+
+    .dot.warn {
+      background: var(--yellow);
+    }
+
+    .value {
+      font-size: 22px;
+      font-weight: 800;
+      margin-top: 8px;
+    }
+
+    .positive {
+      color: var(--green);
+    }
+
+    .negative {
+      color: var(--red);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    th {
+      text-align: left;
+      color: var(--muted);
+      font-size: 10px;
+      text-transform: uppercase;
+      background: #f8f9fc;
+    }
+
+    th,
+    td {
+      padding: 12px 10px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }
+
+    .badge {
+      display: inline-block;
+      border-radius: 99px;
+      padding: 4px 9px;
+      font-size: 11px;
+      font-weight: 700;
+      background: #edf1f7;
+      color: #526078;
+    }
+
+    .badge.good {
+      background: #e5f6ee;
+      color: var(--green);
+    }
+
+    .badge.bad {
+      background: #fdebed;
+      color: var(--red);
+    }
+
+    .badge.warn {
+      background: #fff4d9;
+      color: var(--yellow);
+    }
+
+    button {
+      border: 0;
+      border-radius: 7px;
+      background: var(--blue);
+      color: #fff;
+      padding: 9px 13px;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      margin: 0 5px 5px 0;
+    }
+
+    button.secondary {
+      background: #e9eef8;
+      color: var(--blue);
+    }
+
+    button.danger {
+      background: var(--red);
+    }
+
+    .toolbar,
+    .section-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .section-head a {
+      color: var(--blue);
+      font-size: 12px;
+    }
+
+    .empty {
+      text-align: center;
+      color: var(--muted);
+      padding: 24px;
+    }
+
+    .payload {
+      background: #f7f9fc;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 12px;
+      margin-top: 10px;
+      color: #526078;
+      font-size: 12px;
+      white-space: pre-wrap;
+      overflow: auto;
+    }
+
+    summary {
+      cursor: pointer;
+      list-style: none;
+    }
+
+    .decision-row {
+      display: grid;
+      grid-template-columns: 130px 1fr 110px 1fr 100px;
+      gap: 12px;
+      align-items: center;
+      padding: 12px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .flash {
+      background: #e5f6ee;
+      color: var(--green);
+      padding: 11px 14px;
+      border-radius: 8px;
+      margin-bottom: 16px;
+    }
+
+    @media (max-width: 800px) {
+      .status-strip,
+      .metric-grid,
+      .session-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+
+      .decision-row {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+
+    @media (max-width: 480px) {
+      .status-strip,
+      .metric-grid,
+      .session-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>FTX Paper Trading</h1>
+      <p>Operator control center · live paper-runtime monitoring</p>
+    </div>
+    <span id="health">
+      <span class="dot warn"></span>Connecting…
+    </span>
+  </header>
+  <main>
+    <nav>
+      {% for item in [
+        ('dashboard', 'Dashboard'),
+        ('decisions', 'Decision review'),
+        ('positions', 'Positions'),
+        ('trades', 'Trades'),
+        ('capital', 'Capital'),
+        ('events', 'Events'),
+        ('logs', 'Logs')
+      ] %}
+        <a class="{% if page == item[0] %}active{% endif %}"
+           href="{% if item[0] == 'dashboard' %}/{% else %}/{{ item[0] }}{% endif %}">
+          {{ item[1] }}
+        </a>
+      {% endfor %}
+    </nav>
+    <div id="flash" class="flash" hidden></div>
+    <div id="app">
+      <div class="card empty">Loading {{ page|replace('-', ' ') }}…</div>
+    </div>
+  </main>
+  <script id="page-config" type="application/json">{{ {'api': api_base_url, 'page': page}|tojson }}</script>
+  <script>
+    const config = JSON.parse(document.getElementById('page-config').textContent);
+    const api = config.api;
+    const page = config.page;
+
+    const money = (n) =>
+      n == null
+        ? 'Not reported'
+        : `₹${Number(n).toLocaleString('en-IN', {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+          })}`;
+
+    const esc = (s) =>
+      String(s ?? '—').replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;',
+      }[c]));
+
+    const badge = (s, c = '') => `<span class="badge ${c}">${esc(s)}</span>`;
+
+    const date = (s) => {
+      if (!s) return 'Not reported';
+      const d = new Date(s);
+      if (isNaN(d)) return esc(s);
+      return new Intl.DateTimeFormat('en-IN', {
+        timeZone: 'Asia/Kolkata',
+        dateStyle: 'medium',
+        timeStyle: 'medium',
+      }).format(d) + ' IST';
+    };
+
+    const session = (s) => {
+      if (!s) return 'Post';
+      const d = new Date(s);
+      const parts = new Intl.DateTimeFormat('en-IN', {
+        timeZone: 'Asia/Kolkata',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      }).formatToParts(d);
+      const hour = +parts.find((x) => x.type === 'hour').value;
+      const minute = +parts.find((x) => x.type === 'minute').value;
+      const n = hour * 60 + minute;
+      if (n < 615) return 'Pre';
+      if (n < 675) return 'Morning';
+      if (n < 810) return 'Mid';
+      if (n < 855) return 'Afternoon';
+      return 'Post';
+    };
+
+    async function get(path, options = {}) {
+      const response = await fetch(api + path, {
+        ...options,
+        headers: {
+          Authorization: `Bearer ${sessionStorage.getItem('ftx_token') || ''}`,
+          ...(options.headers || {}),
+        },
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(body.error?.message || `Request failed (${response.status})`);
+      }
+      return body;
+    }
+
+    function flash(message) {
+      const el = document.getElementById('flash');
+      el.textContent = message;
+      el.hidden = false;
+      setTimeout(() => {
+        el.hidden = true;
+      }, 3500);
+    }
+
+    function table(rows) {
+      if (!rows?.length) {
+        return '<div class="empty">Awaiting runtime data</div>';
+      }
+
+      return `<table>
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Type</th>
+            <th>Details</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows
+            .map(
+              (x) => `<tr>
+                <td>${date(x.timestamp || x.minute || x.created_at)}</td>
+                <td>${badge(x.event_type)}</td>
+                <td>
+                  <details>
+                    <summary>View details</summary>
+                    <div class="payload">${esc(JSON.stringify(x.payload || x, null, 2))}</div>
+                  </details>
+                </td>
+              </tr>`
+            )
+            .join('')}
+        </tbody>
+      </table>`;
+    }
+
+    function decisions(rows) {
+      if (!rows?.length) {
+        return '<div class="empty">Awaiting runtime data</div>';
+      }
+
+      return rows
+        .map(
+          (x) => `<details>
+            <summary class="decision-row">
+              <span>${date(x.timestamp || x.minute || x.created_at)}</span>
+              <span>${esc(x.cell)}</span>
+              <span>${badge(x.direction || '—', x.direction === 'long' ? 'good' : 'bad')}</span>
+              <span>${esc(x.reason || x.detail || x.setup_type || '—')}</span>
+              <span>${badge(
+                x.event_type === 'ACCEPTEDDECISION' ? 'Accepted' : 'Rejected',
+                x.event_type === 'ACCEPTEDDECISION' ? 'good' : 'warn'
+              )}</span>
+            </summary>
+            <div class="payload">${esc(JSON.stringify(x, null, 2))}</div>
+          </details>`
+        )
+        .join('');
+    }
+
+    function render(data) {
+      const runtime = data.runtime || {};
+      const capital = data.capital || {};
+      const decisionRows = data.decisions.decisions || [];
+
+      const top = `<div class="card">
+        <div class="toolbar">
+          <strong>Runtime controls</strong>
+          <div>
+            <button id="connect">Connect Zerodha</button>
+            <button data-cmd="restart" class="secondary">Restart</button>
+            <button data-cmd="stop" class="danger">Stop</button>
+          </div>
+        </div>
+      </div>
+      <div class="status-strip">
+        ${[
+          ['Zerodha', data.broker.authenticated ? 'Connected' : 'Not connected', data.broker.authenticated ? 'good' : 'warn'],
+          ['Worker', runtime.state || 'Unknown', runtime.state === 'RUNNING' ? 'good' : 'warn'],
+          ['Feed', runtime.feed_connected ? 'Healthy' : 'Not connected', runtime.feed_connected ? 'good' : 'bad'],
+          ['Last bar', date(runtime.last_bar_at), ''],
+          ['Heartbeat', date(runtime.last_heartbeat_at), runtime.last_heartbeat_at ? 'good' : 'warn'],
+        ]
+          .map(
+            (x) => `<div class="status-item">
+              <div class="label">${x[0]}</div>
+              <div class="status-value">
+                <span class="dot ${x[2]}"></span>${esc(x[1])}
+              </div>
+            </div>`
+          )
+          .join('')}
+      </div>`;
+
+      let body = '';
+
+      if (page === 'dashboard') {
+        body = `<div class="card">
+          <div class="section-head">
+            <h2>Session overview</h2>
+            <a href="/capital">View all</a>
+          </div>
+          <div class="metric-grid">
+            ${[
+              ['Current equity', capital.current_equity ?? capital.capital],
+              ['P&L', capital.total_pnl ?? capital.realized_pnl],
+              ['Positions', data.positions.positions?.length || 0],
+              ['Session bars', runtime.bars_seen],
+            ]
+              .map(
+                (x) => `<div class="metric">
+                  <div class="label">${x[0]}</div>
+                  <div class="value ${(x[1] ?? 0) < 0 ? 'negative' : 'positive'}">
+                    ${x[0].includes('equity') || x[0] === 'P&L' ? money(x[1]) : x[1] ?? 'Not reported'}
+                  </div>
+                </div>`
+              )
+              .join('')}
+          </div>
+        </div>
+        <div class="card">
+          <div class="section-head">
+            <h2>Recent decisions</h2>
+            <a href="/decisions">View all</a>
+          </div>
+          ${decisions(decisionRows.slice(0, 10))}
+        </div>`;
+      } else if (page === 'decisions') {
+        body = `<div class="card">
+          <h2>Decision review</h2>
+          <div class="session-grid">
+            ${[
+              ['Pre', 'Before 10:15 IST'],
+              ['Morning', '10:15–11:14 IST'],
+              ['Mid', '11:15–13:29 IST'],
+              ['Afternoon', '13:30–14:14 IST'],
+              ['Post', 'From 14:15 IST'],
+            ]
+              .map((x) => {
+                const count = decisionRows.filter((y) => session(y.timestamp || y.minute || y.created_at) === x[0]).length;
+                return `<div class="session">
+                  <strong>${x[0]}</strong>
+                  <div class="label">${x[1]}</div>
+                  <p>${count} decisions</p>
+                  ${badge(count ? 'Active' : 'Quiet', count ? 'good' : 'warn')}
+                </div>`;
+              })
+              .join('')}
+          </div>
+        </div>
+        <div class="card">
+          <h2>Decision rows</h2>
+          ${decisions(decisionRows)}
+        </div>`;
+      } else if (page === 'capital') {
+        body = `<div class="card">
+          <h2>Capital</h2>
+          <div class="metric-grid">
+            ${[
+              ['Initial equity', capital.initial_capital],
+              ['Current equity', capital.current_equity ?? capital.capital],
+              ['Realized P&L', capital.realized_pnl ?? capital.total_pnl],
+              ['Open margin', capital.open_margin],
+              ['Drawdown', capital.drawdown],
+            ]
+              .map((x) => `<div class="metric">
+                <div class="label">${x[0]}</div>
+                <div class="value ${(x[1] ?? 0) < 0 ? 'negative' : ''}">
+                  ${x[0] === 'Drawdown' ? x[1] == null ? 'Not reported' : x[1] + '%' : money(x[1])}
+                </div>
+              </div>`)
+              .join('')}
+          </div>
+        </div>`;
+      } else if (page === 'positions') {
+        body = `<div class="card">
+          <h2>Open positions</h2>
+          ${table(data.positions.positions)}
+        </div>`;
+      } else if (page === 'trades') {
+        body = `<div class="card">
+          <h2>Trades</h2>
+          ${table(data.trades.trades)}
+        </div>`;
+      } else {
+        body = `<div class="card">
+          <h2>${page[0].toUpperCase() + page.slice(1)}</h2>
+          ${table(data.events.events)}
+        </div>`;
+      }
+
+      document.getElementById('app').innerHTML = top + body;
+      wire();
+    }
+
+    function wire() {
+      document.getElementById('connect')?.addEventListener('click', async () => {
+        try {
+          const result = await get('/api/v1/broker/zerodha/login');
+          location.assign(result.login_url);
+        } catch (e) {
+          flash(e.message);
+        }
+      });
+
+      document.querySelectorAll('[data-cmd]').forEach((button) => {
+        button.onclick = async () => {
+          try {
+            await get('/api/v1/runtime/' + button.dataset.cmd, { method: 'POST' });
+            flash('Runtime command accepted');
+            refresh();
+          } catch (e) {
+            flash(e.message);
+          }
+        };
+      });
+    }
+
+    async function refresh() {
+      try {
+        const [health, runtime, capital, positions, trades, decisionsData, events, broker] =
+          await Promise.all(
+            [
+              '/api/v1/health',
+              '/api/v1/runtime',
+              '/api/v1/capital',
+              '/api/v1/positions',
+              '/api/v1/trades',
+              '/api/v1/decisions',
+              '/api/v1/events?limit=100',
+              '/api/v1/broker/zerodha/status',
+            ].map(get)
+          );
+
+        document.getElementById('health').innerHTML = '<span class="dot good"></span>Healthy';
+        render({
+          runtime,
+          capital,
+          positions,
+          trades,
+          decisions: decisionsData,
+          events,
+          broker,
+        });
+      } catch (e) {
+        document.getElementById('health').innerHTML = '<span class="dot bad"></span>API unavailable';
+        flash(e.message);
+      }
+    }
+
+    refresh();
+    setInterval(refresh, 5000);
+  </script>
+</body>
+</html>
