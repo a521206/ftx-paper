@@ -17,8 +17,13 @@ def openapi_document() -> dict[str, Any]:
                 "enum": ["CANDIDATEDECISION", "REJECTEDDECISION", "ACCEPTEDDECISION"],
             },
             "category": {"type": "string", "enum": ["decision"]},
-            "payload": {"type": "object", "additionalProperties": True},
-            "created_at": {"type": "string", "format": "date-time"},
+            "payload": {
+                "type": "object",
+                "required": ["decision_at"],
+                "properties": {"decision_at": {"type": "string", "format": "date-time"}},
+                "additionalProperties": True,
+            },
+            "created_at": {"type": "string", "format": "date-time", "description": "Persistence/audit timestamp"},
         },
     }
     return {

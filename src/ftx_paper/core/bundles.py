@@ -33,14 +33,18 @@ class CompletedBarAggregator:
     the minute; a private monotonic receipt clock controls the grace period.
     """
 
-    def __init__(self, role_by_instrument: Mapping[tuple[str, str], str], *, required_roles: Iterable[str] = ("futures", "vix"), deadline_seconds: float = 10.0) -> None:
+    def __init__(self, role_by_instrument: Mapping[tuple[str, str], str], *, required_roles: Iterable[str] = ("futures", "vix"), deadline_seconds: float = 10.0, snapshot_delay_seconds: float = 0.0) -> None:
         self._roles = dict(role_by_instrument)
         self.required_roles = tuple(required_roles)
         self.deadline_seconds = deadline_seconds
+        if snapshot_delay_seconds < 0:
+            raise ValueError("snapshot delay must be non-negative")
+        self.snapshot_delay_seconds = snapshot_delay_seconds
         if not self.required_roles or len(set(self.required_roles)) != len(self.required_roles):
             raise ValueError("required roles must be non-empty and unique")
         if not set(self.required_roles).issubset(self._roles.values()):
             raise ValueError("instrument roles omit a required input")
+        self._supporting_roles = frozenset(self._roles.values()) - frozenset(self.required_roles)
         self._pending: dict[tuple[str, str], dict[str, MarketBar]] = defaultdict(dict)
         self._emitted: set[tuple[str, str]] = set()
         self._first_seen_monotonic: dict[tuple[str, str], float] = {}
@@ -49,16 +53,26 @@ class CompletedBarAggregator:
         role = self._roles.get((bar.instrument.exchange, bar.instrument.symbol))
         if role is None:
             return None
-        if role not in self.required_roles:
+        if role not in self.required_roles and role not in self._supporting_roles:
             return None
         key = market_minute_key(bar.timestamp)
         if key in self._emitted:
             return None
         self._pending[key][role] = bar
         self._first_seen_monotonic.setdefault(key, time.monotonic())
-        if all(role in self._pending[key] for role in self.required_roles):
+        if (all(role in self._pending[key] for role in self.required_roles)
+                and time.monotonic() - self._first_seen_monotonic[key] >= self.snapshot_delay_seconds):
             return self._emit(key)
         return None
+
+    def required_ready(self, key: tuple[str, str]) -> bool:
+        """Return whether the required snapshot inputs have arrived."""
+        bars = self._pending.get(key)
+        return bars is not None and all(role in bars for role in self.required_roles)
+
+    def snapshot(self, key: tuple[str, str]) -> DecisionBundle | None:
+        """Freeze one minute, including optional bars received so far."""
+        return self._emit(key) if key in self._pending else None
 
     def flush(self, *, incomplete: bool = True) -> tuple[DecisionBundle, ...]:
         result = []
@@ -108,7 +122,9 @@ class CompletedBarAggregator:
         trading_date, minute = key
         bundle = DecisionBundle(
             bundle_id=f"{trading_date}:{minute}", trading_date=trading_date, minute=minute,
-            bars=dict(bars), required_roles=self.required_roles, missing_roles=missing,
+            bars={role: bar for role, bar in bars.items() if role in self.required_roles},
+            required_roles=self.required_roles, missing_roles=missing,
+            supporting_inputs={"bars": {role: bar for role, bar in bars.items() if role in self._supporting_roles}},
         )
         self._emitted.add(key)
         return bundle

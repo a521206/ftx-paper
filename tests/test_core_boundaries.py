@@ -171,3 +171,80 @@ def test_independent_live_engine_has_one_evaluation_per_bundle() -> None:
             assert [item.event_type for item in events] == ["WARMUP"]
         else:
             assert all(item.event_type != "CANDIDATE" for item in events)
+
+
+def test_live_decision_engine_carries_forward_previous_pcr() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    vix = Instrument("INDIA VIX", "NSE", "VIX")
+    call = Instrument("NIFTYCE", "NFO", "CE")
+    put = Instrument("NIFTYPE", "NFO", "PE")
+    engine = IndependentLiveDecisionEngine(version="test", config_hash="hash")
+
+    def bundle(minute: str, options: dict[str, MarketBar]) -> DecisionBundle:
+        timestamp = datetime.fromisoformat(f"2026-01-01T{minute}:00+05:30")
+        return DecisionBundle(
+            f"b{minute}", "2026-01-01", minute,
+            {
+                "futures": MarketBar(instrument, timestamp, 100, 101, 99, 100),
+                "vix": MarketBar(vix, timestamp, 15, 16, 14, 15),
+            }, ("futures", "vix"),
+            supporting_inputs={"bars": options},
+        )
+
+    engine.evaluate(bundle("10:20", {
+        "call": MarketBar(call, datetime(2026, 1, 1, 10, 20, tzinfo=timezone.utc), 1, 1, 1, 1, 100),
+        "put": MarketBar(put, datetime(2026, 1, 1, 10, 20, tzinfo=timezone.utc), 1, 1, 1, 1, 200),
+    }))
+    engine.evaluate(bundle("10:21", {}))
+    third = engine.evaluate(bundle("10:22", {}))
+
+    assert third[0].payload["feature_values"]["pcr"] == 2.0
+
+
+def test_live_decision_engine_resets_cooldown_at_afternoon_session() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    vix = Instrument("INDIA VIX", "NSE", "VIX")
+    engine = IndependentLiveDecisionEngine(version="test", config_hash="hash")
+
+    def bundle(minute: str) -> DecisionBundle:
+        timestamp = datetime.fromisoformat(minute)
+        return DecisionBundle(
+            f"b{minute}", "2026-01-01", minute,
+            {
+                "futures": MarketBar(instrument, timestamp, 100, 101, 99, 100),
+                "vix": MarketBar(vix, timestamp, 15, 16, 14, 15),
+            }, ("futures", "vix"),
+        )
+
+    engine.evaluate(bundle("2026-01-01T04:50:00+00:00"))
+    engine.evaluate(bundle("2026-01-01T04:51:00+00:00"))
+    morning = engine.evaluate(bundle("2026-01-01T04:52:00+00:00"))
+    afternoon = engine.evaluate(bundle("2026-01-01T08:00:00+00:00"))
+
+    assert any(item.event_type == "ACCEPTEDDECISION" for item in morning)
+    assert any(item.event_type == "ACCEPTEDDECISION" for item in afternoon)
+
+
+def test_paper_engine_preserves_live_decision_domain_values_at_boundary() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    vix = Instrument("INDIA VIX", "NSE", "VIX")
+    decision_at = datetime(2026, 1, 1, 10, 20, tzinfo=timezone.utc)
+
+    class Strategy:
+        def on_bundle(self, bundle):
+            from ftx_paper.core import LiveDecision
+
+            return (LiveDecision("WARMUP", {
+                "decision_at": decision_at,
+                "nested": {"observed_at": decision_at},
+            }),)
+
+    bundle = DecisionBundle("b0", "2026-01-01", "10:20", {
+        "futures": MarketBar(instrument, decision_at, 100, 101, 99, 100),
+        "vix": MarketBar(vix, decision_at, 15, 16, 14, 15),
+    }, ("futures", "vix"))
+
+    event = PaperEngine(Strategy()).on_bundle(bundle).events[0]
+
+    assert event["decision_at"] == decision_at
+    assert event["nested"]["observed_at"] == decision_at

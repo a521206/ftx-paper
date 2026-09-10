@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from flask import Flask, jsonify, request
 from typing import Any
 
 from ftx_paper.runtime import RuntimeController, RuntimeSession, RuntimeStore
-from ftx_paper.runtime.events import EXECUTION_EVENT_TYPES, RISK_EVENT_TYPES, is_decision_event
+from ftx_paper.runtime.events import (
+    EXECUTION_EVENT_TYPES, RISK_EVENT_TYPES, DecisionTimestampError, is_decision_event,
+)
+from ftx_paper.runtime.events import serialize_datetime
 from .schemas import error_payload, openapi_document
 
 
@@ -14,6 +19,19 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
     store.recover_interrupted()
     session = session or RuntimeSession(store, zerodha_auth, [])
     controller = controller or RuntimeController(store, session)
+
+    def json_safe(value: Any) -> Any:
+        if isinstance(value, datetime):
+            return serialize_datetime(value)
+        if isinstance(value, dict):
+            return {key: json_safe(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [json_safe(item) for item in value]
+        return value
+
+    @app.errorhandler(DecisionTimestampError)
+    def invalid_decision_timestamp(error: DecisionTimestampError):
+        return jsonify({"error": {"code": "invalid_decision_at", "message": str(error)}}), 422
 
     @app.after_request
     def add_cors_headers(response):
@@ -111,11 +129,17 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             limit = min(int(request.args.get("limit", "100")), 1000)
         except ValueError:
             return jsonify({"error": {"code": "invalid_limit", "message": "limit must be an integer"}}), 400
-        return jsonify({"events": store.read_events(limit)})
+        return jsonify(json_safe({"events": store.read_events(limit)}))
 
     @app.get("/api/v1/decisions")
     def decisions():
         events = store.read_events(1000)
+        selected_date = request.args.get("date")
+        if selected_date:
+            try:
+                datetime.strptime(selected_date, "%Y-%m-%d").date()
+            except ValueError:
+                return jsonify({"error": {"code": "invalid_date", "message": "date must be YYYY-MM-DD"}}), 400
         execution_types = EXECUTION_EVENT_TYPES
         risk_types = RISK_EVENT_TYPES
         executions_by_decision: dict[str, list[dict[str, Any]]] = {}
@@ -160,13 +184,15 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
         decision_events = [
             event for event in events
             if is_decision_event(event.get("event_type", ""))
-            and isinstance(event.get("payload", {}).get("minute"), str)
+            and isinstance(event.get("payload", {}).get("decision_at"), datetime)
+            and (not selected_date or event["payload"]["decision_at"].date().isoformat() == selected_date)
         ]
-        return jsonify({"decisions": [enrich(event) for event in decision_events]})
+        decision_events.sort(key=lambda event: event["payload"]["decision_at"], reverse=True)
+        return jsonify(json_safe({"decisions": [enrich(event) for event in decision_events]}))
 
     @app.get("/api/v1/logs")
     def logs():
-        return jsonify({"logs": store.read_events(1000)})
+        return jsonify(json_safe({"logs": store.read_events(1000)}))
 
     @app.get("/api/v1/positions")
     def positions():
@@ -196,6 +222,6 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
 
     @app.get("/api/v1/audit")
     def audit():
-        return jsonify({"events": store.read_events(1000)})
+        return jsonify(json_safe({"events": store.read_events(1000)}))
 
     return app

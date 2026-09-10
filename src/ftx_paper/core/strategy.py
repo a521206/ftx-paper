@@ -6,6 +6,9 @@ from typing import Protocol
 
 from ftx_paper.contracts import MarketBar, OrderIntent
 
+from .bundles import DecisionBundle
+from .live_decision import LiveDecision
+
 
 @dataclass(frozen=True, slots=True)
 class StrategyMetadata:
@@ -27,6 +30,8 @@ class Strategy(Protocol):
     def metadata(self) -> StrategyMetadata: ...
 
     def on_bar(self, bar: MarketBar) -> tuple[OrderIntent, ...]: ...
+
+    def on_bundle(self, bundle: DecisionBundle) -> tuple[LiveDecision, ...]: ...
 
     def snapshot(self) -> Mapping[str, object]: ...
 

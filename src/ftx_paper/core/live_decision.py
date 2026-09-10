@@ -3,16 +3,34 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
+from zoneinfo import ZoneInfo
 from .bundles import DecisionBundle
 from ftx_paper.contracts import OrderIntent, OrderSide
 from .risk import RiskSizer
 
 
+def _option_pcr(bundle: DecisionBundle) -> float | None:
+    """Read volume PCR from option bars carried as supporting bundle inputs."""
+    supporting = bundle.supporting_inputs or {}
+    bars = supporting.get("bars", {})
+    if not isinstance(bars, dict):
+        return None
+    call_volume = sum(float(bar.volume or 0) for bar in bars.values()
+                      if str(getattr(bar.instrument, "instrument_type", "")).upper() == "CE")
+    put_volume = sum(float(bar.volume or 0) for bar in bars.values()
+                     if str(getattr(bar.instrument, "instrument_type", "")).upper() == "PE")
+    return put_volume / call_volume if call_volume > 0 else None
+
+
 def _decision_datetime(bundle: DecisionBundle) -> datetime:
-    """Parse both the current time-only and legacy full-ISO minute formats."""
+    """Return the timezone-aware instant at which the bundle was evaluated."""
     if "T" in bundle.minute:
-        return datetime.fromisoformat(bundle.minute)
-    return datetime.fromisoformat(f"{bundle.trading_date}T{bundle.minute}")
+        parsed = datetime.fromisoformat(bundle.minute)
+    else:
+        parsed = datetime.fromisoformat(f"{bundle.trading_date}T{bundle.minute}")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+    return parsed
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,21 +47,45 @@ class IndependentLiveDecisionEngine:
     direction, and cooldown logic.  It has no historical-pipeline imports.
     """
 
-    def __init__(self, *, version: str, config_hash: str, cooldown_minutes: int = 30, capital: float = 100_000.0, prior_day_high: float | None = None, prior_day_low: float | None = None) -> None:
+    def __init__(self, *, version: str, config_hash: str, cooldown_minutes: int = 30, capital: float = 100_000.0, prior_day_high: float | None = None, prior_day_low: float | None = None, morning_entry_minutes: tuple[int, int] = (60, 120), afternoon_entry_minutes: tuple[int, int] = (255, 300)) -> None:
         self.version, self.config_hash = version, config_hash
         self.cooldown_minutes = cooldown_minutes
         self.capital = capital
         self.prior_day_high, self.prior_day_low = prior_day_high, prior_day_low
+        self.morning_entry_minutes = morning_entry_minutes
+        self.afternoon_entry_minutes = afternoon_entry_minutes
         self._futures: list = []
+        self._previous_pcr: float | None = None
         self._last_decision: datetime | None = None
         self._trading_date: str | None = None
+        self._decision_session: str | None = None
+
+    def _session_for_time(self, decision_at: datetime) -> str | None:
+        ist_time = decision_at.astimezone(ZoneInfo("Asia/Kolkata"))
+        minutes_from_open = ist_time.hour * 60 + ist_time.minute - (9 * 60 + 15)
+        if self.morning_entry_minutes[0] <= minutes_from_open < self.morning_entry_minutes[1]:
+            return "morning"
+        if self.afternoon_entry_minutes[0] <= minutes_from_open < self.afternoon_entry_minutes[1]:
+            return "afternoon"
+        return None
 
     def evaluate(self, bundle: DecisionBundle) -> tuple[LiveDecision, ...]:
         if self._trading_date != bundle.trading_date:
             self._futures.clear()
+            self._previous_pcr = None
             self._last_decision = None
+            self._decision_session = None
             self._trading_date = bundle.trading_date
-        base = {"minute": bundle.minute, "bundle_id": bundle.bundle_id,
+        decision_at = _decision_datetime(bundle)
+        decision_session = self._session_for_time(decision_at)
+        if decision_session is not None and decision_session != self._decision_session:
+            self._last_decision = None
+            self._decision_session = decision_session
+        current_pcr = _option_pcr(bundle)
+        if current_pcr is not None:
+            self._previous_pcr = current_pcr
+        pcr = current_pcr if current_pcr is not None else self._previous_pcr
+        base = {"decision_at": decision_at.isoformat(), "bundle_id": bundle.bundle_id,
                 "strategy_version": self.version, "config_hash": self.config_hash,
                 "required_input_availability": {r: r not in bundle.missing_roles for r in bundle.required_roles}}
         if not bundle.complete:
@@ -62,11 +104,11 @@ class IndependentLiveDecisionEngine:
         opening = prior[:15]
         or_high, or_low = max(b.high for b in opening), min(b.low for b in opening)
         current = futures.close
-        decision_dt = _decision_datetime(bundle)
-        t = decision_dt.time()
+        decision_dt = decision_at
+        stop_basis = max(futures.high - futures.low, 5.0)
         feature_values = {"vwap": vwap, "session_high": session_high, "session_low": session_low,
                           "opening_range_high": or_high, "opening_range_low": or_low,
-                          "vix": vix_bar.close}
+                          "vix": vix_bar.close, "pcr": pcr}
         location = "VWAP_ZONE" if abs(current - vwap) <= 15 else "SESSION_HIGH" if abs(current - session_high) <= 15 else "SESSION_LOW" if abs(current - session_low) <= 15 else None
         cell = location or "NONE"
         if location is None:
@@ -76,11 +118,12 @@ class IndependentLiveDecisionEngine:
         candidate = {**base, "decision_id": candidate_id, "cell": cell, "direction": direction,
                      "setup_type": "reversal_at_" + cell.lower() if location else "Skip",
                      "feature_values": feature_values, "entry_price": current, "outcome": "candidate"}
+        candidate.update(vix_at_event=vix_bar.close, pcr_at_event=pcr, stop_basis=stop_basis)
         events = []
         reason = None
         if location is None:
             reason = "no_qualifying_setup"
-        elif not (datetime.strptime("10:15", "%H:%M").time() <= t <= datetime.strptime("14:15", "%H:%M").time()):
+        elif decision_session is None:
             reason = "outside_session_window"
         elif self._last_decision and (decision_dt - self._last_decision).total_seconds() < self.cooldown_minutes * 60:
             reason = "cooldown"

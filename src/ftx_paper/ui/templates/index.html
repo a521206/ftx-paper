@@ -589,9 +589,9 @@
     };
 
     const session = (s) => {
-      if (!s) return 'Post';
+      if (!s) throw new Error('Decision row is missing decision_at');
       const d = new Date(s);
-      if (isNaN(d)) return 'Post';
+      if (isNaN(d)) throw new Error(`Invalid decision_at: ${s}`);
       const parts = new Intl.DateTimeFormat('en-IN', {
         timeZone: 'Asia/Kolkata',
         hour: '2-digit',
@@ -624,7 +624,7 @@
     function decisionRecord(raw) {
       const payload = raw?.payload && typeof raw.payload === 'object' ? raw.payload : {};
       const eventType = String(raw?.event_type || payload.event_type || '').toUpperCase();
-      const decisionTime = payload.minute;
+      const decisionTime = payload.decision_at;
       const sessionTime = decisionTime;
       const source = String(payload.decision_source || '').toLowerCase();
       const executionStatus = String(payload.execution_status || '').toLowerCase();
@@ -731,6 +731,14 @@
       return { decision: 'Decision', risk: 'Risk', execution: 'Execution', runtime: 'Runtime' }[category] || 'Runtime';
     }
 
+    function activityTimestamp(raw) {
+      if (activityCategory(raw) === 'Decision') {
+        if (!raw?.payload?.decision_at) throw new Error('Decision row is missing decision_at');
+        return raw.payload.decision_at;
+      }
+      return raw?.created_at;
+    }
+
     function activityDateKey(value) {
       if (!value) return '';
       const parsed = new Date(value);
@@ -750,8 +758,9 @@
         const type = String(raw.event_type || 'UNKNOWN').toUpperCase();
         const category = activityCategory(raw);
         const created = raw.created_at;
-        const dateKey = activityDateKey(created);
-        return `<details class="activity-item" data-activity-type="${esc(type.toLowerCase())}" data-activity-category="${esc(category.toLowerCase())}" data-activity-session="${esc(session(created).toLowerCase())}" data-activity-date="${esc(dateKey)}">
+        const operatorTime = activityTimestamp(raw);
+        const dateKey = activityDateKey(operatorTime);
+        return `<details class="activity-item" data-activity-type="${esc(type.toLowerCase())}" data-activity-category="${esc(category.toLowerCase())}" data-activity-session="${esc(session(operatorTime).toLowerCase())}" data-activity-date="${esc(dateKey)}">
           <summary class="activity-row">
             <span><strong>${esc(type)}</strong><small>${date(created)}</small></span>
             <span>${badge(category, category === 'Decision' ? 'good' : category === 'Execution' ? 'warn' : '')}</span>
@@ -766,7 +775,7 @@
 
     function activityPage(rows) {
       const types = [...new Set(rows.map((x) => String(x.event_type || 'UNKNOWN').toLowerCase()))].sort();
-      const dates = [...new Set(rows.map((x) => activityDateKey(x.created_at)).filter(Boolean))].sort().reverse();
+      const dates = [...new Set(rows.map((x) => activityDateKey(activityTimestamp(x))).filter(Boolean))].sort().reverse();
       const counts = rows.reduce((result, row) => {
         const category = activityCategory(row);
         result[category] = (result[category] || 0) + 1;
@@ -826,7 +835,7 @@
             const payload = raw.payload && typeof raw.payload === 'object' ? raw.payload : {};
             const x = { ...raw, ...payload, event_type: raw.event_type || payload.event_type };
             const eventType = String(x.event_type || '').toUpperCase();
-            const timestamp = payload.minute;
+            const decisionAt = payload.decision_at;
             // Get decision-relevant fields exclusively from payload when available
             const cell = payload.cell || payload.zone || payload.location || payload.symbol;
             const direction = payload.direction || payload.side;
@@ -838,13 +847,13 @@
             const outcomeTone = ['Accepted', 'Filled'].includes(outcomeLabel) ? 'good' : ['Policy Rejection', 'Sizing Rejection', 'Incomplete Bundle', 'Replayed', 'Unfilled', 'Execution Error'].includes(outcomeLabel) ? 'warn' : 'subtle';
             return `<details>
             <summary class="decision-row">
-              <span>${date(timestamp)}</span>
+              <span>${date(decisionAt)}</span>
               <span>${esc(cell || '—')}</span>
               <span>${badge(direction || '—', direction === 'long' ? 'good' : direction === 'short' ? 'bad' : 'subtle')}</span>
               <span>${esc(displayDetail)}</span>
               <span>${badge(outcomeLabel, outcomeTone)}</span>
             </summary>
-            <div class="payload"><strong>Entry price:</strong> ${esc(x.entry_price ?? '—')} · <strong>Score:</strong> ${esc(x.score ?? x.setup_score ?? '—')} · <strong>Setup type:</strong> ${esc(x.setup_type || '—')}<br><strong>Stop basis:</strong> ${esc(x.stop_basis ?? x.stop_bp ?? '—')} · <strong>VIX:</strong> ${esc(x.vix_at_event ?? x.vix ?? '—')} · <strong>PCR:</strong> ${esc(x.pcr_at_event ?? x.pcr ?? '—')}<br><strong>Sequence:</strong> ${esc(x.sequence ?? '—')} · <strong>Decision source:</strong> ${esc(x.decision_source || '—')} · <strong>Decision ID:</strong> ${esc(x.decision_id || '—')}</div>
+            <div class="payload"><strong>Entry price:</strong> ${esc(x.entry_price ?? '—')} · <strong>Score:</strong> ${esc(x.score ?? x.setup_score ?? 'Not calculated')} · <strong>Setup type:</strong> ${esc(x.setup_type || '—')}<br><strong>Stop basis:</strong> ${esc(x.stop_basis ?? x.stop_bp ?? 'Not calculated')} · <strong>VIX:</strong> ${esc(x.vix_at_event ?? x.vix ?? x.feature_values?.vix ?? 'Not reported')} · <strong>PCR:</strong> ${esc(x.pcr_at_event ?? x.pcr ?? x.feature_values?.pcr ?? 'Not reported')}<br><strong>Sequence:</strong> ${esc(x.sequence ?? 'Not calculated')} · <strong>Decision source:</strong> ${esc(x.decision_source || '—')} · <strong>Decision ID:</strong> ${esc(x.decision_id || '—')}</div>
           </details>`; }
         )
         .join('');

@@ -8,24 +8,27 @@ from zoneinfo import ZoneInfo
 
 from ftx_paper.broker import Broker, PaperBroker
 from ftx_paper.contracts import (
-    Instrument, MarketBar, OrderSide, normalize_exchange_timestamp,
+    Instrument, MarketBar, OrderSide, market_minute_key, normalize_exchange_timestamp,
 )
 from ftx_paper.core import CompletedBarAggregator, PaperEngine
 from ftx_paper.execution import PositionLedger
-from .events import is_decision_event
+from .events import is_decision_event, serialize_datetime
 from .store import RuntimeStore
 
 if TYPE_CHECKING:
     from ftx_paper.broker.zerodha import ZerodhaInstrument
 
 
-def _bundle_timestamp(session_date: str, minute: str) -> str:
-    """Return the canonical event time for a completed trading bundle."""
+SNAPSHOT_DELAY_SECONDS = 1.0
+
+
+def _bundle_timestamp(session_date: str, minute: str) -> datetime:
+    """Return the timezone-aware instant at which a bundle was evaluated."""
     value = minute if "T" in minute else f"{session_date}T{minute}"
     parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
-    return parsed.isoformat()
+    return parsed
 
 
 class RuntimeSession:
@@ -47,6 +50,7 @@ class RuntimeSession:
         self._stopping = False
         self._started = threading.Event()
         self._aggregator: CompletedBarAggregator | None = None
+        self._snapshot_timers: dict[tuple[str, str], threading.Timer] = {}
         self._replaying = False
         self._replay_date: str | None = None
 
@@ -87,18 +91,28 @@ class RuntimeSession:
             }
             role_map = {
                 (str(item["exchange"]), str(item["symbol"])): inferred_roles.get(
-                    (str(item["exchange"]), str(item["symbol"])), str(item.get("role") or "").strip().lower()
+                    (str(item["exchange"]), str(item["symbol"])),
+                    ("option:" + str(item["symbol"]) if str(item.get("instrument_type", "")).upper() in {"CE", "PE"}
+                     else str(item.get("role") or "").strip().lower())
                 )
                 for item in resolved
             }
-            self._aggregator = CompletedBarAggregator(role_map, required_roles=("futures", "vix"))
+            self._aggregator = CompletedBarAggregator(
+                role_map, required_roles=("futures", "vix"), deadline_seconds=10.0,
+                snapshot_delay_seconds=SNAPSHOT_DELAY_SECONDS,
+            )
             self.broker = (self.broker_factory or (lambda _client: PaperBroker()))(client)
             self._replay_date = datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
             self._replaying = True
+            reset = getattr(self.engine, "reset", None)
+            if callable(reset):
+                reset()
             self.store.patch_status({"phase": "REPLAYING", "execution_enabled": False,
                                      "replay_date": self._replay_date, "replay_bars_seen": 0})
             self.store.clear_replay_events(self._replay_date)
-            self._replay_today(load_startup_backfill(client, [roles.futures, roles.vix]), self._replay_date)
+            # Replay every configured instrument so supporting inputs (notably
+            # option volumes used for PCR) are present in decision bundles.
+            self._replay_today(load_startup_backfill(client, resolved), self._replay_date)
             self._replaying = False
             normalize = self.normalize_payload or self._make_normalizer(resolved)
             socket = create_kite_socket(self.auth.api_key, self.auth.access_token())
@@ -139,7 +153,11 @@ class RuntimeSession:
                 payload.get("exchange_timestamp") or datetime.now(ZoneInfo("Asia/Kolkata"))
             )
             price = float(payload["last_price"])
-            instrument = Instrument(str(item["symbol"]), str(item["exchange"]), str(item.get("instrument_type", "INDEX")))
+            instrument = Instrument(
+                str(item["symbol"]), str(item["exchange"]), str(item.get("instrument_type", "INDEX")),
+                expiry=str(item["expiry"]) if item.get("expiry") is not None else None,
+                strike=float(item["strike"]) if item.get("strike") is not None else None,
+            )
             return MarketBar(instrument, timestamp.replace(second=0, microsecond=0), price, price, price, price, payload.get("volume_traded"), payload.get("oi"))
 
         return normalize
@@ -161,13 +179,13 @@ class RuntimeSession:
             self._process_bundle(bundle, source="replay")
 
     def _persist_engine_event(self, event: dict[str, object], *, source: str, bundle_id: str,
-                              session_date: str, minute: str, timestamp: str) -> None:
+                              session_date: str, decision_at: datetime, timestamp: str) -> None:
         event_type = str(event.get("event_type", "ENGINE_EVENT"))
         payload = {**event, "decision_source": source, "session_date": session_date,
                    "execution_allowed": source == "live"}
         payload.pop("event_type", None)
         if is_decision_event(event_type):
-            payload["minute"] = minute
+            payload["decision_at"] = serialize_datetime(decision_at)
         metadata = self.engine.strategy_metadata
         if metadata:
             payload.update(strategy_version=metadata.version, config_hash=metadata.config_hash)
@@ -177,10 +195,11 @@ class RuntimeSession:
 
     def _process_bundle(self, bundle, *, source: str) -> None:
         result = self.engine.on_bundle(bundle)
-        timestamp = _bundle_timestamp(bundle.trading_date, bundle.minute)
+        decision_at = _bundle_timestamp(bundle.trading_date, bundle.minute)
+        timestamp = serialize_datetime(decision_at)
         for event in result.events:
             self._persist_engine_event(event, source=source, bundle_id=bundle.bundle_id,
-                                        session_date=bundle.trading_date, minute=timestamp, timestamp=timestamp)
+                                        session_date=bundle.trading_date, decision_at=decision_at, timestamp=timestamp)
         outcome_types = [str(event.get("event_type", "ENGINE_EVENT")) for event in result.events]
         self.store.append_event("BUNDLE_COMPLETE", {
             "bundle_id": bundle.bundle_id, "minute": bundle.minute,
@@ -202,6 +221,33 @@ class RuntimeSession:
                 }, f"order_suppressed:{bundle.trading_date}:{order.client_order_id}", timestamp=timestamp)
             else:
                 self._execute_paper_order(order, session_date=bundle.trading_date, timestamp=timestamp)
+
+    def _schedule_bundle_snapshot(self, key: tuple[str, str]) -> None:
+        if key in self._snapshot_timers or self._aggregator is None:
+            return
+        delay = self._aggregator.snapshot_delay_seconds
+        if delay <= 0:
+            self._snapshot_bundle(key)
+            return
+        timer = threading.Timer(delay, self._snapshot_bundle, args=(key,))
+        timer.daemon = True
+        self._snapshot_timers[key] = timer
+        timer.start()
+
+    def _snapshot_bundle(self, key: tuple[str, str]) -> None:
+        with self._lock:
+            self._snapshot_timers.pop(key, None)
+            if self._stopping or self._aggregator is None:
+                return
+            bundle = self._aggregator.snapshot(key)
+            if bundle is None:
+                return
+            if bundle.complete:
+                self.store.patch_status({"last_completed_bundle_minute": bundle.minute,
+                                         "last_strategy_evaluation_minute": bundle.minute})
+                self._process_bundle(bundle, source="live")
+            else:
+                self._record_incomplete(bundle)
 
     def _execute_paper_order(self, order, *, session_date: str | None = None,
                              timestamp: str | None = None) -> None:
@@ -295,7 +341,7 @@ class RuntimeSession:
                 for event in result.events:
                     self._persist_engine_event(event, source="live", bundle_id=bar.timestamp.isoformat(),
                                                 session_date=bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat(),
-                                                minute=bar.timestamp.isoformat(), timestamp=bar.timestamp.isoformat())
+                                                decision_at=bar.timestamp, timestamp=bar.timestamp.isoformat())
                 for order in result.orders:
                     self._execute_paper_order(
                         order,
@@ -312,6 +358,8 @@ class RuntimeSession:
                     self.store.patch_status({"last_completed_bundle_minute": bundle.minute,
                                              "last_strategy_evaluation_minute": bundle.minute})
                     self._process_bundle(bundle, source="live")
+                elif self._aggregator.required_ready(market_minute_key(bar.timestamp)):
+                    self._schedule_bundle_snapshot(market_minute_key(bar.timestamp))
 
     def _record_incomplete(self, bundle) -> None:
         payload = {
@@ -324,7 +372,7 @@ class RuntimeSession:
         }
         self.store.append_event(
             "BUNDLE_INCOMPLETE", payload, f"bundle_incomplete:{bundle.bundle_id}",
-            timestamp=_bundle_timestamp(bundle.trading_date, bundle.minute),
+            timestamp=serialize_datetime(_bundle_timestamp(bundle.trading_date, bundle.minute)),
         )
 
     def _refresh_pending_status(self) -> None:
@@ -352,6 +400,9 @@ class RuntimeSession:
         with self._lock:
             startup = self._thread
             self._stopping = True
+            for timer in self._snapshot_timers.values():
+                timer.cancel()
+            self._snapshot_timers.clear()
             self.store.patch_status({"state": "STOPPING", "feed_connected": False})
             if self.feed:
                 self.feed.stop()

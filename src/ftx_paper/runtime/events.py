@@ -1,6 +1,12 @@
-"""Small, shared vocabulary for runtime event presentation."""
+"""Small, shared vocabulary and timestamp contract for runtime events."""
 
 from __future__ import annotations
+
+from datetime import datetime, time
+from zoneinfo import ZoneInfo
+
+
+IST = ZoneInfo("Asia/Kolkata")
 
 
 DECISION_EVENT_TYPES = frozenset({
@@ -9,11 +15,55 @@ DECISION_EVENT_TYPES = frozenset({
     "REJECTEDDECISION",
 })
 
-# These names are migration-only compatibility inputs.  New decision events
-# must use ``minute`` and application code must never read these fields.
+# These names are migration-only compatibility inputs.  They must never be
+# consulted by projections, filters, or new event producers.
 LEGACY_DECISION_TIME_FIELDS = (
-    "bar_datetime", "bar_timestamp", "event_time", "decision_minute", "timestamp",
+    "minute", "bar_datetime", "bar_timestamp", "event_time", "timestamp",
 )
+
+
+class DecisionTimestampError(ValueError):
+    """Raised when a decision event has no valid timezone-aware decision_at."""
+
+
+def parse_decision_at(value: object) -> datetime:
+    """Parse a decision timestamp and normalize it to IST."""
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise DecisionTimestampError(f"invalid decision_at: {value!r}") from exc
+    else:
+        raise DecisionTimestampError("decision event requires a non-empty decision_at")
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise DecisionTimestampError("decision_at must be timezone-aware")
+    return parsed.astimezone(IST)
+
+
+def serialize_datetime(value: object) -> str:
+    """Serialize an aware datetime only at an external boundary."""
+    if not isinstance(value, datetime):
+        raise TypeError(f"expected datetime, got {type(value).__name__}")
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("cannot serialize a timezone-naive datetime")
+    return value.isoformat()
+
+
+def decision_session_bucket(value: datetime) -> str:
+    """Classify an already parsed decision timestamp using IST boundaries."""
+    local = parse_decision_at(value)
+    current = local.time()
+    if current < time(10, 15):
+        return "Pre"
+    if current < time(11, 15):
+        return "Morning"
+    if current < time(13, 30):
+        return "Mid"
+    if current < time(14, 15):
+        return "Afternoon"
+    return "Post"
 
 RISK_EVENT_TYPES = frozenset({"SIZING_REJECTED"})
 
@@ -46,8 +96,14 @@ def is_decision_event(event_type: str) -> bool:
 
 __all__ = [
     "DECISION_EVENT_TYPES",
+    "DecisionTimestampError",
     "EXECUTION_EVENT_TYPES",
+    "IST",
+    "LEGACY_DECISION_TIME_FIELDS",
     "RISK_EVENT_TYPES",
+    "decision_session_bucket",
     "event_category",
     "is_decision_event",
+    "parse_decision_at",
+    "serialize_datetime",
 ]

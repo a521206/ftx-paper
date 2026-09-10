@@ -1,6 +1,9 @@
 import json
 from pathlib import Path
 import sqlite3
+from datetime import date, datetime, timezone
+
+import pytest
 
 from ftx_paper.api import create_app
 from ftx_paper.runtime import RuntimeStore
@@ -11,7 +14,7 @@ from ftx_paper.broker.zerodha import ZerodhaAuth
 import ftx_paper.broker.zerodha.adapter as zerodha_adapter
 from ftx_paper.contracts import OrderIntent, OrderSide
 from ftx_paper.contracts import Instrument, MarketBar
-from datetime import datetime
+from ftx_paper.runtime.events import DecisionTimestampError, decision_session_bucket
 
 
 def test_api_reads_runtime_store(tmp_path: Path) -> None:
@@ -45,6 +48,38 @@ def test_api_exposes_persisted_events(tmp_path: Path) -> None:
     assert "timestamp" not in event
 
 
+def test_runtime_store_serializes_nested_event_datetimes(tmp_path: Path) -> None:
+    store = RuntimeStore(tmp_path)
+    observed_at = datetime(2026, 9, 10, 10, 20, tzinfo=timezone.utc)
+
+    store.append_event("ENGINE_EVENT", {
+        "observed_at": observed_at,
+        "nested": {"session_date": date(2026, 9, 10)},
+    })
+
+    payload = store.read_events()[0]["payload"]
+    assert payload == {
+        "observed_at": observed_at.isoformat(),
+        "nested": {"session_date": "2026-09-10"},
+    }
+
+
+def test_runtime_store_serializes_status_datetimes(tmp_path: Path) -> None:
+    store = RuntimeStore(tmp_path)
+    updated_at = datetime(2026, 9, 10, 10, 20, tzinfo=timezone.utc)
+
+    store.write_status({"state": "RUNNING", "updated_at": updated_at})
+
+    assert store.read_status()["updated_at"] == updated_at.isoformat()
+
+
+def test_runtime_store_rejects_unsupported_json_values_with_context(tmp_path: Path) -> None:
+    store = RuntimeStore(tmp_path)
+
+    with pytest.raises(TypeError, match=r"event ENGINE_EVENT payload\.value"):
+        store.append_event("ENGINE_EVENT", {"value": object()})
+
+
 def test_interrupted_paper_session_returns_to_stopped(tmp_path: Path) -> None:
     store = RuntimeStore(tmp_path)
     store.write_status({"state": "RUNNING", "feed_connected": True})
@@ -61,7 +96,7 @@ def test_api_exposes_decisions_and_logs_as_projections(tmp_path: Path) -> None:
     store = RuntimeStore(tmp_path)
     store.append_event("ENGINE_EVENT", {"bar": 1})
     store.append_event("REJECTEDDECISION", {
-        "decision_id": "d1", "minute": "2026-09-10T10:20:00+05:30",
+        "decision_id": "d1", "decision_at": "2026-09-10T10:20:00+05:30",
         "cell": "vwap", "direction": "short", "reason": "setup_score_skip",
     })
     store.append_event("RUNTIME_LOG", {"message": "started"})
@@ -76,7 +111,7 @@ def test_api_exposes_decisions_and_logs_as_projections(tmp_path: Path) -> None:
 def test_decision_projection_includes_execution_outcome(tmp_path: Path) -> None:
     store = RuntimeStore(tmp_path)
     store.append_event("ACCEPTEDDECISION", {
-        "decision_id": "d1", "decision_source": "live", "minute": "2026-09-10T10:20:00+05:30",
+        "decision_id": "d1", "decision_source": "live", "decision_at": "2026-09-10T10:20:00+05:30",
     })
     store.append_event("ORDER_ACK", {"decision_id": "d1", "status": "FILLED"})
     store.append_event("FILL", {"decision_id": "d1", "price": 101.5})
@@ -90,7 +125,7 @@ def test_decision_projection_includes_execution_outcome(tmp_path: Path) -> None:
 
 def test_decision_projection_attaches_risk_without_counting_it_as_a_decision(tmp_path: Path) -> None:
     store = RuntimeStore(tmp_path)
-    store.append_event("ACCEPTEDDECISION", {"decision_id": "d1", "minute": "2026-09-10T10:20:00+05:30"})
+    store.append_event("ACCEPTEDDECISION", {"decision_id": "d1", "decision_at": "2026-09-10T10:20:00+05:30"})
     store.append_event("SIZING_REJECTED", {"decision_id": "d1", "reason": "insufficient_capital"})
     store.append_event("STRATEGY_EVALUATION", {"bundle_id": "b1"})
 
@@ -102,20 +137,19 @@ def test_decision_projection_attaches_risk_without_counting_it_as_a_decision(tmp
     assert decisions[0]["payload"]["risk_event"]["event_type"] == "SIZING_REJECTED"
 
 
-def test_new_decisions_store_only_minute_for_decision_time(tmp_path: Path) -> None:
+def test_new_decisions_store_only_decision_at_for_decision_time(tmp_path: Path) -> None:
     store = RuntimeStore(tmp_path)
     store.append_event("ACCEPTEDDECISION", {
-        "decision_id": "d1", "minute": "2026-09-10T10:20:00+05:30",
-        "bar_datetime": "2026-09-10T10:21:00+05:30", "event_time": "2026-09-10T10:22:00+05:30",
+        "decision_id": "d1", "decision_at": "2026-09-10T10:20:00+05:30",
     })
 
     event = store.read_events()[0]
-    assert event["payload"]["minute"] == "2026-09-10T10:20:00+05:30"
-    assert not {"bar_datetime", "bar_timestamp", "event_time", "decision_minute", "timestamp"} & event["payload"].keys()
-    assert event["created_at"] != event["payload"]["minute"]
+    assert event["payload"]["decision_at"].isoformat() == "2026-09-10T10:20:00+05:30"
+    assert not {"minute", "bar_datetime", "bar_timestamp", "event_time", "timestamp"} & event["payload"].keys()
+    assert event["created_at"] != event["payload"]["decision_at"]
 
 
-def test_legacy_decision_timestamps_migrate_without_overwriting_minute(tmp_path: Path) -> None:
+def test_legacy_decision_timestamps_migrate_to_decision_at(tmp_path: Path) -> None:
     database = tmp_path / "runtime.sqlite3"
     with sqlite3.connect(database) as connection:
         connection.executescript(
@@ -128,15 +162,16 @@ def test_legacy_decision_timestamps_migrate_without_overwriting_minute(tmp_path:
         )
         connection.execute(
             "INSERT INTO runtime_events(event_type, payload, timestamp) VALUES (?, ?, ?)",
-            ("REJECTEDDECISION", json.dumps({"minute": "2026-09-10T10:21:00+05:30", "event_time": "bad"}), "2026-09-10T15:00:00Z"),
+            ("REJECTEDDECISION", json.dumps({"minute": "2026-09-10T10:21:00+05:30"}), "2026-09-10T15:00:00Z"),
         )
 
     store = RuntimeStore(tmp_path)
     events = {event["event_type"]: event for event in store.read_events()}
-    assert events["ACCEPTEDDECISION"]["payload"]["minute"] == "2026-09-10T10:20:00+05:30"
-    assert events["REJECTEDDECISION"]["payload"]["minute"] == "2026-09-10T10:21:00+05:30"
-    assert "event_time" not in events["REJECTEDDECISION"]["payload"]
-    assert store.decision_timestamp_migration == {"migrated": 1, "unmigratable": 0}
+    assert events["ACCEPTEDDECISION"]["payload"]["decision_at"].isoformat() == "2026-09-10T10:20:00+05:30"
+    assert events["REJECTEDDECISION"]["payload"]["decision_at"].isoformat() == "2026-09-10T10:21:00+05:30"
+    assert "minute" not in events["REJECTEDDECISION"]["payload"]
+    assert store.decision_timestamp_migration["migrated"] == 2
+    assert store.decision_timestamp_migration["unmigratable"] == 0
 
 
 def test_runtime_actions_are_api_boundaries(tmp_path: Path) -> None:
@@ -149,6 +184,60 @@ def test_runtime_actions_are_api_boundaries(tmp_path: Path) -> None:
 
     assert response.status_code == 202
     assert store.read_status()["state"] == "STARTING"
+
+
+def test_decision_date_filter_uses_ist_calendar_date(tmp_path: Path) -> None:
+    store = RuntimeStore(tmp_path)
+    store.append_event("ACCEPTEDDECISION", {"decision_id": "utc-boundary", "decision_at": "2026-09-09T19:00:00Z"})
+    client = create_app(store).test_client()
+
+    assert len(client.get("/api/v1/decisions?date=2026-09-10").get_json()["decisions"]) == 1
+    assert len(client.get("/api/v1/decisions?date=2026-09-09").get_json()["decisions"]) == 0
+
+
+def test_decision_session_boundaries_are_ist() -> None:
+    values = [
+        ("10:14", "Pre"), ("10:15", "Morning"), ("11:14", "Morning"),
+        ("11:15", "Mid"), ("13:29", "Mid"), ("13:30", "Afternoon"),
+        ("14:14", "Afternoon"), ("14:15", "Post"),
+    ]
+    for clock, expected in values:
+        value = datetime.fromisoformat(f"2026-09-10T{clock}:00+05:30")
+        assert decision_session_bucket(value) == expected
+
+
+def test_decision_timestamps_must_be_aware_and_cannot_fallback(tmp_path: Path) -> None:
+    store = RuntimeStore(tmp_path)
+    with pytest.raises(DecisionTimestampError, match="decision_at"):
+        store.append_event("ACCEPTEDDECISION", {"decision_id": "naive", "decision_at": "2026-09-10T10:20:00"})
+    with pytest.raises(DecisionTimestampError, match="decision_at"):
+        store.append_event("ACCEPTEDDECISION", {"decision_id": "fallback", "created_at": "2026-09-10T10:20:00+05:30"})
+
+
+def test_created_at_does_not_affect_decision_filtering(tmp_path: Path) -> None:
+    store = RuntimeStore(tmp_path)
+    store.append_event("ACCEPTEDDECISION", {"decision_id": "audit-only", "decision_at": "2026-09-09T19:00:00Z"})
+    with sqlite3.connect(store.database) as connection:
+        connection.execute("UPDATE runtime_events SET created_at = ?", ("2026-09-10T04:00:00+00:00",))
+    assert create_app(store).test_client().get("/api/v1/decisions?date=2026-09-10").get_json()["decisions"]
+    assert not create_app(store).test_client().get("/api/v1/decisions?date=2026-09-09").get_json()["decisions"]
+
+
+def test_unmigratable_decision_rows_are_reported_and_fail_on_read(tmp_path: Path) -> None:
+    database = tmp_path / "runtime.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE runtime_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT NOT NULL, "
+            "payload TEXT NOT NULL, created_at TEXT NOT NULL, idempotency_key TEXT UNIQUE)")
+        connection.execute(
+            "INSERT INTO runtime_events(event_type, payload, created_at) VALUES (?, ?, ?)",
+            ("ACCEPTEDDECISION", json.dumps({"decision_id": "missing"}), "2026-09-10T15:00:00Z"),
+        )
+    store = RuntimeStore(tmp_path)
+    assert store.decision_timestamp_migration["unmigratable"] == 1
+    assert store.decision_timestamp_migration["unmigratable_rows"][0]["id"] == 1
+    with pytest.raises(DecisionTimestampError, match="decision_at"):
+        store.read_events()
 
 
 def test_ui_is_a_separate_http_client() -> None:

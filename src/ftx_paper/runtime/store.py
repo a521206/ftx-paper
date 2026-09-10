@@ -3,16 +3,42 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from .events import DECISION_EVENT_TYPES, LEGACY_DECISION_TIME_FIELDS, event_category, is_decision_event
+from .events import (
+    DECISION_EVENT_TYPES,
+    LEGACY_DECISION_TIME_FIELDS,
+    DecisionTimestampError,
+    event_category,
+    is_decision_event,
+    parse_decision_at,
+    serialize_datetime,
+)
 
 
 class ProcessAlreadyRunningError(RuntimeError):
     """Raised when another live process owns a runtime service lease."""
+
+
+def _json_safe(value: Any, *, path: str) -> Any:
+    """Convert supported domain values before writing JSON to the store."""
+    if isinstance(value, datetime):
+        return serialize_datetime(value)
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {
+            key: _json_safe(item, path=f"{path}.{key}")
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item, path=f"{path}[{index}]") for index, item in enumerate(value)]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    raise TypeError(f"{path} contains unsupported JSON value of type {type(value).__name__}")
 
 
 def _pid_is_alive(pid: int) -> bool:
@@ -39,7 +65,9 @@ class RuntimeStore:
         self.root.mkdir(parents=True, exist_ok=True)
         self.database = self.root / "runtime.sqlite3"
         self._event_counts_cache: dict[str, Any] | None = None
-        self.decision_timestamp_migration: dict[str, int] = {"migrated": 0, "unmigratable": 0}
+        self.decision_timestamp_migration: dict[str, Any] = {
+            "migrated": 0, "unmigratable": 0, "unmigratable_rows": [],
+        }
         with sqlite3.connect(self.database) as connection:
             connection.executescript(
                 """
@@ -89,26 +117,33 @@ class RuntimeStore:
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS runtime_migrations ("
                 "name TEXT PRIMARY KEY, applied_at TEXT NOT NULL, migrated_rows INTEGER NOT NULL, "
-                "unmigratable_rows INTEGER NOT NULL)"
+                "unmigratable_rows INTEGER NOT NULL, unmigratable_details TEXT NOT NULL DEFAULT '[]')"
             )
-            self._migrate_decision_minutes(connection)
+            migration_columns = {row[1] for row in connection.execute("PRAGMA table_info(runtime_migrations)")}
+            if "unmigratable_details" not in migration_columns:
+                connection.execute("ALTER TABLE runtime_migrations ADD COLUMN unmigratable_details TEXT NOT NULL DEFAULT '[]'")
+            self._migrate_decision_timestamps(connection)
 
-    def _migrate_decision_minutes(self, connection: sqlite3.Connection) -> None:
-        """Copy legacy decision timestamps into ``minute`` exactly once."""
+    def _migrate_decision_timestamps(self, connection: sqlite3.Connection) -> None:
+        """Explicitly migrate legacy decision fields into ``decision_at``."""
         marker = connection.execute(
-            "SELECT 1 FROM runtime_migrations WHERE name = 'decision-minute-v1'"
+            "SELECT 1 FROM runtime_migrations WHERE name = 'decision-at-v2'"
         ).fetchone()
         if marker is not None:
             row = connection.execute(
-                "SELECT migrated_rows, unmigratable_rows FROM runtime_migrations "
-                "WHERE name = 'decision-minute-v1'"
+                "SELECT migrated_rows, unmigratable_rows, unmigratable_details FROM runtime_migrations "
+                "WHERE name = 'decision-at-v2'"
             ).fetchone()
             if row is not None:
-                self.decision_timestamp_migration = {"migrated": int(row[0]), "unmigratable": int(row[1])}
+                self.decision_timestamp_migration = {
+                    "migrated": int(row[0]), "unmigratable": int(row[1]),
+                    "unmigratable_rows": json.loads(row[2] or "[]"),
+                }
             return
 
         migrated = 0
         unmigratable = 0
+        unmigratable_rows: list[dict[str, str | int]] = []
         placeholders = ", ".join("?" for _ in DECISION_EVENT_TYPES)
         rows = connection.execute(
             f"SELECT id, payload FROM runtime_events WHERE event_type IN ({placeholders})",
@@ -116,47 +151,54 @@ class RuntimeStore:
         ).fetchall()
         for row in rows:
             payload = json.loads(row[1])
-            minute = payload.get("minute")
-            if not isinstance(minute, str) or not minute.strip():
-                minute = next(
-                    (payload.get(name) for name in LEGACY_DECISION_TIME_FIELDS
-                     if isinstance(payload.get(name), str) and payload.get(name).strip()),
-                    None,
-                )
-                if minute is None:
+            candidates = [(name, payload.get(name)) for name in LEGACY_DECISION_TIME_FIELDS
+                          if payload.get(name) not in (None, "")]
+            if payload.get("decision_at") not in (None, ""):
+                candidates.insert(0, ("decision_at", payload.get("decision_at")))
+            if not candidates:
+                unmigratable += 1
+                unmigratable_rows.append({"id": int(row[0]), "reason": "missing decision_at"})
+                continue
+            distinct = {str(value).strip() for _, value in candidates}
+            if len(distinct) > 1 and "decision_at" not in {name for name, _ in candidates}:
+                unmigratable += 1
+                unmigratable_rows.append({"id": int(row[0]), "reason": "conflicting legacy timestamps"})
+                continue
+            source_name, source_value = candidates[0]
+            if source_name == "minute" and isinstance(source_value, str) and "T" not in source_value:
+                session_date = payload.get("session_date")
+                if not isinstance(session_date, str) or not session_date.strip():
                     unmigratable += 1
+                    unmigratable_rows.append({"id": int(row[0]), "reason": "time-only minute lacks session_date"})
                     continue
-                payload["minute"] = minute
-                migrated += 1
-            normalized = self._normalize_decision_minute(payload)
-            if normalized != payload.get("minute"):
-                payload["minute"] = normalized
-                migrated += 1
+                source_value = f"{session_date}T{source_value}:00+05:30"
+            try:
+                normalized = serialize_datetime(parse_decision_at(source_value))
+            except (DecisionTimestampError, TypeError) as exc:
+                unmigratable += 1
+                unmigratable_rows.append({"id": int(row[0]), "reason": str(exc)})
+                continue
+            payload["decision_at"] = normalized
             for name in LEGACY_DECISION_TIME_FIELDS:
                 payload.pop(name, None)
+            if source_name != "decision_at":
+                migrated += 1
             connection.execute(
                 "UPDATE runtime_events SET payload = ? WHERE id = ?",
-                (json.dumps(payload), row[0]),
+                (json.dumps(_json_safe(payload, path=f"event {row[0]} payload")), row[0]),
             )
         applied_at = datetime.now(timezone.utc).isoformat()
         connection.execute(
-            "INSERT INTO runtime_migrations(name, applied_at, migrated_rows, unmigratable_rows) "
-            "VALUES ('decision-minute-v1', ?, ?, ?)",
-            (applied_at, migrated, unmigratable),
+            "INSERT INTO runtime_migrations(name, applied_at, migrated_rows, unmigratable_rows, unmigratable_details) "
+            "VALUES ('decision-at-v2', ?, ?, ?, ?)",
+            (applied_at, migrated, unmigratable, json.dumps(
+                _json_safe(unmigratable_rows, path="migration unmigratable_rows")
+            )),
         )
-        self.decision_timestamp_migration = {"migrated": migrated, "unmigratable": unmigratable}
-
-    @staticmethod
-    def _normalize_decision_minute(payload: dict[str, Any]) -> str | None:
-        """Expand a legacy time-only minute using its persisted session date."""
-        minute = payload.get("minute")
-        session_date = payload.get("session_date")
-        if not isinstance(minute, str) or "T" in minute or not isinstance(session_date, str):
-            return minute if isinstance(minute, str) else None
-        value = minute.strip()
-        if len(value) == 5:
-            return f"{session_date}T{value}:00+05:30"
-        return minute
+        self.decision_timestamp_migration = {
+            "migrated": migrated, "unmigratable": unmigratable,
+            "unmigratable_rows": unmigratable_rows,
+        }
 
     def acquire_process_lease(self, service: str) -> str:
         """Atomically claim a service lease, removing leases for dead PIDs."""
@@ -204,7 +246,7 @@ class RuntimeStore:
                 INSERT INTO runtime_status(id, payload, updated_at) VALUES (1, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at
                 """,
-                (json.dumps(status), now),
+                (json.dumps(_json_safe(status, path="status")), now),
             )
 
     def patch_status(self, updates: dict[str, Any]) -> None:
@@ -217,18 +259,23 @@ class RuntimeStore:
         event_type = str(event_type).upper()
         payload = dict(payload)
         if is_decision_event(event_type):
-            if not isinstance(payload.get("minute"), str) or not payload["minute"].strip():
-                raise ValueError("decision events require canonical payload field 'minute'")
-            payload["minute"] = self._normalize_decision_minute(payload)
-            for name in LEGACY_DECISION_TIME_FIELDS:
-                payload.pop(name, None)
+            if "decision_at" not in payload:
+                raise DecisionTimestampError("decision events require canonical payload field 'decision_at'")
+            normalized = parse_decision_at(payload["decision_at"])
+            payload["decision_at"] = serialize_datetime(normalized)
+            forbidden = set(LEGACY_DECISION_TIME_FIELDS) & payload.keys()
+            if forbidden:
+                raise DecisionTimestampError(
+                    "decision events cannot contain legacy decision timestamp fields: "
+                    + ", ".join(sorted(forbidden))
+                )
         # ``timestamp`` is retained as a source-compatibility argument only;
         # it must never become the persistence timestamp or decision time.
         event_timestamp = datetime.now(timezone.utc).isoformat()
         with sqlite3.connect(self.database) as connection:
             cursor = connection.execute(
                 "INSERT OR IGNORE INTO runtime_events(event_type, payload, created_at, idempotency_key) VALUES (?, ?, ?, ?)",
-                (event_type, json.dumps(payload), event_timestamp, idempotency_key),
+                (event_type, json.dumps(_json_safe(payload, path=f"event {event_type} payload")), event_timestamp, idempotency_key),
             )
             inserted = cursor.rowcount == 1
         if inserted:
@@ -275,11 +322,17 @@ class RuntimeStore:
                 "SELECT event_type, payload, created_at FROM runtime_events ORDER BY id DESC LIMIT ?",
                 (limit,),
             ).fetchall()
-        return [
-            {"event_type": event_type, "category": event_category(event_type),
-             "payload": json.loads(payload), "created_at": created_at}
-            for event_type, payload, created_at in rows
-        ]
+        result = []
+        for event_type, raw_payload, raw_created_at in rows:
+            payload = json.loads(raw_payload)
+            created = datetime.fromisoformat(str(raw_created_at).replace("Z", "+00:00"))
+            if created.tzinfo is None or created.utcoffset() is None:
+                raise ValueError(f"event {event_type} has timezone-naive created_at")
+            if is_decision_event(event_type):
+                payload["decision_at"] = parse_decision_at(payload.get("decision_at"))
+            result.append({"event_type": event_type, "category": event_category(event_type),
+                           "payload": payload, "created_at": created})
+        return result
 
     def event_counts(self) -> dict[str, Any]:
         if self._event_counts_cache is not None:

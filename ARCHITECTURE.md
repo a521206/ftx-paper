@@ -27,12 +27,15 @@ layer. `OrderAck` and `Fill` are deliberately separate types.
 
 ## Event timestamp contract
 
-`minute` is the sole decision-bar timestamp field in event payloads. Replay and
-live decision events write their evaluated bar time to `minute`; API
-projections, UI rendering, and filters read only that field. `created_at` is
-the SQLite persistence timestamp and is never used as a decision time. The
-runtime store performs a one-time migration of legacy decision bar-time fields
-and records any rows that could not be migrated.
+`decision_at` is the sole decision timestamp field in decision event payloads.
+It is the timezone-aware instant at which the strategy evaluated the completed
+market bar. Replay and live decision events write that instant to `decision_at`;
+the runtime parses it into an aware `datetime`, normalizes it to IST for
+operator-facing date/session decisions, and serializes it only at API/storage
+boundaries. `created_at` is the SQLite persistence/audit timestamp and is never
+used as a decision time. The runtime store explicitly migrates legacy decision
+fields and reports rows that cannot be migrated; it never guesses from
+`created_at`.
 
 ## Deliberate duplication
 

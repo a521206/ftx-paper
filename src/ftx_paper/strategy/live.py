@@ -40,6 +40,8 @@ class ConfiguredLiveStrategy:
         self._decision_engine = IndependentLiveDecisionEngine(
             version=self.version, config_hash=self.metadata.config_hash,
             cooldown_minutes=config.cooldown_minutes, capital=capital,
+            morning_entry_minutes=config.morning_entry_minutes,
+            afternoon_entry_minutes=config.afternoon_entry_minutes,
         )
 
     @property
@@ -49,6 +51,19 @@ class ConfiguredLiveStrategy:
 
     def snapshot(self) -> Mapping[str, object]:
         return {"schema_version": 1, "config": self.config.as_dict()}
+
+    def reset(self) -> None:
+        """Clear all bar, position, feature, and decision-gate state."""
+        self._bars.clear()
+        self._position = None
+        self._features = LiveFeatureCalculator()
+        self._exits = ExitStateMachine(trail_distance=10.0)
+        self._decision_engine = IndependentLiveDecisionEngine(
+            version=self.version, config_hash=self.metadata.config_hash,
+            cooldown_minutes=self.config.cooldown_minutes, capital=self._capital,
+            morning_entry_minutes=self.config.morning_entry_minutes,
+            afternoon_entry_minutes=self.config.afternoon_entry_minutes,
+        )
 
     @classmethod
     def from_snapshot(cls, snapshot: Mapping[str, object]) -> "ConfiguredLiveStrategy":
