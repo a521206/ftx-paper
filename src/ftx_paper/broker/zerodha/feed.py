@@ -52,11 +52,9 @@ def create_kite_socket(api_key: str, access_token: str) -> TickerSocket:
         def _send_subscription(self):
             if self._tokens and self._ticker is not None:
                 self._ticker.subscribe(self._tokens)
-                # Match the reference live app when FULL mode is available;
-                # lightweight test doubles and older clients may expose only
-                # QUOTE mode.
-                mode = getattr(self._ticker, "MODE_FULL", self._ticker.MODE_QUOTE)
-                self._ticker.set_mode(mode, self._tokens)
+                # QUOTE is the established payload contract for the normalizer
+                # and bar builder; keep it explicit across reconnects.
+                self._ticker.set_mode(self._ticker.MODE_QUOTE, self._tokens)
 
         def close(self):
             self._connected = False

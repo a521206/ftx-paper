@@ -114,7 +114,7 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
     @app.get("/api/v1/decisions")
     def decisions():
         events = store.read_events(1000)
-        decision_types = {"ACCEPTEDDECISION", "REJECTEDDECISION", "SIZING_REJECTED", "EXECUTEDDECISION"}
+        decision_types = {"CANDIDATEDECISION", "ACCEPTEDDECISION", "REJECTEDDECISION"}
         return jsonify({
             "decisions": [event for event in events if str(event.get("event_type", "")).upper() in decision_types]
         })
