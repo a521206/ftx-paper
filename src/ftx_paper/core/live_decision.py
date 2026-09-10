@@ -8,6 +8,13 @@ from ftx_paper.contracts import OrderIntent, OrderSide
 from .risk import RiskSizer
 
 
+def _decision_datetime(bundle: DecisionBundle) -> datetime:
+    """Parse both the current time-only and legacy full-ISO minute formats."""
+    if "T" in bundle.minute:
+        return datetime.fromisoformat(bundle.minute)
+    return datetime.fromisoformat(f"{bundle.trading_date}T{bundle.minute}")
+
+
 @dataclass(frozen=True, slots=True)
 class LiveDecision:
     event_type: str
@@ -55,7 +62,8 @@ class IndependentLiveDecisionEngine:
         opening = prior[:15]
         or_high, or_low = max(b.high for b in opening), min(b.low for b in opening)
         current = futures.close
-        t = datetime.fromisoformat(bundle.minute).time()
+        decision_dt = _decision_datetime(bundle)
+        t = decision_dt.time()
         feature_values = {"vwap": vwap, "session_high": session_high, "session_low": session_low,
                           "opening_range_high": or_high, "opening_range_low": or_low,
                           "vix": vix_bar.close}
@@ -74,14 +82,14 @@ class IndependentLiveDecisionEngine:
             reason = "no_qualifying_setup"
         elif not (datetime.strptime("10:15", "%H:%M").time() <= t <= datetime.strptime("14:15", "%H:%M").time()):
             reason = "outside_session_window"
-        elif self._last_decision and (datetime.fromisoformat(bundle.minute) - self._last_decision).total_seconds() < self.cooldown_minutes * 60:
+        elif self._last_decision and (decision_dt - self._last_decision).total_seconds() < self.cooldown_minutes * 60:
             reason = "cooldown"
         elif vix_bar.close <= 0:
             reason = "vix_gate"
         if reason:
             events.append(LiveDecision("REJECTEDDECISION", {**candidate, "outcome": "policy rejection", "reason": reason, "decision_id": sha256(f"{candidate_id}:{reason}".encode()).hexdigest()[:24]}))
             return tuple(events)
-        self._last_decision = datetime.fromisoformat(bundle.minute)
+        self._last_decision = decision_dt
         side = OrderSide.BUY if direction == "long" else OrderSide.SELL
         stop = current - max(futures.high - futures.low, 5.0) if side is OrderSide.BUY else current + max(futures.high - futures.low, 5.0)
         sizing = RiskSizer().size(capital=self.capital, equity=self.capital, peak_equity=self.capital, entry=current, stop=stop)
