@@ -264,6 +264,54 @@
       gap: 12px;
     }
 
+    .event-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+
+    .event-toolbar input,
+    .event-toolbar select {
+      border: 1px solid var(--md-outline-variant);
+      border-radius: 8px;
+      background: var(--md-surface);
+      color: var(--md-on-surface);
+      min-height: 40px;
+      padding: 8px 10px;
+      font: inherit;
+    }
+
+    .event-toolbar input {
+      flex: 1 1 220px;
+      min-width: 180px;
+    }
+
+    .event-summary {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+
+    .event-summary .badge {
+      cursor: pointer;
+    }
+
+    .event-row {
+      display: grid;
+      grid-template-columns: minmax(170px, 1.2fr) minmax(150px, 0.7fr) 2fr auto;
+      gap: 14px;
+      align-items: center;
+    }
+
+    .event-row small {
+      display: block;
+      color: var(--md-on-surface-variant);
+      margin-top: 3px;
+    }
+
     .section-head a {
       color: var(--md-primary);
       font-size: 14px;
@@ -319,6 +367,10 @@
       }
 
       .decision-row {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .event-row {
         grid-template-columns: 1fr 1fr;
       }
 
@@ -480,6 +532,57 @@
       </table>`;
     }
 
+    function eventStream(rows) {
+      if (!rows?.length) {
+        return '<div class="empty">No runtime events recorded</div>';
+      }
+
+      const counts = rows.reduce((result, row) => {
+        const type = row.event_type || 'UNKNOWN';
+        result[type] = (result[type] || 0) + 1;
+        return result;
+      }, {});
+      const filters = Object.entries(counts)
+        .sort((a, b) => b[1] - a[1])
+        .map(([type, count]) => `<span class="badge" data-event-filter="${esc(type)}">${esc(type)} · ${count}</span>`)
+        .join('');
+
+      return `<div class="event-summary">${filters}</div>
+        <div id="event-list">
+          ${rows.map((x) => `<details class="event-item" data-event-type="${esc(x.event_type || 'UNKNOWN').toLowerCase()}">
+            <summary class="event-row">
+              <span><strong>${esc(x.event_type || 'UNKNOWN')}</strong><small>${date(x.created_at)}</small></span>
+              <span>${badge(session(x.created_at))}</span>
+              <span>${esc(x.payload?.message || x.payload?.reason || x.payload?.detail || 'Runtime event')}</span>
+              <span>View payload</span>
+            </summary>
+            <div class="payload">${esc(JSON.stringify(x.payload || {}, null, 2))}</div>
+          </details>`).join('')}
+        </div>`;
+    }
+
+    function wireEventPage(rows) {
+      const search = document.getElementById('event-search');
+      const type = document.getElementById('event-type');
+      const apply = () => {
+        const query = (search?.value || '').toLowerCase().trim();
+        const selected = type?.value || '';
+        document.querySelectorAll('.event-item').forEach((item) => {
+          const matchesType = !selected || item.dataset.eventType === selected;
+          const matchesQuery = !query || item.textContent.toLowerCase().includes(query);
+          item.hidden = !(matchesType && matchesQuery);
+        });
+      };
+      search?.addEventListener('input', apply);
+      type?.addEventListener('change', apply);
+      document.querySelectorAll('[data-event-filter]').forEach((item) => {
+        item.addEventListener('click', () => {
+          if (type) type.value = item.dataset.eventFilter.toLowerCase();
+          apply();
+        });
+      });
+    }
+
     function decisions(rows) {
       if (!rows?.length) {
         return '<div class="empty">Awaiting runtime data</div>';
@@ -638,6 +741,22 @@
           <h2>Trades</h2>
           ${table(data.trades.trades)}
         </div>`;
+      } else if (page === 'events') {
+        const types = [...new Set((data.events.events || []).map((x) => String(x.event_type || 'UNKNOWN').toLowerCase()))].sort();
+        body = `<div class="card">
+          <div class="section-head">
+            <div><h2>Event stream</h2><div class="label">Latest runtime events from /api/v1/events</div></div>
+            <button id="refresh-events" class="secondary">Refresh now</button>
+          </div>
+          <div class="event-toolbar">
+            <input id="event-search" type="search" placeholder="Search event type or payload…" aria-label="Search events">
+            <select id="event-type" aria-label="Filter by event type">
+              <option value="">All event types</option>
+              ${types.map((x) => `<option value="${esc(x)}">${esc(x.toUpperCase())}</option>`).join('')}
+            </select>
+          </div>
+          ${eventStream(data.events.events)}
+        </div>`;
       } else {
         body = `<div class="card">
           <h2>${page[0].toUpperCase() + page.slice(1)}</h2>
@@ -647,6 +766,7 @@
 
       document.getElementById('app').innerHTML = top + body;
       wire();
+      if (page === 'events') wireEventPage(data.events.events || []);
     }
 
     function wire() {
@@ -670,6 +790,8 @@
           }
         };
       });
+
+      document.getElementById('refresh-events')?.addEventListener('click', refresh);
     }
 
     async function refresh() {
