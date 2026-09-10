@@ -256,6 +256,76 @@
       background: var(--md-error);
     }
 
+    .session-filter {
+      display: block;
+      width: 100%;
+      min-height: 0;
+      margin: 0;
+      padding: 16px;
+      border: 1px solid var(--md-outline-variant);
+      border-radius: 16px;
+      background: var(--md-surface-container-low);
+      color: var(--md-on-surface);
+      text-align: left;
+      text-decoration: none;
+      line-height: 20px;
+      box-shadow: none;
+      transition: background-color 120ms ease, border-color 120ms ease;
+    }
+
+    .session-filter:link,
+    .session-filter:visited {
+      color: var(--md-on-surface);
+      text-decoration: none;
+    }
+
+    .session-filter:hover,
+    .session-filter[aria-current="page"] {
+      background: var(--md-surface-container);
+      border-color: var(--md-primary);
+    }
+
+    .session-filter[aria-current="page"] {
+      background: var(--md-primary-container);
+      color: var(--md-on-primary-container);
+    }
+
+    .session-filter[aria-current="page"] .label,
+    .session-filter[aria-current="page"] .session-meta {
+      color: var(--md-on-primary-container);
+    }
+
+    .session-filter .session-count {
+      display: block;
+      margin-top: 8px;
+      font-size: 20px;
+      line-height: 24px;
+      font-weight: 600;
+    }
+
+    .session-filter .session-meta {
+      display: block;
+      margin-top: 4px;
+      color: var(--md-on-surface-variant);
+      font-size: 12px;
+      line-height: 17px;
+    }
+
+    .session-filter > .badge {
+      margin-top: 12px;
+    }
+
+    .review-summary {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 0 0 16px;
+    }
+
+    .review-summary .badge {
+      background: var(--md-surface-container);
+    }
+
     .toolbar,
     .section-head {
       display: flex;
@@ -476,6 +546,60 @@
       return 'Post';
     };
 
+    const decisionSessions = [
+      ['Pre', 'Before 10:15 IST'],
+      ['Morning', '10:15–11:14 IST'],
+      ['Mid', '11:15–13:29 IST'],
+      ['Afternoon', '13:30–14:14 IST'],
+      ['Post', 'From 14:15 IST'],
+    ];
+
+    let selectedDecisionSession = new URLSearchParams(location.search).get('session');
+    if (!decisionSessions.some((item) => item[0] === selectedDecisionSession)) {
+      selectedDecisionSession = null;
+    }
+
+    function decisionRecord(raw) {
+      const payload = raw?.payload && typeof raw.payload === 'object' ? raw.payload : {};
+      const eventType = String(raw?.event_type || payload.event_type || '').toUpperCase();
+      const decisionTime = payload.minute || payload.decision_minute || raw?.timestamp || raw?.created_at;
+      // Runtime decisions persist a time-only minute; created_at keeps the
+      // session filter correct when the payload does not include the date.
+      const sessionTime = typeof decisionTime === 'string' && decisionTime.includes('T')
+        ? decisionTime
+        : raw?.created_at || decisionTime;
+      const outcome = String(payload.outcome || (
+        eventType === 'ACCEPTEDDECISION' ? 'accepted' :
+        eventType === 'REJECTEDDECISION' ? 'rejected' :
+        eventType === 'EXECUTEDDECISION' ? 'executed' : ''
+      )).toLowerCase();
+      const source = String(payload.decision_source || '').toLowerCase();
+      return { payload, eventType, decisionTime, sessionTime, outcome, source };
+    }
+
+    function decisionSession(raw) {
+      return session(decisionRecord(raw).sessionTime);
+    }
+
+    function decisionStats(rows, sessionName) {
+      const matching = rows.filter((raw) => decisionSession(raw) === sessionName);
+      const stats = { detections: matching.length, candidates: 0, replayed: 0, executed: 0, accepted: 0, rejected: 0 };
+      matching.forEach((raw) => {
+        const item = decisionRecord(raw);
+        const isCandidate = item.eventType.includes('CANDIDATE') || item.outcome === 'candidate';
+        const isReplayed = item.source === 'replay' || item.outcome === 'replayed';
+        const isExecuted = item.eventType === 'EXECUTEDDECISION' || item.outcome === 'executed';
+        const isAccepted = item.eventType === 'ACCEPTEDDECISION' || item.outcome === 'accepted';
+        const isRejected = item.eventType === 'REJECTEDDECISION' || item.eventType === 'SIZING_REJECTED' || item.outcome.includes('rejection') || item.outcome === 'rejected';
+        if (isCandidate) stats.candidates += 1;
+        if (isReplayed) stats.replayed += 1;
+        if (isExecuted) stats.executed += 1;
+        if (isAccepted && !isReplayed) stats.accepted += 1;
+        if (isRejected) stats.rejected += 1;
+      });
+      return stats;
+    }
+
     async function get(path, options = {}) {
       const response = await fetch(api + path, {
         ...options,
@@ -617,6 +741,13 @@
         .join('');
     }
 
+    function filteredDecisionRows(rows) {
+      if (!selectedDecisionSession) {
+        selectedDecisionSession = rows.length ? decisionSession(rows[0]) : 'Post';
+      }
+      return rows.filter((raw) => decisionSession(raw) === selectedDecisionSession);
+    }
+
     function render(data) {
       const runtime = data.runtime || {};
       const capital = data.capital || {};
@@ -685,31 +816,39 @@
           ${decisions(decisionRows.slice(0, 10))}
         </div>`;
       } else if (page === 'decisions') {
+        const visibleDecisionRows = filteredDecisionRows(decisionRows);
+        const selectedStats = decisionStats(decisionRows, selectedDecisionSession);
         body = `<div class="card">
           <h2>Decision review</h2>
           <div class="session-grid">
-            ${[
-              ['Pre', 'Before 10:15 IST'],
-              ['Morning', '10:15–11:14 IST'],
-              ['Mid', '11:15–13:29 IST'],
-              ['Afternoon', '13:30–14:14 IST'],
-              ['Post', 'From 14:15 IST'],
-            ]
+            ${decisionSessions
               .map((x) => {
-                const count = decisionRows.filter((y) => session(y.timestamp || y.minute || y.created_at) === x[0]).length;
-                return `<div class="session">
+                const stats = decisionStats(decisionRows, x[0]);
+                const active = stats.detections > 0;
+                return `<a class="session session-filter" href="/decisions?session=${encodeURIComponent(x[0])}"${selectedDecisionSession === x[0] ? ' aria-current="page"' : ''}>
                   <strong>${x[0]}</strong>
                   <div class="label">${x[1]}</div>
-                  <p>${count} decisions</p>
-                  ${badge(count ? 'Active' : 'Quiet', count ? 'good' : 'warn')}
-                </div>`;
+                  <span class="session-count">${stats.detections} <span class="label">detections</span></span>
+                  ${badge(active ? 'Active' : 'Quiet', active ? 'good' : 'warn')}
+                </a>`;
               })
               .join('')}
           </div>
+          <div class="review-summary">
+            ${[
+              [selectedDecisionSession, 'selected'],
+              [selectedStats.detections, 'detections'],
+              [selectedStats.candidates, 'candidates'],
+              [selectedStats.replayed, 'replayed'],
+              [selectedStats.executed, 'executed'],
+              [selectedStats.accepted, 'live accepted'],
+              [selectedStats.rejected, 'rejected'],
+            ].map((x) => `<span class="badge"><strong>${esc(x[0])}</strong> ${x[1]}</span>`).join('')}
+          </div>
         </div>
         <div class="card">
-          <h2>Decision rows</h2>
-          ${decisions(decisionRows)}
+          <div class="section-head"><h2>Decision rows</h2><span class="label">Showing ${visibleDecisionRows.length} of ${decisionRows.length}</span></div>
+          ${decisions(visibleDecisionRows)}
         </div>`;
       } else if (page === 'capital') {
         body = `<div class="card">

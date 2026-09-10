@@ -22,6 +22,10 @@ def _pid_is_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
+    except OSError:
+        # Windows can report invalid or stale PIDs as WinError 87 instead of
+        # raising ProcessLookupError. Treat those leases as recoverable.
+        return False
     return True
 
 
