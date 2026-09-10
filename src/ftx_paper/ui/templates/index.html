@@ -6,19 +6,27 @@
   <title>FTX Paper Trading · {{ page|title }}</title>
   <style>
     :root {
-      --navy: #172033;
-      --ink: #172033;
-      --muted: #6b7280;
-      --line: #e4e8ef;
-      --bg: #f5f7fb;
-      --green: #16845b;
-      --red: #c43d4b;
-      --yellow: #b27a16;
-      --blue: #3564b8;
-      --shadow: 0 8px 24px #17203312;
-      font: 14px Inter, system-ui, sans-serif;
-      color: var(--ink);
-      background: var(--bg);
+      --md-primary: #415f91;
+      --md-on-primary: #ffffff;
+      --md-primary-container: #d6e3ff;
+      --md-on-primary-container: #284777;
+      --md-secondary-container: #dce2f9;
+      --md-on-secondary-container: #3f4759;
+      --md-surface: #f9f9ff;
+      --md-surface-container: #edeef5;
+      --md-surface-container-low: #f3f3fa;
+      --md-on-surface: #1a1b20;
+      --md-on-surface-variant: #44474f;
+      --md-outline-variant: #c4c6d0;
+      --md-error: #ba1a1a;
+      --md-error-container: #ffdad6;
+      --md-success: #386a20;
+      --md-success-container: #bceea3;
+      --md-warning: #765900;
+      --md-warning-container: #ffe08a;
+      font: 15px "Segoe UI", Roboto, system-ui, sans-serif;
+      color: var(--md-on-surface);
+      background: var(--md-surface);
     }
 
     * {
@@ -30,67 +38,80 @@
     }
 
     header {
-      background: var(--navy);
-      color: #fff;
-      padding: 22px max(22px, calc((100% - 1240px) / 2));
+      background: var(--md-surface-container);
+      border-bottom: 1px solid var(--md-outline-variant);
+      padding: 20px max(22px, calc((100% - 1180px) / 2));
       display: flex;
       justify-content: space-between;
     }
 
     header h1 {
-      font-size: 20px;
+      color: var(--md-on-surface);
+      font-size: 22px;
+      line-height: 28px;
       margin: 0;
-      font-weight: 800;
+      font-weight: 700;
     }
 
     header p {
       margin: 4px 0;
-      color: #aeb8cb;
+      color: var(--md-on-surface-variant);
+      font-size: 13px;
+      line-height: 18px;
+    }
+
+    #health {
+      align-self: center;
+      color: var(--md-on-surface-variant);
       font-size: 12px;
+      font-weight: 700;
     }
 
     main {
-      max-width: 1240px;
+      max-width: 1180px;
       margin: auto;
-      padding: 26px 22px;
+      padding: 20px 22px 36px;
     }
 
     nav {
       display: flex;
-      gap: 4px;
+      gap: 2px;
       flex-wrap: wrap;
-      margin-bottom: 24px;
+      margin-bottom: 20px;
     }
 
     nav a {
-      color: #526078;
+      color: var(--md-on-surface-variant);
       text-decoration: none;
-      padding: 9px 12px;
-      border-radius: 7px;
+      padding: 8px 10px;
+      border-radius: 20px;
+      min-height: 40px;
+      font-size: 14px;
       font-weight: 600;
     }
 
     nav a.active,
     nav a:hover {
-      background: #e9eef8;
-      color: var(--blue);
+      background: var(--md-secondary-container);
+      color: var(--md-on-secondary-container);
     }
 
     .card,
     .status-item,
     .metric,
     .session {
-      background: #fff;
-      border: 1px solid var(--line);
+      background: var(--md-surface-container-low);
+      border: 1px solid var(--md-outline-variant);
       border-radius: 12px;
-      padding: 18px;
-      box-shadow: var(--shadow);
-      margin-bottom: 18px;
+      padding: 16px;
+      margin-bottom: 14px;
     }
 
     .card h2 {
-      font-size: 15px;
-      margin: 0 0 15px;
+      font-size: 20px;
+      line-height: 24px;
+      font-weight: 600;
+      margin: 0 0 13px;
     }
 
     .status-strip,
@@ -98,13 +119,13 @@
     .session-grid {
       display: grid;
       grid-template-columns: repeat(5, 1fr);
-      gap: 10px;
+      gap: 8px;
     }
 
     .status-item,
     .metric,
     .session {
-      padding: 14px;
+      padding: 12px;
       margin: 0;
       box-shadow: none;
     }
@@ -115,14 +136,16 @@
 
     .label {
       text-transform: uppercase;
-      letter-spacing: 0.08em;
-      color: var(--muted);
-      font-size: 10px;
-      font-weight: 700;
+      letter-spacing: 0.04em;
+      color: var(--md-on-surface-variant);
+      font-size: 11px;
+      line-height: 16px;
+      font-weight: 600;
     }
 
     .status-value {
-      font-weight: 700;
+      font-size: 14px;
+      font-weight: 600;
       margin-top: 7px;
     }
 
@@ -131,34 +154,35 @@
       width: 8px;
       height: 8px;
       border-radius: 50%;
-      background: var(--muted);
+      background: var(--md-on-surface-variant);
       margin-right: 7px;
     }
 
     .dot.good {
-      background: var(--green);
+      background: var(--md-success);
     }
 
     .dot.bad {
-      background: var(--red);
+      background: var(--md-error);
     }
 
     .dot.warn {
-      background: var(--yellow);
+      background: var(--md-warning);
     }
 
     .value {
-      font-size: 22px;
-      font-weight: 800;
-      margin-top: 8px;
+      font-size: 24px;
+      line-height: 32px;
+      font-weight: 600;
+      margin-top: 6px;
     }
 
     .positive {
-      color: var(--green);
+      color: var(--md-success);
     }
 
     .negative {
-      color: var(--red);
+      color: var(--md-error);
     }
 
     table {
@@ -168,16 +192,17 @@
 
     th {
       text-align: left;
-      color: var(--muted);
-      font-size: 10px;
+      color: var(--md-on-surface-variant);
+      font-size: 11px;
+      letter-spacing: 0.04em;
       text-transform: uppercase;
-      background: #f8f9fc;
+      background: var(--md-surface-container);
     }
 
     th,
     td {
-      padding: 12px 10px;
-      border-bottom: 1px solid var(--line);
+      padding: 13px 10px;
+      border-bottom: 1px solid var(--md-outline-variant);
       vertical-align: top;
     }
 
@@ -185,46 +210,50 @@
       display: inline-block;
       border-radius: 99px;
       padding: 4px 9px;
-      font-size: 11px;
-      font-weight: 700;
-      background: #edf1f7;
-      color: #526078;
+      font-size: 12px;
+      line-height: 16px;
+      font-weight: 600;
+      background: var(--md-surface-container);
+      color: var(--md-on-surface-variant);
     }
 
     .badge.good {
-      background: #e5f6ee;
-      color: var(--green);
+      background: var(--md-success-container);
+      color: var(--md-success);
     }
 
     .badge.bad {
-      background: #fdebed;
-      color: var(--red);
+      background: var(--md-error-container);
+      color: var(--md-error);
     }
 
     .badge.warn {
-      background: #fff4d9;
-      color: var(--yellow);
+      background: var(--md-warning-container);
+      color: var(--md-warning);
     }
 
     button {
       border: 0;
-      border-radius: 7px;
-      background: var(--blue);
-      color: #fff;
-      padding: 9px 13px;
+      border-radius: 20px;
+      background: var(--md-primary);
+      color: var(--md-on-primary);
+      min-height: 40px;
+      padding: 10px 20px;
       font: inherit;
-      font-weight: 700;
+      font-size: 14px;
+      letter-spacing: 0.01em;
+      font-weight: 600;
       cursor: pointer;
       margin: 0 5px 5px 0;
     }
 
     button.secondary {
-      background: #e9eef8;
-      color: var(--blue);
+      background: var(--md-primary-container);
+      color: var(--md-on-primary-container);
     }
 
     button.danger {
-      background: var(--red);
+      background: var(--md-error);
     }
 
     .toolbar,
@@ -236,23 +265,24 @@
     }
 
     .section-head a {
-      color: var(--blue);
-      font-size: 12px;
+      color: var(--md-primary);
+      font-size: 14px;
+      font-weight: 600;
     }
 
     .empty {
       text-align: center;
-      color: var(--muted);
+      color: var(--md-on-surface-variant);
       padding: 24px;
     }
 
     .payload {
-      background: #f7f9fc;
-      border: 1px solid var(--line);
-      border-radius: 7px;
+      background: var(--md-surface-container);
+      border: 1px solid var(--md-outline-variant);
+      border-radius: 8px;
       padding: 12px;
       margin-top: 10px;
-      color: #526078;
+      color: var(--md-on-surface-variant);
       font-size: 12px;
       white-space: pre-wrap;
       overflow: auto;
@@ -268,13 +298,14 @@
       grid-template-columns: 130px 1fr 110px 1fr 100px;
       gap: 12px;
       align-items: center;
-      padding: 12px 0;
-      border-bottom: 1px solid var(--line);
+      font-size: 14px;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--md-outline-variant);
     }
 
     .flash {
-      background: #e5f6ee;
-      color: var(--green);
+      background: var(--md-success-container);
+      color: var(--md-success);
       padding: 11px 14px;
       border-radius: 8px;
       margin-bottom: 16px;
@@ -289,6 +320,11 @@
 
       .decision-row {
         grid-template-columns: 1fr 1fr;
+      }
+
+      header {
+        align-items: flex-start;
+        gap: 12px;
       }
     }
 
