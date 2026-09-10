@@ -13,7 +13,7 @@ def create_ui_app(api_base_url: str | None = None) -> Flask:
     @app.get("/")
     @app.get("/<page>")
     def index(page: str = "dashboard"):
-        pages = {"dashboard", "decisions", "positions", "trades", "events", "logs"}
+        pages = {"dashboard", "decisions", "positions", "trades", "events", "logs", "capital"}
         if page not in pages:
             return "Not found", 404
         return render_template("index.html", api_base_url=configured_api.rstrip("/"), page=page)

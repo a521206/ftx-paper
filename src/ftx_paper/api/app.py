@@ -54,6 +54,7 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             return jsonify({"error": {"code": "invalid_request_token", "message": str(exc)}}), 400
         except Exception as exc:  # broker errors are not safe to expose as 500 details
             return jsonify({"error": {"code": "broker_auth_failed", "message": str(exc)}}), 502
+        controller.request_start()
         return jsonify({"provider": "zerodha", "authenticated": True}), 200
 
     @app.get("/zerodha/callback")
@@ -69,6 +70,7 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             return f"Zerodha login failed: {exc}", 400
         except Exception:
             return "Zerodha token exchange failed. Check the API logs.", 502
+        controller.request_start()
         return "Zerodha connected successfully. You may close this window and refresh the dashboard.", 200
 
     @app.get("/api/v1/broker/zerodha/status")
@@ -116,7 +118,18 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
     @app.get("/api/v1/capital")
     def capital():
         status = store.read_status()
-        return jsonify({"capital": status.get("capital", 0), "currency": "INR"})
+        raw = status.get("capital", 0)
+        values = raw if isinstance(raw, dict) else {}
+        return jsonify({
+            "capital": values.get("capital", raw if not isinstance(raw, dict) else None),
+            "initial_capital": values.get("initial_capital"),
+            "current_equity": values.get("current_equity", values.get("capital")),
+            "realized_pnl": values.get("realized_pnl", values.get("total_pnl")),
+            "total_pnl": values.get("total_pnl", values.get("realized_pnl")),
+            "open_margin": values.get("open_margin", values.get("open_margin_used")),
+            "drawdown": values.get("drawdown", values.get("drawdown_pct")),
+            "currency": "INR",
+        })
 
     @app.get("/api/v1/trades")
     def trades():
