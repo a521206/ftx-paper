@@ -139,6 +139,47 @@ def test_completed_bars_emit_one_bundle_only_after_required_roles_arrive() -> No
     assert aggregator.ingest(future) is None
 
 
+def test_futures_clock_carries_forward_missing_supporting_bar_and_ignores_late_bar() -> None:
+    future = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    vix = Instrument("INDIA VIX", "NSE", "VIX")
+    aggregator = CompletedBarAggregator({
+        ("NFO", "NIFTYFUT"): "futures",
+        ("NSE", "INDIA VIX"): "vix",
+    }, required_roles=("futures",))
+    prior_minute = datetime(2026, 1, 1, 10, 19, tzinfo=ZoneInfo("Asia/Kolkata"))
+    decision_minute = datetime(2026, 1, 1, 10, 20, tzinfo=ZoneInfo("Asia/Kolkata"))
+    prior_vix = MarketBar(vix, prior_minute, 15, 16, 14, 15)
+    future_bar = MarketBar(future, decision_minute, 100, 102, 99, 101)
+    late_vix = MarketBar(vix, decision_minute, 16, 17, 15, 16)
+
+    assert aggregator.ingest(prior_vix) is None
+    bundle = aggregator.ingest(future_bar)
+    assert bundle is not None
+    assert bundle.supporting_inputs["bars"]["vix"] is prior_vix
+    assert bundle.supporting_inputs["sources"]["vix"] == "carried_forward"
+    assert bundle.supporting_inputs["missing"] == ("vix",)
+    assert bundle.supporting_inputs["unavailable"] == ()
+    assert aggregator.ingest(late_vix) is None
+
+
+def test_futures_clock_prefers_same_minute_supporting_bar() -> None:
+    future = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    vix = Instrument("INDIA VIX", "NSE", "VIX")
+    aggregator = CompletedBarAggregator({
+        ("NFO", "NIFTYFUT"): "futures",
+        ("NSE", "INDIA VIX"): "vix",
+    }, required_roles=("futures",))
+    minute = datetime(2026, 1, 1, 10, 20, tzinfo=ZoneInfo("Asia/Kolkata"))
+    vix_bar = MarketBar(vix, minute, 15, 16, 14, 15)
+    future_bar = MarketBar(future, minute, 100, 102, 99, 101)
+
+    assert aggregator.ingest(vix_bar) is None
+    bundle = aggregator.ingest(future_bar)
+    assert bundle is not None
+    assert bundle.supporting_inputs["bars"]["vix"] is vix_bar
+    assert bundle.supporting_inputs["sources"]["vix"] == "same_minute"
+
+
 def test_supporting_role_is_ignored_and_expired_bundle_has_diagnostics() -> None:
     future = Instrument("NIFTYFUT", "NFO", "FUTURES")
     spot = Instrument("NIFTY", "NSE", "INDEX")

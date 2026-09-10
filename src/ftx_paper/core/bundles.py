@@ -26,11 +26,11 @@ class DecisionBundle:
 
 
 class CompletedBarAggregator:
-    """Collect instrument bars and emit one bundle per date/minute.
+    """Emit one futures-clocked bundle per date/minute.
 
-    A minute is emitted immediately only when complete.  ``flush`` is the
-    explicit close policy for incomplete minutes. Exchange timestamps identify
-    the minute; a private monotonic receipt clock controls the grace period.
+    Same-minute supporting bars are preferred. Missing supporting bars carry
+    forward their latest completed value, and late bars cannot mutate an
+    emitted bundle.
     """
 
     def __init__(self, role_by_instrument: Mapping[tuple[str, str], str], *, required_roles: Iterable[str] = ("futures", "vix"), deadline_seconds: float = 10.0) -> None:
@@ -45,6 +45,7 @@ class CompletedBarAggregator:
         self._pending: dict[tuple[str, str], dict[str, MarketBar]] = defaultdict(dict)
         self._emitted: set[tuple[str, str]] = set()
         self._first_seen_monotonic: dict[tuple[str, str], float] = {}
+        self._previous: dict[str, MarketBar] = {}
 
     def ingest(self, bar: MarketBar) -> DecisionBundle | None:
         role = self._roles.get((bar.instrument.exchange, bar.instrument.symbol))
@@ -57,6 +58,8 @@ class CompletedBarAggregator:
             return None
         self._pending[key][role] = bar
         self._first_seen_monotonic.setdefault(key, time.monotonic())
+        if self.required_roles == ("futures",) and role == "futures":
+            return self._emit(key)
         if all(role in self._pending[key] for role in self.required_roles):
             return self._emit(key)
         return None
@@ -103,15 +106,36 @@ class CompletedBarAggregator:
         return tuple(result)
 
     def _emit(self, key: tuple[str, str]) -> DecisionBundle:
-        bars = self._pending.pop(key)
+        current = self._pending.pop(key)
         self._first_seen_monotonic.pop(key, None)
+        bars = dict(current)
+        sources = {role: "same_minute" for role in current}
+        missing_same_minute: list[str] = []
+        unavailable_inputs: list[str] = []
+        for role in self._supporting_roles:
+            if role in bars:
+                continue
+            missing_same_minute.append(role)
+            previous = self._previous.get(role)
+            if previous is None:
+                unavailable_inputs.append(role)
+                continue
+            bars[role] = previous
+            sources[role] = "carried_forward"
         missing = tuple(role for role in self.required_roles if role not in bars)
         trading_date, minute = key
+        for role, bar in bars.items():
+            self._previous[role] = bar
         bundle = DecisionBundle(
             bundle_id=f"{trading_date}:{minute}", trading_date=trading_date, minute=minute,
             bars={role: bar for role, bar in bars.items() if role in self.required_roles},
             required_roles=self.required_roles, missing_roles=missing,
-            supporting_inputs={"bars": {role: bar for role, bar in bars.items() if role in self._supporting_roles}},
+            supporting_inputs={
+                "bars": {role: bar for role, bar in bars.items() if role in self._supporting_roles},
+                "sources": sources,
+                "missing": tuple(sorted(missing_same_minute)),
+                "unavailable": tuple(sorted(unavailable_inputs)),
+            },
         )
         self._emitted.add(key)
         return bundle
