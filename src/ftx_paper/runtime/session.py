@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 from ftx_paper.broker import Broker, PaperBroker
 from ftx_paper.contracts import (
-    Instrument, MarketBar, OrderSide, market_minute_key, normalize_exchange_timestamp,
+    Instrument, MarketBar, OrderSide, normalize_exchange_timestamp,
 )
 from ftx_paper.core import CompletedBarAggregator, PaperEngine
 from ftx_paper.execution import PositionLedger
@@ -17,9 +17,6 @@ from .store import RuntimeStore
 
 if TYPE_CHECKING:
     from ftx_paper.broker.zerodha import ZerodhaInstrument
-
-
-SNAPSHOT_DELAY_SECONDS = 1.0
 
 
 def _bundle_timestamp(session_date: str, minute: str) -> datetime:
@@ -50,7 +47,6 @@ class RuntimeSession:
         self._stopping = False
         self._started = threading.Event()
         self._aggregator: CompletedBarAggregator | None = None
-        self._snapshot_timers: dict[tuple[str, str], threading.Timer] = {}
         self._replaying = False
         self._replay_date: str | None = None
 
@@ -98,8 +94,7 @@ class RuntimeSession:
                 for item in resolved
             }
             self._aggregator = CompletedBarAggregator(
-                role_map, required_roles=("futures", "vix"), deadline_seconds=10.0,
-                snapshot_delay_seconds=SNAPSHOT_DELAY_SECONDS,
+                role_map, required_roles=("futures",), deadline_seconds=10.0,
             )
             self.broker = (self.broker_factory or (lambda _client: PaperBroker()))(client)
             self._replay_date = datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
@@ -222,33 +217,6 @@ class RuntimeSession:
             else:
                 self._execute_paper_order(order, session_date=bundle.trading_date, timestamp=timestamp)
 
-    def _schedule_bundle_snapshot(self, key: tuple[str, str]) -> None:
-        if key in self._snapshot_timers or self._aggregator is None:
-            return
-        delay = self._aggregator.snapshot_delay_seconds
-        if delay <= 0:
-            self._snapshot_bundle(key)
-            return
-        timer = threading.Timer(delay, self._snapshot_bundle, args=(key,))
-        timer.daemon = True
-        self._snapshot_timers[key] = timer
-        timer.start()
-
-    def _snapshot_bundle(self, key: tuple[str, str]) -> None:
-        with self._lock:
-            self._snapshot_timers.pop(key, None)
-            if self._stopping or self._aggregator is None:
-                return
-            bundle = self._aggregator.snapshot(key)
-            if bundle is None:
-                return
-            if bundle.complete:
-                self.store.patch_status({"last_completed_bundle_minute": bundle.minute,
-                                         "last_strategy_evaluation_minute": bundle.minute})
-                self._process_bundle(bundle, source="live")
-            else:
-                self._record_incomplete(bundle)
-
     def _execute_paper_order(self, order, *, session_date: str | None = None,
                              timestamp: str | None = None) -> None:
         context = {
@@ -358,8 +326,6 @@ class RuntimeSession:
                     self.store.patch_status({"last_completed_bundle_minute": bundle.minute,
                                              "last_strategy_evaluation_minute": bundle.minute})
                     self._process_bundle(bundle, source="live")
-                elif self._aggregator.required_ready(market_minute_key(bar.timestamp)):
-                    self._schedule_bundle_snapshot(market_minute_key(bar.timestamp))
 
     def _record_incomplete(self, bundle) -> None:
         payload = {
@@ -400,9 +366,6 @@ class RuntimeSession:
         with self._lock:
             startup = self._thread
             self._stopping = True
-            for timer in self._snapshot_timers.values():
-                timer.cancel()
-            self._snapshot_timers.clear()
             self.store.patch_status({"state": "STOPPING", "feed_connected": False})
             if self.feed:
                 self.feed.stop()

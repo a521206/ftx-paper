@@ -22,6 +22,12 @@ def _option_pcr(bundle: DecisionBundle) -> float | None:
     return put_volume / call_volume if call_volume > 0 else None
 
 
+def _supporting_bar(bundle: DecisionBundle, role: str):
+    supporting = bundle.supporting_inputs or {}
+    bars = supporting.get("bars", {})
+    return bars.get(role) if isinstance(bars, dict) else None
+
+
 def _decision_datetime(bundle: DecisionBundle) -> datetime:
     """Return the timezone-aware instant at which the bundle was evaluated."""
     if "T" in bundle.minute:
@@ -56,6 +62,7 @@ class IndependentLiveDecisionEngine:
         self.afternoon_entry_minutes = afternoon_entry_minutes
         self._futures: list = []
         self._previous_pcr: float | None = None
+        self._previous_vix = None
         self._last_decision: datetime | None = None
         self._trading_date: str | None = None
         self._decision_session: str | None = None
@@ -73,6 +80,7 @@ class IndependentLiveDecisionEngine:
         if self._trading_date != bundle.trading_date:
             self._futures.clear()
             self._previous_pcr = None
+            self._previous_vix = None
             self._last_decision = None
             self._decision_session = None
             self._trading_date = bundle.trading_date
@@ -90,7 +98,10 @@ class IndependentLiveDecisionEngine:
                 "required_input_availability": {r: r not in bundle.missing_roles for r in bundle.required_roles}}
         if not bundle.complete:
             return ()
-        vix_bar = bundle.bars.get("vix")
+        current_vix = bundle.bars.get("vix") or _supporting_bar(bundle, "vix")
+        if current_vix is not None:
+            self._previous_vix = current_vix
+        vix_bar = current_vix or self._previous_vix
         if vix_bar is None:
             decision_id = sha256(f"{bundle.bundle_id}:missing_vix".encode()).hexdigest()[:24]
             return (LiveDecision("REJECTEDDECISION", {**base, "decision_id": decision_id, "cell": "NONE", "direction": "NONE", "setup_type": "Skip", "outcome": "policy rejection", "reason": "missing_vix", "required_input_availability": {**base["required_input_availability"], "vix": False}, "feature_values": {}}),)
