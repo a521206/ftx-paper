@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, TypedDict
 from datetime import date, datetime, timedelta
 
 from ftx_paper.broker.protocol import Fill
@@ -9,7 +10,23 @@ from ftx_paper.contracts import Instrument, MarketBar, OrderAck, OrderIntent
 KITE_EXCHANGE_MAP = {"NSE_INDEX": "NSE", "BSE_INDEX": "BSE"}
 
 
-def resolve_instruments(client: Any, specifications: list[dict[str, object]]) -> list[dict[str, object]]:
+class ZerodhaInstrument(TypedDict):
+    instrument_token: int
+    exchange: str
+    symbol: str
+    tradingsymbol: str
+    instrument_type: str
+    role: str | None
+
+
+@dataclass
+class RuntimeRoles:
+    futures: ZerodhaInstrument
+    vix: ZerodhaInstrument
+    options: dict[str, object] | None = None
+
+
+def resolve_instruments(client: Any, specifications: list[dict[str, object]]) -> list[ZerodhaInstrument]:
     """Resolve configured exchange/tradingsymbol pairs to broker tokens."""
     if not specifications:
         raise ValueError("No Zerodha instruments configured")
@@ -27,28 +44,27 @@ def resolve_instruments(client: Any, specifications: list[dict[str, object]]) ->
     return resolved
 
 
-def classify_runtime_roles(instruments: list[dict[str, object]]) -> dict[str, object]:
-    roles: dict[str, object] = {}
-    options = []
+def classify_runtime_roles(instruments: list[ZerodhaInstrument]) -> RuntimeRoles:
+    futures: ZerodhaInstrument | None = None
+    vix: ZerodhaInstrument | None = None
+    options_list: list[ZerodhaInstrument] = []
     for item in instruments:
         symbol = str(item.get("symbol", "")).upper()
         exchange = str(item.get("exchange", ""))
         role = str(item.get("role", "")).lower()
         if role == "vix" or symbol in {"INDIA VIX", "INDIAVIX"}:
-            roles["vix"] = item
+            vix = item
         elif role == "futures" or (exchange == "NFO" and symbol.endswith("FUT")):
-            roles["futures"] = item
+            futures = item
         elif exchange == "NFO" and symbol.endswith(("CE", "PE")):
-            options.append(item)
-    if options:
-        roles["options"] = {"contracts": options}
-    missing = [name for name in ("futures", "vix") if name not in roles]
-    if missing:
+            options_list.append(item)
+    if futures is None or vix is None:
+        missing = [name for name, value in (("futures", futures), ("vix", vix)) if value is None]
         raise ValueError(f"Missing required FTX Zerodha instrument roles: {', '.join(missing)}")
-    return roles
+    return RuntimeRoles(futures=futures, vix=vix, options={"contracts": options_list} if options_list else None)
 
 
-def load_startup_backfill(client: Any, instruments: list[dict[str, object]], *, days: int = 2) -> tuple[MarketBar, ...]:
+def load_startup_backfill(client: Any, instruments: list[ZerodhaInstrument], *, days: int = 2) -> tuple[MarketBar, ...]:
     """Fetch bounded one-minute warmup bars and normalize them at the broker edge."""
     end = date.today()
     start = end - timedelta(days=max(1, days + 3))

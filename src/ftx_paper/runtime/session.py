@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import threading
 from datetime import datetime, timezone
-from typing import Any, Callable, cast
+from typing import TYPE_CHECKING, Any, Callable
 
 from ftx_paper.broker import Broker
 from ftx_paper.contracts import Instrument, MarketBar, OrderSide
 from ftx_paper.core import CompletedBarAggregator, PaperEngine
 from ftx_paper.execution import PositionLedger
 from .store import RuntimeStore
+
+if TYPE_CHECKING:
+    from ftx_paper.broker.zerodha import ZerodhaInstrument
 
 
 class RuntimeSession:
@@ -47,11 +50,11 @@ class RuntimeSession:
                 raise ValueError("Zerodha authentication required")
             from ftx_paper.broker.zerodha import ZerodhaBroker, ZerodhaFeed, classify_runtime_roles, create_kite_socket, load_startup_backfill, resolve_instruments
             client = self.client_factory() if self.client_factory else self.auth.authenticated_client()
-            resolved = resolve_instruments(client, self.specifications)
+            resolved: list[ZerodhaInstrument] = resolve_instruments(client, self.specifications)
             roles = classify_runtime_roles(resolved)
             role_map = {(str(item["exchange"]), str(item["symbol"])): str(item.get("role") or "") for item in resolved}
             self._aggregator = CompletedBarAggregator(role_map, required_roles=("futures", "vix"))
-            for bar in load_startup_backfill(client, [cast(dict[str, object], roles["futures"]), cast(dict[str, object], roles["vix"])]):
+            for bar in load_startup_backfill(client, [roles.futures, roles.vix]):
                 self.engine.on_bar(bar)
             normalize = self.normalize_payload or self._make_normalizer(resolved)
             socket = create_kite_socket(self.auth.api_key, self.auth.access_token())
@@ -79,7 +82,7 @@ class RuntimeSession:
             self._started.set()
 
     @staticmethod
-    def _make_normalizer(resolved):
+    def _make_normalizer(resolved: list[ZerodhaInstrument]):
         by_token = {int(item["instrument_token"]): item for item in resolved}
 
         def normalize(payload):
@@ -156,7 +159,7 @@ class RuntimeSession:
                         continue
                     ack = self.broker.submit(order)
                     self.store.append_event("ORDER_ACK", {"decision_id": order.client_order_id, "client_order_id": ack.client_order_id, "broker_order_id": ack.broker_order_id, "status": ack.status}, f"order_ack:{ack.client_order_id}")
-                    fill = self.broker.poll_fill(order, ack.broker_order_id) if hasattr(self.broker, "poll_fill") else (self.broker.fills[-1] if getattr(self.broker, "fills", None) else None)
+                    fill = self.broker.poll_fill(order, ack.broker_order_id)
                     if fill:
                         self.store.append_event("EXECUTEDDECISION", {"decision_id": order.client_order_id, "client_order_id": fill.client_order_id, "status": "FILLED", "fill_price": fill.price, "quantity": fill.quantity}, f"executed:{fill.client_order_id}")
                     if fill and self.ledger:

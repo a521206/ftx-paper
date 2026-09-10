@@ -134,8 +134,8 @@ def test_zerodha_instrument_resolution_and_role_classification() -> None:
             return [{"tradingsymbol": "NIFTYFUT", "instrument_token": 1}, {"tradingsymbol": "INDIA VIX", "instrument_token": 2}]
     rows = resolve_instruments(Client(), [{"exchange": "NFO", "tradingsymbol": "NIFTYFUT", "role": "futures"}, {"exchange": "NSE", "tradingsymbol": "INDIA VIX", "role": "vix"}])
     roles = classify_runtime_roles(rows)
-    assert roles["futures"]["instrument_token"] == 1
-    assert roles["vix"]["instrument_token"] == 2
+    assert roles.futures["instrument_token"] == 1
+    assert roles.vix["instrument_token"] == 2
 
 
 def test_zerodha_historical_rows_become_normalized_market_bars() -> None:

@@ -28,6 +28,8 @@ class Broker(Protocol):
 
     def close(self) -> None: ...
 
+    def poll_fill(self, order: OrderIntent, broker_order_id: str) -> Fill | None: ...
+
 
 class PaperBroker:
     """Deterministic broker for paper mode; production adapters implement Broker."""
@@ -44,6 +46,9 @@ class PaperBroker:
         from datetime import datetime, timezone
         self.fills.append(Fill(order.client_order_id, order.instrument, order.quantity, price, datetime.now(timezone.utc).isoformat()))
         return order_ack
+
+    def poll_fill(self, order: OrderIntent, broker_order_id: str) -> Fill | None:
+        return self.fills[-1] if self.fills else None
 
     def close(self) -> None:
         return None
