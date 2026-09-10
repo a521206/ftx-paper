@@ -658,6 +658,15 @@
       return stats;
     }
 
+    let refreshTimer = null;
+    let refreshDelayMs = 5000;
+    let refreshInFlight = false;
+
+    function scheduleRefresh(delayMs) {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(refresh, delayMs);
+    }
+
     async function get(path, options = {}) {
       const response = await fetch(api + path, {
         ...options,
@@ -668,7 +677,9 @@
       });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) {
-        throw new Error(body.error?.message || `Request failed (${response.status})`);
+        const error = new Error(body.error?.message || `Request failed (${response.status})`);
+        error.status = response.status;
+        throw error;
       }
       return body;
     }
@@ -1016,6 +1027,8 @@
     }
 
     async function refresh() {
+      if (refreshInFlight) return;
+      refreshInFlight = true;
       try {
         const [health, runtime, capital, positions, trades, decisionsData, events, broker] =
           await Promise.all(
@@ -1041,14 +1054,23 @@
           events,
           broker,
         });
+        refreshDelayMs = 5000;
+        scheduleRefresh(refreshDelayMs);
       } catch (e) {
         document.getElementById('health').innerHTML = '<span class="dot bad"></span>API unavailable';
-        flash(e.message);
+        if (e.status === 429) {
+          refreshDelayMs = Math.min(60000, refreshDelayMs * 2);
+          flash(`API rate limited; retrying in ${Math.ceil(refreshDelayMs / 1000)}s`);
+        } else {
+          flash(e.message);
+        }
+        scheduleRefresh(refreshDelayMs);
+      } finally {
+        refreshInFlight = false;
       }
     }
 
     refresh();
-    setInterval(refresh, 5000);
   </script>
 </body>
 </html>

@@ -12,7 +12,7 @@ from ftx_paper.contracts import MarketBar
 
 
 class TickerSocket(Protocol):
-    def connect(self, on_message: Callable[[Mapping[str, Any]], None], on_close: Callable[[], None]) -> None: ...
+    def connect(self, on_message: Callable[[Mapping[str, Any]], None], on_close: Callable[..., None]) -> None: ...
     def subscribe(self, tokens: list[int]) -> None: ...
     def close(self) -> None: ...
 
@@ -31,12 +31,21 @@ def create_kite_socket(api_key: str, access_token: str) -> TickerSocket:
 
         def connect(self, on_message, on_close):
             self._connected = False
-            # KiteTicker instances are single-use after close.  Recreate the
-            # underlying websocket for every connection generation.
-            ticker = KiteTicker(api_key, access_token)
+            # The wrapper owns reconnects. Running KiteTicker's reconnect loop
+            # as well would create duplicate connection attempts during 429s.
+            ticker = KiteTicker(api_key, access_token, reconnect=False)
             self._ticker = ticker
             ticker.on_ticks = lambda _ws, payload: [on_message(item) for item in payload]
-            ticker.on_close = lambda *_args: on_close()
+
+            def handle_close(*args):
+                if self._ticker is not ticker:
+                    return
+                code = args[1] if len(args) > 1 else None
+                reason = args[2] if len(args) > 2 else ""
+                on_close(code, reason)
+
+            ticker.on_close = handle_close
+            ticker.on_error = handle_close
             ticker.on_connect = lambda *_args: self._on_connect()
             ticker.connect(threaded=True)
 
@@ -71,8 +80,9 @@ def create_kite_socket(api_key: str, access_token: str) -> TickerSocket:
 @dataclass(frozen=True, slots=True)
 class ReconnectPolicy:
     max_attempts: int = 5
-    initial_delay_seconds: float = 1.0
-    max_delay_seconds: float = 30.0
+    initial_delay_seconds: float = 2.0
+    max_delay_seconds: float = 60.0
+    rate_limit_delay_seconds: float = 60.0
 
     def delay(self, attempt: int) -> float:
         return min(self.max_delay_seconds, self.initial_delay_seconds * (2 ** max(0, attempt - 1)))
@@ -99,6 +109,8 @@ class ZerodhaFeed:
         self._next_watchdog_reconnect = 0.0
         self._started_at = 0.0
         self._connected = False
+        self._last_error: str | None = None
+        self._rate_limited_until: float | None = None
         self._reconnect_lock = RLock()
         self._reconnecting = False
         self._health = {
@@ -109,6 +121,8 @@ class ZerodhaFeed:
     def start(self) -> None:
         self._running = True
         self._attempts = 0
+        self._last_error = None
+        self._rate_limited_until = None
         self._started_at = self.clock()
         self._connect()
         self._watchdog_stop.clear()
@@ -138,6 +152,8 @@ class ZerodhaFeed:
             health["last_market_bar_at"] = bar.timestamp.isoformat()
             health["last_tick_seen_monotonic"] = self.clock()
             self._attempts = 0
+            self._last_error = None
+            self._rate_limited_until = None
             current = self._current.get(key)
             if current is None:
                 self._current[key] = bar
@@ -172,7 +188,15 @@ class ZerodhaFeed:
             instruments[key] = snapshot
         socket_connected = getattr(self.socket, "is_connected", None)
         connected = bool(socket_connected) if socket_connected is not None else self._connected
-        return {"connected": connected, "stale_instruments": stale, "instruments": instruments}
+        return {
+            "connected": connected,
+            "reconnect_attempts": self._attempts,
+            "last_error": self._last_error,
+            "rate_limited": self._rate_limited_until is not None and now < self._rate_limited_until,
+            "rate_limited_until_monotonic": self._rate_limited_until,
+            "stale_instruments": stale,
+            "instruments": instruments,
+        }
 
     def _emit_health(self) -> None:
         if self.on_health:
@@ -199,15 +223,17 @@ class ZerodhaFeed:
                     return
                 self._connected = False
                 self._next_watchdog_reconnect = self.clock() + self.policy.max_delay_seconds
+                self.pause(self.policy.delay(self._attempts))
                 self.socket.close()
                 self._connect()
             finally:
                 self._reconnecting = False
 
-    def _on_close(self) -> None:
+    def _on_close(self, code: int | None = None, reason: str = "") -> None:
         with self._reconnect_lock:
             if not self._running or self._reconnecting or self._attempts >= self.policy.max_attempts:
                 self._connected = False
+                self._last_error = f"{code}: {reason}" if code is not None else reason or None
                 self._emit_health()
                 return
             self._reconnecting = True
@@ -215,7 +241,18 @@ class ZerodhaFeed:
                 self._connected = False
                 self._attempts += 1
                 self._current.clear()
-                self.pause(self.policy.delay(self._attempts))
+                error_text = f"{code}: {reason}" if code is not None else reason
+                self._last_error = error_text or None
+                rate_limited = (
+                    "429" in error_text
+                    or "too many requests" in error_text.lower()
+                    or "toomanyrequests" in error_text.lower()
+                )
+                delay = self.policy.delay(self._attempts)
+                if rate_limited:
+                    delay = max(delay, self.policy.rate_limit_delay_seconds)
+                    self._rate_limited_until = self.clock() + delay
+                self.pause(delay)
                 self._connect()
             finally:
                 self._reconnecting = False

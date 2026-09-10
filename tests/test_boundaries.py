@@ -6,6 +6,7 @@ from ftx_paper.ui import create_ui_app
 from ftx_paper.broker.zerodha import ReconnectPolicy, ZerodhaFeed
 from ftx_paper.broker.zerodha import ZerodhaBroker, classify_runtime_roles, load_startup_backfill, resolve_instruments
 from ftx_paper.broker.zerodha import ZerodhaAuth
+import ftx_paper.broker.zerodha.adapter as zerodha_adapter
 from ftx_paper.contracts import OrderIntent, OrderSide
 from ftx_paper.contracts import Instrument, MarketBar
 from datetime import datetime
@@ -186,12 +187,54 @@ def test_zerodha_instrument_resolution_and_role_classification() -> None:
     assert roles.vix["instrument_token"] == 2
 
 
+def test_zerodha_instrument_resolution_caches_exchange_master() -> None:
+    class Client:
+        def __init__(self):
+            self.calls = []
+
+        def instruments(self, exchange):
+            self.calls.append(exchange)
+            return [
+                {"tradingsymbol": "NIFTYFUT", "instrument_token": 1},
+                {"tradingsymbol": "NIFTYVIX", "instrument_token": 2},
+            ]
+
+    client = Client()
+    resolve_instruments(client, [
+        {"exchange": "NFO", "tradingsymbol": "NIFTYFUT", "role": "futures"},
+        {"exchange": "NFO", "tradingsymbol": "NIFTYVIX", "role": "vix"},
+    ])
+
+    assert client.calls == ["NFO"]
+
+
 def test_zerodha_historical_rows_become_normalized_market_bars() -> None:
     class Client:
         def historical_data(self, token, start, end, interval):
             return [{"date": "2026-01-01T10:00:00+05:30", "open": 1, "high": 2, "low": 0, "close": 1.5, "volume": 10}]
     bars = load_startup_backfill(Client(), [{"instrument_token": 1, "symbol": "NIFTYFUT", "exchange": "NFO"}])
     assert bars[0].close == 1.5 and bars[0].instrument.symbol == "NIFTYFUT"
+
+
+def test_zerodha_historical_backfill_retries_rate_limits(monkeypatch) -> None:
+    class Client:
+        def __init__(self):
+            self.calls = 0
+
+        def historical_data(self, token, start, end, interval):
+            self.calls += 1
+            if self.calls < 3:
+                raise RuntimeError("Too many requests")
+            return [{"date": "2026-01-01T10:00:00+05:30", "open": 1, "high": 2, "low": 0, "close": 1.5}]
+
+    monkeypatch.setattr(zerodha_adapter, "_reserve_historical_request_slot", lambda: None)
+    monkeypatch.setattr(zerodha_adapter.time, "sleep", lambda _seconds: None)
+    client = Client()
+
+    bars = load_startup_backfill(client, [{"instrument_token": 1, "symbol": "NIFTYFUT", "exchange": "NFO"}])
+
+    assert client.calls == 3
+    assert bars[0].close == 1.5
 
 
 def test_zerodha_feed_emits_only_closed_minute_bars() -> None:
@@ -293,6 +336,38 @@ def test_zerodha_feed_reconnects_with_bounded_backoff() -> None:
     assert socket.connections == 2
     socket.close_callback()
     assert socket.connections == 3
+
+
+def test_zerodha_feed_uses_long_cooldown_for_rate_limited_close() -> None:
+    class Socket:
+        def __init__(self):
+            self.connections = 0
+
+        def connect(self, on_message, on_close):
+            self.connections += 1
+            self.close_callback = on_close
+
+        def subscribe(self, tokens):
+            pass
+
+        def close(self):
+            pass
+
+    socket = Socket()
+    pauses = []
+    feed = ZerodhaFeed(
+        socket,
+        [1],
+        lambda payload: payload,
+        lambda bar: None,
+        ReconnectPolicy(2, 1, 2, 10),
+        pauses.append,
+    )
+    feed.start()
+    socket.close_callback(1006, "WebSocket connection upgrade failed (429 - TooManyRequests)")
+
+    assert pauses == [10]
+    assert socket.connections == 2
     socket.close_callback()
     assert socket.connections == 3
 

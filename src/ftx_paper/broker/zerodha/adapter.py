@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, TypedDict
 from datetime import datetime, timedelta
+import threading
+import time
 from zoneinfo import ZoneInfo
 
 from ftx_paper.broker.protocol import Fill
@@ -12,6 +14,11 @@ from ftx_paper.contracts import (
 
 KITE_EXCHANGE_MAP = {"NSE_INDEX": "NSE", "BSE_INDEX": "BSE"}
 IST = ZoneInfo("Asia/Kolkata")
+HISTORICAL_REQUEST_INTERVAL_SECONDS = 0.5
+HISTORICAL_RATE_LIMIT_RETRIES = 3
+HISTORICAL_RATE_LIMIT_BACKOFF_SECONDS = 1.0
+_historical_rate_limit_lock = threading.Lock()
+_next_historical_request_at = 0.0
 
 
 class ZerodhaInstrument(TypedDict):
@@ -35,17 +42,51 @@ def resolve_instruments(client: Any, specifications: list[dict[str, object]]) ->
     if not specifications:
         raise ValueError("No Zerodha instruments configured")
     resolved = []
+    contracts_by_exchange: dict[str, list[dict[str, Any]]] = {}
     for spec in specifications:
         exchange = str(spec.get("exchange", "")).strip()
         symbol = str(spec.get("tradingsymbol", "")).strip()
         if not exchange or not symbol:
             raise ValueError("Each Zerodha instrument needs exchange and tradingsymbol")
-        rows = client.instruments(KITE_EXCHANGE_MAP.get(exchange, exchange))
+        kite_exchange = KITE_EXCHANGE_MAP.get(exchange, exchange)
+        if kite_exchange not in contracts_by_exchange:
+            contracts_by_exchange[kite_exchange] = client.instruments(kite_exchange)
+        rows = contracts_by_exchange[kite_exchange]
         match = next((row for row in rows if row.get("tradingsymbol") == symbol), None)
         if match is None:
             raise ValueError(f"Zerodha instrument not found: {exchange}:{symbol}")
         resolved.append({**dict(match), "exchange": exchange, "symbol": symbol, "role": spec.get("role")})
     return resolved
+
+
+def _reserve_historical_request_slot() -> None:
+    """Throttle historical requests across all startup workers in this process."""
+    global _next_historical_request_at
+    with _historical_rate_limit_lock:
+        now = time.monotonic()
+        wait_seconds = max(0.0, _next_historical_request_at - now)
+        _next_historical_request_at = max(now, _next_historical_request_at) + HISTORICAL_REQUEST_INTERVAL_SECONDS
+    if wait_seconds > 0:
+        time.sleep(wait_seconds)
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    if "too many requests" in str(exc).lower():
+        return True
+    response = getattr(exc, "response", None)
+    return getattr(response, "status_code", None) == 429 or getattr(exc, "code", None) == 429
+
+
+def _retry_after_seconds(exc: Exception) -> float | None:
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None) or getattr(exc, "headers", None)
+    if not headers:
+        return None
+    value = headers.get("Retry-After") or headers.get("retry-after")
+    try:
+        return max(0.0, float(value)) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def classify_runtime_roles(instruments: list[ZerodhaInstrument]) -> RuntimeRoles:
@@ -74,8 +115,24 @@ def load_startup_backfill(client: Any, instruments: list[ZerodhaInstrument], *, 
     start = end - timedelta(days=max(1, days + 3))
     bars: list[MarketBar] = []
     for item in instruments:
-        rows = client.historical_data(int(item["instrument_token"]), start, end, "minute")
-        for row in rows:
+        rows = None
+        for attempt in range(HISTORICAL_RATE_LIMIT_RETRIES + 1):
+            _reserve_historical_request_slot()
+            try:
+                rows = client.historical_data(int(item["instrument_token"]), start, end, "minute")
+                break
+            except Exception as exc:
+                if not _is_rate_limit_error(exc) or attempt >= HISTORICAL_RATE_LIMIT_RETRIES:
+                    if _is_rate_limit_error(exc):
+                        raise RuntimeError(
+                            "Zerodha historical API rate limit exceeded after bounded retries"
+                        ) from exc
+                    raise
+                delay = _retry_after_seconds(exc)
+                if delay is None:
+                    delay = HISTORICAL_RATE_LIMIT_BACKOFF_SECONDS * (2**attempt)
+                time.sleep(delay)
+        for row in rows or ():
             timestamp = row.get("date")
             parsed = normalize_exchange_timestamp(timestamp)
             bars.append(MarketBar(
