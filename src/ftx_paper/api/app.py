@@ -83,7 +83,14 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
 
     @app.get("/api/v1/runtime")
     def runtime():
-        return jsonify(store.read_status())
+        status = store.read_status()
+        if status.get("bars_seen") or store.read_events(1):
+            status["event_counts"] = store.event_counts()
+        return jsonify(status)
+
+    @app.get("/api/v1/diagnostics")
+    def diagnostics():
+        return jsonify({"status": store.read_status(), "event_counts": store.event_counts()})
 
     @app.post("/api/v1/runtime/<command>")
     def runtime_command(command: str):
@@ -107,7 +114,10 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
     @app.get("/api/v1/decisions")
     def decisions():
         events = store.read_events(1000)
-        return jsonify({"decisions": [event for event in events if event["event_type"] == "ENGINE_EVENT"]})
+        decision_types = {"BUNDLE_CREATED", "BUNDLE_INCOMPLETE", "CANDIDATE", "ACCEPTEDDECISION", "REJECTEDDECISION", "SIZING_REJECTED", "EXECUTEDDECISION"}
+        return jsonify({
+            "decisions": [event for event in events if str(event.get("event_type", "")).upper() in decision_types]
+        })
 
     @app.get("/api/v1/logs")
     def logs():

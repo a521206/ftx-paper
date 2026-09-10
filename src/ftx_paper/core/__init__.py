@@ -6,5 +6,7 @@ from .risk import RiskConfig, RiskDecision, RiskSizer
 from .replay import ReplayResult, replay
 from .session import LiveSession, SessionState
 from .strategy import Strategy, StrategyMetadata
+from .bundles import CompletedBarAggregator, DecisionBundle
+from .live_decision import IndependentLiveDecisionEngine, LiveDecision
 
-__all__ = ["EngineResult", "ExitAction", "ExitStateMachine", "LiveFeatureCalculator", "LiveFeatures", "LiveSession", "PaperEngine", "PositionState", "ReplayResult", "RiskConfig", "RiskDecision", "RiskSizer", "SessionState", "SetupDecision", "SetupPolicy", "Strategy", "StrategyMetadata", "replay"]
+__all__ = ["CompletedBarAggregator", "DecisionBundle", "EngineResult", "ExitAction", "ExitStateMachine", "IndependentLiveDecisionEngine", "LiveDecision", "LiveFeatureCalculator", "LiveFeatures", "LiveSession", "PaperEngine", "PositionState", "ReplayResult", "RiskConfig", "RiskDecision", "RiskSizer", "SessionState", "SetupDecision", "SetupPolicy", "Strategy", "StrategyMetadata", "replay"]

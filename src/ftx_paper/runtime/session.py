@@ -6,7 +6,7 @@ from typing import Any, Callable
 
 from ftx_paper.broker import Broker
 from ftx_paper.contracts import Instrument, MarketBar, OrderSide
-from ftx_paper.core import PaperEngine
+from ftx_paper.core import CompletedBarAggregator, PaperEngine
 from ftx_paper.execution import PositionLedger
 from .store import RuntimeStore
 
@@ -28,6 +28,7 @@ class RuntimeSession:
         self._lock = threading.RLock()
         self._stopping = False
         self._started = threading.Event()
+        self._aggregator: CompletedBarAggregator | None = None
 
     def start(self) -> None:
         with self._lock:
@@ -47,6 +48,9 @@ class RuntimeSession:
             client = self.client_factory() if self.client_factory else self.auth.authenticated_client()
             resolved = resolve_instruments(client, self.specifications)
             roles = classify_runtime_roles(resolved)
+            role_map = {(str(item["exchange"]), str(item["symbol"])): str(item.get("role") or "") for item in resolved}
+            required_roles = tuple(dict.fromkeys(role for role in role_map.values() if role))
+            self._aggregator = CompletedBarAggregator(role_map, required_roles=required_roles)
             for bar in load_startup_backfill(client, [roles["futures"], roles["vix"]]):
                 self.engine.on_bar(bar)
             normalize = self.normalize_payload or self._make_normalizer(resolved)
@@ -86,39 +90,66 @@ class RuntimeSession:
         with self._lock:
             if self._stopping or self.store.read_status().get("state") != "RUNNING":
                 return
-            result = self.engine.on_bar(bar)
             now = datetime.now(timezone.utc).isoformat()
-            self.store.patch_status({"last_bar_at": bar.timestamp.isoformat(), "last_heartbeat_at": now})
+            self.store.patch_status({"last_bar_at": bar.timestamp.isoformat(), "last_heartbeat_at": now,
+                                     "bars_seen": self.engine.bars_seen + 1})
+            if self._aggregator is None:
+                result = self.engine.on_bar(bar)
+                bundles = ()
+            else:
+                bundle = self._aggregator.ingest(bar)
+                bundles = (bundle,) if bundle is not None else ()
+                result = None
             metadata = self.engine.strategy_metadata
-            for event in result.events:
-                payload = dict(event)
-                if metadata:
-                    payload.update(strategy_version=metadata.version, config_hash=metadata.config_hash)
-                self.store.append_event("ENGINE_EVENT", payload, f"decision:{bar.timestamp.isoformat()}:{self.engine.bars_seen}")
-            for order in result.orders:
-                ack = self.broker.submit(order)
-                self.store.append_event("ORDER_ACK", {"client_order_id": ack.client_order_id, "broker_order_id": ack.broker_order_id, "status": ack.status}, f"order_ack:{ack.client_order_id}")
-                fill = self.broker.poll_fill(order, ack.broker_order_id) if hasattr(self.broker, "poll_fill") else (self.broker.fills[-1] if getattr(self.broker, "fills", None) else None)
-                if fill and self.ledger:
-                    position = self.ledger.apply_fill(fill, order.side if order.side in (OrderSide.BUY, OrderSide.SELL) else OrderSide.BUY)
-                    self.store.append_event("FILL", {"client_order_id": fill.client_order_id, "symbol": position.symbol, "quantity": position.quantity, "average_price": position.average_price}, f"fill:{fill.client_order_id}")
-                    self.store.patch_status({"capital": self.ledger.cash, "open_positions": [p.__dict__ if hasattr(p, "__dict__") else {"symbol": p.symbol, "quantity": p.quantity, "average_price": p.average_price} for p in self.ledger.positions()]})
+            results = [self.engine.on_bundle(bundle) for bundle in bundles] if result is None else [result]
+            if result is not None:
+                for event in result.events:
+                    event_type = str(event.pop("event_type", "ENGINE_EVENT"))
+                    payload = dict(event)
+                    if metadata:
+                        payload.update(strategy_version=metadata.version, config_hash=metadata.config_hash)
+                    self.store.append_event(event_type, payload, f"{event_type}:{bar.timestamp.isoformat()}:{self.engine.bars_seen}")
+            for bundle, bundle_result in zip(bundles, results):
+                self.store.append_event("BUNDLE_CREATED" if bundle.complete else "BUNDLE_INCOMPLETE", {
+                    "bundle_id": bundle.bundle_id, "decision_minute": bundle.minute,
+                    "missing_inputs": list(bundle.missing_roles), "required_input_availability": {r: r not in bundle.missing_roles for r in bundle.required_roles},
+                }, f"bundle:{bundle.bundle_id}")
+                self.store.patch_status({"last_completed_bundle_minute": bundle.minute, "last_strategy_evaluation_minute": bundle.minute})
+                for event in bundle_result.events:
+                    event_type = str(event.pop("event_type", "ENGINE_EVENT"))
+                    payload = dict(event)
+                    if metadata:
+                        payload.update(strategy_version=metadata.version, config_hash=metadata.config_hash)
+                    self.store.append_event(event_type, payload, f"{event_type}:{payload.get('decision_id', bundle.bundle_id)}")
+            for bundle_result in results:
+                for order in bundle_result.orders:
+                    if self.broker is None:
+                        self.store.append_event("SIZING_REJECTED", {"decision_id": order.client_order_id, "reason": "broker_unavailable"}, f"sizing:{order.client_order_id}")
+                        continue
+                    ack = self.broker.submit(order)
+                    self.store.append_event("ORDER_ACK", {"decision_id": order.client_order_id, "client_order_id": ack.client_order_id, "broker_order_id": ack.broker_order_id, "status": ack.status}, f"order_ack:{ack.client_order_id}")
+                    fill = self.broker.poll_fill(order, ack.broker_order_id) if hasattr(self.broker, "poll_fill") else (self.broker.fills[-1] if getattr(self.broker, "fills", None) else None)
+                    if fill:
+                        self.store.append_event("EXECUTEDDECISION", {"decision_id": order.client_order_id, "client_order_id": fill.client_order_id, "status": "FILLED", "fill_price": fill.price, "quantity": fill.quantity}, f"executed:{fill.client_order_id}")
+                    if fill and self.ledger:
+                        position = self.ledger.apply_fill(fill, order.side if order.side in (OrderSide.BUY, OrderSide.SELL) else OrderSide.BUY)
+                        self.store.append_event("FILL", {"client_order_id": fill.client_order_id, "symbol": position.symbol, "quantity": position.quantity, "average_price": position.average_price}, f"fill:{fill.client_order_id}")
+                        self.store.patch_status({"capital": self.ledger.cash, "open_positions": [p.__dict__ if hasattr(p, "__dict__") else {"symbol": p.symbol, "quantity": p.quantity, "average_price": p.average_price} for p in self.ledger.positions()]})
 
     def stop(self) -> None:
         with self._lock:
+            startup = self._thread
             self._stopping = True
             self.store.patch_status({"state": "STOPPING", "feed_connected": False})
-            startup = self._thread
             if self.feed:
                 self.feed.stop()
+            if self.broker:
+                self.broker.close()
+            self.store.patch_status({"state": "STOPPED", "bars_seen": self.engine.bars_seen})
         if startup and startup is not threading.current_thread():
             startup.join()
         with self._lock:
             try:
-                if self.feed:
-                    self.feed.flush()
-                if self.broker:
-                    self.broker.close()
                 self.store.patch_status({"state": "STOPPED", "bars_seen": self.engine.bars_seen})
             except Exception as exc:
                 self.store.patch_status({"state": "ERROR", "error": str(exc)})

@@ -41,5 +41,5 @@ def test_stop_orders_feed_cleanup_before_broker(tmp_path):
     session.feed = Feed(session.on_closed_bar)
     session.broker = PaperBroker()
     session.stop()
-    assert session.feed.stopped and session.feed.flushed
+    assert session.feed.stopped and not session.feed.flushed
     assert store.read_status()["state"] == "STOPPED"

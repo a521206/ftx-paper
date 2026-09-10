@@ -450,7 +450,7 @@
 
     function table(rows) {
       if (!rows?.length) {
-        return '<div class="empty">Awaiting runtime data</div>';
+        return '<div class="empty">No strategy decisions recorded</div>';
       }
 
       return `<table>
@@ -487,19 +487,19 @@
 
       return rows
         .map(
-          (x) => `<details>
+          (raw) => { const x = { ...(raw.payload || {}), ...raw };
+            const outcome = x.outcome || (x.event_type === 'ACCEPTEDDECISION' ? 'Accepted' : x.event_type === 'REJECTEDDECISION' ? 'Policy rejection' : x.event_type === 'SIZING_REJECTED' ? 'Sizing rejection' : x.event_type === 'EXECUTEDDECISION' ? 'Executed' : x.event_type === 'BUNDLE_INCOMPLETE' ? 'Incomplete bundle' : x.event_type === 'BUNDLE_CREATED' ? 'Bundle created' : x.event_type === 'ENGINE_EVENT' ? 'Observed' : x.event_type === 'CANDIDATE' ? 'Candidate' : 'No qualifying setup');
+            const outcomeTone = ['Accepted', 'Executed'].includes(outcome) ? 'good' : ['Policy rejection', 'Sizing rejection', 'Incomplete bundle'].includes(outcome) ? 'warn' : 'subtle';
+            return `<details>
             <summary class="decision-row">
               <span>${date(x.timestamp || x.minute || x.created_at)}</span>
-              <span>${esc(x.cell)}</span>
+              <span>${esc(x.cell || x.symbol || '—')}</span>
               <span>${badge(x.direction || '—', x.direction === 'long' ? 'good' : 'bad')}</span>
-              <span>${esc(x.reason || x.detail || x.setup_type || '—')}</span>
-              <span>${badge(
-                x.event_type === 'ACCEPTEDDECISION' ? 'Accepted' : 'Rejected',
-                x.event_type === 'ACCEPTEDDECISION' ? 'good' : 'warn'
-              )}</span>
+              <span>${esc(x.reason || x.detail || x.setup_type || (x.close != null ? `Close ${x.close}` : '—'))}</span>
+              <span>${badge(outcome, outcomeTone)}</span>
             </summary>
-            <div class="payload">${esc(JSON.stringify(x, null, 2))}</div>
-          </details>`
+            <div class="payload"><strong>Entry price:</strong> ${esc(x.entry_price ?? '—')} · <strong>Score:</strong> ${esc(x.score ?? x.setup_score ?? '—')} · <strong>Setup type:</strong> ${esc(x.setup_type || '—')}<br><strong>Stop basis:</strong> ${esc(x.stop_basis ?? x.stop_bp ?? '—')} · <strong>VIX:</strong> ${esc(x.vix_at_event ?? x.vix ?? '—')} · <strong>PCR:</strong> ${esc(x.pcr_at_event ?? x.pcr ?? '—')}<br><strong>Sequence:</strong> ${esc(x.sequence ?? '—')} · <strong>Decision source:</strong> ${esc(x.decision_source || '—')} · <strong>Decision ID:</strong> ${esc(x.decision_id || '—')}</div>
+          </details>`; }
         )
         .join('');
     }

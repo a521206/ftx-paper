@@ -38,13 +38,31 @@ def test_api_exposes_persisted_events(tmp_path: Path) -> None:
     assert response.get_json()["events"][0]["payload"] == {"value": 1}
 
 
+def test_interrupted_paper_session_returns_to_stopped(tmp_path: Path) -> None:
+    store = RuntimeStore(tmp_path)
+    store.write_status({"state": "RUNNING", "feed_connected": True})
+
+    assert store.recover_interrupted() is True
+    assert store.read_status()["state"] == "STOPPED"
+    assert store.read_status()["feed_connected"] is False
+    recovery = store.read_events()[0]
+    assert recovery["event_type"] == "RUNTIME_RECOVERY"
+    assert recovery["payload"]["resulting_state"] == "STOPPED"
+
+
 def test_api_exposes_decisions_and_logs_as_projections(tmp_path: Path) -> None:
     store = RuntimeStore(tmp_path)
     store.append_event("ENGINE_EVENT", {"bar": 1})
+    store.append_event("REJECTEDDECISION", {
+        "decision_id": "d1", "minute": "2026-09-10T10:20:00+05:30",
+        "cell": "vwap", "direction": "short", "reason": "setup_score_skip",
+    })
     store.append_event("RUNTIME_LOG", {"message": "started"})
     client = create_app(store).test_client()
-    assert client.get("/api/v1/decisions").get_json()["decisions"][0]["payload"] == {"bar": 1}
-    assert len(client.get("/api/v1/logs").get_json()["logs"]) == 2
+    decisions = client.get("/api/v1/decisions").get_json()["decisions"]
+    assert len(decisions) == 1
+    assert decisions[0]["payload"]["decision_id"] == "d1"
+    assert len(client.get("/api/v1/logs").get_json()["logs"]) == 3
 
 
 def test_runtime_actions_are_api_boundaries(tmp_path: Path) -> None:

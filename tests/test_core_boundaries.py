@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 from ftx_paper.broker import PaperBroker
 from ftx_paper.contracts import Instrument, MarketBar, OrderSide
-from ftx_paper.core import ExitStateMachine, LiveFeatureCalculator, PaperEngine, PositionState, RiskSizer, SetupPolicy, replay
+from ftx_paper.core import CompletedBarAggregator, DecisionBundle, ExitStateMachine, IndependentLiveDecisionEngine, LiveFeatureCalculator, PaperEngine, PositionState, RiskSizer, SetupPolicy, replay
 from ftx_paper.core import LiveSession
 from ftx_paper.strategy import ConfiguredLiveStrategy
 
@@ -120,3 +120,30 @@ def test_replay_fixture_has_stable_production_transcript() -> None:
         ("entry-2026-01-01T10:16:00", 100, "BUY"),
         ("entry-2026-01-01T10:17:00", 100, "BUY"),
     ]
+
+
+def test_completed_bars_emit_one_bundle_only_after_required_roles_arrive() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    vix = Instrument("INDIA VIX", "NSE", "VIX")
+    aggregator = CompletedBarAggregator({("NFO", "NIFTYFUT"): "futures", ("NSE", "INDIA VIX"): "vix"})
+    minute = datetime(2026, 1, 1, 10, 20, tzinfo=timezone.utc)
+    future = MarketBar(instrument, minute, 100, 102, 99, 101)
+    vix_bar = MarketBar(vix, minute, 15, 16, 14, 15)
+    assert aggregator.ingest(future) is None
+    bundle = aggregator.ingest(vix_bar)
+    assert bundle is not None and bundle.complete
+    assert aggregator.ingest(future) is None
+
+
+def test_independent_live_engine_has_one_evaluation_per_bundle() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    vix = Instrument("INDIA VIX", "NSE", "VIX")
+    engine = IndependentLiveDecisionEngine(version="test", config_hash="hash")
+    for index in range(3):
+        minute = datetime(2026, 1, 1, 10, 20 + index, tzinfo=timezone.utc)
+        bundle = DecisionBundle(f"b{index}", "2026-01-01", minute.strftime("%Y-%m-%dT%H:%M"), {
+            "futures": MarketBar(instrument, minute, 100 + index, 102 + index, 99 + index, 101 + index),
+            "vix": MarketBar(vix, minute, 15, 16, 14, 15),
+        }, ("futures", "vix"))
+        events = engine.evaluate(bundle)
+        assert sum(item.event_type == "CANDIDATE" for item in events) == 1

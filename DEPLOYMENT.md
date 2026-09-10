@@ -33,8 +33,8 @@ ftx-paper-ui      # presentation-only dashboard
 ```
 
 The API starts and stops the in-process session directly. An interrupted
-session is marked `RECOVERY_REQUIRED`; inspect the audit log before starting
-again. Deploy one API instance per runtime state directory.
+session is returned to `STOPPED` automatically; the interruption is retained
+in the audit log. Deploy one API instance per runtime state directory.
 
 For local Windows startup, run `.\run-api.ps1` for the API and `.\run-ui.ps1` for the dashboard. The API defaults to port 8501 and the UI to port 8502. Override ports with `-Port`; override the UI API target with `-ApiBaseUrl`.
 
@@ -44,7 +44,7 @@ For local Windows startup, run `.\run-api.ps1` for the API and `.\run-ui.ps1` fo
 2. Back up the runtime and auth SQLite databases.
 3. Install the new `ftx-paper` wheel in the package environment.
 4. Start the API and verify `/api/v1/health` and `/api/v1/openapi.json`.
-5. Start the runtime session and inspect recovery/audit events.
+5. Start the runtime session and optionally inspect recovery/audit events.
 6. Start the UI and verify runtime, capital, positions, trades, and events.
 
 Rollback uses the previous wheel against the backed-up runtime data. Do not

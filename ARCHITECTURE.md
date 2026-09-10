@@ -37,7 +37,8 @@ hash so that paper trades remain reproducible.
 1. Contracts and characterization tests are stable.
 2. Core replay tests pass without external services.
 3. Zerodha adapter passes mocked authentication/feed/order tests.
-4. Runtime health survives API restart through explicit recovery.
+4. Runtime health survives API restart by returning interrupted paper sessions
+   to `STOPPED` and recording an audit event.
 5. API contract tests pass with injected controller/session dependencies.
 6. UI uses API endpoints exclusively.
 7. Only then is `scripts.ftx.run_ftx_web` changed to launch `ftx-paper`.

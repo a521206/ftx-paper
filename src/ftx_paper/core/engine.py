@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ftx_paper.contracts import MarketBar, OrderIntent
+from .bundles import DecisionBundle
 from .strategy import Strategy, StrategyMetadata
 
 
@@ -32,3 +33,14 @@ class PaperEngine:
             "close": bar.close,
             "bars_seen": self.bars_seen,
         },))
+
+    def on_bundle(self, bundle: DecisionBundle) -> EngineResult:
+        """Evaluate one synchronized minute, then hand orders to execution."""
+        self.bars_seen += len(bundle.bars)
+        if self.strategy is None or not hasattr(self.strategy, "on_bundle"):
+            return EngineResult(events=({"bundle_id": bundle.bundle_id, "minute": bundle.minute,
+                                         "bundle_complete": bundle.complete},))
+        decisions = self.strategy.on_bundle(bundle)
+        orders = tuple(item.order for item in decisions if getattr(item, "order", None) is not None)
+        events = tuple({"event_type": item.event_type, **item.payload} for item in decisions)
+        return EngineResult(orders=orders, events=events)

@@ -14,6 +14,7 @@ class RuntimeStore:
         self.root = Path(runtime_dir)
         self.root.mkdir(parents=True, exist_ok=True)
         self.database = self.root / "runtime.sqlite3"
+        self._event_counts_cache: dict[str, Any] | None = None
         with sqlite3.connect(self.database) as connection:
             connection.executescript(
                 """
@@ -71,15 +72,29 @@ class RuntimeStore:
                 "INSERT OR IGNORE INTO runtime_events(event_type, payload, created_at, idempotency_key) VALUES (?, ?, ?, ?)",
                 (event_type, json.dumps(payload), datetime.now(timezone.utc).isoformat(), idempotency_key),
             )
-            return cursor.rowcount == 1
+            inserted = cursor.rowcount == 1
+        if inserted:
+            self._event_counts_cache = None
+        return inserted
 
     def recover_interrupted(self) -> bool:
         status = self.read_status()
         if status.get("state") not in {"RUNNING", "STARTING", "START_REQUESTED"}:
             return False
         previous_state = status.get("state")
-        self.patch_status({"state": "RECOVERY_REQUIRED", "recovered_from": previous_state})
-        self.append_event("RUNTIME_RECOVERY", {"previous_state": previous_state}, "recovery:interrupted")
+        # Paper trading has no external positions to reconcile.  An interrupted
+        # process can therefore resume from a clean stopped state; retain an
+        # audit event so the interruption remains visible in the UI.
+        self.patch_status({
+            "state": "STOPPED",
+            "feed_connected": False,
+            "recovered_from": previous_state,
+        })
+        self.append_event(
+            "RUNTIME_RECOVERY",
+            {"previous_state": previous_state, "resulting_state": "STOPPED"},
+            "recovery:interrupted",
+        )
         return True
 
     def read_events(self, limit: int = 100) -> list[dict[str, Any]]:
@@ -94,3 +109,13 @@ class RuntimeStore:
             {"event_type": event_type, "payload": json.loads(payload), "created_at": created_at}
             for event_type, payload, created_at in rows
         ]
+
+    def event_counts(self) -> dict[str, Any]:
+        if self._event_counts_cache is not None:
+            return {key: dict(value) for key, value in self._event_counts_cache.items()}
+        with sqlite3.connect(self.database) as connection:
+            rows = connection.execute("SELECT event_type, COUNT(*) FROM runtime_events GROUP BY event_type").fetchall()
+            reasons = connection.execute("SELECT json_extract(payload, '$.reason'), COUNT(*) FROM runtime_events WHERE json_extract(payload, '$.reason') IS NOT NULL GROUP BY json_extract(payload, '$.reason')").fetchall()
+        self._event_counts_cache = {"by_event_type": {str(kind): int(count) for kind, count in rows},
+                                    "by_rejection_reason": {str(reason): int(count) for reason, count in reasons}}
+        return {key: dict(value) for key, value in self._event_counts_cache.items()}

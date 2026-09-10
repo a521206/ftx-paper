@@ -8,6 +8,7 @@ from .config import DEFAULT_CONFIG, STRATEGY_NAME, STRATEGY_VERSION, StrategyCon
 from ftx_paper.core.strategy import StrategyMetadata
 from ftx_paper.core import ExitStateMachine, LiveFeatureCalculator, PositionState, RiskSizer, SetupPolicy
 from ftx_paper.contracts import OrderSide
+from ftx_paper.core import DecisionBundle, IndependentLiveDecisionEngine
 
 
 class ConfiguredLiveStrategy:
@@ -36,6 +37,10 @@ class ConfiguredLiveStrategy:
         self._risk = RiskSizer()
         self._exits = ExitStateMachine(trail_distance=10.0)
         self._capital = capital
+        self._decision_engine = IndependentLiveDecisionEngine(
+            version=self.version, config_hash=self.metadata.config_hash,
+            cooldown_minutes=config.cooldown_minutes, capital=capital,
+        )
 
     @property
     def metadata(self) -> StrategyMetadata:
@@ -77,3 +82,8 @@ class ConfiguredLiveStrategy:
             return ()
         self._position = PositionState(bar.instrument, bar.close, stop, sized.quantity, decision.side)
         return (self._policy.to_order(decision, bar, sized.quantity, f"entry-{bar.timestamp.isoformat()}"),)
+
+    def on_bundle(self, bundle: DecisionBundle):
+        if self._decide is not None:
+            return ()
+        return self._decision_engine.evaluate(bundle)
