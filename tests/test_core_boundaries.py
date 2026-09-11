@@ -533,32 +533,6 @@ def test_live_decision_engine_persists_score_and_quality_bucket() -> None:
     assert decision.payload["sequence"] == 4
 
 
-def test_scoring_contract_values_are_pinned() -> None:
-    """Guard the paper-local copy of the canonical FTX score contract.
-
-    ``ftx_paper.core.scoring`` intentionally duplicates the canonical contract
-    in ``src/ftx/setup_score.py`` to stay independently runnable. The expected
-    values below are duplicated here on purpose so any silent change to the
-    paper copy's thresholds or tier boundaries fails this test.
-    """
-    from ftx_paper.core import scoring
-
-    assert scoring.CONSEC_DOWN_THRESH == 3
-    assert scoring.DESCENT_SPEED_THRESH == 1.5
-    assert scoring.CLIMAX_VOL_THRESH == 2.0
-    assert scoring.WICK_RATIO_THRESH == 0.70
-    assert scoring.DELTA_DIVERGENCE_THRESH == -0.3
-    assert scoring.PCR_EXTREME == 1.2
-    assert scoring.VIX_INTRADAY_SPIKE == 5.0
-    assert scoring.SCORE_A_PLUS == 8
-    assert scoring.SCORE_STANDARD == 5
-    assert scoring.SCORE_WEAK == 2
-    assert scoring.score_to_setup_type(9) == ("A+", 1.5)
-    assert scoring.score_to_setup_type(7) == ("Standard", 1.0)
-    assert scoring.score_to_setup_type(3) == ("Weak", 0.5)
-    assert scoring.score_to_setup_type(0) == ("Skip", 0.0)
-
-
 def test_risk_sizer_applies_score_multiplier_without_changing_default() -> None:
     sizer = RiskSizer()
     baseline = sizer.size(

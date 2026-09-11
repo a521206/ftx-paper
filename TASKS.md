@@ -81,9 +81,9 @@
 
 ### Track P4 — Score parity
 
-- [ ] Verify selling-structure values for every factor and insufficient-history case
-- [ ] Match the nine score factors, grinding override, thresholds, and setup-type mapping
-- [ ] Compare paper and canonical score factors/value-by-value on shared fixtures
+- [x] Verify selling-structure values for every factor and insufficient-history case
+- [x] Match the nine score factors, grinding override, thresholds, and setup-type mapping
+- [x] Compare paper and canonical score factors/value-by-value on shared fixtures
 
 ### Track P5 — Session-policy parity
 

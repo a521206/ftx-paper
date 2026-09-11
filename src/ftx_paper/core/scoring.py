@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from math import isfinite
+from zoneinfo import ZoneInfo
 
 from ftx_paper.contracts import MarketBar
 
@@ -38,19 +40,37 @@ class SellingStructure:
     selling_type: str
 
 
-def _synthetic_delta_divergence(bars: Sequence[MarketBar]) -> float:
-    """Correlate closes with cumulative CLV×volume synthetic delta."""
+IST = ZoneInfo("Asia/Kolkata")
+
+
+def _synthetic_delta_divergence(
+    bars: Sequence[MarketBar],
+    *,
+    event_time: str | None = None,
+) -> float:
+    """Correlate canonical ``sc`` closes with cumulative synthetic delta.
+
+    The canonical implementation intentionally reconstructs each bar as
+    ``high=sc``, ``low=sl``, ``close=sc``.  That is not the ordinary OHLC CLV
+    calculation, so keep the unusual construction explicit here.
+    """
     if len(bars) < 2:
         return 0.0
     cumulative: list[float] = []
     closes: list[float] = []
     running = 0.0
     for bar in bars:
-        high = float(bar.high)
+        if event_time is not None:
+            minute = bar.timestamp.astimezone(IST).strftime("%H:%M")
+            if not ("09:15" <= minute < event_time):
+                continue
+        high = float(bar.close)
         low = float(bar.low)
         close = float(bar.close)
         volume = float(bar.volume or 0.0)
-        if high < low or volume < 0:
+        if min(high, low, close, volume) < 0 or not all(
+            isfinite(value) for value in (high, low, close, volume)
+        ):
             continue
         clv = (close - low) / (high - low) if high > low else 0.5
         running += clv * volume
@@ -83,7 +103,8 @@ def compute_selling_structure(
     current_range = current.high - current.low
     is_doji = current_range > 0 and body / current_range < 0.3
     lookback = 20 if is_doji else 10
-    bars = list(prior_bars[-lookback:])
+    all_prior = list(prior_bars)
+    bars = all_prior[-lookback:]
     if len(bars) < 3:
         return SellingStructure(0, 0.0, 0.0, False, 0.0, 0.0, 0.0, 0, "grinding")
 
@@ -100,8 +121,9 @@ def compute_selling_structure(
     descent_speed_bp = total_drop / current.close * 10000 / len(bars) if current.close > 0 else 0.0
 
     vol_climax = 0.0
-    for index, bar in enumerate(bars):
-        reference = bars[max(0, index - 5):index]
+    first_index = len(all_prior) - len(bars)
+    for index, bar in enumerate(bars, start=first_index):
+        reference = all_prior[max(0, index - 5):index]
         average = sum(float(item.volume or 0.0) for item in reference) / len(reference) if reference else float(bar.volume or 0.0)
         if average > 0:
             vol_climax = max(vol_climax, float(bar.volume or 0.0) / average)
@@ -112,7 +134,8 @@ def compute_selling_structure(
         < sum(float(bar.volume or 0.0) for bar in bars[-6:-3])
     )
     wick_rejection = (current.close - current.low) / current_range if current_range > 0 else 0.5
-    delta_divergence = _synthetic_delta_divergence(bars)
+    event_time = current.timestamp.astimezone(IST).strftime("%H:%M")
+    delta_divergence = _synthetic_delta_divergence(bars, event_time=event_time)
     vix_trend_pct = (vix_at_event - vix_open) / vix_open * 100 if vix_open > 0 else 0.0
     climax_score = sum((vol_climax >= CLIMAX_VOL_THRESH, vol_drying, delta_divergence < DELTA_DIVERGENCE_THRESH))
     selling_type = "climactic" if climax_score >= 2 else "grinding"
