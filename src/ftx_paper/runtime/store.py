@@ -13,7 +13,9 @@ from collections.abc import Iterable
 from ftx_paper.contracts import MarketBar, MarketRole, OptionRole, role_to_key
 from .events import (
     DECISION_EVENT_TYPES,
+    EXECUTION_EVENT_TYPES,
     LEGACY_DECISION_TIME_FIELDS,
+    RISK_EVENT_TYPES,
     DecisionTimestampError,
     event_category,
     is_decision_event,
@@ -68,9 +70,6 @@ class RuntimeStore:
         self.root.mkdir(parents=True, exist_ok=True)
         self.database = self.root / "runtime.sqlite3"
         self._event_counts_cache: dict[str, Any] | None = None
-        self.decision_timestamp_migration: dict[str, Any] = {
-            "migrated": 0, "unmigratable": 0, "unmigratable_rows": [],
-        }
         with sqlite3.connect(self.database) as connection:
             connection.executescript(
                 """
@@ -86,6 +85,13 @@ class RuntimeStore:
                     created_at TEXT NOT NULL,
                     idempotency_key TEXT UNIQUE
                 );
+                CREATE INDEX IF NOT EXISTS idx_runtime_events_id_desc
+                    ON runtime_events(id DESC);
+                CREATE INDEX IF NOT EXISTS idx_runtime_events_type_id
+                    ON runtime_events(event_type, id DESC);
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_runtime_events_idempotency
+                    ON runtime_events(idempotency_key)
+                    WHERE idempotency_key IS NOT NULL;
                 CREATE TABLE IF NOT EXISTS process_leases (
                     service TEXT PRIMARY KEY,
                     pid INTEGER NOT NULL,
@@ -115,6 +121,10 @@ class RuntimeStore:
                     ingested_at TEXT NOT NULL,
                     PRIMARY KEY (symbol, exchange, minute)
                 );
+                CREATE INDEX IF NOT EXISTS ix_runtime_events_event_type
+                    ON runtime_events(event_type);
+                CREATE INDEX IF NOT EXISTS ix_runtime_events_decision_id
+                    ON runtime_events(json_extract(payload, '$.decision_id'));
                 """
             )
             connection.execute(
@@ -133,115 +143,6 @@ class RuntimeStore:
                 "UPDATE market_bars SET open_interest = 0.0 "
                 "WHERE upper(instrument_type) IN ('FUT', 'FUTURES') AND open_interest IS NULL"
             )
-            columns = {row[1] for row in connection.execute("PRAGMA table_info(runtime_events)")}
-            if "timestamp" in columns and "created_at" not in columns:
-                connection.execute("ALTER TABLE runtime_events RENAME COLUMN timestamp TO created_at")
-                columns.remove("timestamp")
-                columns.add("created_at")
-            elif "timestamp" in columns and "created_at" in columns:
-                connection.execute(
-                    "UPDATE runtime_events SET created_at = COALESCE(created_at, timestamp) "
-                    "WHERE created_at IS NULL"
-                )
-                connection.execute("ALTER TABLE runtime_events DROP COLUMN timestamp")
-                columns.remove("timestamp")
-            if "idempotency_key" not in columns:
-                connection.execute("ALTER TABLE runtime_events ADD COLUMN idempotency_key TEXT")
-            connection.execute(
-                "DELETE FROM runtime_events WHERE idempotency_key IS NOT NULL AND rowid NOT IN "
-                "(SELECT MIN(rowid) FROM runtime_events WHERE idempotency_key IS NOT NULL GROUP BY idempotency_key)"
-            )
-            connection.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS ux_runtime_events_idempotency "
-                "ON runtime_events(idempotency_key) WHERE idempotency_key IS NOT NULL"
-            )
-            connection.execute("DROP TABLE IF EXISTS runtime_commands")
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS runtime_migrations ("
-                "name TEXT PRIMARY KEY, applied_at TEXT NOT NULL, migrated_rows INTEGER NOT NULL, "
-                "unmigratable_rows INTEGER NOT NULL, unmigratable_details TEXT NOT NULL DEFAULT '[]')"
-            )
-            migration_columns = {row[1] for row in connection.execute("PRAGMA table_info(runtime_migrations)")}
-            if "unmigratable_details" not in migration_columns:
-                connection.execute("ALTER TABLE runtime_migrations ADD COLUMN unmigratable_details TEXT NOT NULL DEFAULT '[]'")
-            self._migrate_decision_timestamps(connection)
-
-    def _migrate_decision_timestamps(self, connection: sqlite3.Connection) -> None:
-        """Explicitly migrate legacy decision fields into ``decision_at``."""
-        marker = connection.execute(
-            "SELECT 1 FROM runtime_migrations WHERE name = 'decision-at-v2'"
-        ).fetchone()
-        if marker is not None:
-            row = connection.execute(
-                "SELECT migrated_rows, unmigratable_rows, unmigratable_details FROM runtime_migrations "
-                "WHERE name = 'decision-at-v2'"
-            ).fetchone()
-            if row is not None:
-                self.decision_timestamp_migration = {
-                    "migrated": int(row[0]), "unmigratable": int(row[1]),
-                    "unmigratable_rows": json.loads(row[2] or "[]"),
-                }
-            return
-
-        migrated = 0
-        unmigratable = 0
-        unmigratable_rows: list[dict[str, str | int]] = []
-        placeholders = ", ".join("?" for _ in DECISION_EVENT_TYPES)
-        rows = connection.execute(
-            f"SELECT id, payload FROM runtime_events WHERE event_type IN ({placeholders})",
-            tuple(sorted(DECISION_EVENT_TYPES)),
-        ).fetchall()
-        for row in rows:
-            payload = json.loads(row[1])
-            candidates = [(name, payload.get(name)) for name in LEGACY_DECISION_TIME_FIELDS
-                          if payload.get(name) not in (None, "")]
-            if payload.get("decision_at") not in (None, ""):
-                candidates.insert(0, ("decision_at", payload.get("decision_at")))
-            if not candidates:
-                unmigratable += 1
-                unmigratable_rows.append({"id": int(row[0]), "reason": "missing decision_at"})
-                continue
-            distinct = {str(value).strip() for _, value in candidates}
-            if len(distinct) > 1 and "decision_at" not in {name for name, _ in candidates}:
-                unmigratable += 1
-                unmigratable_rows.append({"id": int(row[0]), "reason": "conflicting legacy timestamps"})
-                continue
-            source_name, source_value = candidates[0]
-            if source_name == "minute" and isinstance(source_value, str) and "T" not in source_value:
-                session_date = payload.get("session_date")
-                if not isinstance(session_date, str) or not session_date.strip():
-                    unmigratable += 1
-                    unmigratable_rows.append({"id": int(row[0]), "reason": "time-only minute lacks session_date"})
-                    continue
-                source_value = f"{session_date}T{source_value}:00+05:30"
-            try:
-                normalized = serialize_datetime(parse_decision_at(source_value))
-            except (DecisionTimestampError, TypeError) as exc:
-                unmigratable += 1
-                unmigratable_rows.append({"id": int(row[0]), "reason": str(exc)})
-                continue
-            payload["decision_at"] = normalized
-            for name in LEGACY_DECISION_TIME_FIELDS:
-                payload.pop(name, None)
-            if source_name != "decision_at":
-                migrated += 1
-            connection.execute(
-                "UPDATE runtime_events SET payload = ? WHERE id = ?",
-                (json.dumps(_json_safe(payload, path=f"event {row[0]} payload")), row[0]),
-            )
-        applied_at = datetime.now(timezone.utc).isoformat()
-        connection.execute(
-            "INSERT INTO runtime_migrations(name, applied_at, migrated_rows, unmigratable_rows, unmigratable_details) "
-            "VALUES ('decision-at-v2', ?, ?, ?, ?)",
-            (applied_at, migrated, unmigratable, json.dumps(
-                _json_safe(unmigratable_rows, path="migration unmigratable_rows")
-            )),
-        )
-        self.decision_timestamp_migration = {
-            "migrated": migrated, "unmigratable": unmigratable,
-            "unmigratable_rows": unmigratable_rows,
-        }
-
     def acquire_process_lease(self, service: str) -> str:
         """Atomically claim a service lease, removing leases for dead PIDs."""
         pid = os.getpid()
@@ -341,28 +242,6 @@ class RuntimeStore:
     def _now() -> str:
         return datetime.now(timezone.utc).isoformat()
 
-    def import_expiry_dates_once(self, dates: list[str], *, source: str) -> int:
-        """Copy expiry dates once and record an idempotent migration marker."""
-        migration_name = "weekly-expiry-dates-v1"
-        normalized = sorted({str(value)[:10] for value in dates if str(value).strip()})
-        if not normalized:
-            raise ValueError("cannot apply expiry migration with no dates")
-        now = self._now()
-        with sqlite3.connect(self.database) as connection:
-            if connection.execute(
-                "SELECT 1 FROM runtime_migrations WHERE name = ?", (migration_name,)
-            ).fetchone() is not None:
-                return 0
-            connection.executemany(
-                "INSERT OR IGNORE INTO expiry_dates(date, source, copied_at) VALUES (?, ?, ?)",
-                [(date, source, now) for date in normalized],
-            )
-            connection.execute(
-                "INSERT INTO runtime_migrations(name, applied_at, migrated_rows, unmigratable_rows, unmigratable_details) VALUES (?, ?, ?, 0, '[]')",
-                (migration_name, now, len(normalized)),
-            )
-        return len(normalized)
-
     def write_status(self, status: dict[str, Any]) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with sqlite3.connect(self.database) as connection:
@@ -439,14 +318,7 @@ class RuntimeStore:
         )
         return True
 
-    def read_events(self, limit: int = 100) -> list[dict[str, Any]]:
-        if limit < 1:
-            return []
-        with sqlite3.connect(self.database) as connection:
-            rows = connection.execute(
-                "SELECT event_type, payload, created_at FROM runtime_events ORDER BY id DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
+    def _events_from_rows(self, rows: Iterable[tuple[str, str, str]]) -> list[dict[str, Any]]:
         result = []
         for event_type, raw_payload, raw_created_at in rows:
             payload = json.loads(raw_payload)
@@ -458,6 +330,65 @@ class RuntimeStore:
             result.append({"event_type": event_type, "category": event_category(event_type),
                            "payload": payload, "created_at": created})
         return result
+
+    def read_events(self, limit: int = 100) -> list[dict[str, Any]]:
+        if limit < 1:
+            return []
+        with sqlite3.connect(self.database) as connection:
+            rows = connection.execute(
+                "SELECT event_type, payload, created_at FROM runtime_events ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return self._events_from_rows(rows)
+
+    def read_decision_events(self, session_date: str | None = None, limit: int = 1000) -> list[dict[str, Any]]:
+        """Read decision events on their own, independent of the general event stream.
+
+        ``session_date`` filters on the IST calendar date of ``decision_at``. Decision
+        Rows without a canonical timestamp are excluded rather than failing the
+        whole projection.
+        """
+        if limit < 1:
+            return []
+        event_types = tuple(sorted(DECISION_EVENT_TYPES))
+        placeholders = ", ".join("?" for _ in event_types)
+        sql = (
+            "SELECT event_type, payload, created_at FROM runtime_events "
+            f"WHERE event_type IN ({placeholders}) "
+            "AND json_extract(payload, '$.decision_at') <> ''"
+        )
+        params: list[Any] = list(event_types)
+        if session_date:
+            sql += " AND substr(json_extract(payload, '$.decision_at'), 1, 10) = ?"
+            params.append(session_date)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        with sqlite3.connect(self.database) as connection:
+            rows = connection.execute(sql, params).fetchall()
+        return self._events_from_rows(rows)
+
+    def read_decision_lifecycle_events(self, decision_ids: Iterable[str]) -> list[dict[str, Any]]:
+        """Read execution and risk events for the given decision ids."""
+        ids = sorted({str(item) for item in decision_ids if item})
+        if not ids:
+            return []
+        event_types = tuple(sorted(EXECUTION_EVENT_TYPES | RISK_EVENT_TYPES))
+        type_placeholders = ", ".join("?" for _ in event_types)
+        events: list[dict[str, Any]] = []
+        chunk_size = 400
+        with sqlite3.connect(self.database) as connection:
+            for start in range(0, len(ids), chunk_size):
+                window = ids[start:start + chunk_size]
+                id_placeholders = ", ".join("?" for _ in window)
+                rows = connection.execute(
+                    "SELECT event_type, payload, created_at FROM runtime_events "
+                    f"WHERE event_type IN ({type_placeholders}) "
+                    f"AND json_extract(payload, '$.decision_id') IN ({id_placeholders}) "
+                    "ORDER BY id DESC",
+                    (*event_types, *window),
+                ).fetchall()
+                events.extend(self._events_from_rows(rows))
+        return events
 
     def event_counts(self) -> dict[str, Any]:
         if self._event_counts_cache is not None:

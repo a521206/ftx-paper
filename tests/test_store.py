@@ -7,6 +7,26 @@ from ftx_paper.contracts import Instrument, MarketBar, OptionType
 from ftx_paper.runtime import RuntimeStore
 
 
+def test_runtime_store_bootstraps_event_indexes(tmp_path):
+    store = RuntimeStore(tmp_path)
+    with sqlite3.connect(store.database) as connection:
+        indexes = {
+            row[1]
+            for row in connection.execute(
+                "SELECT type, name, tbl_name, sql FROM sqlite_master "
+                "WHERE type = 'index' AND tbl_name = 'runtime_events'"
+            )
+        }
+
+    assert {
+        "idx_runtime_events_id_desc",
+        "idx_runtime_events_type_id",
+        "ix_runtime_events_event_type",
+        "ix_runtime_events_decision_id",
+        "ux_runtime_events_idempotency",
+    } <= indexes
+
+
 def test_runtime_store_replaces_dead_lease(tmp_path):
     store = RuntimeStore(tmp_path)
     with sqlite3.connect(store.database) as connection:
