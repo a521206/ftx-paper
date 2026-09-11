@@ -59,9 +59,9 @@
 
 ### Track P1 — Decision-clock parity
 
-- [ ] Feed the same completed futures-bar prefix into paper decisions as the canonical pipeline
-- [ ] Match warmup, duplicate-minute rejection, late-bar handling, and date-boundary reset
-- [ ] Add focused fixtures for clock and prefix behavior
+- [x] Feed the same completed futures-bar prefix into paper decisions as the canonical pipeline
+- [x] Match warmup, duplicate-minute rejection, late-bar handling, and date-boundary reset
+- [x] Add focused fixtures for clock and prefix behavior
 
 ### Track P2 — Market-feature parity
 

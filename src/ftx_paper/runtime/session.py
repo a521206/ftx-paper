@@ -10,7 +10,7 @@ from ftx_paper.broker import Broker, PaperBroker
 from ftx_paper.contracts import (
     Instrument, MarketBar, OrderSide, normalize_exchange_timestamp,
 )
-from ftx_paper.core import CompletedBarAggregator, PaperEngine
+from ftx_paper.core import AggregatorConfig, CompletedBarAggregator, InstrumentKey, PaperEngine
 from ftx_paper.execution import PositionLedger
 from .events import is_decision_event, serialize_datetime
 from .store import RuntimeStore
@@ -82,19 +82,19 @@ class RuntimeSession:
             resolved: list[ZerodhaInstrument] = resolve_instruments(client, self.specifications)
             roles = classify_runtime_roles(resolved)
             inferred_roles = {
-                (str(roles.futures["exchange"]), str(roles.futures["symbol"])): "futures",
-                (str(roles.vix["exchange"]), str(roles.vix["symbol"])): "vix",
+                InstrumentKey(str(roles.futures["exchange"]), str(roles.futures["symbol"])): "futures",
+                InstrumentKey(str(roles.vix["exchange"]), str(roles.vix["symbol"])): "vix",
             }
             role_map = {
-                (str(item["exchange"]), str(item["symbol"])): inferred_roles.get(
-                    (str(item["exchange"]), str(item["symbol"])),
+                InstrumentKey(str(item["exchange"]), str(item["symbol"])): inferred_roles.get(
+                    InstrumentKey(str(item["exchange"]), str(item["symbol"])),
                     ("option:" + str(item["symbol"]) if str(item.get("instrument_type", "")).upper() in {"CE", "PE"}
                      else str(item.get("role") or "").strip().lower())
                 )
                 for item in resolved
             }
             self._aggregator = CompletedBarAggregator(
-                role_map, required_roles=("futures",), deadline_seconds=10.0,
+                role_map, AggregatorConfig(required_roles=("futures",), deadline_seconds=10.0),
             )
             self.broker = (self.broker_factory or (lambda _client: PaperBroker()))(client)
             self._replay_date = datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()

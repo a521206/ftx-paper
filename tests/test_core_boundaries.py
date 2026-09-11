@@ -272,6 +272,108 @@ def test_futures_clock_prefers_same_minute_supporting_bar() -> None:
     assert bundle.supporting_inputs["sources"]["vix"] == "same_minute"
 
 
+def test_futures_clock_rejects_duplicate_and_late_futures_minutes() -> None:
+    future = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    aggregator = CompletedBarAggregator(
+        {("NFO", "NIFTYFUT"): "futures"}, required_roles=("futures",)
+    )
+    first = datetime(2026, 1, 1, 10, 20, tzinfo=ZoneInfo("Asia/Kolkata"))
+    second = first.replace(minute=21)
+
+    assert aggregator.ingest(MarketBar(future, first, 100, 101, 99, 100)) is not None
+    assert aggregator.ingest(MarketBar(future, first, 200, 201, 199, 200)) is None
+    assert aggregator.ingest(MarketBar(future, second, 101, 102, 100, 101)) is not None
+    assert aggregator.ingest(MarketBar(future, first, 300, 301, 299, 300)) is None
+
+
+def test_futures_clock_resets_seen_minutes_and_supporting_carry_at_date_boundary() -> None:
+    future = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    vix = Instrument("INDIA VIX", "NSE", "VIX")
+    aggregator = CompletedBarAggregator(
+        {("NFO", "NIFTYFUT"): "futures", ("NSE", "INDIA VIX"): "vix"},
+        required_roles=("futures",),
+    )
+    day_one = datetime(2026, 1, 1, 15, 29, tzinfo=ZoneInfo("Asia/Kolkata"))
+    day_two = datetime(2026, 1, 2, 9, 15, tzinfo=ZoneInfo("Asia/Kolkata"))
+
+    aggregator.ingest(MarketBar(vix, day_one, 15, 16, 14, 15))
+    aggregator.ingest(MarketBar(future, day_one, 100, 101, 99, 100))
+    next_bundle = aggregator.ingest(MarketBar(future, day_two, 101, 102, 100, 101))
+    assert next_bundle is not None
+    assert next_bundle.supporting_inputs["bars"] == {}
+    assert next_bundle.supporting_inputs["unavailable"] == ("vix",)
+
+
+def test_late_supporting_bar_cannot_roll_back_carry_forward_value() -> None:
+    future = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    vix = Instrument("INDIA VIX", "NSE", "VIX")
+    aggregator = CompletedBarAggregator(
+        {("NFO", "NIFTYFUT"): "futures", ("NSE", "INDIA VIX"): "vix"},
+        required_roles=("futures",),
+    )
+    first = datetime(2026, 1, 1, 10, 20, tzinfo=ZoneInfo("Asia/Kolkata"))
+    second = first.replace(minute=21)
+
+    newer_vix = MarketBar(vix, second, 16, 17, 15, 16)
+    older_vix = MarketBar(vix, first, 15, 16, 14, 15)
+    aggregator.ingest(newer_vix)
+    aggregator.ingest(MarketBar(future, second, 101, 102, 100, 101))
+    assert aggregator.ingest(older_vix) is None
+    carried = aggregator.ingest(MarketBar(future, second.replace(minute=22), 102, 103, 101, 102))
+    assert carried is not None
+    assert carried.supporting_inputs["bars"]["vix"] is newer_vix
+
+
+def test_late_supporting_bar_cannot_emit_an_older_pending_minute() -> None:
+    future = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    vix = Instrument("INDIA VIX", "NSE", "VIX")
+    aggregator = CompletedBarAggregator(
+        {("NFO", "NIFTYFUT"): "futures", ("NSE", "INDIA VIX"): "vix"}
+    )
+    first = datetime(2026, 1, 1, 10, 20, tzinfo=ZoneInfo("Asia/Kolkata"))
+    second = first.replace(minute=21)
+
+    assert aggregator.ingest(MarketBar(future, first, 100, 101, 99, 100)) is None
+    assert aggregator.ingest(MarketBar(future, second, 101, 102, 100, 101)) is None
+    assert aggregator.ingest(MarketBar(vix, first, 15, 16, 14, 15)) is None
+    assert aggregator.pending() == (("10:21", ("vix",), ("futures",)),)
+
+
+def test_advancing_futures_clock_discards_stale_pending_minutes_before_flush() -> None:
+    future = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    aggregator = CompletedBarAggregator(
+        {("NFO", "NIFTYFUT"): "futures", ("NSE", "INDIA VIX"): "vix"}
+    )
+    first = datetime(2026, 1, 1, 10, 20, tzinfo=ZoneInfo("Asia/Kolkata"))
+    second = first.replace(minute=21)
+
+    assert aggregator.ingest(MarketBar(future, first, 100, 101, 99, 100)) is None
+    assert aggregator.ingest(MarketBar(future, second, 101, 102, 100, 101)) is None
+    flushed = aggregator.flush()
+    assert len(flushed) == 1
+    assert flushed[0].minute == "10:21"
+    assert flushed[0].missing_roles == ("vix",)
+
+
+def test_bundle_role_mappings_are_canonicalized_independent_of_arrival_order() -> None:
+    future = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    spot = Instrument("NIFTY", "NSE", "INDEX")
+    aggregator = CompletedBarAggregator(
+        {
+            ("NFO", "NIFTYFUT"): "futures",
+            ("NSE", "INDIA VIX"): "vix",
+            ("NSE", "NIFTY"): "spot",
+        },
+        required_roles=("futures",),
+    )
+    minute = datetime(2026, 1, 1, 10, 20, tzinfo=ZoneInfo("Asia/Kolkata"))
+    assert aggregator.ingest(MarketBar(spot, minute, 1, 1, 1, 1)) is None
+    bundle = aggregator.ingest(MarketBar(future, minute, 100, 101, 99, 100))
+    assert bundle is not None
+    assert list(bundle.bars) == ["futures"]
+    assert list(bundle.supporting_inputs["bars"]) == ["spot"]
+
+
 def test_supporting_role_is_ignored_and_expired_bundle_has_diagnostics() -> None:
     future = Instrument("NIFTYFUT", "NFO", "FUTURES")
     spot = Instrument("NIFTY", "NSE", "INDEX")
