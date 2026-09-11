@@ -57,3 +57,22 @@ class PaperEngine:
         record_exit = getattr(self.strategy, "record_exit", None)
         if callable(record_exit):
             record_exit(**kwargs)
+
+    def on_tick(self, bar: MarketBar):
+        """Forward a live tick to the strategy's protective exit state."""
+        on_tick = getattr(self.strategy, "on_tick", None)
+        return on_tick(bar) if callable(on_tick) else ()
+
+    def register_entry(self, order: OrderIntent, *, fill_price: float | None = None) -> None:
+        register = getattr(self.strategy, "register_entry", None)
+        if callable(register):
+            register(order, fill_price=fill_price)
+
+    def on_closed_bar(self, bar: MarketBar):
+        handler = getattr(self.strategy, "on_closed_bar", None)
+        return handler(bar) if callable(handler) else ()
+
+    def settle_exit(self, exit_order_id: str, *, filled: bool) -> None:
+        handler = getattr(self.strategy, "settle_exit", None)
+        if callable(handler):
+            handler(exit_order_id, filled=filled)

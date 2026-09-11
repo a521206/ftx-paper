@@ -32,3 +32,8 @@ class OrderIntent:
     order_type: OrderType = OrderType.MARKET
     limit_price: float | None = None
     reason: str = ""
+    # Entry provenance used to reconstruct live protective exits.
+    cell: str | None = None
+    stop_price: float | None = None
+    exit_mode: str | None = None
+    entry_bar: int | None = None

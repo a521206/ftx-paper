@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 from .bundles import DecisionBundle
 from ftx_paper.contracts import MarketRole, OptionRole, OrderIntent, Role, role_to_key
 from .features import option_pcr_at_event, vix_open_and_event
-from .location_engine import LocationDetector, TransitionPattern, transition_patterns_allow
+from .location_engine import Cell, LocationDetector, TransitionPattern, transition_patterns_allow
 from .risk import RiskSizer
 from .risk_state import RiskGateState
 from .adaptive_stop import adaptive_stop_bp, stop_price
@@ -169,16 +169,14 @@ class IndependentLiveDecisionEngine:
                           "prior_day_low": features.prior_day_low,
                           "vix": vix_bar.close, "vix_open": self._vix_open,
                           "pcr": pcr}
-        cell = location_snapshot.cell
-        if cell is None:
+        if location_snapshot.cell is None:
             return ()
-        cell_policy = self._cell_policies.get((decision_session, cell.name))
-        # Unconfigured cells are outside the decision universe.  Do not emit
-        # candidates or policy rejections for them; the UI should only receive
-        # decisions for cells that can actually be traded in this session.
-        if cell_policy is None:
+        configured = [
+            (Cell.parse(name), policy) for (session, name), policy in self._cell_policies.items()
+            if session is decision_session and Cell.parse(name).locations.issubset(set(location_snapshot.locations))
+        ]
+        if not configured:
             return ()
-        direction = cell_policy.direction.value.lower()
         round_level = round(current / 50) * 50
         structural_proximity = (
             (self.prior_day_low is not None and abs(current - self.prior_day_low) <= 15)
@@ -196,72 +194,58 @@ class IndependentLiveDecisionEngine:
             float(self._vix_open or vix_bar.close), pcr, structural_proximity,
         )
         score_setup_type, score_multiplier = score_to_setup_type(score)
-        setup_family = "reversal_at_" + cell.name
         sequence = len(self._futures)
-        candidate_id = sha256(f"{bundle.bundle_id}:{cell.name}".encode()).hexdigest()[:24]
-        candidate = {**base, "decision_id": candidate_id, "cell": cell.name, "locations": [item.value for item in cell.ordered_locations], "direction": direction,
-                     "setup_type": setup_family,
-                     "score_setup_type": score_setup_type,
-                     "score": score, "score_factors": score_factors,
-                     "score_multiplier": score_multiplier, "sequence": sequence,
-                     "feature_values": feature_values, "entry_price": current, "outcome": "candidate"}
-        candidate.update(vix_at_event=vix_bar.close, pcr_at_event=pcr, stop_basis=stop_basis,
-                         transitions=[{"reference": item.reference.value, "kind": item.kind.value,
-                                       "from": item.from_side.value, "to": item.to_side.value}
-                                      for item in location_snapshot.transitions])
         events = []
-        reason = None
-        if decision_session is Session.OUTSIDE:
-            reason = "outside_session_window"
-        elif score_setup_type == "Skip":
-            reason = "setup_score_skip"
-        elif not transition_patterns_allow(
-            location_snapshot,
-            cell_policy.transition_patterns or self.transition_patterns,
-        ):
-            reason = "transition_policy_mismatch"
-        elif self._last_decision and (decision_dt - self._last_decision).total_seconds() < self.cooldown_minutes * 60:
-            reason = "cooldown"
-        elif vix_bar.close <= 0:
-            reason = "vix_gate"
-        if reason:
-            events.append(LiveDecision("REJECTEDDECISION", {**candidate, "outcome": "policy rejection", "reason": reason, "decision_id": sha256(f"{candidate_id}:{reason}".encode()).hexdigest()[:24]}))
-            return tuple(events)
-        if cell_policy is None:
-            raise RuntimeError("an accepted decision requires a configured cell policy")
-        self._last_decision = decision_dt
-        side = cell_policy.direction
-        stop = stop_price(current, side.value, stop_basis)
-        sizing = RiskSizer().size(
-            capital=self.capital, equity=self.capital, peak_equity=self.capital,
-            entry=current, stop=stop, score=score, vix=float(vix_bar.close),
-            is_expiry_day=bundle.trading_date in self.expiry_dates,
-        )
-        candidate.update(
-            requested_quantity=sizing.quantity,
-            score_multiplier=sizing.score_multiplier,
-            risk_amount=sizing.risk_amount,
-        )
-        events.append(LiveDecision("ACCEPTEDDECISION", {**candidate, "outcome": "accepted", "reason": "eligible"}))
-        if not sizing.approved:
-            events.append(LiveDecision("SIZING_REJECTED", {**candidate, "outcome": "sizing rejection", "reason": sizing.reason}))
-            return tuple(events)
-        gate_reason = self.risk_gate.rejection_reason(
-            cell=cell.name, direction=direction, bar=sequence,
-            quantity=sizing.quantity, date=bundle.trading_date,
-        )
-        if gate_reason is not None:
-            return (LiveDecision(
-                "REJECTEDDECISION",
-                {**candidate, "outcome": "risk rejection", "reason": gate_reason,
-                 "decision_id": sha256(f"{candidate_id}:{gate_reason}".encode()).hexdigest()[:24]},
-            ),)
-        self.risk_gate.record_entry(
-            cell=cell.name, direction=direction, quantity=sizing.quantity,
-            date=bundle.trading_date,
-        )
-        order = OrderIntent(candidate_id, futures.instrument, side, sizing.quantity, reason="live_policy_accepted")
-        events[-1] = LiveDecision("ACCEPTEDDECISION", {**candidate, "outcome": "accepted", "reason": "eligible"}, order=order)
+        for cell, cell_policy in configured:
+            direction = cell_policy.direction.value.lower()
+            candidate_id = sha256(f"{decision_at.isoformat()}:{sequence}:{cell.name}".encode()).hexdigest()[:24]
+            candidate = {**base, "decision_id": candidate_id, "cell": cell.name, "locations": [item.value for item in cell.ordered_locations], "direction": direction,
+                         "setup_type": score_setup_type, "score": score, "score_factors": score_factors,
+                         "score_multiplier": score_multiplier, "sequence": sequence,
+                         "feature_values": feature_values, "entry_price": current, "outcome": "candidate",
+                         "exit_mode": cell_policy.exit_mode.value}
+            candidate.update(vix_at_event=vix_bar.close, pcr_at_event=pcr, stop_basis=stop_basis,
+                             transitions=[{"reference": item.reference.value, "kind": item.kind.value,
+                                           "from": item.from_side.value, "to": item.to_side.value}
+                                          for item in location_snapshot.transitions])
+            reason = None
+            if score_setup_type == "Skip":
+                reason = "setup_score_skip"
+            elif not transition_patterns_allow(location_snapshot, cell_policy.transition_patterns or self.transition_patterns):
+                reason = "transition_policy_mismatch"
+            elif self._last_decision and (decision_dt - self._last_decision).total_seconds() < self.cooldown_minutes * 60:
+                reason = "cooldown"
+            elif vix_bar.close <= 0:
+                reason = "vix_gate"
+            if reason:
+                events.append(LiveDecision(
+                    "REJECTEDDECISION",
+                    {**candidate, "outcome": "policy rejection", "reason": reason,
+                     "decision_id": sha256(f"{candidate_id}:{reason}".encode()).hexdigest()[:24]},
+                ))
+                continue
+            self._last_decision = decision_dt
+            side = cell_policy.direction
+            stop = stop_price(current, side.value, stop_basis)
+            sizing = RiskSizer().size(capital=self.capital, equity=self.capital, peak_equity=self.capital, entry=current, stop=stop, score=score, vix=float(vix_bar.close), is_expiry_day=bundle.trading_date in self.expiry_dates)
+            candidate.update(requested_quantity=sizing.quantity, score_multiplier=sizing.score_multiplier, risk_amount=sizing.risk_amount)
+            events.append(LiveDecision("ACCEPTEDDECISION", {**candidate, "outcome": "accepted", "reason": "eligible"}))
+            if not sizing.approved:
+                events.append(LiveDecision("SIZING_REJECTED", {
+                    **candidate, "outcome": "sizing rejection", "reason": sizing.reason,
+                }))
+                continue
+            gate_reason = self.risk_gate.rejection_reason(cell=cell.name, direction=direction, bar=sequence, quantity=sizing.quantity, date=bundle.trading_date)
+            if gate_reason is not None:
+                events.append(LiveDecision(
+                    "REJECTEDDECISION",
+                    {**candidate, "outcome": "risk rejection", "reason": gate_reason,
+                     "decision_id": sha256(f"{candidate_id}:{gate_reason}".encode()).hexdigest()[:24]},
+                ))
+                continue
+            self.risk_gate.record_entry(cell=cell.name, direction=direction, quantity=sizing.quantity, date=bundle.trading_date)
+            order = OrderIntent(candidate_id, futures.instrument, side, sizing.quantity, reason="live_policy_accepted", cell=cell.name, stop_price=stop, exit_mode=cell_policy.exit_mode.value, entry_bar=sequence)
+            events[-1] = LiveDecision("ACCEPTEDDECISION", {**candidate, "outcome": "accepted", "reason": "eligible"}, order=order)
         return tuple(events)
 
     def record_exit(self, *, cell: str, reason: str, entry_bar: int,

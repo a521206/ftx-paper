@@ -116,6 +116,7 @@ class RuntimeSession:
             self.feed = feed_type(
                 socket, [int(item["instrument_token"]) for item in resolved], normalize,
                 self.on_closed_bar,
+                on_tick=self.on_tick,
                 on_health=self.on_feed_health,
                 expected_instruments={
                     f"{item['exchange']}:{item['symbol']}": (str(item["exchange"]), str(item["symbol"]))
@@ -154,7 +155,7 @@ class RuntimeSession:
                 expiry=str(item["expiry"]) if item.get("expiry") is not None else None,
                 strike=float(item["strike"]) if item.get("strike") is not None else None,
             )
-            return MarketBar(instrument, timestamp.replace(second=0, microsecond=0), price, price, price, price, payload.get("volume_traded"), payload.get("oi"))
+            return MarketBar(instrument, timestamp, price, price, price, price, payload.get("volume_traded"), payload.get("oi"))
 
         return normalize
 
@@ -220,13 +221,14 @@ class RuntimeSession:
                 self._execute_paper_order(order, session_date=bundle.trading_date, timestamp=timestamp)
 
     def _execute_paper_order(self, order, *, session_date: str | None = None,
-                             timestamp: str | None = None) -> None:
+                             timestamp: str | None = None) -> bool:
         context = {
             "decision_id": order.client_order_id,
             "client_order_id": order.client_order_id,
             "decision_source": "live",
             "session_date": session_date,
             "execution_allowed": True,
+            "reason": order.reason,
         }
         if self.broker is None:
             self.store.append_event("EXECUTION_ERROR", {**context,
@@ -262,6 +264,9 @@ class RuntimeSession:
                                     f"execution_error:fill_poll:{order.client_order_id}", timestamp=timestamp)
             return
         if fill:
+            register_entry = getattr(self.engine, "register_entry", None)
+            if callable(register_entry):
+                register_entry(order, fill_price=fill.price)
             position = None
             if self.ledger:
                 position = self.ledger.apply_fill(fill, order.side if order.side in (OrderSide.BUY, OrderSide.SELL) else OrderSide.BUY)
@@ -283,11 +288,13 @@ class RuntimeSession:
                                                         "status": ack.status,
                                                         "outcome": "unfilled",
                                                         "reason": "no_fill_available"},
-                                    f"order_unfilled:{order.client_order_id}", timestamp=timestamp)
+                                     f"order_unfilled:{order.client_order_id}", timestamp=timestamp)
+            return False
         if fill and self.ledger:
             self.store.patch_status({"capital": self.ledger.cash, "open_positions": [
                 p.__dict__ if hasattr(p, "__dict__") else {"symbol": p.symbol, "quantity": p.quantity,
                 "average_price": p.average_price} for p in self.ledger.positions()]})
+        return bool(fill)
 
     def on_closed_bar(self, bar) -> None:
         with self._lock:
@@ -328,6 +335,45 @@ class RuntimeSession:
                     self.store.patch_status({"last_completed_bundle_minute": bundle.minute,
                                              "last_strategy_evaluation_minute": bundle.minute})
                     self._process_bundle(bundle, source="live")
+                for action in self.engine.on_closed_bar(bar):
+                    filled = self._execute_paper_order(
+                        action.intent,
+                        session_date=bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat(),
+                        timestamp=bar.timestamp.isoformat(),
+                    )
+                    self.engine.settle_exit(action.intent.client_order_id, filled=filled)
+                    self.store.append_event("EXITDECISION", {
+                        "decision_id": action.intent.client_order_id,
+                        "cell": action.cell,
+                        "reason": action.reason,
+                        "exit_price": action.price,
+                        "decision_at": bar.timestamp.isoformat(),
+                        "decision_source": "live",
+                        "execution_allowed": True,
+                        "outcome": "exit_triggered",
+                    }, f"exit_decision:{action.intent.client_order_id}", timestamp=bar.timestamp.isoformat())
+
+    def on_tick(self, bar: MarketBar) -> None:
+        """Evaluate protective exits immediately on each live market tick."""
+        with self._lock:
+            if self._stopping or self._replaying or self.store.read_status().get("state") != "RUNNING":
+                return
+            if isinstance(self.broker, PaperBroker):
+                self.broker.update_price(bar.instrument.symbol, bar.close)
+            result = self.engine.on_tick(bar)
+            for action in result:
+                filled = self._execute_paper_order(action.intent, session_date=bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat(), timestamp=bar.timestamp.isoformat())
+                self.engine.settle_exit(action.intent.client_order_id, filled=filled)
+                self.store.append_event("EXITDECISION", {
+                    "decision_id": action.intent.client_order_id,
+                    "cell": action.cell,
+                    "reason": action.reason,
+                    "exit_price": action.price,
+                    "decision_at": bar.timestamp.isoformat(),
+                    "decision_source": "live",
+                    "execution_allowed": True,
+                    "outcome": "exit_triggered",
+                }, f"exit_decision:{action.intent.client_order_id}", timestamp=bar.timestamp.isoformat())
 
     def _record_incomplete(self, bundle) -> None:
         payload = {

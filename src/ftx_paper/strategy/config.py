@@ -28,25 +28,31 @@ class Session(StrEnum):
     OUTSIDE = "outside"
 
 
+class ExitMode(StrEnum):
+    SIGNAL = "signal"
+    TRAIL = "trail"
+
+
 @dataclass(frozen=True, slots=True)
 class CellPolicyConfig:
     """Fixed production assignment for one canonical composite cell."""
 
     cell: str
     direction: OrderSide
+    exit_mode: ExitMode = ExitMode.SIGNAL
     transition_patterns: tuple[TransitionPattern, ...] = ()
 
 
 MORNING_CELL_POLICIES = (
-    CellPolicyConfig("session_low+or_low", OrderSide.BUY),
-    CellPolicyConfig("vwap_zone+session_low+or_low", OrderSide.BUY),
-    CellPolicyConfig("session_high+or_high", OrderSide.SELL),
-    CellPolicyConfig("vwap_zone+or_low", OrderSide.SELL),
+    CellPolicyConfig("session_low+or_low", OrderSide.BUY, ExitMode.SIGNAL),
+    CellPolicyConfig("vwap_zone+session_low+or_low", OrderSide.BUY, ExitMode.SIGNAL),
+    CellPolicyConfig("session_high+or_high", OrderSide.SELL, ExitMode.SIGNAL),
+    CellPolicyConfig("vwap_zone+or_low", OrderSide.SELL, ExitMode.TRAIL),
 )
 AFTERNOON_CELL_POLICIES = (
-    CellPolicyConfig("session_high+or_high", OrderSide.BUY),
-    CellPolicyConfig("or_low", OrderSide.BUY),
-    CellPolicyConfig("vwap_zone+prior_day_high", OrderSide.SELL),
+    CellPolicyConfig("session_high+or_high", OrderSide.BUY, ExitMode.TRAIL),
+    CellPolicyConfig("or_low", OrderSide.BUY, ExitMode.SIGNAL),
+    CellPolicyConfig("vwap_zone+prior_day_high", OrderSide.SELL, ExitMode.TRAIL),
 )
 
 
@@ -70,6 +76,7 @@ class StrategyConfig:
                 "session": session,
                 "cell": item.cell,
                 "direction": item.direction.value.lower(),
+                "exit_mode": item.exit_mode.value,
             }
             for session, policies in (
                 ("morning", MORNING_CELL_POLICIES),
@@ -103,4 +110,5 @@ __all__ = [
     "MORNING_CELL_POLICIES",
     "AFTERNOON_CELL_POLICIES",
     "Session",
+    "ExitMode",
 ]

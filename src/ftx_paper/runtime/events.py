@@ -13,6 +13,7 @@ DECISION_EVENT_TYPES = frozenset({
     "CANDIDATEDECISION",
     "ACCEPTEDDECISION",
     "REJECTEDDECISION",
+    "EXITDECISION",
 })
 
 # These names are migration-only compatibility inputs.  They must never be

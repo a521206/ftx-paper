@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from datetime import time
 
 from ftx_paper.contracts import MarketBar, OrderIntent
 
@@ -46,6 +47,8 @@ class ConfiguredLiveStrategy:
         self._policy = SetupPolicy()
         self._risk = RiskSizer()
         self._exits = ExitStateMachine(trail_distance=10.0)
+        self._decision_positions: dict[str, tuple[PositionState, ExitStateMachine]] = {}
+        self._pending_exits: dict[str, str] = {}
         self._capital = capital
         self._decision_engine = IndependentLiveDecisionEngine(
             version=self.version, config_hash=self.metadata.config_hash,
@@ -73,6 +76,8 @@ class ConfiguredLiveStrategy:
         self._position = None
         self._features = LiveFeatureCalculator()
         self._exits = ExitStateMachine(trail_distance=10.0)
+        self._decision_positions.clear()
+        self._pending_exits.clear()
         self._decision_engine = IndependentLiveDecisionEngine(
             version=self.version, config_hash=self.metadata.config_hash,
             cooldown_minutes=self.config.cooldown_minutes, capital=self._capital,
@@ -163,13 +168,57 @@ class ConfiguredLiveStrategy:
         sized = self._risk.size(capital=self._capital, equity=self._capital, peak_equity=self._capital, entry=bar.close, stop=stop, score=score)
         if not sized.approved:
             return ()
-        self._position = PositionState(bar.instrument, bar.close, stop, sized.quantity, decision.side)
+        self._position = PositionState(bar.instrument, bar.close, stop, sized.quantity, decision.side, exit_mode="trail")
         return (self._policy.to_order(decision, bar, sized.quantity, f"entry-{bar.timestamp.isoformat()}"),)
 
     def on_bundle(self, bundle: DecisionBundle):
         if self._decide is not None:
             return ()
         return self._decision_engine.evaluate(bundle)
+
+    def register_entry(self, order: OrderIntent, *, fill_price: float | None = None) -> None:
+        if order.stop_price is None or order.cell is None:
+            return
+        position = PositionState(
+            order.instrument, fill_price if fill_price is not None else order.limit_price or 0.0,
+            order.stop_price, order.quantity, order.side, cell=order.cell,
+            exit_mode=order.exit_mode or "signal",
+        )
+        trail_distance = 10.0 if order.exit_mode == "trail" else None
+        self._decision_positions[order.client_order_id] = (
+            position, ExitStateMachine(trail_distance=trail_distance, close_time=time(15, 20)),
+        )
+
+    def on_tick(self, bar: MarketBar):
+        actions = []
+        for order_id, (position, exits) in tuple(self._decision_positions.items()):
+            if order_id in self._pending_exits.values():
+                continue
+            if bar.instrument != position.instrument:
+                continue
+            action = exits.evaluate_tick(position, timestamp=bar.timestamp, price=bar.close, client_order_id=f"exit-{order_id}-{bar.timestamp.isoformat()}")
+            if action is not None:
+                actions.append(action)
+                self._pending_exits[action.intent.client_order_id] = order_id
+        return tuple(actions)
+
+    def on_closed_bar(self, bar: MarketBar):
+        """Evaluate signal exits once per completed futures bar."""
+        actions = []
+        for order_id, (position, exits) in tuple(self._decision_positions.items()):
+            if bar.instrument != position.instrument or order_id in self._pending_exits.values():
+                continue
+            action = exits.evaluate(position, timestamp=bar.timestamp, high=bar.high, low=bar.low,
+                                    close=bar.close, client_order_id=f"exit-{order_id}-{bar.timestamp.isoformat()}")
+            if action is not None:
+                actions.append(action)
+                self._pending_exits[action.intent.client_order_id] = order_id
+        return tuple(actions)
+
+    def settle_exit(self, exit_order_id: str, *, filled: bool) -> None:
+        entry_order_id = self._pending_exits.pop(exit_order_id, None)
+        if filled and entry_order_id is not None:
+            self._decision_positions.pop(entry_order_id, None)
 
     def record_exit(self, **kwargs: object) -> None:
         """Apply an execution-layer exit settlement to the decision gate."""

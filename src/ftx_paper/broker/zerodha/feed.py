@@ -91,11 +91,11 @@ class ReconnectPolicy:
 class ZerodhaFeed:
     """Reconnectable Kite socket boundary; only normalized bars leave it."""
 
-    def __init__(self, socket: TickerSocket, tokens: list[int], normalize: Callable[[Mapping[str, Any]], MarketBar], on_bar: Callable[[MarketBar], None], policy: ReconnectPolicy = ReconnectPolicy(), pause: Callable[[float], None] = sleep, *, on_health: Callable[[dict[str, Any]], None] | None = None, expected_instruments: Mapping[str, tuple[str, str]] | None = None, stale_after_seconds: float = 30.0, watchdog_interval_seconds: float = 5.0, clock: Callable[[], float] = monotonic) -> None:
+    def __init__(self, socket: TickerSocket, tokens: list[int], normalize: Callable[[Mapping[str, Any]], MarketBar], on_bar: Callable[[MarketBar], None], policy: ReconnectPolicy = ReconnectPolicy(), pause: Callable[[float], None] = sleep, *, on_tick: Callable[[MarketBar], None] | None = None, on_health: Callable[[dict[str, Any]], None] | None = None, expected_instruments: Mapping[str, tuple[str, str]] | None = None, stale_after_seconds: float = 30.0, watchdog_interval_seconds: float = 5.0, clock: Callable[[], float] = monotonic) -> None:
         if not tokens:
             raise ValueError("at least one Zerodha token is required")
         self.socket, self.tokens, self.normalize, self.on_bar = socket, tokens, normalize, on_bar
-        self.policy, self.pause = policy, pause
+        self.policy, self.pause, self.on_tick = policy, pause, on_tick
         self.on_health = on_health
         self.stale_after_seconds = stale_after_seconds
         self.watchdog_interval_seconds = watchdog_interval_seconds
@@ -145,6 +145,8 @@ class ZerodhaFeed:
     def _on_message(self, payload: Mapping[str, Any]) -> None:
         if self._running:
             bar = self.normalize(payload)
+            if self.on_tick is not None:
+                self.on_tick(bar)
             key = f"{bar.instrument.exchange}:{bar.instrument.symbol}"
             health = self._health.setdefault(key, {"symbol": bar.instrument.symbol, "exchange": bar.instrument.exchange, "tick_count": 0, "bar_count": 0})
             health["tick_count"] += 1
@@ -156,14 +158,14 @@ class ZerodhaFeed:
             self._rate_limited_until = None
             current = self._current.get(key)
             if current is None:
-                self._current[key] = bar
-            elif bar.timestamp == current.timestamp:
+                self._current[key] = self._minute_bar(bar)
+            elif bar.timestamp.replace(second=0, microsecond=0) == current.timestamp:
                 self._current[key] = MarketBar(current.instrument, current.timestamp, current.open, max(current.high, bar.high), min(current.low, bar.low), bar.close, bar.volume, bar.open_interest)
-            elif bar.timestamp > current.timestamp:
+            elif bar.timestamp.replace(second=0, microsecond=0) > current.timestamp:
                 self.on_bar(current)
                 health["bar_count"] += 1
                 health["last_closed_bar_at"] = current.timestamp.isoformat()
-                self._current[key] = bar
+                self._current[key] = self._minute_bar(bar)
             self._emit_health()
 
     def flush(self) -> None:
@@ -172,6 +174,11 @@ class ZerodhaFeed:
             key = f"{bar.instrument.exchange}:{bar.instrument.symbol}"
             self._health.setdefault(key, {"symbol": bar.instrument.symbol, "exchange": bar.instrument.exchange, "tick_count": 0, "bar_count": 0})["last_closed_bar_at"] = bar.timestamp.isoformat()
         self._current.clear()
+
+    @staticmethod
+    def _minute_bar(bar: MarketBar) -> MarketBar:
+        return MarketBar(bar.instrument, bar.timestamp.replace(second=0, microsecond=0), bar.open,
+                          bar.high, bar.low, bar.close, bar.volume, bar.open_interest)
 
     def health_snapshot(self) -> dict[str, Any]:
         now = self.clock()
