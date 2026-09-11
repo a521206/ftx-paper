@@ -153,13 +153,20 @@ class RuntimeSession:
             )
             price = float(payload["last_price"])
             instrument_type = str(item.get("instrument_type", "INDEX"))
+            if str(item["symbol"]).upper() in {"INDIA VIX", "INDIAVIX"}:
+                instrument_type = "INDEX"
+            expiry = str(item["expiry"]) if item.get("expiry") is not None and instrument_type in {"FUT", "CE", "PE"} else None
+            strike = float(item["strike"]) if item.get("strike") is not None and instrument_type in {"CE", "PE"} else None
             instrument = Instrument(
                 str(item["symbol"]), str(item["exchange"]), instrument_type,
-                expiry=str(item["expiry"]) if item.get("expiry") is not None else None,
-                strike=float(item["strike"]) if item.get("strike") is not None else None,
+                expiry=expiry,
+                strike=strike,
                 option_type=OptionType(instrument_type) if instrument_type in {"CE", "PE"} else None,
             )
-            return MarketBar(instrument, timestamp, price, price, price, price, payload.get("volume_traded"), payload.get("oi"))
+            open_interest = payload.get("oi")
+            if instrument_type == "FUT" and open_interest is None:
+                open_interest = 0.0
+            return MarketBar(instrument, timestamp, price, price, price, price, payload.get("volume_traded"), open_interest)
 
         return normalize
 

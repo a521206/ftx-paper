@@ -117,6 +117,22 @@ class RuntimeStore:
                 );
                 """
             )
+            connection.execute(
+                "UPDATE market_bars SET instrument_type = 'INDEX' "
+                "WHERE upper(symbol) IN ('INDIA VIX', 'INDIAVIX')"
+            )
+            connection.execute(
+                "UPDATE market_bars SET expiry = NULL, strike = NULL, option_type = NULL "
+                "WHERE upper(instrument_type) = 'INDEX'"
+            )
+            connection.execute(
+                "UPDATE market_bars SET strike = NULL, option_type = NULL "
+                "WHERE upper(instrument_type) IN ('FUT', 'FUTURES')"
+            )
+            connection.execute(
+                "UPDATE market_bars SET open_interest = 0.0 "
+                "WHERE upper(instrument_type) IN ('FUT', 'FUTURES') AND open_interest IS NULL"
+            )
             columns = {row[1] for row in connection.execute("PRAGMA table_info(runtime_events)")}
             if "timestamp" in columns and "created_at" not in columns:
                 connection.execute("ALTER TABLE runtime_events RENAME COLUMN timestamp TO created_at")
@@ -280,10 +296,14 @@ class RuntimeStore:
             rows.append((
                 bar.instrument.symbol, bar.instrument.exchange, minute,
                 bar.open, bar.high, bar.low, bar.close, bar.volume,
-                bar.open_interest, bar.instrument.instrument_type,
-                bar.instrument.expiry,
-                bar.instrument.strike,
-                str(bar.instrument.option_type) if bar.instrument.option_type is not None else None,
+                (bar.open_interest if bar.open_interest is not None else 0.0
+                 if str(bar.instrument.instrument_type).upper() in {"FUT", "FUTURES"} else None),
+                ("FUT" if str(bar.instrument.instrument_type).upper() == "FUTURES"
+                 else "INDEX" if bar.instrument.symbol.upper() in {"INDIA VIX", "INDIAVIX"}
+                 else bar.instrument.instrument_type),
+                bar.instrument.expiry if str(bar.instrument.instrument_type).upper() in {"FUT", "FUTURES", "CE", "PE"} else None,
+                bar.instrument.strike if str(bar.instrument.instrument_type).upper() in {"CE", "PE"} else None,
+                str(bar.instrument.option_type) if str(bar.instrument.instrument_type).upper() in {"CE", "PE"} and bar.instrument.option_type is not None else None,
                 source, now,
             ))
         if not rows:

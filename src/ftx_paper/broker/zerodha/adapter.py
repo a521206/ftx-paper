@@ -139,17 +139,22 @@ def load_startup_backfill(client: Any, instruments: list[ZerodhaInstrument], *, 
             timestamp = row.get("date")
             parsed = normalize_exchange_timestamp(timestamp)
             instrument_type = str(item.get("instrument_type", "INDEX"))
+            if str(item["symbol"]).upper() in {"INDIA VIX", "INDIAVIX"}:
+                instrument_type = "INDEX"
+            expiry = str(item["expiry"]) if item.get("expiry") is not None and instrument_type in {"FUT", "CE", "PE"} else None
+            strike = float(item["strike"]) if item.get("strike") is not None and instrument_type in {"CE", "PE"} else None
             bars.append(MarketBar(
                 instrument=Instrument(
                     str(item["symbol"]), str(item["exchange"]), instrument_type,
-                    expiry=str(item["expiry"]) if item.get("expiry") is not None else None,
-                    strike=float(item["strike"]) if item.get("strike") is not None else None,
+                    expiry=expiry,
+                    strike=strike,
                     option_type=OptionType(instrument_type) if instrument_type in {"CE", "PE"} else None,
                 ),
                 timestamp=parsed,
                 open=float(row["open"]), high=float(row["high"]), low=float(row["low"]), close=float(row["close"]),
                 volume=float(row["volume"]) if row.get("volume") is not None else None,
-                open_interest=float(row["oi"]) if row.get("oi") is not None else None,
+                open_interest=(float(row["oi"]) if row.get("oi") is not None else 0.0)
+                if instrument_type == "FUT" else (float(row["oi"]) if row.get("oi") is not None else None),
             ))
     return tuple(sorted(bars, key=lambda bar: bar.timestamp))
 
