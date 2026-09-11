@@ -1,0 +1,34 @@
+{
+  "simultaneous_vwap_prior_high": {
+    "features": {
+      "vwap": 100.0,
+      "session_high": 110.0,
+      "session_low": 90.0,
+      "atr": 4.0,
+      "opening_range_high": 101.0,
+      "opening_range_low": 99.0,
+      "opening_range_complete": true,
+      "prior_day_high": 100.0,
+      "prior_day_low": 80.0
+    },
+    "close": 100.0,
+    "locations": ["vwap_zone", "or_high", "or_low", "prior_day_high"],
+    "cell": "vwap_zone+or_high+or_low+prior_day_high"
+  },
+  "new_high_prunes_session_high": {
+    "features": {
+      "vwap": 100.0,
+      "session_high": 110.0,
+      "session_low": 90.0,
+      "atr": 4.0,
+      "opening_range_high": null,
+      "opening_range_low": null,
+      "opening_range_complete": false,
+      "prior_day_high": null,
+      "prior_day_low": null
+    },
+    "close": 112.0,
+    "locations": ["new_high", "session_high"],
+    "cell": "new_high"
+  }
+}

@@ -6,7 +6,8 @@ from hashlib import sha256
 from zoneinfo import ZoneInfo
 from .bundles import DecisionBundle
 from ftx_paper.contracts import MarketRole, OptionRole, OrderIntent, OrderSide, Role, role_to_key
-from .features import LiveFeatureCalculator, option_pcr_at_event, vix_open_and_event
+from .features import option_pcr_at_event, vix_open_and_event
+from .location_engine import LocationDetector, TransitionPattern, transition_patterns_allow
 from .risk import RiskSizer
 from .scoring import calculate_setup_score, compute_selling_structure, score_to_setup_type
 
@@ -63,17 +64,18 @@ class IndependentLiveDecisionEngine:
     direction, and cooldown logic.  It has no historical-pipeline imports.
     """
 
-    def __init__(self, *, version: str, config_hash: str, cooldown_minutes: int = 30, capital: float = 100_000.0, prior_day_high: float | None = None, prior_day_low: float | None = None, morning_entry_minutes: tuple[int, int] = (60, 120), afternoon_entry_minutes: tuple[int, int] = (255, 300)) -> None:
+    def __init__(self, *, version: str, config_hash: str, cooldown_minutes: int = 30, capital: float = 100_000.0, prior_day_high: float | None = None, prior_day_low: float | None = None, morning_entry_minutes: tuple[int, int] = (60, 120), afternoon_entry_minutes: tuple[int, int] = (255, 300), transition_patterns: tuple[TransitionPattern, ...] = ()) -> None:
         self.version, self.config_hash = version, config_hash
         self.cooldown_minutes = cooldown_minutes
         self.capital = capital
         self.prior_day_high, self.prior_day_low = prior_day_high, prior_day_low
         self.morning_entry_minutes = morning_entry_minutes
         self.afternoon_entry_minutes = afternoon_entry_minutes
+        self.transition_patterns = transition_patterns
         self._futures: list = []
         self._previous_vix = None
         self._vix_history: list = []
-        self._feature_calculator = LiveFeatureCalculator()
+        self._location_detector = LocationDetector()
         self._last_decision: datetime | None = None
         self._trading_date: str | None = None
         self._decision_session: str | None = None
@@ -91,12 +93,13 @@ class IndependentLiveDecisionEngine:
     def evaluate(self, bundle: DecisionBundle) -> tuple[LiveDecision, ...]:
         if self._trading_date != bundle.trading_date:
             if self._futures:
-                self.prior_day_high = max(bar.high for bar in self._futures)
-                self.prior_day_low = min(bar.low for bar in self._futures)
+                self._location_detector.close_day()
+                self.prior_day_high, self.prior_day_low = self._location_detector.prior_day_levels
             self._futures.clear()
             self._previous_vix = None
             self._vix_history.clear()
             self._vix_open = None
+            self._location_detector.reset(prior_day_high=self.prior_day_high, prior_day_low=self.prior_day_low)
             self._last_decision = None
             self._decision_session = None
             self._trading_date = bundle.trading_date
@@ -126,15 +129,13 @@ class IndependentLiveDecisionEngine:
         futures = bundle.bars[MarketRole.FUTURES]
         self._futures.append(futures)
         if len(self._futures) < 3:
+            self._location_detector.observe(futures)
             return (LiveDecision("WARMUP", {**base, "reason": "insufficient_history", "feature_values": {}}),)
         prior = tuple(self._futures[:-1])
-        features = self._feature_calculator.calculate_event(
-            prior, futures,
-            prior_day_high=self.prior_day_high,
-            prior_day_low=self.prior_day_low,
-        )
-        if features.vwap is None:
-            return ()
+        location_snapshot = self._location_detector.observe(futures)
+        if location_snapshot is None:
+            return (LiveDecision("WARMUP", {**base, "reason": "insufficient_history", "feature_values": {}}),)
+        features = location_snapshot.features
         vwap = features.vwap
         session_high, session_low = features.session_high, features.session_low
         or_high, or_low = features.opening_range_high, features.opening_range_low
@@ -147,9 +148,8 @@ class IndependentLiveDecisionEngine:
                           "prior_day_low": features.prior_day_low,
                           "vix": vix_bar.close, "vix_open": self._vix_open,
                           "pcr": pcr}
-        location = "VWAP_ZONE" if abs(current - vwap) <= 15 else "SESSION_HIGH" if abs(current - session_high) <= 15 else "SESSION_LOW" if abs(current - session_low) <= 15 else None
-        cell = location or "NONE"
-        if location is None:
+        cell = location_snapshot.cell
+        if cell is None:
             return ()
         direction = "long" if current >= vwap else "short"
         round_level = round(current / 50) * 50
@@ -169,24 +169,29 @@ class IndependentLiveDecisionEngine:
             float(self._vix_open or vix_bar.close), pcr, structural_proximity,
         )
         score_setup_type, score_multiplier = score_to_setup_type(score)
-        setup_family = "reversal_at_" + cell.lower() if location else "Skip"
+        setup_family = "reversal_at_" + cell.name
         sequence = len(self._futures)
-        candidate_id = sha256(f"{bundle.bundle_id}:{cell}".encode()).hexdigest()[:24]
-        candidate = {**base, "decision_id": candidate_id, "cell": cell, "direction": direction,
+        candidate_id = sha256(f"{bundle.bundle_id}:{cell.name}".encode()).hexdigest()[:24]
+        candidate = {**base, "decision_id": candidate_id, "cell": cell.name, "locations": [item.value for item in cell.ordered_locations], "direction": direction,
                      "setup_type": setup_family,
                      "score_setup_type": score_setup_type,
                      "score": score, "score_factors": score_factors,
                      "score_multiplier": score_multiplier, "sequence": sequence,
                      "feature_values": feature_values, "entry_price": current, "outcome": "candidate"}
-        candidate.update(vix_at_event=vix_bar.close, pcr_at_event=pcr, stop_basis=stop_basis)
+        candidate.update(vix_at_event=vix_bar.close, pcr_at_event=pcr, stop_basis=stop_basis,
+                         transitions=[{"reference": item.reference.value, "kind": item.kind.value,
+                                       "from": item.from_side.value, "to": item.to_side.value}
+                                      for item in location_snapshot.transitions])
         events = []
         reason = None
-        if location is None:
+        if cell is None:
             reason = "no_qualifying_setup"
         elif decision_session is None:
             reason = "outside_session_window"
         elif score_setup_type == "Skip":
             reason = "setup_score_skip"
+        elif not transition_patterns_allow(location_snapshot, self.transition_patterns):
+            reason = "transition_policy_mismatch"
         elif self._last_decision and (decision_dt - self._last_decision).total_seconds() < self.cooldown_minutes * 60:
             reason = "cooldown"
         elif vix_bar.close <= 0:

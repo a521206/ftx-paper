@@ -73,11 +73,11 @@
 
 ### Track P3 — Location and cell parity
 
-- [ ] Port the canonical all-location detector independently into `ftx-paper`
-- [ ] Support VWAP, session high/low, new high/low, opening-range high/low, and prior-day locations
-- [ ] Match proximity thresholds, simultaneous-location combinations, and opening-range completion
-- [ ] Match transition debouncing and transition-pattern filtering
-- [ ] Add location/cell golden fixtures
+- [x] Port the canonical all-location detector independently into `ftx-paper`
+- [x] Support VWAP, session high/low, new high/low, opening-range high/low, and prior-day locations
+- [x] Match proximity thresholds, simultaneous-location combinations, and opening-range completion
+- [x] Match transition debouncing and transition-pattern filtering
+- [x] Add location/cell golden fixtures
 
 ### Track P4 — Score parity
 
