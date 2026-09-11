@@ -35,7 +35,8 @@ class ConfiguredLiveStrategy:
         self,
         decide: Callable[[MarketBar], tuple[OrderIntent, ...]] | None = None,
         config: StrategyConfig = DEFAULT_CONFIG,
-        capital: float = 100_000.0,
+        capital: float = 1_000_000.0,
+        expiry_dates: frozenset[str] = frozenset(),
     ) -> None:
         self._decide = decide
         self.config = config
@@ -51,6 +52,7 @@ class ConfiguredLiveStrategy:
             cooldown_minutes=config.cooldown_minutes, capital=capital,
             morning_entry_minutes=config.morning_entry_minutes,
             afternoon_entry_minutes=config.afternoon_entry_minutes,
+            expiry_dates=expiry_dates,
         )
 
     @property
@@ -72,6 +74,7 @@ class ConfiguredLiveStrategy:
             cooldown_minutes=self.config.cooldown_minutes, capital=self._capital,
             morning_entry_minutes=self.config.morning_entry_minutes,
             afternoon_entry_minutes=self.config.afternoon_entry_minutes,
+            expiry_dates=self._decision_engine.expiry_dates,
         )
 
     @classmethod

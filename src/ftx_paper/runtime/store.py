@@ -90,6 +90,11 @@ class RuntimeStore:
                     started_at TEXT NOT NULL,
                     instance_id TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS expiry_dates (
+                    date TEXT PRIMARY KEY,
+                    source TEXT NOT NULL,
+                    copied_at TEXT NOT NULL
+                );
                 """
             )
             columns = {row[1] for row in connection.execute("PRAGMA table_info(runtime_events)")}
@@ -238,6 +243,38 @@ class RuntimeStore:
         with sqlite3.connect(self.database) as connection:
             row = connection.execute("SELECT payload FROM runtime_status WHERE id = 1").fetchone()
         return json.loads(row[0]) if row else {}
+
+    def read_expiry_dates(self) -> frozenset[str]:
+        """Return the one-time imported weekly expiry calendar."""
+        with sqlite3.connect(self.database) as connection:
+            rows = connection.execute("SELECT date FROM expiry_dates ORDER BY date").fetchall()
+        return frozenset(str(row[0]) for row in rows)
+
+    @staticmethod
+    def _now() -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    def import_expiry_dates_once(self, dates: list[str], *, source: str) -> int:
+        """Copy expiry dates once and record an idempotent migration marker."""
+        migration_name = "weekly-expiry-dates-v1"
+        normalized = sorted({str(value)[:10] for value in dates if str(value).strip()})
+        if not normalized:
+            raise ValueError("cannot apply expiry migration with no dates")
+        now = self._now()
+        with sqlite3.connect(self.database) as connection:
+            if connection.execute(
+                "SELECT 1 FROM runtime_migrations WHERE name = ?", (migration_name,)
+            ).fetchone() is not None:
+                return 0
+            connection.executemany(
+                "INSERT OR IGNORE INTO expiry_dates(date, source, copied_at) VALUES (?, ?, ?)",
+                [(date, source, now) for date in normalized],
+            )
+            connection.execute(
+                "INSERT INTO runtime_migrations(name, applied_at, migrated_rows, unmigratable_rows, unmigratable_details) VALUES (?, ?, ?, 0, '[]')",
+                (migration_name, now, len(normalized)),
+            )
+        return len(normalized)
 
     def write_status(self, status: dict[str, Any]) -> None:
         now = datetime.now(timezone.utc).isoformat()

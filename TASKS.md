@@ -95,11 +95,11 @@
 
 ### Track P6 — Stop and sizing parity
 
-- [ ] Match adaptive ATR/VIX stop calculation, bounds, and expiry-day adjustment
-- [ ] Match setup-size multipliers and low-VIX reduction
-- [ ] Match capital, equity, peak-equity, drawdown, and risk-budget semantics
-- [ ] Match vehicle-specific sizing and synthetic-premium lookup behavior
-- [ ] Add stop and quantity golden fixtures
+- [x] Match adaptive ATR/VIX stop calculation, bounds, and expiry-day adjustment
+- [x] Match setup-size multipliers and low-VIX reduction
+- [x] Match capital, equity, peak-equity, drawdown, and risk-budget semantics
+- [x] Match vehicle-specific sizing and synthetic-premium lookup behavior
+- [x] Add stop and quantity golden fixtures
 
 ### Track P7 — Risk-gate parity
 

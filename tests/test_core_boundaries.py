@@ -1,12 +1,47 @@
 from datetime import datetime, timezone
+import json
+from pathlib import Path
 import time
 from zoneinfo import ZoneInfo
 
 from ftx_paper.broker import PaperBroker
-from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderSide, parse_role, role_to_key
-from ftx_paper.core import CompletedBarAggregator, DecisionBundle, ExitStateMachine, IndependentLiveDecisionEngine, LiveFeatureCalculator, PaperEngine, PositionState, RiskSizer, SetupPolicy, option_pcr_at_event, replay, vix_open_and_event
+from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderSide, SyntheticPremiumPair, parse_role, role_to_key
+from ftx_paper.core import CompletedBarAggregator, DecisionBundle, ExitStateMachine, IndependentLiveDecisionEngine, LiveFeatureCalculator, PaperEngine, PositionState, RiskSizer, SetupPolicy, adaptive_stop_bp, option_pcr_at_event, replay, vix_open_and_event
 from ftx_paper.core import LiveSession
 from ftx_paper.strategy import ConfiguredLiveStrategy
+
+
+def test_p6_stop_and_quantity_golden_fixture() -> None:
+    fixture = json.loads((Path(__file__).parent / "fixtures" / "p6_stop_quantity.json").read_text())
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    bars = tuple(
+        MarketBar(instrument, datetime(2026, 1, 1, 4, 0 + index, tzinfo=timezone.utc), row["high"], row["high"], row["low"], row["close"])
+        for index, row in enumerate(fixture["stop"]["bars_before"])
+    )
+    assert adaptive_stop_bp(bars, fixture["stop"]["vix"]) == fixture["stop"]["normal_bp"]
+    assert adaptive_stop_bp(bars, fixture["stop"]["vix"], is_expiry_day=True) == fixture["stop"]["expiry_bp"]
+    expected = fixture["quantity"]
+    decision = RiskSizer().size(
+        capital=expected["capital"], equity=expected["equity"], peak_equity=expected["peak_equity"],
+        entry=expected["entry"], stop=expected["entry"] * (1 - expected["stop_bp"] / 10000),
+    )
+    assert decision.risk_budget == expected["risk_budget"]
+    assert decision.quantity == expected["quantity"]
+
+
+def test_synthetic_sizing_requires_validated_ce_pe_pair() -> None:
+    sizer = RiskSizer()
+    rejected = sizer.size(
+        capital=1_000_000, equity=1_000_000, peak_equity=1_000_000,
+        entry=22_000, stop=21_900, vehicle="synthetic",
+    )
+    approved = sizer.size(
+        capital=1_000_000, equity=1_000_000, peak_equity=1_000_000,
+        entry=22_000, stop=21_900, vehicle="synthetic",
+        synthetic_premiums=SyntheticPremiumPair(120.0, 130.0),
+    )
+    assert rejected.reason == "missing_synthetic_premium"
+    assert approved.vehicle == "synthetic"
 
 
 def test_engine_does_not_require_broker() -> None:

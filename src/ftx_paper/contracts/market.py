@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
+import math
 from zoneinfo import ZoneInfo
 
 
@@ -94,3 +95,15 @@ class MarketBar:
     close: float
     volume: float | None = None
     open_interest: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SyntheticPremiumPair:
+    """Validated entry quote for the two legs of a synthetic future."""
+
+    ce: float
+    pe: float
+
+    def __post_init__(self) -> None:
+        if not all(math.isfinite(value) and value > 0 for value in (self.ce, self.pe)):
+            raise ValueError("synthetic CE and PE premiums must be finite and positive")

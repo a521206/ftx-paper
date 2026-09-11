@@ -5,10 +5,11 @@ from datetime import datetime
 from hashlib import sha256
 from zoneinfo import ZoneInfo
 from .bundles import DecisionBundle
-from ftx_paper.contracts import MarketRole, OptionRole, OrderIntent, OrderSide, Role, role_to_key
+from ftx_paper.contracts import MarketRole, OptionRole, OrderIntent, Role, role_to_key
 from .features import option_pcr_at_event, vix_open_and_event
 from .location_engine import LocationDetector, TransitionPattern, transition_patterns_allow
 from .risk import RiskSizer
+from .adaptive_stop import adaptive_stop_bp, stop_price
 from .scoring import calculate_setup_score, compute_selling_structure, score_to_setup_type
 from ftx_paper.strategy.config import (
     AFTERNOON_CELL_POLICIES,
@@ -71,7 +72,7 @@ class IndependentLiveDecisionEngine:
     direction, and cooldown logic.  It has no historical-pipeline imports.
     """
 
-    def __init__(self, *, version: str, config_hash: str, cooldown_minutes: int = 30, capital: float = 100_000.0, prior_day_high: float | None = None, prior_day_low: float | None = None, morning_entry_minutes: tuple[int, int] = MORNING_ENTRY_MINUTES, afternoon_entry_minutes: tuple[int, int] = AFTERNOON_ENTRY_MINUTES, transition_patterns: tuple[TransitionPattern, ...] = ()) -> None:
+    def __init__(self, *, version: str, config_hash: str, cooldown_minutes: int = 30, capital: float = 1_000_000.0, prior_day_high: float | None = None, prior_day_low: float | None = None, morning_entry_minutes: tuple[int, int] = MORNING_ENTRY_MINUTES, afternoon_entry_minutes: tuple[int, int] = AFTERNOON_ENTRY_MINUTES, transition_patterns: tuple[TransitionPattern, ...] = (), expiry_dates: frozenset[str] = frozenset()) -> None:
         self.version, self.config_hash = version, config_hash
         self.cooldown_minutes = cooldown_minutes
         self.capital = capital
@@ -79,6 +80,7 @@ class IndependentLiveDecisionEngine:
         self.morning_entry_minutes = morning_entry_minutes
         self.afternoon_entry_minutes = afternoon_entry_minutes
         self.transition_patterns = transition_patterns
+        self.expiry_dates = expiry_dates
         self._cell_policies = {
             (Session.MORNING, item.cell): item for item in MORNING_CELL_POLICIES
         }
@@ -154,7 +156,10 @@ class IndependentLiveDecisionEngine:
         or_high, or_low = features.opening_range_high, features.opening_range_low
         current = futures.close
         decision_dt = decision_at
-        stop_basis = max(futures.high - futures.low, 5.0)
+        stop_basis = adaptive_stop_bp(
+            prior, float(vix_bar.close),
+            is_expiry_day=bundle.trading_date in self.expiry_dates,
+        )
         feature_values = {"vwap": vwap, "session_high": session_high, "session_low": session_low,
                           "opening_range_high": or_high, "opening_range_low": or_low,
                           "atr": features.atr, "prior_day_high": features.prior_day_high,
@@ -220,10 +225,11 @@ class IndependentLiveDecisionEngine:
             raise RuntimeError("an accepted decision requires a configured cell policy")
         self._last_decision = decision_dt
         side = cell_policy.direction
-        stop = current - max(futures.high - futures.low, 5.0) if side is OrderSide.BUY else current + max(futures.high - futures.low, 5.0)
+        stop = stop_price(current, side.value, stop_basis)
         sizing = RiskSizer().size(
             capital=self.capital, equity=self.capital, peak_equity=self.capital,
-            entry=current, stop=stop, score=score,
+            entry=current, stop=stop, score=score, vix=float(vix_bar.close),
+            is_expiry_day=bundle.trading_date in self.expiry_dates,
         )
         candidate.update(
             requested_quantity=sizing.quantity,

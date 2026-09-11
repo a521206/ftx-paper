@@ -1,0 +1,21 @@
+{
+  "stop": {
+    "bars_before": [
+      {"high": 22050, "low": 21950, "close": 22000},
+      {"high": 22050, "low": 21950, "close": 22000},
+      {"high": 22050, "low": 21950, "close": 22000}
+    ],
+    "vix": 20,
+    "normal_bp": 50.0,
+    "expiry_bp": 75.0
+  },
+  "quantity": {
+    "capital": 2500000,
+    "equity": 2500000,
+    "peak_equity": 2500000,
+    "entry": 22000,
+    "stop_bp": 50.0,
+    "risk_budget": 50000.0,
+    "quantity": 10
+  }
+}

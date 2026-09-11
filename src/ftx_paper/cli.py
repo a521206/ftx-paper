@@ -29,8 +29,8 @@ def api_main() -> None:
             store,
             auth,
             list(raw.get("instruments", ())),
-            engine=PaperEngine(ConfiguredLiveStrategy()),
-            ledger=PositionLedger(100_000.0),
+            engine=PaperEngine(ConfiguredLiveStrategy(expiry_dates=store.read_expiry_dates())),
+            ledger=PositionLedger(1_000_000.0),
         )
         create_app(store, zerodha_auth=auth, session=session).run(host=config.host, port=config.port, debug=False, use_reloader=False)
     finally:
