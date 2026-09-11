@@ -526,11 +526,12 @@ def test_live_decision_engine_persists_score_and_quality_bucket() -> None:
     engine.evaluate(bundle(1))
     engine.evaluate(bundle(2))
     events = engine.evaluate(bundle(3))
-    decision = next(item for item in events if item.event_type == "ACCEPTEDDECISION")
+    decision = next(item for item in events if item.event_type == "REJECTEDDECISION")
     assert 0 <= decision.payload["score"] <= 9
     assert decision.payload["score_setup_type"] in {"A+", "Standard", "Weak"}
     assert decision.payload["setup_type"] == "reversal_at_vwap_zone"
     assert decision.payload["sequence"] == 4
+    assert decision.payload["reason"] == "cell_not_configured"
 
 
 def test_risk_sizer_applies_score_multiplier_without_changing_default() -> None:

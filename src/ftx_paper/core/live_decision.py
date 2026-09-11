@@ -10,6 +10,13 @@ from .features import option_pcr_at_event, vix_open_and_event
 from .location_engine import LocationDetector, TransitionPattern, transition_patterns_allow
 from .risk import RiskSizer
 from .scoring import calculate_setup_score, compute_selling_structure, score_to_setup_type
+from ftx_paper.strategy.config import (
+    AFTERNOON_CELL_POLICIES,
+    AFTERNOON_ENTRY_MINUTES,
+    MORNING_CELL_POLICIES,
+    MORNING_ENTRY_MINUTES,
+    Session,
+)
 
 
 def _option_pcr(bundle: DecisionBundle) -> float | None:
@@ -64,7 +71,7 @@ class IndependentLiveDecisionEngine:
     direction, and cooldown logic.  It has no historical-pipeline imports.
     """
 
-    def __init__(self, *, version: str, config_hash: str, cooldown_minutes: int = 30, capital: float = 100_000.0, prior_day_high: float | None = None, prior_day_low: float | None = None, morning_entry_minutes: tuple[int, int] = (60, 120), afternoon_entry_minutes: tuple[int, int] = (255, 300), transition_patterns: tuple[TransitionPattern, ...] = ()) -> None:
+    def __init__(self, *, version: str, config_hash: str, cooldown_minutes: int = 30, capital: float = 100_000.0, prior_day_high: float | None = None, prior_day_low: float | None = None, morning_entry_minutes: tuple[int, int] = MORNING_ENTRY_MINUTES, afternoon_entry_minutes: tuple[int, int] = AFTERNOON_ENTRY_MINUTES, transition_patterns: tuple[TransitionPattern, ...] = ()) -> None:
         self.version, self.config_hash = version, config_hash
         self.cooldown_minutes = cooldown_minutes
         self.capital = capital
@@ -72,23 +79,29 @@ class IndependentLiveDecisionEngine:
         self.morning_entry_minutes = morning_entry_minutes
         self.afternoon_entry_minutes = afternoon_entry_minutes
         self.transition_patterns = transition_patterns
+        self._cell_policies = {
+            (Session.MORNING, item.cell): item for item in MORNING_CELL_POLICIES
+        }
+        self._cell_policies.update({
+            (Session.AFTERNOON, item.cell): item for item in AFTERNOON_CELL_POLICIES
+        })
         self._futures: list = []
         self._previous_vix = None
         self._vix_history: list = []
         self._location_detector = LocationDetector()
         self._last_decision: datetime | None = None
         self._trading_date: str | None = None
-        self._decision_session: str | None = None
+        self._decision_session: Session | None = None
         self._vix_open: float | None = None
 
-    def _session_for_time(self, decision_at: datetime) -> str | None:
+    def _session_for_time(self, decision_at: datetime) -> Session:
         ist_time = decision_at.astimezone(ZoneInfo("Asia/Kolkata"))
         minutes_from_open = ist_time.hour * 60 + ist_time.minute - (9 * 60 + 15)
         if self.morning_entry_minutes[0] <= minutes_from_open < self.morning_entry_minutes[1]:
-            return "morning"
+            return Session.MORNING
         if self.afternoon_entry_minutes[0] <= minutes_from_open < self.afternoon_entry_minutes[1]:
-            return "afternoon"
-        return None
+            return Session.AFTERNOON
+        return Session.OUTSIDE
 
     def evaluate(self, bundle: DecisionBundle) -> tuple[LiveDecision, ...]:
         if self._trading_date != bundle.trading_date:
@@ -105,7 +118,7 @@ class IndependentLiveDecisionEngine:
             self._trading_date = bundle.trading_date
         decision_at = _decision_datetime(bundle)
         decision_session = self._session_for_time(decision_at)
-        if decision_session is not None and decision_session != self._decision_session:
+        if decision_session is not self._decision_session:
             self._last_decision = None
             self._decision_session = decision_session
         current_pcr = _option_pcr(bundle)
@@ -151,7 +164,8 @@ class IndependentLiveDecisionEngine:
         cell = location_snapshot.cell
         if cell is None:
             return ()
-        direction = "long" if current >= vwap else "short"
+        cell_policy = self._cell_policies.get((decision_session, cell.name))
+        direction = cell_policy.direction.value.lower() if cell_policy is not None else "NONE"
         round_level = round(current / 50) * 50
         structural_proximity = (
             (self.prior_day_low is not None and abs(current - self.prior_day_low) <= 15)
@@ -184,13 +198,16 @@ class IndependentLiveDecisionEngine:
                                       for item in location_snapshot.transitions])
         events = []
         reason = None
-        if cell is None:
-            reason = "no_qualifying_setup"
-        elif decision_session is None:
+        if decision_session is Session.OUTSIDE:
             reason = "outside_session_window"
+        elif cell_policy is None:
+            reason = "cell_not_configured"
         elif score_setup_type == "Skip":
             reason = "setup_score_skip"
-        elif not transition_patterns_allow(location_snapshot, self.transition_patterns):
+        elif not transition_patterns_allow(
+            location_snapshot,
+            cell_policy.transition_patterns or self.transition_patterns,
+        ):
             reason = "transition_policy_mismatch"
         elif self._last_decision and (decision_dt - self._last_decision).total_seconds() < self.cooldown_minutes * 60:
             reason = "cooldown"
@@ -199,8 +216,10 @@ class IndependentLiveDecisionEngine:
         if reason:
             events.append(LiveDecision("REJECTEDDECISION", {**candidate, "outcome": "policy rejection", "reason": reason, "decision_id": sha256(f"{candidate_id}:{reason}".encode()).hexdigest()[:24]}))
             return tuple(events)
+        if cell_policy is None:
+            raise RuntimeError("an accepted decision requires a configured cell policy")
         self._last_decision = decision_dt
-        side = OrderSide.BUY if direction == "long" else OrderSide.SELL
+        side = cell_policy.direction
         stop = current - max(futures.high - futures.low, 5.0) if side is OrderSide.BUY else current + max(futures.high - futures.low, 5.0)
         sizing = RiskSizer().size(
             capital=self.capital, equity=self.capital, peak_equity=self.capital,
