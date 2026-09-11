@@ -7,7 +7,7 @@ from typing import Any
 
 from ftx_paper.runtime import RuntimeController, RuntimeSession, RuntimeStore
 from ftx_paper.runtime.events import (
-    EXECUTION_EVENT_TYPES, RISK_EVENT_TYPES, DecisionTimestampError, is_decision_event,
+    EXECUTION_EVENT_TYPES, RISK_EVENT_TYPES, DecisionTimestampError,
 )
 from ftx_paper.runtime.events import serialize_datetime
 from .schemas import error_payload, openapi_document
@@ -109,8 +109,7 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
 
     @app.get("/api/v1/diagnostics")
     def diagnostics():
-        return jsonify({"status": store.read_status(), "event_counts": store.event_counts(),
-                        "decision_timestamp_migration": store.decision_timestamp_migration})
+        return jsonify({"status": store.read_status(), "event_counts": store.event_counts()})
 
     @app.post("/api/v1/runtime/<command>")
     def runtime_command(command: str):
@@ -133,25 +132,27 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
 
     @app.get("/api/v1/decisions")
     def decisions():
-        events = store.read_events(1000)
         selected_date = request.args.get("date")
         if selected_date:
             try:
                 datetime.strptime(selected_date, "%Y-%m-%d").date()
             except ValueError:
                 return jsonify({"error": {"code": "invalid_date", "message": "date must be YYYY-MM-DD"}}), 400
-        execution_types = EXECUTION_EVENT_TYPES
-        risk_types = RISK_EVENT_TYPES
+        decision_events = store.read_decision_events(session_date=selected_date, limit=1000)
+        decision_ids = {
+            str(event["payload"]["decision_id"])
+            for event in decision_events if event.get("payload", {}).get("decision_id")
+        }
         executions_by_decision: dict[str, list[dict[str, Any]]] = {}
         risks_by_decision: dict[str, list[dict[str, Any]]] = {}
-        for event in events:
+        for event in store.read_decision_lifecycle_events(decision_ids):
             event_type = str(event.get("event_type", "")).upper()
             decision_id = event.get("payload", {}).get("decision_id")
             if not decision_id:
                 continue
-            if event_type in execution_types:
+            if event_type in EXECUTION_EVENT_TYPES:
                 executions_by_decision.setdefault(str(decision_id), []).append(event)
-            elif event_type in risk_types:
+            elif event_type in RISK_EVENT_TYPES:
                 risks_by_decision.setdefault(str(decision_id), []).append(event)
 
         def enrich(event: dict[str, Any]) -> dict[str, Any]:
@@ -181,14 +182,9 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
                 payload["execution_status"] = "replayed"
             return {**event, "category": "decision", "payload": payload}
 
-        decision_events = [
-            event for event in events
-            if is_decision_event(event.get("event_type", ""))
-            and isinstance(event.get("payload", {}).get("decision_at"), datetime)
-            and (not selected_date or event["payload"]["decision_at"].date().isoformat() == selected_date)
-        ]
+        decision_events = [enrich(event) for event in decision_events]
         decision_events.sort(key=lambda event: event["payload"]["decision_at"], reverse=True)
-        return jsonify(json_safe({"decisions": [enrich(event) for event in decision_events]}))
+        return jsonify(json_safe({"decisions": decision_events}))
 
     @app.get("/api/v1/logs")
     def logs():

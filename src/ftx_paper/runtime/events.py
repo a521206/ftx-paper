@@ -16,8 +16,8 @@ DECISION_EVENT_TYPES = frozenset({
     "EXITDECISION",
 })
 
-# These names are migration-only compatibility inputs.  They must never be
-# consulted by projections, filters, or new event producers.
+# These names are rejected on new decision events. They are retained only so
+# callers get a clear validation error instead of silently storing old fields.
 LEGACY_DECISION_TIME_FIELDS = (
     "minute", "bar_datetime", "bar_timestamp", "event_time", "timestamp",
 )

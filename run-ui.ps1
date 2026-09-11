@@ -48,6 +48,7 @@ Stop-ExistingUiProcess -PythonPath $venvPython
 $env:PYTHONPATH = Join-Path $packageRoot "src"
 $env:FTX_API_BASE_URL = $ApiBaseUrl
 $env:FTX_UI_PORT = [string]$Port
+$env:FTX_PAPER_RUNTIME_DIR = Join-Path (Split-Path -Parent $packageRoot) "data\runtime\ftx\current"
 
 & $venvPython -c "from ftx_paper.cli import ui_main; ui_main()"
 exit $LASTEXITCODE

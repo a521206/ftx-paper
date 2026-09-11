@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 import sqlite3
 from datetime import date, datetime, timezone
@@ -123,6 +122,22 @@ def test_decision_projection_includes_execution_outcome(tmp_path: Path) -> None:
     assert decisions[0]["payload"]["execution_event_type"] == "FILL"
 
 
+def test_decision_projection_is_independent_of_event_stream_volume(tmp_path: Path) -> None:
+    store = RuntimeStore(tmp_path)
+    store.append_event("ACCEPTEDDECISION", {
+        "decision_id": "d1", "decision_source": "live", "decision_at": "2026-09-10T10:20:00+05:30",
+    })
+    for index in range(1500):
+        store.append_event("HEALTH_SAMPLE", {"tick": index})
+
+    decisions = create_app(store).test_client().get(
+        "/api/v1/decisions?date=2026-09-10"
+    ).get_json()["decisions"]
+
+    assert len(decisions) == 1
+    assert decisions[0]["payload"]["decision_id"] == "d1"
+
+
 def test_decision_projection_attaches_risk_without_counting_it_as_a_decision(tmp_path: Path) -> None:
     store = RuntimeStore(tmp_path)
     store.append_event("ACCEPTEDDECISION", {"decision_id": "d1", "decision_at": "2026-09-10T10:20:00+05:30"})
@@ -147,31 +162,6 @@ def test_new_decisions_store_only_decision_at_for_decision_time(tmp_path: Path) 
     assert event["payload"]["decision_at"].isoformat() == "2026-09-10T10:20:00+05:30"
     assert not {"minute", "bar_datetime", "bar_timestamp", "event_time", "timestamp"} & event["payload"].keys()
     assert event["created_at"] != event["payload"]["decision_at"]
-
-
-def test_legacy_decision_timestamps_migrate_to_decision_at(tmp_path: Path) -> None:
-    database = tmp_path / "runtime.sqlite3"
-    with sqlite3.connect(database) as connection:
-        connection.executescript(
-            "CREATE TABLE runtime_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT NOT NULL, "
-            "payload TEXT NOT NULL, timestamp TEXT NOT NULL, idempotency_key TEXT UNIQUE);"
-        )
-        connection.execute(
-            "INSERT INTO runtime_events(event_type, payload, timestamp) VALUES (?, ?, ?)",
-            ("ACCEPTEDDECISION", json.dumps({"bar_datetime": "2026-09-10T10:20:00+05:30"}), "2026-09-10T15:00:00Z"),
-        )
-        connection.execute(
-            "INSERT INTO runtime_events(event_type, payload, timestamp) VALUES (?, ?, ?)",
-            ("REJECTEDDECISION", json.dumps({"minute": "2026-09-10T10:21:00+05:30"}), "2026-09-10T15:00:00Z"),
-        )
-
-    store = RuntimeStore(tmp_path)
-    events = {event["event_type"]: event for event in store.read_events()}
-    assert events["ACCEPTEDDECISION"]["payload"]["decision_at"].isoformat() == "2026-09-10T10:20:00+05:30"
-    assert events["REJECTEDDECISION"]["payload"]["decision_at"].isoformat() == "2026-09-10T10:21:00+05:30"
-    assert "minute" not in events["REJECTEDDECISION"]["payload"]
-    assert store.decision_timestamp_migration["migrated"] == 2
-    assert store.decision_timestamp_migration["unmigratable"] == 0
 
 
 def test_runtime_actions_are_api_boundaries(tmp_path: Path) -> None:
@@ -221,23 +211,6 @@ def test_created_at_does_not_affect_decision_filtering(tmp_path: Path) -> None:
         connection.execute("UPDATE runtime_events SET created_at = ?", ("2026-09-10T04:00:00+00:00",))
     assert create_app(store).test_client().get("/api/v1/decisions?date=2026-09-10").get_json()["decisions"]
     assert not create_app(store).test_client().get("/api/v1/decisions?date=2026-09-09").get_json()["decisions"]
-
-
-def test_unmigratable_decision_rows_are_reported_and_fail_on_read(tmp_path: Path) -> None:
-    database = tmp_path / "runtime.sqlite3"
-    with sqlite3.connect(database) as connection:
-        connection.execute(
-            "CREATE TABLE runtime_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT NOT NULL, "
-            "payload TEXT NOT NULL, created_at TEXT NOT NULL, idempotency_key TEXT UNIQUE)")
-        connection.execute(
-            "INSERT INTO runtime_events(event_type, payload, created_at) VALUES (?, ?, ?)",
-            ("ACCEPTEDDECISION", json.dumps({"decision_id": "missing"}), "2026-09-10T15:00:00Z"),
-        )
-    store = RuntimeStore(tmp_path)
-    assert store.decision_timestamp_migration["unmigratable"] == 1
-    assert store.decision_timestamp_migration["unmigratable_rows"][0]["id"] == 1
-    with pytest.raises(DecisionTimestampError, match="decision_at"):
-        store.read_events()
 
 
 def test_ui_is_a_separate_http_client() -> None:

@@ -45,6 +45,13 @@ def _instrument_expiry(value: object) -> date:
     return date.fromisoformat(str(value))
 
 
+def instrument_expiry_iso(value: object) -> str | None:
+    """Return an ISO date string for a broker expiry value, or None when absent."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    return _instrument_expiry(value).isoformat()
+
+
 @dataclass
 class RuntimeRoles:
     futures: ZerodhaInstrument
@@ -107,7 +114,7 @@ def discover_option_surface_contracts(
     for parsed_expiry, row in contracts:
         symbol = str(row["tradingsymbol"])
         key = ("NFO", symbol)
-        if parsed_expiry.isoformat() != str(selected_expiry) or key in seen:
+        if parsed_expiry.isoformat() != selected_expiry or key in seen:
             continue
         seen.add(key)
         discovered.append({**dict(row), "exchange": "NFO", "symbol": symbol, "role": None})
@@ -193,8 +200,9 @@ def load_startup_backfill(client: Any, instruments: list[ZerodhaInstrument], *, 
             instrument_type = str(item.get("instrument_type", "INDEX"))
             if str(item["symbol"]).upper() in {"INDIA VIX", "INDIAVIX"}:
                 instrument_type = "INDEX"
-            expiry = str(item["expiry"]) if item.get("expiry") is not None and instrument_type in {"FUT", "CE", "PE"} else None
-            strike = float(item["strike"]) if item.get("strike") is not None and instrument_type in {"CE", "PE"} else None
+            expiry = instrument_expiry_iso(item.get("expiry")) if instrument_type in {"FUT", "CE", "PE"} else None
+            raw_strike = item.get("strike")
+            strike = float(raw_strike) if raw_strike is not None and instrument_type in {"CE", "PE"} else None
             bars.append(MarketBar(
                 instrument=Instrument(
                     str(item["symbol"]), str(item["exchange"]), instrument_type,

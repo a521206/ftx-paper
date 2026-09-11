@@ -154,6 +154,8 @@ class RuntimeSession:
 
     @staticmethod
     def _make_normalizer(resolved: list[ZerodhaInstrument]):
+        from ftx_paper.broker.zerodha import instrument_expiry_iso
+
         by_token = {int(item["instrument_token"]): item for item in resolved}
 
         def normalize(payload):
@@ -166,8 +168,9 @@ class RuntimeSession:
             instrument_type = str(item.get("instrument_type", "INDEX"))
             if str(item["symbol"]).upper() in {"INDIA VIX", "INDIAVIX"}:
                 instrument_type = "INDEX"
-            expiry = str(item["expiry"]) if item.get("expiry") is not None and instrument_type in {"FUT", "CE", "PE"} else None
-            strike = float(item["strike"]) if item.get("strike") is not None and instrument_type in {"CE", "PE"} else None
+            expiry = instrument_expiry_iso(item.get("expiry")) if instrument_type in {"FUT", "CE", "PE"} else None
+            raw_strike = item.get("strike")
+            strike = float(raw_strike) if raw_strike is not None and instrument_type in {"CE", "PE"} else None
             instrument = Instrument(
                 str(item["symbol"]), str(item["exchange"]), instrument_type,
                 expiry=expiry,
@@ -258,7 +261,7 @@ class RuntimeSession:
                                                          "phase": "submit",
                                                          "reason": "broker_unavailable"},
                                     f"execution_error:submit:{order.client_order_id}", timestamp=timestamp)
-            return
+            return False
         try:
             ack = self.broker.submit(order)
         except Exception as exc:
@@ -268,7 +271,7 @@ class RuntimeSession:
                                                          "error_type": type(exc).__name__,
                                                          "reason": str(exc)},
                                     f"execution_error:submit:{order.client_order_id}", timestamp=timestamp)
-            return
+            return False
         self.store.append_event("ORDER_ACK", {**context,
                                                "client_order_id": ack.client_order_id,
                                                "broker_order_id": ack.broker_order_id,
@@ -284,7 +287,7 @@ class RuntimeSession:
                                                          "error_type": type(exc).__name__,
                                                          "reason": str(exc)},
                                     f"execution_error:fill_poll:{order.client_order_id}", timestamp=timestamp)
-            return
+            return False
         if fill:
             register_entry = getattr(self.engine, "register_entry", None)
             if callable(register_entry):
@@ -422,16 +425,13 @@ class RuntimeSession:
         })
 
     def on_feed_health(self, health: dict[str, object]) -> None:
-        """Persist low-rate feed health without writing tick-level events."""
+        """Update feed health in status only; periodic samples are not audit events."""
         with self._lock:
             if self._stopping:
                 return
             if self._aggregator is not None:
                 self._refresh_pending_status()
             self.store.patch_status({"feed_health": health, "feed_connected": bool(health.get("connected"))})
-            sampled_at = datetime.now(timezone.utc)
-            bucket = sampled_at.replace(second=(sampled_at.second // 5) * 5, microsecond=0).isoformat()
-            self.store.append_event("HEALTH_SAMPLE", health, f"health:{bucket}")
 
     def stop(self) -> None:
         with self._lock:
