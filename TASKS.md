@@ -47,3 +47,93 @@
 - [x] In-process push-feed runtime session
 - [x] Serialized start/stop/restart lifecycle
 - [x] Remove subprocess worker and command queue
+
+## Bit-for-bit canonical FTX parity
+
+### Track P0 — Parity contract
+
+- [x] Define the canonical parity contract: inputs, defaults, timestamps, ordering, missing-data behavior, and output fields
+- [x] Document the independent `ftx-paper` mapping to each canonical component
+- [x] Define the zero-difference acceptance criteria and the explicitly allowed exceptions
+- [ ] Approve [PARITY_CONTRACT.md](PARITY_CONTRACT.md) as the working specification
+
+### Track P1 — Decision-clock parity
+
+- [ ] Feed the same completed futures-bar prefix into paper decisions as the canonical pipeline
+- [ ] Match warmup, duplicate-minute rejection, late-bar handling, and date-boundary reset
+- [ ] Add focused fixtures for clock and prefix behavior
+
+### Track P2 — Market-feature parity
+
+- [ ] Match VWAP, developing session high/low, ATR, and opening-range calculations
+- [ ] Match prior-day high/low initialization and rollover
+- [ ] Match VIX opening, event-time lookup, carry-forward, and missing-VIX behavior
+- [ ] Match option-PCR lookup, cutoff, and unavailable-value behavior
+- [ ] Add field-by-field feature comparison tests
+
+### Track P3 — Location and cell parity
+
+- [ ] Port the canonical all-location detector independently into `ftx-paper`
+- [ ] Support VWAP, session high/low, new high/low, opening-range high/low, and prior-day locations
+- [ ] Match proximity thresholds, simultaneous-location combinations, and opening-range completion
+- [ ] Match transition debouncing and transition-pattern filtering
+- [ ] Add location/cell golden fixtures
+
+### Track P4 — Score parity
+
+- [ ] Verify selling-structure values for every factor and insufficient-history case
+- [ ] Match the nine score factors, grinding override, thresholds, and setup-type mapping
+- [ ] Compare paper and canonical score factors/value-by-value on shared fixtures
+
+### Track P5 — Session-policy parity
+
+- [ ] Match morning and afternoon half-open session windows
+- [ ] Match configured composite cells and fixed policy directions
+- [ ] Remove price-relative direction inference from the paper decision path
+- [ ] Match transition-policy eligibility and rejection reasons
+- [ ] Add session-boundary and policy-matrix tests
+
+### Track P6 — Stop and sizing parity
+
+- [ ] Match adaptive ATR/VIX stop calculation, bounds, and expiry-day adjustment
+- [ ] Match setup-size multipliers and low-VIX reduction
+- [ ] Match capital, equity, peak-equity, drawdown, and risk-budget semantics
+- [ ] Match vehicle-specific sizing and synthetic-premium lookup behavior
+- [ ] Add stop and quantity golden fixtures
+
+### Track P7 — Risk-gate parity
+
+- [ ] Match directional exposure and concurrency limits
+- [ ] Match thesis-failure handling
+- [ ] Match per-cell post-exit cooldown behavior
+- [ ] Match risk-gate state reset and persistence across session segments
+- [ ] Add focused gate-state replay tests
+
+### Track P8 — Exit parity
+
+- [ ] Implement canonical per-cell signal, trail, target, hard-stop, and end-of-day modes
+- [ ] Match trail activation, distance, breakeven lock, and intrabar ordering
+- [ ] Match exit timestamps, held bars, and exit reasons
+- [ ] Add deterministic exit fixtures for every exit mode
+
+### Track P9 — Decision-replay comparator
+
+- [ ] Build a harness that feeds identical bundles to paper and canonical implementations
+- [ ] Compare event identity, cell, direction, score, factors, stop, quantity, reason, and timing
+- [ ] Emit a machine-readable first-difference report
+- [ ] Add regression tests for every discovered mismatch
+
+### Track P10 — Ledger and vehicle comparator
+
+- [ ] Compare futures exits, fills, costs, and final trade ledgers
+- [ ] Compare synthetic premium entry/exit, sizing, costs, and ledgers
+- [ ] Compare daily PnL, drawdown, and rejection counts
+- [ ] Produce a reproducible cross-vehicle comparison report
+
+### Track P11 — Cutover
+
+- [ ] Run the complete holdout replay and achieve zero decision differences
+- [ ] Obtain explicit approval for any remaining exceptions
+- [ ] Remove or quarantine the simplified paper `on_bar` path
+- [ ] Switch runtime execution to the parity-proven decision path
+- [ ] Remove the canonical live implementation from NiftyZoning only after the parity gate passes
