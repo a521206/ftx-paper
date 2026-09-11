@@ -118,7 +118,7 @@
 
 ### Track P9 — Decision-replay comparator
 
-- [ ] Build a harness that feeds identical bundles to paper and canonical implementations
+- [x] Build a trade-level harness that compares canonical audit output with persisted Paper events
 - [ ] Compare event identity, cell, direction, score, factors, stop, quantity, reason, and timing
 - [ ] Emit a machine-readable first-difference report
 - [ ] Add regression tests for every discovered mismatch
