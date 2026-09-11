@@ -18,7 +18,7 @@ def test_location_and_cell_golden_fixtures() -> None:
 
 
 def test_cell_normalization_is_independent_of_input_order() -> None:
-    assert Cell("or_low", "session_low", "vwap_zone").name == "vwap_zone+new_low+or_low"
+    assert Cell("or_low", "session_low", "vwap_zone").name == "vwap_zone+session_low+or_low"
 
 
 def test_empty_cell_is_rejected() -> None:

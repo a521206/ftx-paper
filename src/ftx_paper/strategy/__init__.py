@@ -1,6 +1,6 @@
 from typing import TYPE_CHECKING
 
-from .config import STRATEGY_NAME, STRATEGY_VERSION
+from .config import CAPITAL, STRATEGY_NAME, STRATEGY_VERSION
 
 if TYPE_CHECKING:
     from .live import ConfiguredLiveStrategy
@@ -12,4 +12,4 @@ def __getattr__(name: str):
         return ConfiguredLiveStrategy
     raise AttributeError(name)
 
-__all__ = ["ConfiguredLiveStrategy", "STRATEGY_NAME", "STRATEGY_VERSION"]
+__all__ = ["CAPITAL", "ConfiguredLiveStrategy", "STRATEGY_NAME", "STRATEGY_VERSION"]

@@ -33,9 +33,9 @@ class ConfiguredLiveStrategy:
 
     def __init__(
         self,
+        capital: float,
         decide: Callable[[MarketBar], tuple[OrderIntent, ...]] | None = None,
         config: StrategyConfig = DEFAULT_CONFIG,
-        capital: float = 1_000_000.0,
         expiry_dates: frozenset[str] = frozenset(),
     ) -> None:
         self._decide = decide
@@ -78,7 +78,7 @@ class ConfiguredLiveStrategy:
         )
 
     @classmethod
-    def from_snapshot(cls, snapshot: Mapping[str, object]) -> "ConfiguredLiveStrategy":
+    def from_snapshot(cls, snapshot: Mapping[str, object], *, capital: float) -> "ConfiguredLiveStrategy":
         schema_version = snapshot.get("schema_version", 0)
         if not isinstance(schema_version, int) or isinstance(schema_version, bool) or schema_version != 1:
             raise ValueError("unsupported strategy snapshot schema")
@@ -115,7 +115,7 @@ class ConfiguredLiveStrategy:
             afternoon_entry_minutes=afternoon_entry_minutes,
             cooldown_minutes=cooldown_minutes,
         )
-        return cls(config=config)
+        return cls(config=config, capital=capital)
 
     @staticmethod
     def _parse_minute_pair(key: str, value: object) -> tuple[int, int]:

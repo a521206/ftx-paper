@@ -72,7 +72,7 @@ class IndependentLiveDecisionEngine:
     direction, and cooldown logic.  It has no historical-pipeline imports.
     """
 
-    def __init__(self, *, version: str, config_hash: str, cooldown_minutes: int = 30, capital: float = 1_000_000.0, prior_day_high: float | None = None, prior_day_low: float | None = None, morning_entry_minutes: tuple[int, int] = MORNING_ENTRY_MINUTES, afternoon_entry_minutes: tuple[int, int] = AFTERNOON_ENTRY_MINUTES, transition_patterns: tuple[TransitionPattern, ...] = (), expiry_dates: frozenset[str] = frozenset()) -> None:
+    def __init__(self, *, version: str, config_hash: str, capital: float, cooldown_minutes: int = 30, prior_day_high: float | None = None, prior_day_low: float | None = None, morning_entry_minutes: tuple[int, int] = MORNING_ENTRY_MINUTES, afternoon_entry_minutes: tuple[int, int] = AFTERNOON_ENTRY_MINUTES, transition_patterns: tuple[TransitionPattern, ...] = (), expiry_dates: frozenset[str] = frozenset()) -> None:
         self.version, self.config_hash = version, config_hash
         self.cooldown_minutes = cooldown_minutes
         self.capital = capital

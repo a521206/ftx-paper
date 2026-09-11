@@ -16,7 +16,7 @@ IST = ZoneInfo("Asia/Kolkata")
 
 
 def _engine() -> IndependentLiveDecisionEngine:
-    return IndependentLiveDecisionEngine(version="test", config_hash="test")
+    return IndependentLiveDecisionEngine(version="test", config_hash="test", capital=2_500_000.0)
 
 
 def test_session_entry_gates_are_half_open_at_both_boundaries() -> None:
@@ -29,8 +29,8 @@ def test_session_entry_gates_are_half_open_at_both_boundaries() -> None:
 
 
 def test_configured_cell_matrix_has_fixed_session_directions() -> None:
-    morning = {(item.cell): item.direction.value for item in MORNING_CELL_POLICIES}
-    afternoon = {(item.cell): item.direction.value for item in AFTERNOON_CELL_POLICIES}
+    morning = {(item.cell): item.direction.value.lower() for item in MORNING_CELL_POLICIES}
+    afternoon = {(item.cell): item.direction.value.lower() for item in AFTERNOON_CELL_POLICIES}
 
     assert morning == {
         "session_low+or_low": "buy",
