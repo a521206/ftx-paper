@@ -617,6 +617,9 @@
     ];
 
     let selectedDecisionSession = new URLSearchParams(location.search).get('session');
+    const decisionDate = new URLSearchParams(location.search).get('date') || new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Kolkata',
+    }).format(new Date());
     if (!decisionSessions.some((item) => item[0] === selectedDecisionSession)) {
       selectedDecisionSession = null;
     }
@@ -943,7 +946,7 @@
               .map((x) => {
                 const stats = decisionStats(decisionRows, x[0]);
                 const active = stats.detections > 0;
-                return `<a class="session session-filter" href="/decisions?session=${encodeURIComponent(x[0])}"${selectedDecisionSession === x[0] ? ' aria-current="page"' : ''}>
+                return `<a class="session session-filter" href="/decisions?session=${encodeURIComponent(x[0])}&date=${encodeURIComponent(decisionDate)}"${selectedDecisionSession === x[0] ? ' aria-current="page"' : ''}>
                   <strong>${x[0]}</strong>
                   <div class="label">${x[1]}</div>
                   <span class="session-count">${stats.detections} <span class="label">detections</span></span>
@@ -1048,7 +1051,7 @@
               '/api/v1/capital',
               '/api/v1/positions',
               '/api/v1/trades',
-              '/api/v1/decisions',
+              page === 'decisions' ? `/api/v1/decisions?date=${encodeURIComponent(decisionDate)}` : '/api/v1/decisions',
               '/api/v1/events?limit=100',
               '/api/v1/broker/zerodha/status',
             ].map(get)

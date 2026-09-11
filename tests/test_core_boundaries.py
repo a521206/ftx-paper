@@ -475,7 +475,7 @@ def test_supporting_role_is_ignored_and_expired_bundle_has_diagnostics() -> None
     assert expired[0].bars["futures"].timestamp == minute
 
 
-def test_live_decision_engine_does_not_carry_forward_previous_pcr() -> None:
+def test_live_decision_engine_suppresses_unconfigured_cells() -> None:
     instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
     vix = Instrument("INDIA VIX", "NSE", "VIX")
     call = Instrument("NIFTYCE", "NFO", "CE")
@@ -500,7 +500,7 @@ def test_live_decision_engine_does_not_carry_forward_previous_pcr() -> None:
     engine.evaluate(bundle("10:21", {}))
     third = engine.evaluate(bundle("10:22", {}))
 
-    assert third[0].payload["feature_values"]["pcr"] is None
+    assert third == ()
 
 
 def test_live_decision_engine_persists_score_and_quality_bucket() -> None:
@@ -522,12 +522,7 @@ def test_live_decision_engine_persists_score_and_quality_bucket() -> None:
     engine.evaluate(bundle(1))
     engine.evaluate(bundle(2))
     events = engine.evaluate(bundle(3))
-    decision = next(item for item in events if item.event_type == "REJECTEDDECISION")
-    assert 0 <= decision.payload["score"] <= 9
-    assert decision.payload["score_setup_type"] in {"A+", "Standard", "Weak", "Skip"}
-    assert decision.payload["setup_type"] == "reversal_at_vwap_zone"
-    assert decision.payload["sequence"] == 4
-    assert decision.payload["reason"] in {"cell_not_configured", "setup_score_skip"}
+    assert events == ()
 
 
 def test_risk_sizer_never_exceeds_risk_budget_when_budget_is_marginal() -> None:

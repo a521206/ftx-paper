@@ -173,7 +173,12 @@ class IndependentLiveDecisionEngine:
         if cell is None:
             return ()
         cell_policy = self._cell_policies.get((decision_session, cell.name))
-        direction = cell_policy.direction.value.lower() if cell_policy is not None else "NONE"
+        # Unconfigured cells are outside the decision universe.  Do not emit
+        # candidates or policy rejections for them; the UI should only receive
+        # decisions for cells that can actually be traded in this session.
+        if cell_policy is None:
+            return ()
+        direction = cell_policy.direction.value.lower()
         round_level = round(current / 50) * 50
         structural_proximity = (
             (self.prior_day_low is not None and abs(current - self.prior_day_low) <= 15)
@@ -208,8 +213,6 @@ class IndependentLiveDecisionEngine:
         reason = None
         if decision_session is Session.OUTSIDE:
             reason = "outside_session_window"
-        elif cell_policy is None:
-            reason = "cell_not_configured"
         elif score_setup_type == "Skip":
             reason = "setup_score_skip"
         elif not transition_patterns_allow(
