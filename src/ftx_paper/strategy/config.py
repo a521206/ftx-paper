@@ -76,7 +76,6 @@ class StrategyConfig:
                 "session": session,
                 "cell": item.cell,
                 "direction": item.direction.value.lower(),
-                "exit_mode": item.exit_mode.value,
             }
             for session, policies in (
                 ("morning", MORNING_CELL_POLICIES),
