@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from ftx_paper.broker import PaperBroker
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderIntent, OrderSide
@@ -36,6 +37,8 @@ def test_closed_bar_is_processed_under_session_lifecycle(tmp_path):
     session.on_closed_bar(bar)
     assert session.engine.bars_seen == 1
     assert any(event["event_type"] == "ENGINE_EVENT" for event in store.read_events())
+    session_date = bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat()
+    assert len(store.read_market_bars(session_date)) == 1
 
 
 def test_role_objects_are_json_safe_at_runtime_boundary():

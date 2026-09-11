@@ -7,8 +7,10 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo
+from collections.abc import Iterable
 
-from ftx_paper.contracts import MarketRole, OptionRole, role_to_key
+from ftx_paper.contracts import MarketBar, MarketRole, OptionRole, role_to_key
 from .events import (
     DECISION_EVENT_TYPES,
     LEGACY_DECISION_TIME_FIELDS,
@@ -94,6 +96,24 @@ class RuntimeStore:
                     date TEXT PRIMARY KEY,
                     source TEXT NOT NULL,
                     copied_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS market_bars (
+                    symbol TEXT NOT NULL,
+                    exchange TEXT NOT NULL,
+                    minute TEXT NOT NULL,
+                    open REAL NOT NULL,
+                    high REAL NOT NULL,
+                    low REAL NOT NULL,
+                    close REAL NOT NULL,
+                    volume REAL,
+                    open_interest REAL,
+                    instrument_type TEXT,
+                    expiry TEXT,
+                    strike REAL,
+                    option_type TEXT,
+                    source TEXT NOT NULL,
+                    ingested_at TEXT NOT NULL,
+                    PRIMARY KEY (symbol, exchange, minute)
                 );
                 """
             )
@@ -249,6 +269,53 @@ class RuntimeStore:
         with sqlite3.connect(self.database) as connection:
             rows = connection.execute("SELECT date FROM expiry_dates ORDER BY date").fetchall()
         return frozenset(str(row[0]) for row in rows)
+
+    def append_market_bars(self, bars: Iterable[MarketBar], *, source: str) -> None:
+        """Persist normalized historical or live bars in the runtime database."""
+        now = self._now()
+        rows = []
+        for bar in bars:
+            timestamp = bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata"))
+            minute = timestamp.replace(second=0, microsecond=0).isoformat()
+            rows.append((
+                bar.instrument.symbol, bar.instrument.exchange, minute,
+                bar.open, bar.high, bar.low, bar.close, bar.volume,
+                bar.open_interest, bar.instrument.instrument_type,
+                bar.instrument.expiry,
+                bar.instrument.strike,
+                str(bar.instrument.option_type) if bar.instrument.option_type is not None else None,
+                source, now,
+            ))
+        if not rows:
+            return
+        with sqlite3.connect(self.database) as connection:
+            connection.executemany(
+                """
+                INSERT OR REPLACE INTO market_bars
+                (symbol, exchange, minute, open, high, low, close, volume,
+                 open_interest, instrument_type, expiry, strike, option_type,
+                 source, ingested_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+    def read_market_bars(self, session_date: str) -> list[dict[str, Any]]:
+        """Read one IST trading session of normalized bars for export."""
+        with sqlite3.connect(self.database) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                """
+                SELECT symbol, exchange, minute, open, high, low, close, volume,
+                       open_interest, instrument_type, expiry, strike, option_type,
+                       source, ingested_at
+                FROM market_bars
+                WHERE substr(minute, 1, 10) = ?
+                ORDER BY minute, exchange, symbol
+                """,
+                (session_date,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     @staticmethod
     def _now() -> str:

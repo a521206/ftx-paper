@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 from ftx_paper.broker import Broker, PaperBroker
 from ftx_paper.contracts import (
-    Instrument, MarketBar, MarketRole, OptionRole, OrderSide, normalize_exchange_timestamp, parse_role,
+    Instrument, MarketBar, MarketRole, OptionRole, OptionType, OrderSide, normalize_exchange_timestamp, parse_role,
     role_to_key,
 )
 from ftx_paper.core import AggregatorConfig, CompletedBarAggregator, InstrumentKey, PaperEngine
@@ -108,7 +108,9 @@ class RuntimeSession:
             self.store.clear_replay_events(self._replay_date)
             # Replay every configured instrument so supporting inputs (notably
             # option volumes used for PCR) are present in decision bundles.
-            self._replay_today(load_startup_backfill(client, resolved), self._replay_date)
+            backfill = load_startup_backfill(client, resolved)
+            self.store.append_market_bars(backfill, source="historical_backfill")
+            self._replay_today(backfill, self._replay_date)
             self._replaying = False
             normalize = self.normalize_payload or self._make_normalizer(resolved)
             socket = create_kite_socket(self.auth.api_key, self.auth.access_token())
@@ -150,10 +152,12 @@ class RuntimeSession:
                 payload.get("exchange_timestamp") or datetime.now(ZoneInfo("Asia/Kolkata"))
             )
             price = float(payload["last_price"])
+            instrument_type = str(item.get("instrument_type", "INDEX"))
             instrument = Instrument(
-                str(item["symbol"]), str(item["exchange"]), str(item.get("instrument_type", "INDEX")),
+                str(item["symbol"]), str(item["exchange"]), instrument_type,
                 expiry=str(item["expiry"]) if item.get("expiry") is not None else None,
                 strike=float(item["strike"]) if item.get("strike") is not None else None,
+                option_type=OptionType(instrument_type) if instrument_type in {"CE", "PE"} else None,
             )
             return MarketBar(instrument, timestamp, price, price, price, price, payload.get("volume_traded"), payload.get("oi"))
 
@@ -303,6 +307,7 @@ class RuntimeSession:
             if isinstance(self.broker, PaperBroker):
                 self.broker.update_price(bar.instrument.symbol, bar.close)
             now = datetime.now(timezone.utc).isoformat()
+            self.store.append_market_bars((bar,), source="live")
             self.store.patch_status({"last_bar_at": bar.timestamp.isoformat(), "last_heartbeat_at": now,
                                      "bars_seen": self.engine.bars_seen + 1})
             bar_key = f"{bar.instrument.exchange}:{bar.instrument.symbol}:{bar.timestamp.isoformat()}"

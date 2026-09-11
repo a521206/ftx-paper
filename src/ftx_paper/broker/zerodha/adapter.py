@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 from ftx_paper.broker.protocol import Fill
 from ftx_paper.contracts import (
-    Instrument, MarketBar, MarketRole, OrderAck, OrderIntent, Role,
+    Instrument, MarketBar, MarketRole, OptionType, OrderAck, OrderIntent, Role,
     normalize_exchange_timestamp, parse_role,
 )
 
@@ -138,8 +138,14 @@ def load_startup_backfill(client: Any, instruments: list[ZerodhaInstrument], *, 
         for row in rows or ():
             timestamp = row.get("date")
             parsed = normalize_exchange_timestamp(timestamp)
+            instrument_type = str(item.get("instrument_type", "INDEX"))
             bars.append(MarketBar(
-                instrument=Instrument(str(item["symbol"]), str(item["exchange"]), str(item.get("instrument_type", "INDEX"))),
+                instrument=Instrument(
+                    str(item["symbol"]), str(item["exchange"]), instrument_type,
+                    expiry=str(item["expiry"]) if item.get("expiry") is not None else None,
+                    strike=float(item["strike"]) if item.get("strike") is not None else None,
+                    option_type=OptionType(instrument_type) if instrument_type in {"CE", "PE"} else None,
+                ),
                 timestamp=parsed,
                 open=float(row["open"]), high=float(row["high"]), low=float(row["low"]), close=float(row["close"]),
                 volume=float(row["volume"]) if row.get("volume") is not None else None,
