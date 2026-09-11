@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import time
-from ftx_paper.contracts import MarketBar, OrderIntent, OrderSide
+from ftx_paper.contracts import MarketBar, OrderIntent, OrderRole, OrderSide
 from .features import LiveFeatures
 
 
@@ -43,4 +43,4 @@ class SetupPolicy:
     def to_order(decision: SetupDecision, bar: MarketBar, quantity: int, client_order_id: str) -> OrderIntent:
         if quantity < 1:
             raise ValueError("quantity must be positive")
-        return OrderIntent(client_order_id, bar.instrument, decision.side, quantity, reason=decision.reason)
+        return OrderIntent(client_order_id, bar.instrument, decision.side, quantity, reason=decision.reason, role=OrderRole.ENTRY)

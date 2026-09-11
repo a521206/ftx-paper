@@ -365,15 +365,8 @@ class RuntimeSession:
                         timestamp=bar.timestamp.isoformat(),
                     )
             else:
-                expired = self._aggregator.expire(now=time.monotonic())
-                for incomplete in expired:
-                    self._record_incomplete(incomplete)
-                bundle = self._aggregator.ingest(bar)
-                self._refresh_pending_status()
-                if bundle is not None:
-                    self.store.patch_status({"last_completed_bundle_minute": bundle.minute,
-                                             "last_strategy_evaluation_minute": bundle.minute})
-                    self._process_bundle(bundle, source="live")
+                # Settle positions carried into this bar before evaluating a
+                # new bundle, matching the deterministic replay ordering.
                 for action in self.engine.on_closed_bar(bar):
                     filled = self._execute_paper_order(
                         action.intent,
@@ -391,6 +384,15 @@ class RuntimeSession:
                         "execution_allowed": True,
                         "outcome": "exit_triggered",
                     }, f"exit_decision:{action.intent.client_order_id}", timestamp=bar.timestamp.isoformat())
+                expired = self._aggregator.expire(now=time.monotonic())
+                for incomplete in expired:
+                    self._record_incomplete(incomplete)
+                bundle = self._aggregator.ingest(bar)
+                self._refresh_pending_status()
+                if bundle is not None:
+                    self.store.patch_status({"last_completed_bundle_minute": bundle.minute,
+                                             "last_strategy_evaluation_minute": bundle.minute})
+                    self._process_bundle(bundle, source="live")
 
     def on_tick(self, bar: MarketBar) -> None:
         """Evaluate protective exits immediately on each live market tick."""

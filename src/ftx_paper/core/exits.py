@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, time
-from ftx_paper.contracts import Instrument, OrderIntent, OrderSide
+from ftx_paper.contracts import Instrument, OrderIntent, OrderRole, OrderSide
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,5 +63,5 @@ class ExitStateMachine:
     @staticmethod
     def _action(position: PositionState, price: float, reason: str, client_order_id: str) -> ExitAction:
         side = OrderSide.SELL if position.side is OrderSide.BUY else OrderSide.BUY
-        intent = OrderIntent(client_order_id, position.instrument, side, position.quantity, reason=reason)
+        intent = OrderIntent(client_order_id, position.instrument, side, position.quantity, reason=reason, role=OrderRole.EXIT)
         return ExitAction(reason, price, intent, position.cell)

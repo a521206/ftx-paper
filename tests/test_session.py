@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from ftx_paper.broker import PaperBroker
-from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderIntent, OrderSide
+from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderIntent, OrderRole, OrderSide
 from ftx_paper.runtime.store import _json_safe
 from ftx_paper.core import EngineResult, PaperEngine
 from ftx_paper.core import CompletedBarAggregator
@@ -96,6 +96,39 @@ def test_incomplete_bundle_is_diagnosed_without_advancing_completion(tmp_path):
     assert events[0]["payload"]["minute"] == "15:50"
 
 
+def test_startup_replay_processes_each_date_and_keeps_cumulative_count(tmp_path):
+    store = RuntimeStore(tmp_path)
+
+    class Engine:
+        bars_seen = 0
+        resets = 0
+        strategy_metadata = None
+
+        def reset(self):
+            self.resets += 1
+            self.bars_seen = 0
+
+        def on_bundle(self, bundle):
+            self.bars_seen += len(bundle.bars)
+            return EngineResult()
+
+    session = RuntimeSession(store, None, [], engine=Engine())
+    session._aggregator = CompletedBarAggregator(
+        {("NFO", "NIFTYFUT"): "futures"}, required_roles=(MarketRole.FUTURES,),
+    )
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    bars = tuple(
+        MarketBar(instrument, datetime(2026, 1, day, 9, 15, tzinfo=ZoneInfo("Asia/Kolkata")), 100, 101, 99, 100)
+        for day in (1, 2)
+    )
+
+    session._replay_dates(bars)
+
+    assert session.engine.resets == 1
+    assert store.read_status()["replay_date"] == "2026-01-02"
+    assert store.read_status()["replay_bars_seen"] == 2
+
+
 def test_replay_suppresses_orders_and_tags_events(tmp_path):
     store = RuntimeStore(tmp_path)
     instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
@@ -106,7 +139,7 @@ def test_replay_suppresses_orders_and_tags_events(tmp_path):
 
         def on_bundle(self, bundle):
             return EngineResult(
-                orders=(OrderIntent("replay-order", instrument, OrderSide.BUY, 1),),
+                orders=(OrderIntent("replay-order", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY),),
                 events=({"event_type": "ACCEPTEDDECISION", "decision_id": "replay-order"},),
             )
 
@@ -139,7 +172,7 @@ def test_live_order_reaches_paper_broker_and_persists_fill(tmp_path):
 
         def on_bundle(self, bundle):
             return EngineResult(
-                orders=(OrderIntent("live-order", instrument, OrderSide.BUY, 2),),
+                orders=(OrderIntent("live-order", instrument, OrderSide.BUY, 2, role=OrderRole.ENTRY),),
                 events=({"event_type": "ACCEPTEDDECISION", "decision_id": "live-order"},),
             )
 

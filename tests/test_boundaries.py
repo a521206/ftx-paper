@@ -11,7 +11,7 @@ from ftx_paper.broker.zerodha import ReconnectPolicy, ZerodhaFeed
 from ftx_paper.broker.zerodha import ZerodhaBroker, classify_runtime_roles, load_startup_backfill, resolve_instruments
 from ftx_paper.broker.zerodha import ZerodhaAuth
 import ftx_paper.broker.zerodha.adapter as zerodha_adapter
-from ftx_paper.contracts import OrderIntent, OrderSide
+from ftx_paper.contracts import OrderIntent, OrderRole, OrderSide
 from ftx_paper.contracts import Instrument, MarketBar
 from ftx_paper.runtime.events import DecisionTimestampError, decision_session_bucket
 
@@ -475,7 +475,7 @@ def test_zerodha_order_submission_is_disabled_for_paper_runtime() -> None:
         def order_history(self, order_id):
             return [{"status": "OPEN"}, {"status": "COMPLETE", "filled_quantity": 2, "average_price": 101, "exchange_timestamp": "2026-01-01T10:00:00+05:30"}]
     instrument = Instrument("NIFTY", "NSE", "INDEX")
-    order = OrderIntent("client-1", instrument, OrderSide.BUY, 2)
+    order = OrderIntent("client-1", instrument, OrderSide.BUY, 2, role=OrderRole.ENTRY)
     broker = ZerodhaBroker(Client())
     try:
         broker.submit(order)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 from .market import Instrument
@@ -14,6 +14,11 @@ class OrderSide(StrEnum):
 class OrderType(StrEnum):
     MARKET = "MARKET"
     LIMIT = "LIMIT"
+
+
+class OrderRole(StrEnum):
+    ENTRY = "ENTRY"
+    EXIT = "EXIT"
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,3 +42,4 @@ class OrderIntent:
     stop_price: float | None = None
     exit_mode: str | None = None
     entry_bar: int | None = None
+    role: OrderRole = field(kw_only=True)

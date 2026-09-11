@@ -5,7 +5,7 @@ import time
 from zoneinfo import ZoneInfo
 
 from ftx_paper.broker import PaperBroker
-from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderIntent, OrderSide, parse_role, role_to_key
+from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderIntent, OrderRole, OrderSide, parse_role, role_to_key
 from ftx_paper.core import CompletedBarAggregator, DecisionBundle, ExitAction, ExitStateMachine, IndependentLiveDecisionEngine, LiveFeatureCalculator, PaperEngine, PositionState, RiskSizer, SetupPolicy, adaptive_stop_bp, option_pcr_at_event, replay, vix_open_and_event
 from ftx_paper.core import LiveSession
 from ftx_paper.strategy import ConfiguredLiveStrategy
@@ -34,7 +34,7 @@ def test_paper_broker_returns_contract_fill() -> None:
     instrument = Instrument("NIFTY", "NSE", "INDEX")
     from ftx_paper.contracts import OrderIntent, OrderSide
 
-    fill = PaperBroker({"NIFTY": 100.0}).submit(OrderIntent("order-1", instrument, OrderSide.BUY, 1))
+    fill = PaperBroker({"NIFTY": 100.0}).submit(OrderIntent("order-1", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY))
 
     assert fill.status == "FILLED"
     assert fill.client_order_id == "order-1"
@@ -155,6 +155,17 @@ def test_exit_state_machine_emits_protective_exit() -> None:
     assert action is not None
     assert action.reason == "stop"
     assert action.intent.side is OrderSide.SELL
+    assert action.intent.role is OrderRole.EXIT
+
+
+def test_order_without_explicit_role_fails_fast() -> None:
+    instrument = Instrument("NIFTY", "NSE", "INDEX")
+    try:
+        OrderIntent("entry-legacy", instrument, OrderSide.BUY, 1)
+    except TypeError as exc:
+        assert "role" in str(exc)
+    else:
+        raise AssertionError("exit-shaped order without an explicit role was accepted")
 
 
 def test_replay_is_deterministic_and_rejects_reordering() -> None:
@@ -227,12 +238,12 @@ def test_replay_completes_entry_fill_exit_and_realized_trade() -> None:
 
         def on_bar(self, bar):
             if bar.timestamp == first.timestamp:
-                return (OrderIntent("entry-1", instrument, OrderSide.BUY, 2),)
+                return (OrderIntent("entry-1", instrument, OrderSide.BUY, 2, role=OrderRole.ENTRY),)
             return ()
 
         def on_closed_bar(self, bar):
             if bar.timestamp == second.timestamp:
-                intent = OrderIntent("exit-entry-1", instrument, OrderSide.SELL, 2, reason="target")
+                intent = OrderIntent("exit-entry-1", instrument, OrderSide.SELL, 2, reason="target", role=OrderRole.EXIT)
                 return (ExitAction("target", 108.0, intent),)
             return ()
 
@@ -247,7 +258,7 @@ def test_replay_completes_entry_fill_exit_and_realized_trade() -> None:
     assert [order.client_order_id for order in result.orders] == ["entry-1", "exit-entry-1"]
     assert len(result.trades) == 1
     trade = result.trades[0]
-    assert (trade.entry_price, trade.exit_price, trade.exit_reason, trade.realized_pnl) == (100, 108.0, "target", 16.0)
+    assert (trade.entry_price, trade.exit_price, trade.exit_reason, trade.realized_pnl, trade.status) == (100, 108.0, "target", 16.0, "closed")
     assert [event["event_type"] for event in result.events if "event_type" in event] == ["FILL", "EXITDECISION", "FILL"]
 
 

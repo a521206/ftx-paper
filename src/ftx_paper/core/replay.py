@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from collections.abc import Iterable
-from ftx_paper.contracts import MarketBar, OrderIntent, OrderSide
+from typing import Literal
+from ftx_paper.contracts import MarketBar, OrderIntent, OrderRole, OrderSide
 from .engine import PaperEngine
 
 
@@ -21,6 +22,7 @@ class ReplayTrade:
     exit_price: float | None = None
     exit_reason: str | None = None
     realized_pnl: float | None = None
+    status: Literal["open", "closed"] = "open"
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,9 +123,7 @@ def replay(engine: PaperEngine, bars: Iterable[MarketBar]) -> ReplayResult:
 
 
 def _is_exit(order: OrderIntent) -> bool:
-    return order.client_order_id.startswith("exit-") or order.reason in {
-        "stop", "trailing_stop", "counter_move", "session_close",
-    }
+    return order.role == OrderRole.EXIT
 
 
 def _settle_trade(
@@ -157,5 +157,6 @@ def _settle_trade(
         exit_price=exit_price,
         exit_reason=exit_reason,
         realized_pnl=(exit_price - trade.entry_price) * trade.quantity * signed,
+        status="closed",
     )
     trades.append(settled)

@@ -5,7 +5,7 @@ from datetime import datetime
 from hashlib import sha256
 from zoneinfo import ZoneInfo
 from .bundles import DecisionBundle
-from ftx_paper.contracts import MarketRole, OptionRole, OrderIntent, Role, role_to_key
+from ftx_paper.contracts import MarketRole, OptionRole, OrderIntent, OrderRole, Role, role_to_key
 from .features import option_pcr_at_event, vix_open_and_event
 from .location_engine import Cell, LocationDetector, TransitionPattern, transition_patterns_allow
 from .risk import RiskSizer
@@ -244,7 +244,7 @@ class IndependentLiveDecisionEngine:
                 ))
                 continue
             self.risk_gate.record_entry(cell=cell.name, direction=direction, quantity=sizing.quantity, date=bundle.trading_date)
-            order = OrderIntent(candidate_id, futures.instrument, side, sizing.quantity, reason="live_policy_accepted", cell=cell.name, stop_price=stop, exit_mode=cell_policy.exit_mode.value, entry_bar=sequence)
+            order = OrderIntent(candidate_id, futures.instrument, side, sizing.quantity, reason="live_policy_accepted", cell=cell.name, stop_price=stop, exit_mode=cell_policy.exit_mode.value, entry_bar=sequence, role=OrderRole.ENTRY)
             events[-1] = LiveDecision("ACCEPTEDDECISION", {**candidate, "outcome": "accepted", "reason": "eligible"}, order=order)
         return tuple(events)
 
