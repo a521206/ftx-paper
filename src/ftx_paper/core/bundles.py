@@ -3,9 +3,18 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 import time
-from typing import Iterable, Mapping
+from typing import Iterable, Mapping, TypedDict
 
 from ftx_paper.contracts import MarketBar, MarketRole, Role, market_minute_key, parse_role, role_to_key
+
+
+class SupportingInputs(TypedDict, total=False):
+    """Typed supporting data carried alongside the required bundle bars."""
+
+    bars: Mapping[Role | str, MarketBar]
+    sources: Mapping[str, str]
+    missing: tuple[str, ...]
+    unavailable: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,7 +27,7 @@ class DecisionBundle:
     bars: Mapping[Role, MarketBar]
     required_roles: tuple[Role, ...]
     missing_roles: tuple[Role, ...] = ()
-    supporting_inputs: Mapping[str, object] | None = None
+    supporting_inputs: SupportingInputs | None = None
 
     @property
     def complete(self) -> bool:

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Mapping
 from zoneinfo import ZoneInfo
 
-from ftx_paper.contracts import MarketBar
+from ftx_paper.contracts import MarketBar, Role
 
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -122,7 +123,7 @@ def vix_open_and_event(
 
 
 def option_pcr_at_event(
-    bars: dict[object, MarketBar] | None,
+    bars: Mapping[Role | str, MarketBar] | None,
     event: MarketBar,
 ) -> float | None:
     """Return exact-minute PE/CE volume PCR after the canonical 10:00 cutoff."""
