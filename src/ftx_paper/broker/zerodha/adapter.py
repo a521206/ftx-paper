@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, TypedDict
-from datetime import datetime, timedelta
+from typing import Any, NotRequired, TypedDict
+from datetime import date, datetime, timedelta
 import threading
 import time
 from zoneinfo import ZoneInfo
@@ -29,6 +29,20 @@ class ZerodhaInstrument(TypedDict):
     tradingsymbol: str
     instrument_type: str
     role: Role | None
+    expiry: NotRequired[date | str | None]
+    strike: NotRequired[float | int | None]
+    name: NotRequired[str | None]
+    lot_size: NotRequired[int | None]
+    tick_size: NotRequired[float | None]
+
+
+def _instrument_expiry(value: object) -> date:
+    """Normalize Zerodha's date-like expiry values without leaking datetime."""
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value))
 
 
 @dataclass
@@ -60,6 +74,44 @@ def resolve_instruments(client: Any, specifications: list[dict[str, object]]) ->
         role = parse_role(raw_role) if raw_role is not None else None
         resolved.append({**dict(match), "exchange": exchange, "symbol": symbol, "role": role})
     return resolved
+
+
+def discover_option_surface_contracts(
+    client: Any,
+    *,
+    underlying: str = "NIFTY",
+    expiry: str | None = None,
+    as_of: date | None = None,
+) -> list[ZerodhaInstrument]:
+    """Discover every NIFTY CE/PE contract for the nearest live expiry."""
+    target = underlying.upper().replace(" ", "")
+    today = as_of or datetime.now(IST).date()
+    contracts = []
+    for row in client.instruments("NFO"):
+        row_expiry = row.get("expiry")
+        instrument_type = str(row.get("instrument_type", "")).upper()
+        if (str(row.get("name", "")).upper().replace(" ", "") != target
+                or instrument_type not in {"CE", "PE"}
+                or row_expiry is None or row.get("strike") is None):
+            continue
+        parsed_expiry = _instrument_expiry(row_expiry)
+        if parsed_expiry >= today:
+            contracts.append((parsed_expiry, row))
+    if not contracts:
+        return []
+    selected_expiry = expiry
+    if selected_expiry in {None, "", "nearest"}:
+        selected_expiry = min(item[0] for item in contracts).isoformat()
+    discovered: list[ZerodhaInstrument] = []
+    seen: set[tuple[str, str]] = set()
+    for parsed_expiry, row in contracts:
+        symbol = str(row["tradingsymbol"])
+        key = ("NFO", symbol)
+        if parsed_expiry.isoformat() != str(selected_expiry) or key in seen:
+            continue
+        seen.add(key)
+        discovered.append({**dict(row), "exchange": "NFO", "symbol": symbol, "role": None})
+    return discovered
 
 
 def _reserve_historical_request_slot() -> None:

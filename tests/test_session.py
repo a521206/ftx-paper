@@ -8,6 +8,7 @@ from ftx_paper.core import EngineResult, PaperEngine
 from ftx_paper.core import CompletedBarAggregator
 from ftx_paper.runtime import RuntimeSession, RuntimeStore
 from ftx_paper.execution import PositionLedger
+import ftx_paper.broker.zerodha as zerodha
 
 
 class Feed:
@@ -181,3 +182,51 @@ def test_session_restores_ledger_from_runtime_status(tmp_path):
 
     assert ledger.cash == 800.0
     assert ledger.positions()[0].quantity == 2
+
+
+def test_startup_discovers_options_before_backfill_and_feed_subscription(monkeypatch, tmp_path):
+    configured = [
+        {"exchange": "NFO", "tradingsymbol": "NIFTY26SEPFUT", "role": "futures"},
+        {"exchange": "NSE_INDEX", "tradingsymbol": "INDIA VIX", "role": "vix"},
+    ]
+    resolved = [
+        {"instrument_token": 1, "exchange": "NFO", "symbol": "NIFTY26SEPFUT", "tradingsymbol": "NIFTY26SEPFUT", "instrument_type": "FUT", "role": MarketRole.FUTURES},
+        {"instrument_token": 2, "exchange": "NSE_INDEX", "symbol": "INDIA VIX", "tradingsymbol": "INDIA VIX", "instrument_type": "INDEX", "role": MarketRole.VIX},
+    ]
+    option = {"instrument_token": 3, "exchange": "NFO", "symbol": "NIFTY26SEP25000CE", "tradingsymbol": "NIFTY26SEP25000CE", "instrument_type": "CE", "expiry": "2026-09-24", "strike": 25000, "role": None}
+    captured = {}
+
+    class Auth:
+        api_key = "key"
+
+        @staticmethod
+        def access_token():
+            return "token"
+
+    class Client:
+        pass
+
+    class Feed:
+        def __init__(self, _socket, tokens, _normalize, _on_bar, **_kwargs):
+            captured["tokens"] = tokens
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr(zerodha, "resolve_instruments", lambda _client, _specs: list(resolved))
+    monkeypatch.setattr(zerodha, "discover_option_surface_contracts", lambda _client, **_kwargs: [option])
+    def fake_backfill(_client, instruments):
+        captured["backfill"] = list(instruments)
+        return ()
+
+    monkeypatch.setattr(zerodha, "load_startup_backfill", fake_backfill)
+    monkeypatch.setattr(zerodha, "create_kite_socket", lambda *_args: object())
+
+    session = RuntimeSession(RuntimeStore(tmp_path), Auth(), configured, client_factory=lambda: Client(), feed_factory=Feed, engine=PaperEngine())
+    session._start_impl()
+
+    assert any(item["symbol"] == option["symbol"] for item in captured["backfill"])
+    assert 3 in captured["tokens"]

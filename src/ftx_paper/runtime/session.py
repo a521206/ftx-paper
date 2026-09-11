@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable
 from zoneinfo import ZoneInfo
@@ -15,6 +16,9 @@ from ftx_paper.core import AggregatorConfig, CompletedBarAggregator, InstrumentK
 from ftx_paper.execution import PositionLedger
 from .events import is_decision_event, serialize_datetime
 from .store import RuntimeStore
+
+
+logger = logging.getLogger("ftx-paper")
 
 if TYPE_CHECKING:
     from ftx_paper.broker.zerodha import ZerodhaInstrument
@@ -78,9 +82,16 @@ class RuntimeSession:
         try:
             if self.auth is None or self.auth.access_token() is None:
                 raise ValueError("Zerodha authentication required")
-            from ftx_paper.broker.zerodha import ZerodhaFeed, classify_runtime_roles, create_kite_socket, load_startup_backfill, resolve_instruments
+            from ftx_paper.broker.zerodha import ZerodhaFeed, classify_runtime_roles, create_kite_socket, discover_option_surface_contracts, load_startup_backfill, resolve_instruments
             client = self.client_factory() if self.client_factory else self.auth.authenticated_client()
             resolved: list[ZerodhaInstrument] = resolve_instruments(client, self.specifications)
+            discovered_options = discover_option_surface_contracts(client, underlying="NIFTY")
+            resolved_keys = {(str(item["exchange"]), str(item["symbol"])) for item in resolved}
+            resolved.extend(
+                item for item in discovered_options
+                if (str(item["exchange"]), str(item["symbol"])) not in resolved_keys
+            )
+            logger.info("Discovered %d nearest-expiry option contracts", len(discovered_options))
             roles = classify_runtime_roles(resolved)
             inferred_roles = {
                 InstrumentKey(str(roles.futures["exchange"]), str(roles.futures["symbol"])): MarketRole.FUTURES,
@@ -106,7 +117,7 @@ class RuntimeSession:
             self.store.patch_status({"phase": "REPLAYING", "execution_enabled": False,
                                      "replay_date": self._replay_date, "replay_bars_seen": 0})
             self.store.clear_replay_events(self._replay_date)
-            # Replay every configured instrument so supporting inputs (notably
+            # Replay every resolved instrument so supporting inputs (notably
             # option volumes used for PCR) are present in decision bundles.
             backfill = load_startup_backfill(client, resolved)
             self.store.append_market_bars(backfill, source="historical_backfill")
