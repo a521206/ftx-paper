@@ -51,3 +51,9 @@ class PaperEngine:
         orders = tuple(order for item in decisions if (order := item.order) is not None)
         events = tuple({"event_type": item.event_type, **dict(item.payload)} for item in decisions)
         return EngineResult(orders=orders, events=events)
+
+    def record_exit(self, **kwargs: object) -> None:
+        """Forward a settled exit to strategies that maintain risk-gate state."""
+        record_exit = getattr(self.strategy, "record_exit", None)
+        if callable(record_exit):
+            record_exit(**kwargs)

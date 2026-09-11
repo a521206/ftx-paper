@@ -103,11 +103,11 @@
 
 ### Track P7 — Risk-gate parity
 
-- [ ] Match directional exposure and concurrency limits
-- [ ] Match thesis-failure handling
-- [ ] Match per-cell post-exit cooldown behavior
-- [ ] Match risk-gate state reset and persistence across session segments
-- [ ] Add focused gate-state replay tests
+- [x] Match directional exposure and concurrency limits
+- [x] Match thesis-failure handling
+- [x] Match per-cell post-exit cooldown behavior
+- [x] Match risk-gate state reset and persistence across session segments
+- [x] Add focused gate-state replay tests
 
 ### Track P8 — Exit parity
 

@@ -9,6 +9,7 @@ from ftx_paper.contracts import MarketRole, OptionRole, OrderIntent, Role, role_
 from .features import option_pcr_at_event, vix_open_and_event
 from .location_engine import LocationDetector, TransitionPattern, transition_patterns_allow
 from .risk import RiskSizer
+from .risk_state import RiskGateState
 from .adaptive_stop import adaptive_stop_bp, stop_price
 from .scoring import calculate_setup_score, compute_selling_structure, score_to_setup_type
 from ftx_paper.strategy.config import (
@@ -72,7 +73,7 @@ class IndependentLiveDecisionEngine:
     direction, and cooldown logic.  It has no historical-pipeline imports.
     """
 
-    def __init__(self, *, version: str, config_hash: str, capital: float, cooldown_minutes: int = 30, prior_day_high: float | None = None, prior_day_low: float | None = None, morning_entry_minutes: tuple[int, int] = MORNING_ENTRY_MINUTES, afternoon_entry_minutes: tuple[int, int] = AFTERNOON_ENTRY_MINUTES, transition_patterns: tuple[TransitionPattern, ...] = (), expiry_dates: frozenset[str] = frozenset()) -> None:
+    def __init__(self, *, version: str, config_hash: str, capital: float, cooldown_minutes: int = 30, prior_day_high: float | None = None, prior_day_low: float | None = None, morning_entry_minutes: tuple[int, int] = MORNING_ENTRY_MINUTES, afternoon_entry_minutes: tuple[int, int] = AFTERNOON_ENTRY_MINUTES, transition_patterns: tuple[TransitionPattern, ...] = (), expiry_dates: frozenset[str] = frozenset(), risk_gate: RiskGateState | None = None) -> None:
         self.version, self.config_hash = version, config_hash
         self.cooldown_minutes = cooldown_minutes
         self.capital = capital
@@ -95,6 +96,7 @@ class IndependentLiveDecisionEngine:
         self._trading_date: str | None = None
         self._decision_session: Session | None = None
         self._vix_open: float | None = None
+        self.risk_gate = risk_gate or RiskGateState()
 
     def _session_for_time(self, decision_at: datetime) -> Session:
         ist_time = decision_at.astimezone(ZoneInfo("Asia/Kolkata"))
@@ -118,6 +120,7 @@ class IndependentLiveDecisionEngine:
             self._last_decision = None
             self._decision_session = None
             self._trading_date = bundle.trading_date
+        self.risk_gate._new_day(bundle.trading_date)
         decision_at = _decision_datetime(bundle)
         decision_session = self._session_for_time(decision_at)
         if decision_session is not self._decision_session:
@@ -240,9 +243,38 @@ class IndependentLiveDecisionEngine:
         if not sizing.approved:
             events.append(LiveDecision("SIZING_REJECTED", {**candidate, "outcome": "sizing rejection", "reason": sizing.reason}))
             return tuple(events)
+        gate_reason = self.risk_gate.rejection_reason(
+            cell=cell.name, direction=direction, bar=sequence,
+            quantity=sizing.quantity, date=bundle.trading_date,
+        )
+        if gate_reason is not None:
+            return (LiveDecision(
+                "REJECTEDDECISION",
+                {**candidate, "outcome": "risk rejection", "reason": gate_reason,
+                 "decision_id": sha256(f"{candidate_id}:{gate_reason}".encode()).hexdigest()[:24]},
+            ),)
+        self.risk_gate.record_entry(
+            cell=cell.name, direction=direction, quantity=sizing.quantity,
+            date=bundle.trading_date,
+        )
         order = OrderIntent(candidate_id, futures.instrument, side, sizing.quantity, reason="live_policy_accepted")
         events[-1] = LiveDecision("ACCEPTEDDECISION", {**candidate, "outcome": "accepted", "reason": "eligible"}, order=order)
         return tuple(events)
+
+    def record_exit(self, *, cell: str, reason: str, entry_bar: int,
+                    exit_bar: int, date: str) -> None:
+        """Apply a completed exit to the replay/live risk state."""
+        self.risk_gate.record_exit(
+            cell=cell, reason=reason, entry_bar=entry_bar, exit_bar=exit_bar,
+            date=date,
+        )
+
+    def risk_snapshot(self) -> dict[str, object]:
+        """Return JSON-safe gate state for persistence across segments."""
+        return self.risk_gate.snapshot()
+
+    def restore_risk_snapshot(self, snapshot: dict[str, object]) -> None:
+        self.risk_gate.restore(snapshot)
 
 
 __all__ = ["IndependentLiveDecisionEngine", "LiveDecision"]

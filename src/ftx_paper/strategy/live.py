@@ -61,7 +61,11 @@ class ConfiguredLiveStrategy:
         return StrategyMetadata(self.name, self.version, config_hash)
 
     def snapshot(self) -> Mapping[str, object]:
-        return {"schema_version": 1, "config": self.config.as_dict()}
+        return {
+            "schema_version": 1,
+            "config": self.config.as_dict(),
+            "risk_gate": self._decision_engine.risk_snapshot(),
+        }
 
     def reset(self) -> None:
         """Clear all bar, position, feature, and decision-gate state."""
@@ -115,7 +119,11 @@ class ConfiguredLiveStrategy:
             afternoon_entry_minutes=afternoon_entry_minutes,
             cooldown_minutes=cooldown_minutes,
         )
-        return cls(config=config, capital=capital)
+        strategy = cls(config=config, capital=capital)
+        risk_snapshot = snapshot.get("risk_gate")
+        if isinstance(risk_snapshot, Mapping):
+            strategy._decision_engine.restore_risk_snapshot(dict(risk_snapshot))
+        return strategy
 
     @staticmethod
     def _parse_minute_pair(key: str, value: object) -> tuple[int, int]:
@@ -162,3 +170,7 @@ class ConfiguredLiveStrategy:
         if self._decide is not None:
             return ()
         return self._decision_engine.evaluate(bundle)
+
+    def record_exit(self, **kwargs: object) -> None:
+        """Apply an execution-layer exit settlement to the decision gate."""
+        self._decision_engine.record_exit(**kwargs)
