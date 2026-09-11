@@ -5,8 +5,8 @@ import time
 from zoneinfo import ZoneInfo
 
 from ftx_paper.broker import PaperBroker
-from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderSide, parse_role, role_to_key
-from ftx_paper.core import CompletedBarAggregator, DecisionBundle, ExitStateMachine, IndependentLiveDecisionEngine, LiveFeatureCalculator, PaperEngine, PositionState, RiskSizer, SetupPolicy, adaptive_stop_bp, option_pcr_at_event, replay, vix_open_and_event
+from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderIntent, OrderSide, parse_role, role_to_key
+from ftx_paper.core import CompletedBarAggregator, DecisionBundle, ExitAction, ExitStateMachine, IndependentLiveDecisionEngine, LiveFeatureCalculator, PaperEngine, PositionState, RiskSizer, SetupPolicy, adaptive_stop_bp, option_pcr_at_event, replay, vix_open_and_event
 from ftx_paper.core import LiveSession
 from ftx_paper.strategy import ConfiguredLiveStrategy
 from ftx_paper.strategy.config import CAPITAL
@@ -215,6 +215,40 @@ def test_replay_fixture_has_stable_production_transcript() -> None:
         ("entry-2026-01-01T10:16:00", 5, "BUY"),
         ("entry-2026-01-01T10:17:00", 5, "BUY"),
     ]
+
+
+def test_replay_completes_entry_fill_exit_and_realized_trade() -> None:
+    instrument = Instrument("NIFTY", "NSE", "INDEX")
+    first = MarketBar(instrument, datetime(2026, 1, 1, 10, 15), 100, 101, 99, 100, 10)
+    second = MarketBar(instrument, datetime(2026, 1, 1, 10, 16), 110, 111, 109, 110, 10)
+
+    class LifecycleStrategy:
+        metadata = None
+
+        def on_bar(self, bar):
+            if bar.timestamp == first.timestamp:
+                return (OrderIntent("entry-1", instrument, OrderSide.BUY, 2),)
+            return ()
+
+        def on_closed_bar(self, bar):
+            if bar.timestamp == second.timestamp:
+                intent = OrderIntent("exit-entry-1", instrument, OrderSide.SELL, 2, reason="target")
+                return (ExitAction("target", 108.0, intent),)
+            return ()
+
+        def settle_exit(self, order_id, *, filled):
+            return None
+
+        def register_entry(self, order, *, fill_price=None):
+            return None
+
+    result = replay(PaperEngine(LifecycleStrategy()), (first, second))
+
+    assert [order.client_order_id for order in result.orders] == ["entry-1", "exit-entry-1"]
+    assert len(result.trades) == 1
+    trade = result.trades[0]
+    assert (trade.entry_price, trade.exit_price, trade.exit_reason, trade.realized_pnl) == (100, 108.0, "target", 16.0)
+    assert [event["event_type"] for event in result.events if "event_type" in event] == ["FILL", "EXITDECISION", "FILL"]
 
 
 def test_completed_bars_emit_one_bundle_only_after_required_roles_arrive() -> None:

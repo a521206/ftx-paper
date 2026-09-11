@@ -109,19 +109,17 @@ class RuntimeSession:
                 role_map, AggregatorConfig(required_roles=(MarketRole.FUTURES,), deadline_seconds=10.0),
             )
             self.broker = (self.broker_factory or (lambda _client: PaperBroker()))(client)
-            self._replay_date = datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
             self._replaying = True
             reset = getattr(self.engine, "reset", None)
             if callable(reset):
                 reset()
             self.store.patch_status({"phase": "REPLAYING", "execution_enabled": False,
-                                     "replay_date": self._replay_date, "replay_bars_seen": 0})
-            self.store.clear_replay_events(self._replay_date)
+                                     "replay_date": None, "replay_bars_seen": 0})
             # Replay every resolved instrument so supporting inputs (notably
             # option volumes used for PCR) are present in decision bundles.
             backfill = load_startup_backfill(client, resolved)
             self.store.append_market_bars(backfill, source="historical_backfill")
-            self._replay_today(backfill, self._replay_date)
+            self._replay_dates(backfill)
             self._replaying = False
             normalize = self.normalize_payload or self._make_normalizer(resolved)
             socket = create_kite_socket(self.auth.api_key, self.auth.access_token())
@@ -184,21 +182,36 @@ class RuntimeSession:
 
         return normalize
 
-    def _replay_today(self, bars: tuple[MarketBar, ...], session_date: str) -> None:
-        """Rebuild today's strategy state without executing orders."""
+    def _replay_dates(self, bars: tuple[MarketBar, ...]) -> None:
+        """Rebuild every stored trading date without executing orders."""
         if self._aggregator is None:
             return
-        for bar in bars:
-            if bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat() != session_date:
-                continue
-            if isinstance(self.broker, PaperBroker):
-                self.broker.update_price(bar.instrument.symbol, bar.close)
-            bundle = self._aggregator.ingest(bar)
-            if bundle is not None:
+        dates = sorted({
+            bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat()
+            for bar in bars
+        })
+        replayed_bars = 0
+        for index, session_date in enumerate(dates):
+            if index:
+                reset = getattr(self.engine, "reset", None)
+                if callable(reset):
+                    reset()
+            self._replay_date = session_date
+            self.store.patch_status({"replay_date": session_date})
+            self.store.clear_replay_events(session_date)
+            for bar in bars:
+                bar_date = bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat()
+                if bar_date != session_date:
+                    continue
+                if isinstance(self.broker, PaperBroker):
+                    self.broker.update_price(bar.instrument.symbol, bar.close)
+                replayed_bars += 1
+                bundle = self._aggregator.ingest(bar)
+                if bundle is not None:
+                    self._process_bundle(bundle, source="replay")
+                    self.store.patch_status({"replay_last_bar": bundle.minute, "replay_bars_seen": replayed_bars})
+            for bundle in self._aggregator.flush(incomplete=False):
                 self._process_bundle(bundle, source="replay")
-                self.store.patch_status({"replay_last_bar": bundle.minute, "replay_bars_seen": self.engine.bars_seen})
-        for bundle in self._aggregator.flush(incomplete=False):
-            self._process_bundle(bundle, source="replay")
 
     def _persist_engine_event(self, event: dict[str, object], *, source: str, bundle_id: str,
                               session_date: str, decision_at: datetime, timestamp: str) -> None:
