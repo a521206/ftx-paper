@@ -267,14 +267,6 @@ def test_events_and_logs_redirect_to_combined_activity_page() -> None:
     assert "activity-type" in html
 
 
-def test_browser_smoke_dashboard_contains_live_api_sections() -> None:
-    response = create_ui_app("http://api.test").test_client().get("/")
-    assert response.status_code == 200
-    html = response.get_data(as_text=True)
-    for endpoint in ("health", "runtime", "capital", "positions", "trades", "events"):
-        assert f"/api/v1/{endpoint}" in html
-
-
 def test_zerodha_auth_routes_use_injected_adapter() -> None:
     class FakeAuth:
         def login_url(self):

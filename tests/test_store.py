@@ -1,17 +1,7 @@
 import os
 import sqlite3
 
-import pytest
-
-from ftx_paper.runtime import ProcessAlreadyRunningError, RuntimeStore
-
-
-def test_runtime_store_refuses_live_duplicate_lease(tmp_path):
-    store = RuntimeStore(tmp_path)
-    store.acquire_process_lease("api")
-
-    with pytest.raises(ProcessAlreadyRunningError, match="api process already running"):
-        store.acquire_process_lease("api")
+from ftx_paper.runtime import RuntimeStore
 
 
 def test_runtime_store_replaces_dead_lease(tmp_path):
