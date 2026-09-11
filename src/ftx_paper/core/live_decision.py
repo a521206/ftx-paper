@@ -5,22 +5,31 @@ from datetime import datetime
 from hashlib import sha256
 from zoneinfo import ZoneInfo
 from .bundles import DecisionBundle
-from ftx_paper.contracts import MarketRole, OrderIntent, OrderSide, Role
+from ftx_paper.contracts import MarketRole, OptionRole, OrderIntent, OrderSide, Role, role_to_key
+from .features import LiveFeatureCalculator, option_pcr_at_event, vix_open_and_event
 from .risk import RiskSizer
 from .scoring import calculate_setup_score, compute_selling_structure, score_to_setup_type
 
 
 def _option_pcr(bundle: DecisionBundle) -> float | None:
-    """Read volume PCR from option bars carried as supporting bundle inputs."""
+    """Read exact-minute volume PCR, with the canonical 10:00 cutoff."""
     supporting = bundle.supporting_inputs or {}
     bars = supporting.get("bars", {})
     if not isinstance(bars, dict):
         return None
-    call_volume = sum(float(bar.volume or 0) for bar in bars.values()
-                      if str(getattr(bar.instrument, "instrument_type", "")).upper() == "CE")
-    put_volume = sum(float(bar.volume or 0) for bar in bars.values()
-                     if str(getattr(bar.instrument, "instrument_type", "")).upper() == "PE")
-    return put_volume / call_volume if call_volume > 0 else None
+    futures = bundle.bars.get(MarketRole.FUTURES)
+    if futures is None:
+        return None
+    sources = supporting.get("sources", {})
+    if isinstance(sources, dict):
+        bars = {
+            key: bar for key, bar in bars.items()
+            if sources.get(
+                role_to_key(key) if isinstance(key, (MarketRole, OptionRole)) else str(key),
+                "same_minute",
+            ) == "same_minute"
+        }
+    return option_pcr_at_event(bars, futures)
 
 
 def _supporting_bar(bundle: DecisionBundle, role: Role):
@@ -62,8 +71,9 @@ class IndependentLiveDecisionEngine:
         self.morning_entry_minutes = morning_entry_minutes
         self.afternoon_entry_minutes = afternoon_entry_minutes
         self._futures: list = []
-        self._previous_pcr: float | None = None
         self._previous_vix = None
+        self._vix_history: list = []
+        self._feature_calculator = LiveFeatureCalculator()
         self._last_decision: datetime | None = None
         self._trading_date: str | None = None
         self._decision_session: str | None = None
@@ -80,9 +90,12 @@ class IndependentLiveDecisionEngine:
 
     def evaluate(self, bundle: DecisionBundle) -> tuple[LiveDecision, ...]:
         if self._trading_date != bundle.trading_date:
+            if self._futures:
+                self.prior_day_high = max(bar.high for bar in self._futures)
+                self.prior_day_low = min(bar.low for bar in self._futures)
             self._futures.clear()
-            self._previous_pcr = None
             self._previous_vix = None
+            self._vix_history.clear()
             self._vix_open = None
             self._last_decision = None
             self._decision_session = None
@@ -93,9 +106,7 @@ class IndependentLiveDecisionEngine:
             self._last_decision = None
             self._decision_session = decision_session
         current_pcr = _option_pcr(bundle)
-        if current_pcr is not None:
-            self._previous_pcr = current_pcr
-        pcr = current_pcr if current_pcr is not None else self._previous_pcr
+        pcr = current_pcr
         base = {"decision_at": decision_at.isoformat(), "bundle_id": bundle.bundle_id,
                 "strategy_version": self.version, "config_hash": self.config_hash,
                 "required_input_availability": {r: r not in bundle.missing_roles for r in bundle.required_roles}}
@@ -104,8 +115,10 @@ class IndependentLiveDecisionEngine:
         current_vix = bundle.bars.get(MarketRole.VIX) or _supporting_bar(bundle, MarketRole.VIX)
         if current_vix is not None:
             self._previous_vix = current_vix
-            if self._vix_open is None:
-                self._vix_open = float(current_vix.close)
+            self._vix_history.append(current_vix)
+            opening, _ = vix_open_and_event(tuple(self._vix_history), current_vix)
+            if opening is not None:
+                self._vix_open = opening
         vix_bar = current_vix or self._previous_vix
         if vix_bar is None:
             decision_id = sha256(f"{bundle.bundle_id}:missing_vix".encode()).hexdigest()[:24]
@@ -114,17 +127,26 @@ class IndependentLiveDecisionEngine:
         self._futures.append(futures)
         if len(self._futures) < 3:
             return (LiveDecision("WARMUP", {**base, "reason": "insufficient_history", "feature_values": {}}),)
-        prior = self._futures[:-1]
-        vwap = sum(((b.high + b.low + b.close) / 3) * (b.volume or 0) for b in prior) / max(sum(b.volume or 0 for b in prior), 1e-12)
-        session_high, session_low = max(b.high for b in prior), min(b.low for b in prior)
-        opening = prior[:15]
-        or_high, or_low = max(b.high for b in opening), min(b.low for b in opening)
+        prior = tuple(self._futures[:-1])
+        features = self._feature_calculator.calculate_event(
+            prior, futures,
+            prior_day_high=self.prior_day_high,
+            prior_day_low=self.prior_day_low,
+        )
+        if features.vwap is None:
+            return ()
+        vwap = features.vwap
+        session_high, session_low = features.session_high, features.session_low
+        or_high, or_low = features.opening_range_high, features.opening_range_low
         current = futures.close
         decision_dt = decision_at
         stop_basis = max(futures.high - futures.low, 5.0)
         feature_values = {"vwap": vwap, "session_high": session_high, "session_low": session_low,
                           "opening_range_high": or_high, "opening_range_low": or_low,
-                          "vix": vix_bar.close, "pcr": pcr}
+                          "atr": features.atr, "prior_day_high": features.prior_day_high,
+                          "prior_day_low": features.prior_day_low,
+                          "vix": vix_bar.close, "vix_open": self._vix_open,
+                          "pcr": pcr}
         location = "VWAP_ZONE" if abs(current - vwap) <= 15 else "SESSION_HIGH" if abs(current - session_high) <= 15 else "SESSION_LOW" if abs(current - session_low) <= 15 else None
         cell = location or "NONE"
         if location is None:

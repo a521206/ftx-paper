@@ -4,7 +4,7 @@ from zoneinfo import ZoneInfo
 
 from ftx_paper.broker import PaperBroker
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderSide, parse_role, role_to_key
-from ftx_paper.core import CompletedBarAggregator, DecisionBundle, ExitStateMachine, IndependentLiveDecisionEngine, LiveFeatureCalculator, PaperEngine, PositionState, RiskSizer, SetupPolicy, replay
+from ftx_paper.core import CompletedBarAggregator, DecisionBundle, ExitStateMachine, IndependentLiveDecisionEngine, LiveFeatureCalculator, PaperEngine, PositionState, RiskSizer, SetupPolicy, option_pcr_at_event, replay, vix_open_and_event
 from ftx_paper.core import LiveSession
 from ftx_paper.strategy import ConfiguredLiveStrategy
 
@@ -55,6 +55,65 @@ def test_live_features_are_causal_and_deterministic() -> None:
     assert features.opening_range_high == 103
     assert features.atr == 3.0
     assert features == calculator.calculate(bars)
+
+
+def test_live_event_features_match_each_canonical_prefix_field() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    bars = tuple(
+        MarketBar(
+            instrument, datetime(2026, 1, 1, 9, 15 + i, tzinfo=ZoneInfo("Asia/Kolkata")),
+            100 + i, 104 + i + (i % 3), 98 + i, 101 + i, 10 + i,
+        )
+        for i in range(20)
+    )
+    current = MarketBar(instrument, datetime(2026, 1, 1, 9, 35, tzinfo=ZoneInfo("Asia/Kolkata")), 120, 126, 117, 123, 40)
+    prefix = bars
+    expected_vwap = sum(((bar.high + bar.low + bar.close) / 3) * bar.volume for bar in prefix) / sum(bar.volume for bar in prefix)
+    expected_high = max(bar.high for bar in prefix)
+    expected_low = min(bar.low for bar in prefix)
+    expected_atr = sum(bar.high - bar.low for bar in prefix[-20:]) / 20
+
+    features = LiveFeatureCalculator().calculate_event(
+        prefix, current, prior_day_high=130, prior_day_low=90,
+    )
+
+    assert features.vwap == expected_vwap
+    assert features.session_high == expected_high
+    assert features.session_low == expected_low
+    assert features.atr == expected_atr
+    assert features.opening_range_high == max(bar.high for bar in prefix[:15])
+    assert features.opening_range_low == min(bar.low for bar in prefix[:15])
+    assert features.prior_day_high == 130
+    assert features.prior_day_low == 90
+    assert features.return_1 == current.close / prefix[-1].close - 1
+
+
+def test_vix_lookup_uses_opening_value_and_latest_causal_bar() -> None:
+    vix = Instrument("INDIA VIX", "NSE", "VIX")
+    bars = (
+        MarketBar(vix, datetime(2026, 1, 1, 9, 15, tzinfo=ZoneInfo("Asia/Kolkata")), 14, 15, 13, 14.5),
+        MarketBar(vix, datetime(2026, 1, 1, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata")), 15, 16, 14, 15.5),
+        MarketBar(vix, datetime(2026, 1, 1, 10, 2, tzinfo=ZoneInfo("Asia/Kolkata")), 16, 17, 15, 16.5),
+    )
+    event = MarketBar(Instrument("NIFTYFUT", "NFO", "FUTURES"), datetime(2026, 1, 1, 10, 1, tzinfo=ZoneInfo("Asia/Kolkata")), 100, 101, 99, 100)
+
+    assert vix_open_and_event(bars, event) == (14.5, 15.5)
+
+
+def test_option_pcr_matches_cutoff_and_unavailable_contract() -> None:
+    call = Instrument("NIFTYCE", "NFO", "CE")
+    put = Instrument("NIFTYPE", "NFO", "PE")
+    future = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    options = {
+        "call": MarketBar(call, datetime(2026, 1, 1, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata")), 1, 1, 1, 1, 100),
+        "put": MarketBar(put, datetime(2026, 1, 1, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata")), 1, 1, 1, 1, 250),
+    }
+    before_cutoff = MarketBar(future, datetime(2026, 1, 1, 9, 59, tzinfo=ZoneInfo("Asia/Kolkata")), 100, 101, 99, 100)
+    at_cutoff = MarketBar(future, datetime(2026, 1, 1, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata")), 100, 101, 99, 100)
+
+    assert option_pcr_at_event(options, before_cutoff) is None
+    assert option_pcr_at_event(options, at_cutoff) == 2.5
+    assert option_pcr_at_event({"put": options["put"]}, at_cutoff) is None
 
 
 def test_setup_policy_emits_one_explicit_order_intent() -> None:
@@ -420,7 +479,7 @@ def test_independent_live_engine_has_one_evaluation_per_bundle() -> None:
             assert all(item.event_type != "CANDIDATE" for item in events)
 
 
-def test_live_decision_engine_carries_forward_previous_pcr() -> None:
+def test_live_decision_engine_does_not_carry_forward_previous_pcr() -> None:
     instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
     vix = Instrument("INDIA VIX", "NSE", "VIX")
     call = Instrument("NIFTYCE", "NFO", "CE")
@@ -445,7 +504,7 @@ def test_live_decision_engine_carries_forward_previous_pcr() -> None:
     engine.evaluate(bundle("10:21", {}))
     third = engine.evaluate(bundle("10:22", {}))
 
-    assert third[0].payload["feature_values"]["pcr"] == 2.0
+    assert third[0].payload["feature_values"]["pcr"] is None
 
 
 def test_live_decision_engine_persists_score_and_quality_bucket() -> None:

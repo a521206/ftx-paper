@@ -30,6 +30,8 @@ class SetupPolicy:
         self._last_timestamp = bar.timestamp
         if not self.start <= bar.timestamp.timetz().replace(tzinfo=None) <= self.end:
             return None
+        if features.vwap is None:
+            return None
         references = (("prior_high", prior_high, OrderSide.SELL), ("prior_low", prior_low, OrderSide.BUY), ("vwap", features.vwap, OrderSide.BUY if bar.close >= features.vwap else OrderSide.SELL))
         for name, level, side in references:
             if level is not None and abs(bar.close - level) <= self.proximity:
