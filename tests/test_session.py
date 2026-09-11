@@ -1,7 +1,8 @@
 from datetime import datetime, timezone
 
 from ftx_paper.broker import PaperBroker
-from ftx_paper.contracts import Instrument, MarketBar, OrderIntent, OrderSide
+from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderIntent, OrderSide
+from ftx_paper.runtime.store import _json_safe
 from ftx_paper.core import EngineResult, PaperEngine
 from ftx_paper.core import CompletedBarAggregator
 from ftx_paper.runtime import RuntimeSession, RuntimeStore
@@ -35,6 +36,11 @@ def test_closed_bar_is_processed_under_session_lifecycle(tmp_path):
     session.on_closed_bar(bar)
     assert session.engine.bars_seen == 1
     assert any(event["event_type"] == "ENGINE_EVENT" for event in store.read_events())
+
+
+def test_role_objects_are_json_safe_at_runtime_boundary():
+    payload = _json_safe({MarketRole.FUTURES: 1, OptionRole("NIFTYCE"): 2}, path="payload")
+    assert payload == {"futures": 1, "option:NIFTYCE": 2}
 
 
 def test_stop_orders_feed_cleanup_before_broker(tmp_path):
@@ -108,8 +114,8 @@ def test_replay_suppresses_orders_and_tags_events(tmp_path):
             "bundle_id": "2026-01-01:10:20",
             "trading_date": "2026-01-01",
             "minute": "10:20",
-            "required_roles": ("futures", "vix"),
-            "bars": {"futures": object()},
+            "required_roles": (MarketRole.FUTURES, MarketRole.VIX),
+            "bars": {MarketRole.FUTURES: object()},
         })(),
         source="replay",
     )
@@ -140,8 +146,8 @@ def test_live_order_reaches_paper_broker_and_persists_fill(tmp_path):
             "bundle_id": "2026-01-01:10:20",
             "trading_date": "2026-01-01",
             "minute": "10:20",
-            "required_roles": ("futures", "vix"),
-            "bars": {"futures": object(), "vix": object()},
+            "required_roles": (MarketRole.FUTURES, MarketRole.VIX),
+            "bars": {MarketRole.FUTURES: object(), MarketRole.VIX: object()},
         })(),
         source="live",
     )

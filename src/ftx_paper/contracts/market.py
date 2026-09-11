@@ -31,6 +31,49 @@ class OptionType(StrEnum):
     PUT = "PE"
 
 
+class MarketRole(StrEnum):
+    FUTURES = "futures"
+    VIX = "vix"
+    SPOT = "spot"
+
+
+@dataclass(frozen=True, slots=True)
+class OptionRole:
+    """Stable role identity for one dynamically configured option contract."""
+
+    symbol: str
+
+    def __post_init__(self) -> None:
+        if not self.symbol.strip():
+            raise ValueError("option role symbol must be non-empty")
+
+
+Role = MarketRole | OptionRole
+
+
+def role_to_key(role: Role) -> str:
+    """Return the stable wire key used in runtime payloads and diagnostics."""
+    if isinstance(role, MarketRole):
+        return role.value
+    if isinstance(role, OptionRole):
+        return f"option:{role.symbol}"
+    raise TypeError(f"unsupported role type: {type(role).__name__}")
+
+
+def parse_role(value: Role | str) -> Role:
+    """Parse an external role value at the configuration/broker boundary."""
+    if isinstance(value, (MarketRole, OptionRole)):
+        return value
+    raw = value.strip()
+    normalized = raw.lower()
+    try:
+        return MarketRole(normalized)
+    except ValueError:
+        if normalized.startswith("option:") and raw[7:].strip():
+            return OptionRole(raw[7:].strip())
+        raise ValueError(f"invalid market role: {value!r}") from None
+
+
 @dataclass(frozen=True, slots=True)
 class Instrument:
     symbol: str

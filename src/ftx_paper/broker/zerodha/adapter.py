@@ -9,7 +9,8 @@ from zoneinfo import ZoneInfo
 
 from ftx_paper.broker.protocol import Fill
 from ftx_paper.contracts import (
-    Instrument, MarketBar, OrderAck, OrderIntent, normalize_exchange_timestamp,
+    Instrument, MarketBar, MarketRole, OrderAck, OrderIntent, Role,
+    normalize_exchange_timestamp, parse_role,
 )
 
 KITE_EXCHANGE_MAP = {"NSE_INDEX": "NSE", "BSE_INDEX": "BSE"}
@@ -27,7 +28,7 @@ class ZerodhaInstrument(TypedDict):
     symbol: str
     tradingsymbol: str
     instrument_type: str
-    role: str | None
+    role: Role | None
 
 
 @dataclass
@@ -55,7 +56,9 @@ def resolve_instruments(client: Any, specifications: list[dict[str, object]]) ->
         match = next((row for row in rows if row.get("tradingsymbol") == symbol), None)
         if match is None:
             raise ValueError(f"Zerodha instrument not found: {exchange}:{symbol}")
-        resolved.append({**dict(match), "exchange": exchange, "symbol": symbol, "role": spec.get("role")})
+        raw_role = spec.get("role")
+        role = parse_role(raw_role) if raw_role is not None else None
+        resolved.append({**dict(match), "exchange": exchange, "symbol": symbol, "role": role})
     return resolved
 
 
@@ -96,10 +99,10 @@ def classify_runtime_roles(instruments: list[ZerodhaInstrument]) -> RuntimeRoles
     for item in instruments:
         symbol = str(item.get("symbol", "")).upper()
         exchange = str(item.get("exchange", ""))
-        role = str(item.get("role", "")).lower()
-        if role == "vix" or symbol in {"INDIA VIX", "INDIAVIX"}:
+        role = parse_role(item.get("role")) if item.get("role") is not None else None
+        if role is MarketRole.VIX or symbol in {"INDIA VIX", "INDIAVIX"}:
             vix = item
-        elif role == "futures" or (exchange == "NFO" and symbol.endswith("FUT")):
+        elif role is MarketRole.FUTURES or (exchange == "NFO" and symbol.endswith("FUT")):
             futures = item
         elif exchange == "NFO" and symbol.endswith(("CE", "PE")):
             options_list.append(item)

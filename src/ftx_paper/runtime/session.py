@@ -8,7 +8,8 @@ from zoneinfo import ZoneInfo
 
 from ftx_paper.broker import Broker, PaperBroker
 from ftx_paper.contracts import (
-    Instrument, MarketBar, OrderSide, normalize_exchange_timestamp,
+    Instrument, MarketBar, MarketRole, OptionRole, OrderSide, normalize_exchange_timestamp, parse_role,
+    role_to_key,
 )
 from ftx_paper.core import AggregatorConfig, CompletedBarAggregator, InstrumentKey, PaperEngine
 from ftx_paper.execution import PositionLedger
@@ -82,19 +83,19 @@ class RuntimeSession:
             resolved: list[ZerodhaInstrument] = resolve_instruments(client, self.specifications)
             roles = classify_runtime_roles(resolved)
             inferred_roles = {
-                InstrumentKey(str(roles.futures["exchange"]), str(roles.futures["symbol"])): "futures",
-                InstrumentKey(str(roles.vix["exchange"]), str(roles.vix["symbol"])): "vix",
+                InstrumentKey(str(roles.futures["exchange"]), str(roles.futures["symbol"])): MarketRole.FUTURES,
+                InstrumentKey(str(roles.vix["exchange"]), str(roles.vix["symbol"])): MarketRole.VIX,
             }
             role_map = {
                 InstrumentKey(str(item["exchange"]), str(item["symbol"])): inferred_roles.get(
                     InstrumentKey(str(item["exchange"]), str(item["symbol"])),
-                    ("option:" + str(item["symbol"]) if str(item.get("instrument_type", "")).upper() in {"CE", "PE"}
-                     else str(item.get("role") or "").strip().lower())
+                    (OptionRole(str(item["symbol"])) if str(item.get("instrument_type", "")).upper() in {"CE", "PE"}
+                     else parse_role(item.get("role") or MarketRole.SPOT))
                 )
                 for item in resolved
             }
             self._aggregator = CompletedBarAggregator(
-                role_map, AggregatorConfig(required_roles=("futures",), deadline_seconds=10.0),
+                role_map, AggregatorConfig(required_roles=(MarketRole.FUTURES,), deadline_seconds=10.0),
             )
             self.broker = (self.broker_factory or (lambda _client: PaperBroker()))(client)
             self._replay_date = datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
@@ -198,7 +199,8 @@ class RuntimeSession:
         outcome_types = [str(event.get("event_type", "ENGINE_EVENT")) for event in result.events]
         self.store.append_event("BUNDLE_COMPLETE", {
             "bundle_id": bundle.bundle_id, "minute": bundle.minute,
-            "required_roles": list(bundle.required_roles), "roles_present": sorted(bundle.bars),
+            "required_roles": [role_to_key(role) for role in bundle.required_roles],
+            "roles_present": [role_to_key(role) for role in bundle.bars],
             "decision_source": source, "session_date": bundle.trading_date,
             "execution_allowed": source == "live",
         }, f"bundle_complete:{source}:{bundle.bundle_id}", timestamp=timestamp)
@@ -331,10 +333,10 @@ class RuntimeSession:
         payload = {
             "minute": bundle.minute,
             "session_date": bundle.trading_date,
-            "required_roles": list(bundle.required_roles),
-            "roles_present": sorted(bundle.bars),
-            "missing_roles": list(bundle.missing_roles),
-            "last_bar_by_role": {role: bar.timestamp.isoformat() for role, bar in bundle.bars.items()},
+            "required_roles": [role_to_key(role) for role in bundle.required_roles],
+            "roles_present": [role_to_key(role) for role in bundle.bars],
+            "missing_roles": [role_to_key(role) for role in bundle.missing_roles],
+            "last_bar_by_role": {role_to_key(role): bar.timestamp.isoformat() for role, bar in bundle.bars.items()},
         }
         self.store.append_event(
             "BUNDLE_INCOMPLETE", payload, f"bundle_incomplete:{bundle.bundle_id}",

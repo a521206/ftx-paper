@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from ftx_paper.contracts import MarketRole, OptionRole, role_to_key
 from .events import (
     DECISION_EVENT_TYPES,
     LEGACY_DECISION_TIME_FIELDS,
@@ -31,7 +32,7 @@ def _json_safe(value: Any, *, path: str) -> Any:
         return value.isoformat()
     if isinstance(value, dict):
         return {
-            key: _json_safe(item, path=f"{path}.{key}")
+            role_to_key(key) if isinstance(key, (MarketRole, OptionRole)) else key: _json_safe(item, path=f"{path}.{key}")
             for key, item in value.items()
         }
     if isinstance(value, (list, tuple)):

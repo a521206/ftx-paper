@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import time
 from typing import Iterable, Mapping
 
-from ftx_paper.contracts import MarketBar, market_minute_key
+from ftx_paper.contracts import MarketBar, MarketRole, Role, market_minute_key, parse_role, role_to_key
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,9 +15,9 @@ class DecisionBundle:
     bundle_id: str
     trading_date: str
     minute: str
-    bars: Mapping[str, MarketBar]
-    required_roles: tuple[str, ...]
-    missing_roles: tuple[str, ...] = ()
+    bars: Mapping[Role, MarketBar]
+    required_roles: tuple[Role, ...]
+    missing_roles: tuple[Role, ...] = ()
     supporting_inputs: Mapping[str, object] | None = None
 
     @property
@@ -37,11 +37,13 @@ class InstrumentKey:
 class AggregatorConfig:
     """Configuration for the completed-bar decision clock."""
 
-    required_roles: tuple[str, ...] = ("futures", "vix")
+    required_roles: tuple[Role, ...] = (MarketRole.FUTURES, MarketRole.VIX)
     deadline_seconds: float = 10.0
 
     def __post_init__(self) -> None:
-        if not self.required_roles or len(set(self.required_roles)) != len(self.required_roles):
+        normalized_roles = tuple(parse_role(role) for role in self.required_roles)
+        object.__setattr__(self, "required_roles", normalized_roles)
+        if not normalized_roles or len(set(normalized_roles)) != len(normalized_roles):
             raise ValueError("required roles must be non-empty and unique")
         if self.deadline_seconds < 0:
             raise ValueError("deadline_seconds must be non-negative")
@@ -57,34 +59,34 @@ class CompletedBarAggregator:
 
     def __init__(
         self,
-        role_by_instrument: Mapping[InstrumentKey, str],
+        role_by_instrument: Mapping[InstrumentKey, Role],
         config: AggregatorConfig | None = None,
         *,
-        required_roles: Iterable[str] | None = None,
+        required_roles: Iterable[Role] | None = None,
         deadline_seconds: float | None = None,
     ) -> None:
         # Accept tuple keys temporarily at this boundary for old callers;
         # internal state always uses the named identity type.
         self._roles = {
-            key if isinstance(key, InstrumentKey) else InstrumentKey(*key): role
+            key if isinstance(key, InstrumentKey) else InstrumentKey(*key): parse_role(role)
             for key, role in role_by_instrument.items()
         }
         if config is not None and (required_roles is not None or deadline_seconds is not None):
             raise TypeError("use config or legacy keyword options, not both")
         if config is None:
             config = AggregatorConfig(
-                required_roles=("futures", "vix") if required_roles is None else tuple(required_roles),
+                required_roles=(MarketRole.FUTURES, MarketRole.VIX) if required_roles is None else tuple(parse_role(role) for role in required_roles),
                 deadline_seconds=10.0 if deadline_seconds is None else deadline_seconds,
             )
-        self.required_roles = config.required_roles
+        self.required_roles = tuple(parse_role(role) for role in config.required_roles)
         self.deadline_seconds = config.deadline_seconds
         if not set(self.required_roles).issubset(self._roles.values()):
             raise ValueError("instrument roles omit a required input")
-        self._supporting_roles = tuple(sorted(set(self._roles.values()) - set(self.required_roles)))
-        self._pending: dict[tuple[str, str], dict[str, MarketBar]] = defaultdict(dict)
-        self._last_seen_by_role: dict[str, tuple[str, str]] = {}
+        self._supporting_roles = tuple(sorted(set(self._roles.values()) - set(self.required_roles), key=role_to_key))
+        self._pending: dict[tuple[str, str], dict[Role, MarketBar]] = defaultdict(dict)
+        self._last_seen_by_role: dict[Role, tuple[str, str]] = {}
         self._first_seen_monotonic: dict[tuple[str, str], float] = {}
-        self._latest: dict[str, MarketBar] = {}
+        self._latest: dict[Role, MarketBar] = {}
         self._latest_trading_date: str | None = None
         self._last_futures_key: tuple[str, str] | None = None
         self._last_emitted_key: tuple[str, str] | None = None
@@ -113,7 +115,7 @@ class CompletedBarAggregator:
             self._last_futures_key = None
             self._last_emitted_key = None
 
-        if role == "futures":
+        if role is MarketRole.FUTURES:
             # Futures are the decision clock.  A duplicate or late futures
             # bar must not mutate the prefix or create a second decision.
             if self._last_futures_key is not None and key <= self._last_futures_key:
@@ -135,7 +137,7 @@ class CompletedBarAggregator:
             if self._last_futures_key is not None and key < self._last_futures_key:
                 return None
 
-        if role != "futures":
+        if role is not MarketRole.FUTURES:
             self._last_seen_by_role[role] = key
 
         self._latest[role] = bar
@@ -143,7 +145,7 @@ class CompletedBarAggregator:
             return None
         self._pending[key][role] = bar
         self._first_seen_monotonic.setdefault(key, time.monotonic())
-        if self.required_roles == ("futures",) and role == "futures":
+        if self.required_roles == (MarketRole.FUTURES,) and role is MarketRole.FUTURES:
             return self._emit(key)
         if all(role in self._pending[key] for role in self.required_roles):
             return self._emit(key)
@@ -156,7 +158,7 @@ class CompletedBarAggregator:
                 result.append(self._emit(key))
         return tuple(result)
 
-    def pending(self) -> tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...]:
+    def pending(self) -> tuple[tuple[str, tuple[Role, ...], tuple[Role, ...]], ...]:
         """Inspect incomplete minutes without changing aggregation state."""
         result = []
         for (trading_date, minute), bars in sorted(self._pending.items()):
@@ -183,10 +185,10 @@ class CompletedBarAggregator:
                 "trading_date": trading_date,
                 "bundle_id": f"{trading_date}:{minute}",
                 "minute": minute,
-                "required_roles": list(self.required_roles),
-                "roles_present": [role for role in self.required_roles if role in bars],
-                "missing_roles": [role for role in self.required_roles if role not in bars],
-                "last_bar_by_role": {role: bar.timestamp.isoformat() for role, bar in bars.items()},
+                "required_roles": [role_to_key(role) for role in self.required_roles],
+                "roles_present": [role_to_key(role) for role in self.required_roles if role in bars],
+                "missing_roles": [role_to_key(role) for role in self.required_roles if role not in bars],
+                "last_bar_by_role": {role_to_key(role): bar.timestamp.isoformat() for role, bar in bars.items()},
             })
         return tuple(result)
 
@@ -196,8 +198,8 @@ class CompletedBarAggregator:
         current = self._pending.pop(key)
         self._first_seen_monotonic.pop(key, None)
         bars = dict(current)
-        missing_same_minute: list[str] = []
-        unavailable_inputs: list[str] = []
+        missing_same_minute: list[Role] = []
+        unavailable_inputs: list[Role] = []
         for role in self._supporting_roles:
             if role in bars:
                 continue
@@ -222,9 +224,9 @@ class CompletedBarAggregator:
             required_roles=self.required_roles, missing_roles=missing,
             supporting_inputs={
                 "bars": {role: ordered_bars[role] for role in self._supporting_roles if role in ordered_bars},
-                "sources": sources,
-                "missing": tuple(sorted(missing_same_minute)),
-                "unavailable": tuple(sorted(unavailable_inputs)),
+                "sources": {role_to_key(role): source for role, source in sources.items()},
+                "missing": tuple(role_to_key(role) for role in sorted(missing_same_minute, key=role_to_key)),
+                "unavailable": tuple(role_to_key(role) for role in sorted(unavailable_inputs, key=role_to_key)),
             },
         )
         self._last_emitted_key = key

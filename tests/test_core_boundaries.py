@@ -3,7 +3,7 @@ import time
 from zoneinfo import ZoneInfo
 
 from ftx_paper.broker import PaperBroker
-from ftx_paper.contracts import Instrument, MarketBar, OrderSide
+from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderSide, parse_role, role_to_key
 from ftx_paper.core import CompletedBarAggregator, DecisionBundle, ExitStateMachine, IndependentLiveDecisionEngine, LiveFeatureCalculator, PaperEngine, PositionState, RiskSizer, SetupPolicy, replay
 from ftx_paper.core import LiveSession
 from ftx_paper.strategy import ConfiguredLiveStrategy
@@ -158,6 +158,18 @@ def test_completed_bars_emit_one_bundle_only_after_required_roles_arrive() -> No
     assert bundle is not None and bundle.complete
     assert aggregator.pending() == ()
     assert aggregator.ingest(future) is None
+
+
+def test_roles_validate_fixed_values_and_preserve_option_identity() -> None:
+    assert parse_role("FUTURES") is MarketRole.FUTURES
+    assert parse_role("option:NIFTY26SEP25000CE") == OptionRole("NIFTY26SEP25000CE")
+    assert role_to_key(OptionRole("NIFTY26SEP25000CE")) == "option:NIFTY26SEP25000CE"
+    try:
+        parse_role("future")
+    except ValueError as exc:
+        assert "invalid market role" in str(exc)
+    else:
+        raise AssertionError("invalid fixed role was accepted")
 
 
 def test_futures_clock_carries_forward_missing_supporting_bar_and_ignores_late_bar() -> None:

@@ -5,7 +5,7 @@ from datetime import datetime
 from hashlib import sha256
 from zoneinfo import ZoneInfo
 from .bundles import DecisionBundle
-from ftx_paper.contracts import OrderIntent, OrderSide
+from ftx_paper.contracts import MarketRole, OrderIntent, OrderSide, Role
 from .risk import RiskSizer
 from .scoring import calculate_setup_score, compute_selling_structure, score_to_setup_type
 
@@ -23,7 +23,7 @@ def _option_pcr(bundle: DecisionBundle) -> float | None:
     return put_volume / call_volume if call_volume > 0 else None
 
 
-def _supporting_bar(bundle: DecisionBundle, role: str):
+def _supporting_bar(bundle: DecisionBundle, role: Role):
     supporting = bundle.supporting_inputs or {}
     bars = supporting.get("bars", {})
     return bars.get(role) if isinstance(bars, dict) else None
@@ -101,7 +101,7 @@ class IndependentLiveDecisionEngine:
                 "required_input_availability": {r: r not in bundle.missing_roles for r in bundle.required_roles}}
         if not bundle.complete:
             return ()
-        current_vix = bundle.bars.get("vix") or _supporting_bar(bundle, "vix")
+        current_vix = bundle.bars.get(MarketRole.VIX) or _supporting_bar(bundle, MarketRole.VIX)
         if current_vix is not None:
             self._previous_vix = current_vix
             if self._vix_open is None:
@@ -110,7 +110,7 @@ class IndependentLiveDecisionEngine:
         if vix_bar is None:
             decision_id = sha256(f"{bundle.bundle_id}:missing_vix".encode()).hexdigest()[:24]
             return (LiveDecision("REJECTEDDECISION", {**base, "decision_id": decision_id, "cell": "NONE", "direction": "NONE", "setup_type": "Skip", "outcome": "policy rejection", "reason": "missing_vix", "required_input_availability": {**base["required_input_availability"], "vix": False}, "feature_values": {}}),)
-        futures = bundle.bars["futures"]
+        futures = bundle.bars[MarketRole.FUTURES]
         self._futures.append(futures)
         if len(self._futures) < 3:
             return (LiveDecision("WARMUP", {**base, "reason": "insufficient_history", "feature_values": {}}),)
