@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from .bundles import DecisionBundle
 from ftx_paper.contracts import OrderIntent, OrderSide
 from .risk import RiskSizer
+from .scoring import calculate_setup_score, compute_selling_structure, score_to_setup_type
 
 
 def _option_pcr(bundle: DecisionBundle) -> float | None:
@@ -66,6 +67,7 @@ class IndependentLiveDecisionEngine:
         self._last_decision: datetime | None = None
         self._trading_date: str | None = None
         self._decision_session: str | None = None
+        self._vix_open: float | None = None
 
     def _session_for_time(self, decision_at: datetime) -> str | None:
         ist_time = decision_at.astimezone(ZoneInfo("Asia/Kolkata"))
@@ -81,6 +83,7 @@ class IndependentLiveDecisionEngine:
             self._futures.clear()
             self._previous_pcr = None
             self._previous_vix = None
+            self._vix_open = None
             self._last_decision = None
             self._decision_session = None
             self._trading_date = bundle.trading_date
@@ -101,6 +104,8 @@ class IndependentLiveDecisionEngine:
         current_vix = bundle.bars.get("vix") or _supporting_bar(bundle, "vix")
         if current_vix is not None:
             self._previous_vix = current_vix
+            if self._vix_open is None:
+                self._vix_open = float(current_vix.close)
         vix_bar = current_vix or self._previous_vix
         if vix_bar is None:
             decision_id = sha256(f"{bundle.bundle_id}:missing_vix".encode()).hexdigest()[:24]
@@ -125,9 +130,31 @@ class IndependentLiveDecisionEngine:
         if location is None:
             return ()
         direction = "long" if current >= vwap else "short"
+        round_level = round(current / 50) * 50
+        structural_proximity = (
+            (self.prior_day_low is not None and abs(current - self.prior_day_low) <= 15)
+            or (self.prior_day_high is not None and abs(current - self.prior_day_high) <= 15)
+            or abs(current - round_level) <= 15
+        )
+        selling = compute_selling_structure(
+            prior, futures, vix_open=float(self._vix_open or vix_bar.close),
+            vix_at_event=float(vix_bar.close),
+        )
+        ist_decision_at = decision_at.astimezone(ZoneInfo("Asia/Kolkata"))
+        minutes_from_open = ist_decision_at.hour * 60 + ist_decision_at.minute - (9 * 60 + 15)
+        score, score_factors = calculate_setup_score(
+            selling, {"minutes_from_open": float(minutes_from_open)}, float(vix_bar.close),
+            float(self._vix_open or vix_bar.close), pcr, structural_proximity,
+        )
+        score_setup_type, score_multiplier = score_to_setup_type(score)
+        setup_family = "reversal_at_" + cell.lower() if location else "Skip"
+        sequence = len(self._futures)
         candidate_id = sha256(f"{bundle.bundle_id}:{cell}".encode()).hexdigest()[:24]
         candidate = {**base, "decision_id": candidate_id, "cell": cell, "direction": direction,
-                     "setup_type": "reversal_at_" + cell.lower() if location else "Skip",
+                     "setup_type": setup_family,
+                     "score_setup_type": score_setup_type,
+                     "score": score, "score_factors": score_factors,
+                     "score_multiplier": score_multiplier, "sequence": sequence,
                      "feature_values": feature_values, "entry_price": current, "outcome": "candidate"}
         candidate.update(vix_at_event=vix_bar.close, pcr_at_event=pcr, stop_basis=stop_basis)
         events = []
@@ -136,6 +163,8 @@ class IndependentLiveDecisionEngine:
             reason = "no_qualifying_setup"
         elif decision_session is None:
             reason = "outside_session_window"
+        elif score_setup_type == "Skip":
+            reason = "setup_score_skip"
         elif self._last_decision and (decision_dt - self._last_decision).total_seconds() < self.cooldown_minutes * 60:
             reason = "cooldown"
         elif vix_bar.close <= 0:
@@ -146,7 +175,15 @@ class IndependentLiveDecisionEngine:
         self._last_decision = decision_dt
         side = OrderSide.BUY if direction == "long" else OrderSide.SELL
         stop = current - max(futures.high - futures.low, 5.0) if side is OrderSide.BUY else current + max(futures.high - futures.low, 5.0)
-        sizing = RiskSizer().size(capital=self.capital, equity=self.capital, peak_equity=self.capital, entry=current, stop=stop)
+        sizing = RiskSizer().size(
+            capital=self.capital, equity=self.capital, peak_equity=self.capital,
+            entry=current, stop=stop, score=score,
+        )
+        candidate.update(
+            requested_quantity=sizing.quantity,
+            score_multiplier=sizing.score_multiplier,
+            risk_amount=sizing.risk_amount,
+        )
         events.append(LiveDecision("ACCEPTEDDECISION", {**candidate, "outcome": "accepted", "reason": "eligible"}))
         if not sizing.approved:
             events.append(LiveDecision("SIZING_REJECTED", {**candidate, "outcome": "sizing rejection", "reason": sizing.reason}))

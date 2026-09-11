@@ -109,6 +109,27 @@ def test_production_strategy_composes_features_policy_risk_and_exit() -> None:
     assert exit_orders and exit_orders[0].reason in {"stop", "trailing_stop", "session_close"}
 
 
+def test_on_bar_sizing_scales_with_setup_score() -> None:
+    instrument = Instrument("NIFTY", "NSE", "INDEX")
+    weak_strategy = ConfiguredLiveStrategy()
+    weak_orders = [order for order in weak_strategy.on_bar(MarketBar(instrument, datetime(2026, 1, 1, 10, 15), 100, 102, 99, 101, 10))]
+
+    closes = (110, 108, 106, 104, 102, 100, 98, 96)
+    volumes = (3, 3, 3, 20, 3, 3, 2, 2)
+    strong_strategy = ConfiguredLiveStrategy()
+    strong_orders = []
+    for i, close in enumerate(closes):
+        strong_orders.extend(strong_strategy.on_bar(
+            MarketBar(instrument, datetime(2026, 1, 1, 10, 15 + i), close + 1, close + 1, close - 1, close, volumes[i])
+        ))
+    strong_orders.extend(strong_strategy.on_bar(
+        MarketBar(instrument, datetime(2026, 1, 1, 10, 23), 95, 96, 88, 95.5, 30)
+    ))
+
+    assert weak_orders and strong_orders
+    assert strong_orders[-1].quantity > weak_orders[-1].quantity
+
+
 def test_replay_fixture_has_stable_production_transcript() -> None:
     instrument = Instrument("NIFTY", "NSE", "INDEX")
     fixture = tuple(
@@ -118,9 +139,9 @@ def test_replay_fixture_has_stable_production_transcript() -> None:
     result = replay(PaperEngine(ConfiguredLiveStrategy()), fixture)
     assert result.bars_seen == 3
     assert [(order.client_order_id, order.quantity, order.side.value) for order in result.orders] == [
-        ("entry-2026-01-01T10:15:00", 100, "BUY"),
-        ("entry-2026-01-01T10:16:00", 100, "BUY"),
-        ("entry-2026-01-01T10:17:00", 100, "BUY"),
+        ("entry-2026-01-01T10:15:00", 50, "BUY"),
+        ("entry-2026-01-01T10:16:00", 50, "BUY"),
+        ("entry-2026-01-01T10:17:00", 50, "BUY"),
     ]
 
 
@@ -297,7 +318,7 @@ def test_live_decision_engine_carries_forward_previous_pcr() -> None:
         return DecisionBundle(
             f"b{minute}", "2026-01-01", minute,
             {
-                "futures": MarketBar(instrument, timestamp, 100, 101, 99, 100),
+                "futures": MarketBar(instrument, timestamp, 100, 103, 99, 102, 100),
                 "vix": MarketBar(vix, timestamp, 15, 16, 14, 15),
             }, ("futures", "vix"),
             supporting_inputs={"bars": options},
@@ -313,6 +334,89 @@ def test_live_decision_engine_carries_forward_previous_pcr() -> None:
     assert third[0].payload["feature_values"]["pcr"] == 2.0
 
 
+def test_live_decision_engine_persists_score_and_quality_bucket() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    vix = Instrument("INDIA VIX", "NSE", "VIX")
+    engine = IndependentLiveDecisionEngine(version="test", config_hash="hash")
+
+    def bundle(index: int) -> DecisionBundle:
+        timestamp = datetime(2026, 1, 1, 10, 20 + index, tzinfo=timezone.utc)
+        return DecisionBundle(
+            f"score-{index}", "2026-01-01", timestamp.strftime("%Y-%m-%dT%H:%M"),
+            {
+                "futures": MarketBar(instrument, timestamp, 100, 103, 99, 102, 100),
+                "vix": MarketBar(vix, timestamp, 15, 15, 15, 15),
+            }, ("futures", "vix"),
+        )
+
+    engine.evaluate(bundle(0))
+    engine.evaluate(bundle(1))
+    engine.evaluate(bundle(2))
+    events = engine.evaluate(bundle(3))
+    decision = next(item for item in events if item.event_type == "ACCEPTEDDECISION")
+    assert 0 <= decision.payload["score"] <= 9
+    assert decision.payload["score_setup_type"] in {"A+", "Standard", "Weak"}
+    assert decision.payload["setup_type"] == "reversal_at_vwap_zone"
+    assert decision.payload["sequence"] == 4
+
+
+def test_scoring_contract_values_are_pinned() -> None:
+    """Guard the paper-local copy of the canonical FTX score contract.
+
+    ``ftx_paper.core.scoring`` intentionally duplicates the canonical contract
+    in ``src/ftx/setup_score.py`` to stay independently runnable. The expected
+    values below are duplicated here on purpose so any silent change to the
+    paper copy's thresholds or tier boundaries fails this test.
+    """
+    from ftx_paper.core import scoring
+
+    assert scoring.CONSEC_DOWN_THRESH == 3
+    assert scoring.DESCENT_SPEED_THRESH == 1.5
+    assert scoring.CLIMAX_VOL_THRESH == 2.0
+    assert scoring.WICK_RATIO_THRESH == 0.70
+    assert scoring.DELTA_DIVERGENCE_THRESH == -0.3
+    assert scoring.PCR_EXTREME == 1.2
+    assert scoring.VIX_INTRADAY_SPIKE == 5.0
+    assert scoring.SCORE_A_PLUS == 8
+    assert scoring.SCORE_STANDARD == 5
+    assert scoring.SCORE_WEAK == 2
+    assert scoring.score_to_setup_type(9) == ("A+", 1.5)
+    assert scoring.score_to_setup_type(7) == ("Standard", 1.0)
+    assert scoring.score_to_setup_type(3) == ("Weak", 0.5)
+    assert scoring.score_to_setup_type(0) == ("Skip", 0.0)
+
+
+def test_risk_sizer_applies_score_multiplier_without_changing_default() -> None:
+    sizer = RiskSizer()
+    baseline = sizer.size(
+        capital=10000, equity=10000, peak_equity=10000, entry=100, stop=95,
+    )
+    weak = sizer.size(
+        capital=10000, equity=10000, peak_equity=10000, entry=100, stop=95,
+        score=2,
+    )
+    strong = sizer.size(
+        capital=10000, equity=10000, peak_equity=10000, entry=100, stop=95,
+        score=8,
+    )
+    assert baseline.quantity == 20
+    assert weak.quantity == 10 and weak.score_multiplier == 0.5
+    assert strong.quantity == 20 and strong.score_multiplier == 1.5
+
+
+def test_risk_sizer_never_exceeds_risk_budget_when_budget_is_marginal() -> None:
+    sizer = RiskSizer()
+    marginal = sizer.size(
+        capital=10000, equity=10000, peak_equity=10000, entry=100, stop=995,
+    )
+    assert not marginal.approved and marginal.reason == "insufficient_risk_budget"
+    weak = sizer.size(
+        capital=10000, equity=10000, peak_equity=10000, entry=100, stop=995,
+        score=2,
+    )
+    assert not weak.approved and weak.reason == "insufficient_risk_budget"
+
+
 def test_live_decision_engine_resets_cooldown_at_afternoon_session() -> None:
     instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
     vix = Instrument("INDIA VIX", "NSE", "VIX")
@@ -323,14 +427,15 @@ def test_live_decision_engine_resets_cooldown_at_afternoon_session() -> None:
         return DecisionBundle(
             f"b{minute}", "2026-01-01", minute,
             {
-                "futures": MarketBar(instrument, timestamp, 100, 101, 99, 100),
+                "futures": MarketBar(instrument, timestamp, 100, 103, 99, 102, 100),
                 "vix": MarketBar(vix, timestamp, 15, 16, 14, 15),
             }, ("futures", "vix"),
         )
 
     engine.evaluate(bundle("2026-01-01T04:50:00+00:00"))
     engine.evaluate(bundle("2026-01-01T04:51:00+00:00"))
-    morning = engine.evaluate(bundle("2026-01-01T04:52:00+00:00"))
+    engine.evaluate(bundle("2026-01-01T04:52:00+00:00"))
+    morning = engine.evaluate(bundle("2026-01-01T04:53:00+00:00"))
     afternoon = engine.evaluate(bundle("2026-01-01T08:00:00+00:00"))
 
     assert any(item.event_type == "ACCEPTEDDECISION" for item in morning)
