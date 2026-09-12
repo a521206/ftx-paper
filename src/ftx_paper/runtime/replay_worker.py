@@ -6,13 +6,23 @@ from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderRole, Role, SyntheticFutureQuote, synthetic_future_quote
 from ftx_paper.core import AggregatorConfig, Cell, CompletedBarAggregator, InstrumentKey, PaperEngine
+from ftx_paper.core.cost import futures_cost, synthetic_futures_cost
 from ftx_paper.runtime.store import RuntimeStore
 from ftx_paper.strategy import ConfiguredLiveStrategy
-from ftx_paper.strategy.config import CAPITAL
+from ftx_paper.strategy.config import (
+    AFTERNOON_ENTRY_MINUTES,
+    CAPITAL,
+    MORNING_ENTRY_MINUTES,
+)
 from ftx_paper.config import NIFTY_LOT_SIZE
+
+
+IST = ZoneInfo("Asia/Kolkata")
+SESSION_OPEN_MINUTES = 9 * 60 + 15
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +31,18 @@ class TradeSettlement:
     entry_bar: int
     exit_bar: int
     realized_pnl: float
+
+
+def _execution_cost(trade: dict[str, Any]) -> float:
+    """Return the isolated Paper equivalent of the canonical FTX cost model."""
+    lots = float(trade["quantity"])
+    if trade.get("vehicle") == "futures":
+        return futures_cost(lots)
+    ce = float(trade["ce_entry_price"])
+    pe = float(trade["pe_entry_price"])
+    return synthetic_futures_cost(
+        ce, pe, lots, is_short=str(trade.get("side", "")).upper() == "SELL",
+    )
 
 
 class ReplayWorker:
@@ -96,6 +118,9 @@ class ReplayWorker:
 
     def _execute(self, request: dict[str, Any], cancel: Event) -> dict[str, Any]:
         session_date = str(request.get("session_date") or request.get("date") or "")[:10]
+        vehicle = str(request.get("vehicle") or "synthetic").lower()
+        if vehicle not in {"futures", "synthetic"}:
+            raise ValueError(f"unsupported replay vehicle: {vehicle}")
         dates = [session_date] if session_date else self._dates()
         all_events: list[dict[str, Any]] = []
         diagnostic_trades: list[dict[str, Any]] = []
@@ -131,6 +156,8 @@ class ReplayWorker:
                     if isinstance(role, (MarketRole, OptionRole))
                 }
                 for trade in open_trades:
+                    if vehicle == "futures":
+                        continue
                     quote = synthetic_future_quote(
                         futures_bar, option_bars,
                         symbols=(trade["ce_symbol"], trade["pe_symbol"]),
@@ -144,21 +171,25 @@ class ReplayWorker:
                     exit_quote = synthetic_future_quote(
                         futures_bar, option_bars,
                         symbols=(open_trade["ce_symbol"], open_trade["pe_symbol"]),
-                    ) if open_trade else None
-                    if exit_quote is None and open_trade:
+                    ) if open_trade and vehicle == "synthetic" else None
+                    if exit_quote is None and open_trade and vehicle == "synthetic":
                         exit_quote = last_quotes.get(open_trade["entry_order_id"])
-                    if exit_quote is None:
+                    if exit_quote is None and vehicle == "synthetic":
                         all_events.append({"event_type": "EXECUTION_ERROR", "decision_id": action.intent.client_order_id,
                                            "reason": "missing_synthetic_future_quote", "source": "replay", "session_date": date})
                         continue
-                    all_events.append({"event_type": "EXITDECISION", "decision_id": action.intent.client_order_id,
-                                       "timestamp": futures_bar.timestamp.isoformat(), "reason": action.reason,
-                                       "price": exit_quote.price, "synthetic_future_price": exit_quote.price,
-                                       "ce_strike": exit_quote.strike, "ce_exit_price": exit_quote.ce.close,
-                                       "pe_exit_price": exit_quote.pe.close, "source": "replay", "session_date": date})
+                    exit_price = exit_quote.price if exit_quote is not None else futures_bar.close
+                    exit_event = {"event_type": "EXITDECISION", "decision_id": action.intent.client_order_id,
+                                  "entry_decision_id": open_trade["entry_order_id"] if open_trade else None,
+                                  "timestamp": futures_bar.timestamp.isoformat(), "reason": action.reason,
+                                  "price": exit_price, "source": "replay", "session_date": date}
+                    if exit_quote is not None:
+                        exit_event.update({"synthetic_future_price": exit_quote.price, "ce_strike": exit_quote.strike,
+                                           "ce_exit_price": exit_quote.ce.close, "pe_exit_price": exit_quote.pe.close})
+                    all_events.append(exit_event)
                     engine.settle_exit(action.intent.client_order_id, filled=True)
                     realized = self._settle_trade(open_trades, diagnostic_trades, action.intent, futures_bar,
-                                                  exit_quote, action.reason)
+                                                  exit_quote, action.reason, exit_price=exit_price)
                     if realized is not None:
                         engine.record_exit(cell=realized.cell.name, reason=action.reason,
                                            entry_bar=realized.entry_bar, exit_bar=engine.bars_seen,
@@ -176,46 +207,56 @@ class ReplayWorker:
                                        "timestamp": futures_bar.timestamp.isoformat(), "source": "replay",
                                        "session_date": date, "execution_allowed": False})
                     if order.role is OrderRole.ENTRY:
-                        entry_quote = synthetic_future_quote(futures_bar, option_bars)
-                        if entry_quote is None:
+                        entry_quote = synthetic_future_quote(futures_bar, option_bars) if vehicle == "synthetic" else None
+                        if entry_quote is None and vehicle == "synthetic":
                             all_events.append({"event_type": "EXECUTION_ERROR", "decision_id": order.client_order_id,
                                                "reason": "missing_synthetic_future_quote", "source": "replay", "session_date": date})
                             continue
-                        fill_price = entry_quote.price
+                        fill_price = entry_quote.price if entry_quote is not None else futures_bar.close
                         for event in reversed(all_events):
                             if event.get("decision_id") == order.client_order_id:
-                                event.update({"vehicle": "synthetic", "ce_symbol": entry_quote.ce.instrument.symbol,
-                                              "pe_symbol": entry_quote.pe.instrument.symbol, "ce_strike": entry_quote.strike,
-                                              "ce_entry_price": entry_quote.ce.close, "pe_entry_price": entry_quote.pe.close,
-                                              "synthetic_entry_price": entry_quote.price, "entry_price": entry_quote.price})
+                                event.update({"vehicle": vehicle, "entry_price": fill_price})
+                                if entry_quote is not None:
+                                    event.update({"ce_symbol": entry_quote.ce.instrument.symbol,
+                                                  "pe_symbol": entry_quote.pe.instrument.symbol, "ce_strike": entry_quote.strike,
+                                                  "ce_entry_price": entry_quote.ce.close, "pe_entry_price": entry_quote.pe.close,
+                                                  "synthetic_entry_price": entry_quote.price})
                                 break
+                        all_events.append({"event_type": "FILL", "decision_id": order.client_order_id,
+                                           "fill_timestamp": futures_bar.timestamp.isoformat(),
+                                           "price": fill_price, "quantity": order.quantity,
+                                           "vehicle": vehicle, "source": "replay",
+                                           "session_date": date})
                         engine.register_entry(order, fill_price=fill_price,
                                               entry_fill_time=futures_bar.timestamp)
                         open_trades.append({"entry_order_id": order.client_order_id,
                                             "instrument": order.instrument.symbol,
                                             "side": order.side.value, "quantity": order.quantity,
                                             "entry_timestamp": futures_bar.timestamp.isoformat(),
-                                            "entry_price": fill_price, "vehicle": "synthetic",
-                                            "ce_symbol": entry_quote.ce.instrument.symbol, "pe_symbol": entry_quote.pe.instrument.symbol,
-                                            "ce_strike": entry_quote.strike, "ce_entry_price": entry_quote.ce.close,
-                                            "pe_entry_price": entry_quote.pe.close, "cell": order.cell,
+                                            "entry_price": fill_price, "vehicle": vehicle,
+                                            "cell": order.cell,
                                             "entry_bar": order.entry_bar or engine.bars_seen})
-                        last_quotes[order.client_order_id] = entry_quote
+                        if entry_quote is not None:
+                            open_trades[-1].update({"ce_symbol": entry_quote.ce.instrument.symbol, "pe_symbol": entry_quote.pe.instrument.symbol,
+                                                    "ce_strike": entry_quote.strike, "ce_entry_price": entry_quote.ce.close,
+                                                    "pe_entry_price": entry_quote.pe.close})
+                            last_quotes[order.client_order_id] = entry_quote
                     elif order.role is OrderRole.EXIT:
                         open_trade = next((trade for trade in open_trades
                                            if trade["instrument"] == order.instrument.symbol), None)
                         exit_quote = synthetic_future_quote(
                             futures_bar, option_bars,
                             symbols=(open_trade["ce_symbol"], open_trade["pe_symbol"]),
-                        ) if open_trade else None
-                        if exit_quote is None and open_trade:
+                        ) if open_trade and vehicle == "synthetic" else None
+                        if exit_quote is None and open_trade and vehicle == "synthetic":
                             exit_quote = last_quotes.get(open_trade["entry_order_id"])
-                        if exit_quote is None:
+                        if exit_quote is None and vehicle == "synthetic":
                             all_events.append({"event_type": "EXECUTION_ERROR", "decision_id": order.client_order_id,
                                                "reason": "missing_synthetic_future_quote", "source": "replay", "session_date": date})
                             continue
                         realized = self._settle_trade(open_trades, diagnostic_trades, order, futures_bar,
-                                                      exit_quote, order.reason)
+                                                      exit_quote, order.reason,
+                                                      exit_price=exit_quote.price if exit_quote is not None else futures_bar.close)
                         if realized is not None:
                             engine.record_exit(cell=realized.cell.name, reason=order.reason,
                                                entry_bar=realized.entry_bar, exit_bar=engine.bars_seen,
@@ -228,6 +269,7 @@ class ReplayWorker:
             diagnostic_trades.extend({**trade, "status": "open"} for trade in open_trades)
         scores = [int(event["score"]) for event in all_events
                   if isinstance(event.get("score"), (int, float))]
+        normalized_trades = [self._normalize_trade(trade) for trade in diagnostic_trades]
         return {
             "source": "replay",
             "bars_seen": bars_seen,
@@ -235,7 +277,7 @@ class ReplayWorker:
             # Diagnostic-only trades live inside the replay run result. They
             # are never written to runtime_events, the broker ledger, or the
             # live trades/capital projections.
-            "diagnostic_trades": diagnostic_trades,
+            "trades": normalized_trades,
             "capital": {
                 "initial_capital": initial_capital,
                 "current_equity": current_equity,
@@ -253,8 +295,47 @@ class ReplayWorker:
         }
 
     @staticmethod
+    def _normalize_trade(trade: dict[str, Any]) -> dict[str, Any]:
+        """Expose the replay engine's authoritative entry-to-exit record."""
+        entry_at = datetime.fromisoformat(str(trade["entry_timestamp"]))
+        exit_at = (
+            datetime.fromisoformat(str(trade["exit_timestamp"]))
+            if trade.get("exit_timestamp") else None
+        )
+        entry_ist = entry_at.astimezone(IST)
+        exit_ist = exit_at.astimezone(IST) if exit_at else None
+        entry_minutes = entry_ist.hour * 60 + entry_ist.minute - SESSION_OPEN_MINUTES
+        return {
+            "status": str(trade.get("status", "open")),
+            "date": entry_ist.date().isoformat(),
+            "session": ReplayWorker._session_for_minutes(entry_minutes),
+            "vehicle": str(trade.get("vehicle", "synthetic")),
+            "cell": str(trade.get("cell", "")),
+            "direction": "long" if str(trade.get("side", "")).upper() == "BUY" else "short",
+            "entry_time": entry_ist.strftime("%H:%M"),
+            "exit_time": exit_ist.strftime("%H:%M") if exit_ist else "",
+            "quantity": float(trade.get("quantity", 0.0)),
+            "entry_price": float(trade["entry_price"]),
+            "exit_price": float(trade["exit_price"]) if trade.get("exit_price") is not None else None,
+            "gross_pnl_rs": float(trade["gross_pnl_rs"]) if trade.get("gross_pnl_rs") is not None else None,
+            "cost_rs": float(trade["cost_rs"]) if trade.get("cost_rs") is not None else None,
+            "net_pnl_rs": float(trade["net_pnl_rs"]) if trade.get("net_pnl_rs") is not None else None,
+            "exit_reason": trade.get("exit_reason"),
+        }
+
+    @staticmethod
+    def _session_for_minutes(minutes_from_open: int) -> str:
+        """Classify an entry with the canonical half-open session windows."""
+        if MORNING_ENTRY_MINUTES[0] <= minutes_from_open < MORNING_ENTRY_MINUTES[1]:
+            return "morning"
+        if AFTERNOON_ENTRY_MINUTES[0] <= minutes_from_open < AFTERNOON_ENTRY_MINUTES[1]:
+            return "afternoon"
+        return "unknown"
+
+    @staticmethod
     def _settle_trade(open_trades: list[dict[str, Any]], trades: list[dict[str, Any]],
-                      order: Any, bar: MarketBar, quote: SyntheticFutureQuote, reason: str) -> TradeSettlement | None:
+                      order: Any, bar: MarketBar, quote: SyntheticFutureQuote | None,
+                      reason: str, *, exit_price: float) -> TradeSettlement | None:
         opposite = "SELL" if order.side.value == "BUY" else "BUY"
         index = next((i for i, trade in enumerate(open_trades)
                       if trade["instrument"] == order.instrument.symbol and trade["side"] == opposite), None)
@@ -262,15 +343,21 @@ class ReplayWorker:
             return None
         trade = open_trades.pop(index)
         signed = 1.0 if trade["side"] == "BUY" else -1.0
-        exit_price = quote.price
-        realized_pnl = (exit_price - trade["entry_price"]) * NIFTY_LOT_SIZE * trade["quantity"] * signed
-        trades.append({**trade, "exit_order_id": order.client_order_id,
+        gross_pnl = (exit_price - trade["entry_price"]) * NIFTY_LOT_SIZE * trade["quantity"] * signed
+        cost_rs = _execution_cost(trade)
+        net_pnl = gross_pnl - cost_rs
+        settled = {**trade, "exit_order_id": order.client_order_id,
                        "exit_timestamp": bar.timestamp.isoformat(), "exit_price": exit_price,
-                       "synthetic_exit_price": exit_price, "ce_exit_price": quote.ce.close,
-                       "pe_exit_price": quote.pe.close,
                        "exit_reason": reason,
-                       "realized_pnl": realized_pnl,
-                       "status": "closed"})
+                       "realized_pnl": net_pnl,
+                       "gross_pnl_rs": gross_pnl,
+                       "cost_rs": cost_rs,
+                       "net_pnl_rs": net_pnl,
+                       "status": "closed"}
+        if quote is not None:
+            settled.update({"synthetic_exit_price": exit_price, "ce_exit_price": quote.ce.close,
+                            "pe_exit_price": quote.pe.close})
+        trades.append(settled)
         cell = trade.get("cell")
         if not isinstance(cell, str):
             raise TypeError("settled trade cell must be a canonical name")
@@ -278,7 +365,7 @@ class ReplayWorker:
         entry_bar = trade.get("entry_bar", 0)
         if not isinstance(entry_bar, int) or isinstance(entry_bar, bool):
             raise TypeError("settled trade entry_bar must be an integer")
-        return TradeSettlement(parsed_cell, entry_bar, len(trades), realized_pnl)
+        return TradeSettlement(parsed_cell, entry_bar, len(trades), net_pnl)
 
     def _dates(self) -> list[str]:
         return self.store.read_market_dates()

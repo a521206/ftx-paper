@@ -46,9 +46,8 @@ def test_configured_cell_matrix_has_fixed_session_directions() -> None:
 
     assert morning == {
         "session_low+or_low": "buy",
-        "vwap_zone+session_low+or_low": "buy",
-        "session_high+or_high": "sell",
         "vwap_zone+or_low": "sell",
+        "session_high+or_high": "sell",
     }
     assert afternoon == {
         "session_high+or_high": "buy",

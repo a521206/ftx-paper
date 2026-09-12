@@ -14,6 +14,7 @@ from ftx_paper.contracts import (
     role_to_key,
 )
 from ftx_paper.core import AggregatorConfig, CompletedBarAggregator, InstrumentKey, PaperEngine
+from ftx_paper.core.cost import futures_cost, synthetic_futures_cost
 from ftx_paper.execution import PositionLedger
 from .events import is_decision_event, serialize_datetime
 from .store import RuntimeStore
@@ -308,6 +309,16 @@ class RuntimeSession:
                                     f"execution_error:fill_poll:{order.client_order_id}", timestamp=timestamp)
             return False
         if fill:
+            entry_cost = None
+            if order.role is OrderRole.ENTRY:
+                if synthetic_quote is not None:
+                    entry_cost = synthetic_futures_cost(
+                        synthetic_quote.ce.close, synthetic_quote.pe.close,
+                        fill.quantity,
+                        is_short=order.side is OrderSide.SELL,
+                    )
+                else:
+                    entry_cost = futures_cost(fill.quantity)
             self._last_execution_fill = {
                 "price": fill.price,
                 "fill_timestamp": fill.timestamp,
@@ -331,6 +342,7 @@ class RuntimeSession:
                                               "quantity": fill.quantity,
                                               "price": fill.price,
                                               "fill_timestamp": fill.timestamp,
+                                              **({"cost_rs": entry_cost} if entry_cost is not None else {}),
                                               "outcome": "filled",
                                               **({"position": {
                                                   "symbol": position.symbol,

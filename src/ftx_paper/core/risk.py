@@ -18,7 +18,9 @@ class RiskConfig:
     margin_per_lot: float = 175_000.0
     margin_utilization_cap: float = 0.80
     low_vix_threshold: float = 13.0
-    low_vix_multiplier: float = 0.5
+    # Canonical capital sizing applies the score multiplier and policy
+    # stability, but does not apply an additional VIX multiplier.
+    low_vix_multiplier: float = 1.0
 
 
 @dataclass(frozen=True, slots=True)
