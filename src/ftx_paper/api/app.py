@@ -6,6 +6,7 @@ from flask import Flask, jsonify, request
 from typing import Any
 
 from ftx_paper.runtime import RuntimeController, RuntimeSession, RuntimeStore
+from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.runtime.events import (
     EXECUTION_EVENT_TYPES, RISK_EVENT_TYPES, DecisionTimestampError,
 )
@@ -14,11 +15,13 @@ from .schemas import error_payload, openapi_document
 
 
 def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token: str | None = None,
-               controller: RuntimeController | None = None, session: RuntimeSession | None = None) -> Flask:
+               controller: RuntimeController | None = None, session: RuntimeSession | None = None,
+               replay_worker: ReplayWorker | None = None) -> Flask:
     app = Flask(__name__)
     store.recover_interrupted()
     session = session or RuntimeSession(store, zerodha_auth, [])
     controller = controller or RuntimeController(store, session)
+    replay_worker = replay_worker or ReplayWorker(store)
 
     def json_safe(value: Any) -> Any:
         if isinstance(value, datetime):
@@ -54,6 +57,45 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
     @app.get("/api/v1/health")
     def health():
         return jsonify({"status": "pass", "service": "ftx-paper-api"})
+
+    @app.post("/api/v1/replay")
+    def create_replay():
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify(error_payload("invalid_request", "JSON object body required")), 400
+        requested_date = payload.get("session_date", payload.get("date"))
+        if requested_date not in (None, ""):
+            if not isinstance(requested_date, str):
+                return jsonify(error_payload("invalid_date", "session_date must be YYYY-MM-DD")), 400
+            try:
+                parsed_date = datetime.strptime(requested_date, "%Y-%m-%d").date().isoformat()
+            except ValueError:
+                return jsonify(error_payload("invalid_date", "session_date must be YYYY-MM-DD")), 400
+            if parsed_date != requested_date or parsed_date not in store.read_market_dates():
+                return jsonify(error_payload("no_data", "no market data for session_date")), 404
+            payload["session_date"] = parsed_date
+        elif not store.read_market_dates():
+            return jsonify(error_payload("no_data", "no market data available for replay")), 404
+        try:
+            run_id = replay_worker.submit(payload)
+        except RuntimeError as exc:
+            return jsonify(error_payload("replay_queue_full", str(exc))), 409
+        return jsonify(store.read_replay_run(run_id)), 202
+
+    @app.get("/api/v1/replay")
+    def list_replays():
+        return jsonify(json_safe({"runs": store.read_replay_runs()}))
+
+    @app.get("/api/v1/replay/<run_id>")
+    def replay_detail(run_id: str):
+        run = store.read_replay_run(run_id)
+        return jsonify(json_safe(run)) if run is not None else (jsonify(error_payload("not_found", "replay not found")), 404)
+
+    @app.post("/api/v1/replay/<run_id>/cancel")
+    def cancel_replay(run_id: str):
+        if not replay_worker.cancel(run_id):
+            return jsonify(error_payload("not_cancellable", "replay cannot be cancelled")), 409
+        return jsonify(json_safe(store.read_replay_run(run_id)))
 
     @app.get("/api/v1/openapi.json")
     def openapi():

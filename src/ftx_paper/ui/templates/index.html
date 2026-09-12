@@ -539,6 +539,7 @@
         ('positions', 'Positions'),
         ('trades', 'Trades'),
         ('capital', 'Capital'),
+        ('replay', 'Replay'),
         ('activity', 'Activity')
       ] %}
         <a class="{% if page == item[0] %}active{% endif %}"
@@ -905,7 +906,9 @@
 
       let body = '';
 
-      if (page === 'dashboard') {
+      if (page === 'replay') {
+        body = `<div class="card"><h2>Replay runs</h2><p>Replay runs in an isolated in-process worker and never submits orders or mutates live positions.</p><form id="replay-form"><label>Session date (optional) <input id="replay-date" placeholder="YYYY-MM-DD"></label><button>Queue replay</button></form></div><div class="card"><h2>Run history</h2>${table(data.replays.runs || [])}</div>`;
+      } else if (page === 'dashboard') {
         body = `<div class="card">
           <div class="section-head">
             <h2>Session overview</h2>
@@ -1036,6 +1039,11 @@
           }
         };
       });
+      document.getElementById('replay-form')?.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        try { await get('/api/v1/replay', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({session_date: document.getElementById('replay-date').value})}); flash('Replay queued'); refresh(); }
+        catch (e) { flash(e.message); }
+      });
 
     }
 
@@ -1043,7 +1051,7 @@
       if (refreshInFlight) return;
       refreshInFlight = true;
       try {
-        const [health, runtime, capital, positions, trades, decisionsData, events, broker] =
+        const [health, runtime, capital, positions, trades, decisionsData, events, broker, replays] =
           await Promise.all(
             [
               '/api/v1/health',
@@ -1054,6 +1062,7 @@
               page === 'decisions' ? `/api/v1/decisions?date=${encodeURIComponent(decisionDate)}` : '/api/v1/decisions',
               '/api/v1/events?limit=100',
               '/api/v1/broker/zerodha/status',
+              '/api/v1/replay',
             ].map(get)
           );
 
@@ -1066,6 +1075,7 @@
           decisions: decisionsData,
           events,
           broker,
+          replays,
         });
         refreshDelayMs = 5000;
         scheduleRefresh(refreshDelayMs);

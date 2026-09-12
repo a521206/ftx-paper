@@ -63,10 +63,16 @@ class PaperEngine:
         on_tick = getattr(self.strategy, "on_tick", None)
         return on_tick(bar) if callable(on_tick) else ()
 
-    def register_entry(self, order: OrderIntent, *, fill_price: float | None = None) -> None:
+    def register_entry(self, order: OrderIntent, *, fill_price: float | None = None,
+                       entry_fill_time=None) -> None:
         register = getattr(self.strategy, "register_entry", None)
         if callable(register):
-            register(order, fill_price=fill_price)
+            try:
+                register(order, fill_price=fill_price, entry_fill_time=entry_fill_time)
+            except TypeError as exc:
+                if "entry_fill_time" not in str(exc):
+                    raise
+                register(order, fill_price=fill_price)
 
     def on_closed_bar(self, bar: MarketBar):
         handler = getattr(self.strategy, "on_closed_bar", None)

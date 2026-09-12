@@ -46,5 +46,11 @@ def openapi_document() -> dict[str, Any]:
             "/api/v1/positions": {"get": {"responses": {"200": {"description": "Open positions"}}}},
             "/api/v1/capital": {"get": {"responses": {"200": {"description": "Capital"}}}},
             "/api/v1/trades": {"get": {"responses": {"200": {"description": "Trades"}}}},
+            "/api/v1/replay": {
+                "get": {"responses": {"200": {"description": "Replay runs"}}},
+                "post": {"responses": {"202": {"description": "Replay queued"}, "400": {"description": "Invalid request"}}},
+            },
+            "/api/v1/replay/{run_id}": {"get": {"parameters": [{"name": "run_id", "in": "path", "required": True, "schema": {"type": "string"}}], "responses": {"200": {"description": "Replay run"}, "404": {"description": "Not found"}}}},
+            "/api/v1/replay/{run_id}/cancel": {"post": {"parameters": [{"name": "run_id", "in": "path", "required": True, "schema": {"type": "string"}}], "responses": {"200": {"description": "Replay cancelled"}, "409": {"description": "Replay cannot be cancelled"}}}},
         },
     }

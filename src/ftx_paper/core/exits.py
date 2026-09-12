@@ -15,6 +15,7 @@ class PositionState:
     peak_price: float | None = None
     cell: str | None = None
     exit_mode: str = "signal"
+    entry_fill_time: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

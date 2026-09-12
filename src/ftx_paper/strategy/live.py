@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from datetime import time
+from datetime import datetime, time
 
 from ftx_paper.contracts import MarketBar, OrderIntent
 
@@ -168,7 +168,8 @@ class ConfiguredLiveStrategy:
         sized = self._risk.size(capital=self._capital, equity=self._capital, peak_equity=self._capital, entry=bar.close, stop=stop, score=score)
         if not sized.approved:
             return ()
-        self._position = PositionState(bar.instrument, bar.close, stop, sized.quantity, decision.side, exit_mode="trail")
+        self._position = PositionState(bar.instrument, bar.close, stop, sized.quantity, decision.side,
+                                       exit_mode="trail", entry_fill_time=bar.timestamp)
         return (self._policy.to_order(decision, bar, sized.quantity, f"entry-{bar.timestamp.isoformat()}"),)
 
     def on_bundle(self, bundle: DecisionBundle):
@@ -176,13 +177,17 @@ class ConfiguredLiveStrategy:
             return ()
         return self._decision_engine.evaluate(bundle)
 
-    def register_entry(self, order: OrderIntent, *, fill_price: float | None = None) -> None:
+    def register_entry(self, order: OrderIntent, *, fill_price: float | None = None,
+                       entry_fill_time: datetime | str | None = None) -> None:
         if order.stop_price is None or order.cell is None:
             return
+        if isinstance(entry_fill_time, str):
+            entry_fill_time = datetime.fromisoformat(entry_fill_time)
         position = PositionState(
             order.instrument, fill_price if fill_price is not None else order.limit_price or 0.0,
             order.stop_price, order.quantity, order.side, cell=order.cell,
             exit_mode=order.exit_mode or "signal",
+            entry_fill_time=entry_fill_time,
         )
         trail_distance = 10.0 if order.exit_mode == "trail" else None
         self._decision_positions[order.client_order_id] = (
@@ -207,6 +212,8 @@ class ConfiguredLiveStrategy:
         actions = []
         for order_id, (position, exits) in tuple(self._decision_positions.items()):
             if bar.instrument != position.instrument or order_id in self._pending_exits.values():
+                continue
+            if position.entry_fill_time is not None and bar.timestamp < position.entry_fill_time:
                 continue
             action = exits.evaluate(position, timestamp=bar.timestamp, high=bar.high, low=bar.low,
                                     close=bar.close, client_order_id=f"exit-{order_id}-{bar.timestamp.isoformat()}")

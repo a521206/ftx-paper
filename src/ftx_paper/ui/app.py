@@ -15,7 +15,7 @@ def create_ui_app(api_base_url: str | None = None) -> Flask:
     def index(page: str = "dashboard"):
         if page in {"events", "logs"}:
             return redirect(url_for("index", page="activity"))
-        pages = {"dashboard", "decisions", "positions", "trades", "activity", "capital"}
+        pages = {"dashboard", "decisions", "positions", "trades", "activity", "capital", "replay"}
         if page not in pages:
             return "Not found", 404
         return render_template("index.html", api_base_url=configured_api.rstrip("/"), page=page)

@@ -125,6 +125,15 @@ class RuntimeStore:
                     ON runtime_events(event_type);
                 CREATE INDEX IF NOT EXISTS ix_runtime_events_decision_id
                     ON runtime_events(json_extract(payload, '$.decision_id'));
+                CREATE TABLE IF NOT EXISTS replay_runs (
+                    run_id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    request TEXT NOT NULL,
+                    result TEXT,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
             connection.execute(
@@ -238,6 +247,13 @@ class RuntimeStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def read_market_dates(self) -> list[str]:
+        with sqlite3.connect(self.database) as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT substr(minute, 1, 10) FROM market_bars ORDER BY 1"
+            ).fetchall()
+        return [str(row[0]) for row in rows]
+
     @staticmethod
     def _now() -> str:
         return datetime.now(timezone.utc).isoformat()
@@ -298,6 +314,40 @@ class RuntimeStore:
         self._event_counts_cache = None
         return deleted
 
+    def create_replay_run(self, run_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        now = self._now()
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "INSERT INTO replay_runs(run_id, status, request, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (run_id, "queued", json.dumps(_json_safe(request, path="replay request")), now, now),
+            )
+        return self.read_replay_run(run_id) or {}
+
+    def update_replay_run(self, run_id: str, *, status: str, result: dict[str, Any] | None = None,
+                          error: str | None = None) -> None:
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "UPDATE replay_runs SET status=?, result=COALESCE(?, result), error=?, updated_at=? WHERE run_id=?",
+                (status, json.dumps(_json_safe(result, path="replay result")) if result is not None else None,
+                 error, self._now(), run_id),
+            )
+
+    def read_replay_run(self, run_id: str) -> dict[str, Any] | None:
+        with sqlite3.connect(self.database) as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute("SELECT * FROM replay_runs WHERE run_id=?", (run_id,)).fetchone()
+        if row is None:
+            return None
+        value = dict(row)
+        value["request"] = json.loads(value["request"])
+        value["result"] = json.loads(value["result"]) if value["result"] else None
+        return value
+
+    def read_replay_runs(self, limit: int = 100) -> list[dict[str, Any]]:
+        with sqlite3.connect(self.database) as connection:
+            ids = connection.execute("SELECT run_id FROM replay_runs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        return [run for row in ids if (run := self.read_replay_run(str(row[0]))) is not None]
+
     def recover_interrupted(self) -> bool:
         status = self.read_status()
         if status.get("state") not in {"RUNNING", "STARTING", "START_REQUESTED"}:
@@ -356,6 +406,8 @@ class RuntimeStore:
             "SELECT event_type, payload, created_at FROM runtime_events "
             f"WHERE event_type IN ({placeholders}) "
             "AND json_extract(payload, '$.decision_at') <> ''"
+            " AND (json_extract(payload, '$.decision_source') IS NULL "
+            "OR lower(json_extract(payload, '$.decision_source')) <> 'replay')"
         )
         params: list[Any] = list(event_types)
         if session_date:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 import logging
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable
 from zoneinfo import ZoneInfo
@@ -191,9 +192,18 @@ class RuntimeSession:
             for bar in bars
         })
         replayed_bars = 0
+        # Clear any recovered live engine state before taking the isolated
+        # replay copy. The live engine is not used to evaluate replay bars.
+        live_reset = getattr(self.engine, "reset", None)
+        if callable(live_reset):
+            live_reset()
+        replay_engine = deepcopy(self.engine)
+        reset = getattr(replay_engine, "reset", None)
+        if callable(reset):
+            reset()
         for index, session_date in enumerate(dates):
             if index:
-                reset = getattr(self.engine, "reset", None)
+                reset = getattr(replay_engine, "reset", None)
                 if callable(reset):
                     reset()
             self._replay_date = session_date
@@ -203,38 +213,48 @@ class RuntimeSession:
                 bar_date = bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat()
                 if bar_date != session_date:
                     continue
-                if isinstance(self.broker, PaperBroker):
-                    self.broker.update_price(bar.instrument.symbol, bar.close)
                 replayed_bars += 1
                 bundle = self._aggregator.ingest(bar)
                 if bundle is not None:
-                    self._process_bundle(bundle, source="replay")
+                    self._process_replay_bundle(bundle, replay_engine)
                     self.store.patch_status({"replay_last_bar": bundle.minute, "replay_bars_seen": replayed_bars})
             for bundle in self._aggregator.flush(incomplete=False):
-                self._process_bundle(bundle, source="replay")
+                self._process_replay_bundle(bundle, replay_engine)
 
     def _persist_engine_event(self, event: dict[str, object], *, source: str, bundle_id: str,
-                              session_date: str, decision_at: datetime, timestamp: str) -> None:
+                              session_date: str, decision_at: datetime, timestamp: str,
+                              engine: PaperEngine | None = None) -> None:
         event_type = str(event.get("event_type", "ENGINE_EVENT"))
         payload = {**event, "decision_source": source, "session_date": session_date,
                    "execution_allowed": source == "live"}
         payload.pop("event_type", None)
         if is_decision_event(event_type):
             payload["decision_at"] = serialize_datetime(decision_at)
-        metadata = self.engine.strategy_metadata
+        metadata = (engine or self.engine).strategy_metadata
         if metadata:
             payload.update(strategy_version=metadata.version, config_hash=metadata.config_hash)
         self.store.append_event(event_type, payload,
                                 f"{event_type}:{source}:{bundle_id}:{payload.get('decision_id', '')}",
                                 timestamp=timestamp)
 
-    def _process_bundle(self, bundle, *, source: str) -> None:
-        result = self.engine.on_bundle(bundle)
+    def _process_bundle(self, bundle, *, source: str, engine: PaperEngine | None = None) -> None:
+        active_engine = engine or self.engine
+        self._process_bundle_for_source(bundle, source=source, engine=active_engine)
+
+    def _process_replay_bundle(self, bundle, replay_engine: PaperEngine) -> None:
+        """Process startup replay without entering the live bundle path."""
+        self._process_bundle_for_source(bundle, source="replay", engine=replay_engine)
+
+    def _process_bundle_for_source(self, bundle, *, source: str, engine: PaperEngine) -> None:
+        """Persist a bundle result, with live execution kept behind the source gate."""
+        active_engine = engine
+        result = active_engine.on_bundle(bundle)
         decision_at = _bundle_timestamp(bundle.trading_date, bundle.minute)
         timestamp = serialize_datetime(decision_at)
         for event in result.events:
             self._persist_engine_event(event, source=source, bundle_id=bundle.bundle_id,
-                                        session_date=bundle.trading_date, decision_at=decision_at, timestamp=timestamp)
+                                        session_date=bundle.trading_date, decision_at=decision_at, timestamp=timestamp,
+                                        engine=active_engine)
         outcome_types = [str(event.get("event_type", "ENGINE_EVENT")) for event in result.events]
         self.store.append_event("BUNDLE_COMPLETE", {
             "bundle_id": bundle.bundle_id, "minute": bundle.minute,
@@ -304,7 +324,12 @@ class RuntimeSession:
         if fill:
             register_entry = getattr(self.engine, "register_entry", None)
             if callable(register_entry):
-                register_entry(order, fill_price=fill.price)
+                try:
+                    register_entry(order, fill_price=fill.price, entry_fill_time=timestamp)
+                except TypeError as exc:
+                    if "entry_fill_time" not in str(exc):
+                        raise
+                    register_entry(order, fill_price=fill.price)
             position = None
             if self.ledger:
                 position = self.ledger.apply_fill(fill, order.side if order.side in (OrderSide.BUY, OrderSide.SELL) else OrderSide.BUY)
