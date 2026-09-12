@@ -968,8 +968,8 @@
         ('positions', 'Positions'),
         ('trades', 'Trades'),
         ('capital', 'Capital'),
-        ('replay', 'Performance'),
-        ('investigate', 'Decision replay'),
+        ('replay', 'Replay'),
+        ('investigate', 'Investigate'),
         ('activity', 'Activity')
       ] %}
         <a class="{% if page == item[0] %}active{% endif %}"
@@ -1011,7 +1011,10 @@
     const syntheticLegs = (trade) => {
       if (!trade || trade.vehicle !== 'synthetic') return '';
       const strike = trade.ce_strike ?? trade.pe_strike;
-      return `<br><strong>Synthetic future · Strike:</strong> ${esc(strike ?? '—')}<br><strong>CE:</strong> ${esc(trade.ce_entry_price ?? '—')} → ${esc(trade.ce_exit_price ?? 'Open')} · <strong>PE:</strong> ${esc(trade.pe_entry_price ?? '—')} → ${esc(trade.pe_exit_price ?? 'Open')}`;
+      const legs = (trade.ce_entry_price != null || trade.ce_exit_price != null || trade.pe_entry_price != null || trade.pe_exit_price != null)
+        ? `<br><strong>CE:</strong> ${esc(trade.ce_entry_price ?? '—')} → ${esc(trade.ce_exit_price ?? 'Open')} · <strong>PE:</strong> ${esc(trade.pe_entry_price ?? '—')} → ${esc(trade.pe_exit_price ?? 'Open')}`
+        : '';
+      return `<br><small>Instrument: Synthetic future${strike == null ? '' : ` · Strike ${esc(strike)}`}</small>${legs}`;
     };
 
     const date = (s) => {
@@ -1333,7 +1336,18 @@
     }
 
     function replayEventLabel(event) {
-      return String(event.event_type || 'Event').replace(/_/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase().replace(/(^|\s)\S/g, (x) => x.toUpperCase());
+      const type = String(event.event_type || '').toUpperCase();
+      const labels = {
+        ACCEPTEDDECISION: 'Accepted decision',
+        REJECTEDDECISION: 'Rejected decision',
+        ORDER_SUPPRESSED: 'Order suppressed',
+        EXITDECISION: 'Exit decision',
+      };
+      return labels[type] || String(event.event_type || 'Event').replace(/_/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase().replace(/(^|\s)\S/g, (x) => x.toUpperCase());
+    }
+
+    function replayReasonLabel(value) {
+      return String(value || '').replace(/_/g, ' ');
     }
 
     function replayEventDetail(event) {
@@ -1367,6 +1381,18 @@
 
     function replayRunDate(run) {
       return String(run.request?.session_date || 'all');
+    }
+
+    function replayDateLabel(value) {
+      if (!value || value === 'all') return value || 'All available dates';
+      const d = new Date(`${value}T00:00:00+05:30`);
+      return isNaN(d) ? value : new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium' }).format(d);
+    }
+
+    function replayDecisionLabel(value) {
+      return String(value || 'Decision event')
+        .replace(/_/g, ' ')
+        .replace(/\b\w/g, (letter) => letter.toUpperCase());
     }
 
     function replayEventMatches(event, filters) {
@@ -1445,15 +1471,16 @@
         (!filters.date || replayRunDate(run) === filters.date) &&
         (!filters.status || String(run.status || '').toLowerCase() === filters.status) &&
         (!filters.run || String(run.run_id || '') === filters.run)
-      );
+      ).sort((a, b) => replayRunDate(b).localeCompare(replayRunDate(a)) || String(b.created_at || '').localeCompare(String(a.created_at || '')));
       if (!visibleRuns.length) return '<div class="empty replay-results-empty">No replay runs match these filters.</div>';
       return visibleRuns.map((run) => replayRunView(run, filters)).join('');
     }
 
     function replayFilterOptions(runs) {
       const dates = [...new Set(runs.map(replayRunDate).filter((value) => value !== 'all'))].sort().reverse();
+      const orderedRuns = [...runs].sort((a, b) => replayRunDate(b).localeCompare(replayRunDate(a)) || String(b.created_at || '').localeCompare(String(a.created_at || '')));
       const select = (id, label, options, value) => `<div class="replay-filter"><label for="${id}">${label}</label><select id="${id}"><option value="">All ${label.toLowerCase()}</option>${options.map(([optionValue, optionLabel]) => `<option value="${esc(optionValue)}"${value === optionValue ? ' selected' : ''}>${esc(optionLabel)}</option>`).join('')}</select></div>`;
-      return `<div class="replay-filters"><div class="replay-filter-actions"><span class="label"><strong id="replay-visible-runs">${runs.length}</strong> runs · filters apply instantly</span><button id="replay-clear-filters" class="replay-clear" type="button">Clear all</button></div><div class="replay-filter-grid"><div class="replay-filter"><label for="replay-search">Search events</label><input id="replay-search" type="search" value="${esc(replayFilterState.search)}" placeholder="Reason, cell, setup, ID…"></div>${select('replay-date', 'Date', dates.map((x) => [x, x]), replayFilterState.date)}${select('replay-type', 'Event type', [['key', 'Key events'], ['accepted', 'Accepted decisions'], ['exit', 'Exits'], ['rejected', 'Rejections'], ['all', 'All events']], replayFilterState.type)}${select('replay-direction', 'Direction', [['buy', 'Buy / long'], ['sell', 'Sell / short']], replayFilterState.direction)}${select('replay-session', 'Session', decisionSessions.map((x) => [x[0], x[0]]), replayFilterState.session)}${select('replay-status', 'Run status', [['completed', 'Completed'], ['running', 'Running'], ['failed', 'Failed'], ['queued', 'Queued']], replayFilterState.status)}${select('replay-run', 'Replay run', runs.map((run) => [String(run.run_id || ''), `${replayRunDate(run)} · ${replayStatusLabel(String(run.status || '').toLowerCase())}`]), replayFilterState.run)}</div></div>`;
+      return `<div class="replay-filters"><div class="replay-filter-actions"><span class="label"><strong id="replay-visible-runs">${runs.length}</strong> runs · filters apply instantly</span><button id="replay-clear-filters" class="replay-clear" type="button">Clear all</button></div><div class="replay-filter-grid"><div class="replay-filter"><label for="replay-search">Search events</label><input id="replay-search" type="search" value="${esc(replayFilterState.search)}" placeholder="Reason, cell, setup, ID…"></div>${select('replay-date', 'Date', dates.map((x) => [x, replayDateLabel(x)]), replayFilterState.date)}${select('replay-type', 'Event type', [['key', 'Key events'], ['accepted', 'Accepted decisions'], ['exit', 'Exits'], ['rejected', 'Rejections'], ['all', 'All events']], replayFilterState.type)}${select('replay-direction', 'Direction', [['buy', 'Buy / long'], ['sell', 'Sell / short']], replayFilterState.direction)}${select('replay-session', 'Session', decisionSessions.map((x) => [x[0], x[0]]), replayFilterState.session)}${select('replay-status', 'Run status', [['completed', 'Completed'], ['running', 'Running'], ['failed', 'Failed'], ['queued', 'Queued']], replayFilterState.status)}${select('replay-run', 'Replay run', orderedRuns.map((run) => [String(run.run_id || ''), `${replayDateLabel(replayRunDate(run))} · ${replayStatusLabel(String(run.status || '').toLowerCase())}`]), replayFilterState.run)}</div></div>`;
     }
 
     function wireReplayInvestigation(runs) {
@@ -1490,7 +1517,7 @@
       const completed = (runs || []).filter((run) => String(run.status).toLowerCase() === 'completed');
       const requestedDate = new URLSearchParams(window.location.search).get('date') || '';
       const run = completed.find((candidate) => replayRunDate(candidate) === requestedDate) || completed[0] || runs?.[0];
-      const recentDates = [...new Set((runs || []).map(replayRunDate).filter((value) => value !== 'all'))].slice(0, 4);
+      const recentDates = [...new Set((runs || []).map(replayRunDate).filter((value) => value !== 'all'))].sort().reverse().slice(0, 4);
       const dateValue = requestedDate || run?.request?.session_date || '';
       if (!run) return `<div class="replay-runtime-row"><span><strong>Replay workspace</strong> · historical strategy evaluation</span><span>Live runtime remains separate · paper mode</span></div><section class="replay-control-bar"><form id="replay-form"><label>Replay date<input id="replay-date" type="date" aria-label="Replay date"></label><button>Replay strategy</button></form></section><div class="card"><div class="empty">No replay runs yet. Choose a session date above to begin.</div></div>`;
       const stats = performanceStats(run);
@@ -1508,31 +1535,33 @@
             const pnl = trade.realized_pnl ?? trade.net_pnl_rs;
             const entryTimestamp = trade.entry_timestamp || `${trade.date}T${trade.entry_time || ''}`;
             const exitTimestamp = trade.exit_timestamp || `${trade.date}T${trade.exit_time || ''}`;
-            return `<tr><td>${esc(date(entryTimestamp))}</td><td>${esc(date(exitTimestamp))}</td><td>${esc(String(trade.side || trade.direction || '').toUpperCase())}</td><td>${esc(trade.quantity ?? '—')}</td><td>${esc(money(trade.entry_price))}${syntheticLegs(trade)}</td><td>${esc(trade.exit_price == null ? 'Open' : money(trade.exit_price))}</td><td class="pnl ${Number(pnl || 0) < 0 ? 'negative' : ''}">${pnl == null ? 'Open' : esc(money(pnl))}</td><td>${esc(String(trade.exit_reason || 'Still open').replaceAll('_', ' '))}</td></tr>`;
+            return `<tr><td>${esc(date(entryTimestamp))}</td><td>${esc(date(exitTimestamp))}</td><td>${esc(String(trade.side || trade.direction || '').toUpperCase())}</td><td>${esc(trade.quantity ?? trade.lots ?? '—')}</td><td>${esc(money(trade.entry_price))}${syntheticLegs(trade)}</td><td>${esc(trade.exit_price == null ? 'Open' : money(trade.exit_price))}</td><td class="pnl ${Number(pnl || 0) < 0 ? 'negative' : ''}">${pnl == null ? 'Open' : esc(money(pnl))}</td><td>${esc(String(trade.exit_reason || 'Still open').replaceAll('_', ' '))}</td></tr>`;
           }).join('')
         : '<tr><td colspan="8" class="empty">No trades recorded.</td></tr>';
-      const causalEvents = events.filter((event) => ['ACCEPTEDDECISION', 'REJECTEDDECISION', 'EXITDECISION'].includes(String(event.event_type || '').toUpperCase())).slice().sort((a, b) => new Date(replayEventTime(a)) - new Date(replayEventTime(b)));
+      const causalEvents = events.filter((event) => ['ACCEPTEDDECISION', 'REJECTEDDECISION', 'ORDER_SUPPRESSED', 'EXITDECISION'].includes(String(event.event_type || '').toUpperCase())).slice().sort((a, b) => new Date(replayEventTime(a)) - new Date(replayEventTime(b)));
       const causalStream = causalEvents.length
         ? causalEvents.map((event) => {
             const type = String(event.event_type || '').toUpperCase();
             const acceptedEvent = type === 'ACCEPTEDDECISION';
+            const suppressedEvent = type === 'ORDER_SUPPRESSED';
             const exitEvent = type === 'EXITDECISION';
             const direction = String(event.direction || event.side || (exitEvent ? 'exit' : 'not reported')).toUpperCase();
-            const outcome = exitEvent ? 'EXIT' : acceptedEvent ? 'EXECUTED' : 'SKIPPED';
-            const tone = exitEvent ? 'warn' : acceptedEvent ? 'good' : 'subtle';
-            return `<details class="causal-row"><summary><span class="mono">${esc(date(replayEventTime(event)))}</span><span><strong>${esc(direction)}</strong><small>${esc(event.cell || event.setup_type || 'Decision event')}</small></span><span class="causal-detail">${esc(event.reason || event.exit_reason || (acceptedEvent ? 'Gate passed · synthetic entry' : 'Policy gate rejected candidate'))}</span>${badge(outcome, tone)}</summary><div class="causal-path"><strong>Signal</strong><b>→</b><strong>${acceptedEvent ? 'Gate passed' : exitEvent ? 'Exit signal' : 'Gate rejected'}</strong><b>→</b><strong>${acceptedEvent ? 'Synthetic entry' : exitEvent ? 'Exit' : 'No entry'}</strong></div><div class="causal-meta"><div><span>Market state</span><strong>${esc(event.entry_price ?? event.price ?? 'Not reported')}</strong></div><div><span>Evidence</span><strong>${esc(event.cell || event.setup_type || 'Not reported')}</strong></div><div><span>Decision ID</span><strong>${esc(event.decision_id || event.event_id || 'Not reported')}</strong></div></div></details>`;
+            const outcome = exitEvent ? 'EXIT' : suppressedEvent ? 'BLOCKED' : acceptedEvent ? 'EXECUTED' : 'SKIPPED';
+            const tone = exitEvent || suppressedEvent ? 'warn' : acceptedEvent ? 'good' : 'subtle';
+            const evidence = event.cell || event.setup_type || replayEventLabel(event);
+            return `<details class="causal-row"><summary><span class="mono">${esc(date(replayEventTime(event)))}</span><span><strong>${esc(direction)}</strong><small>${esc(replayDecisionLabel(evidence))}</small></span><span class="causal-detail">${esc(replayReasonLabel(event.reason || event.exit_reason || (acceptedEvent ? 'Entry allowed' : suppressedEvent ? 'Risk check blocked order' : exitEvent ? 'Position closed' : 'Entry rejected')))}</span>${badge(outcome, tone)}</summary><div class="causal-path"><strong>Signal</strong><b>→</b><strong>${acceptedEvent ? 'Entry allowed' : suppressedEvent ? 'Risk check' : exitEvent ? 'Exit signal' : 'Entry rejected'}</strong><b>→</b><strong>${acceptedEvent ? 'Synthetic entry' : suppressedEvent ? 'Order blocked' : exitEvent ? 'Exit' : 'No entry'}</strong></div><div class="causal-meta"><div><span>Market state</span><strong>${esc(event.entry_price ?? event.price ?? 'Not reported')}</strong></div><div><span>Evidence</span><strong>${esc(replayDecisionLabel(evidence))}</strong></div><div><span>Decision ID</span><strong>${esc(event.decision_id || event.event_id || 'Not reported')}</strong></div></div></details>`;
           }).join('')
         : '<div class="empty">No decision events recorded for this replay.</div>';
-      return `<div class="replay-runtime-row"><span><strong>Replay workspace</strong> · historical strategy evaluation</span><span>Live runtime · ${esc(broker.authenticated ? 'Zerodha connected' : 'Not connected')} · ${esc(runtime.state || 'Unknown')}</span></div>
-      <section class="replay-control-bar"><form id="replay-form"><label>Replay date<input id="replay-date" type="date" value="${esc(dateValue)}" aria-label="Replay date"></label><button>Replay strategy</button></form><div class="replay-shortcuts"><span>Recent dates</span>${recentDates.map((dateValue) => `<a href="/replay?date=${encodeURIComponent(dateValue)}">${esc(dateValue)}</a>`).join('')}</div></section>
+      return `<div class="replay-runtime-row"><span><strong>Replay workspace</strong> · historical strategy evaluation</span><span>Live runtime status (separate) · ${esc(broker.authenticated ? 'Connected' : 'Not connected')} · ${esc(runtime.state || 'Unknown')}</span></div>
+      <section class="replay-control-bar"><form id="replay-form"><label>Replay date<input id="replay-date" type="date" value="${esc(dateValue)}" aria-label="Replay date"></label><button>Replay strategy</button></form><div class="replay-shortcuts"><span>Recent dates</span>${recentDates.map((dateValue) => `<a href="/replay?date=${encodeURIComponent(dateValue)}">${esc(replayDateLabel(dateValue))}</a>`).join('')}</div></section>
       <div class="section-head"><div><h1>Replay outcome</h1><p class="replay-intro">${esc(requestDate)} · Completed ${esc(date(run.updated_at || run.created_at))}</p></div><a class="investigation-link" href="/replay/investigate">Inspect decision path →</a></div>
       <div class="replay-outcome">
         <div class="metric headline"><div class="label">${noTrades ? 'Replay completed' : 'Net P&amp;L'}</div><div class="value">${noTrades ? 'No trades taken' : esc(money(stats.net))}</div><div>${noTrades ? `${esc(String(result.bars_seen ?? 0))} market bars evaluated` : (stats.net >= 0 ? 'Strategy finished positive' : 'Strategy finished negative')}</div></div>
-        ${[['Win rate', stats.winRate == null || noTrades ? '—' : `${Math.round(stats.winRate * 100)}%`]].map(([label, value]) => `<div class="metric"><div class="label">${label}</div><div class="value">${esc(value)}</div></div>`).join('')}
-        <div class="card replay-diagnosis"><div><h2>${noTrades ? 'No closed trades' : 'What happened?'}</h2><p>${noTrades ? `Strategy remained flat across ${esc(String(result.bars_seen ?? 0))} bars. The strategy did not find an entry meeting all conditions.` : `The replay produced ${stats.closed.length} closed trade${stats.closed.length === 1 ? '' : 's'} across ${esc(String(result.bars_seen ?? 0))} market bars.`}</p><a href="/replay/investigate">Inspect decision path →</a></div><div class="replay-breakdown"><div><span>Entry candidates</span><strong>${candidates}</strong></div><div><span>Rejected signals</span><strong>${rejected}</strong></div><div><span>Risk blocks</span><strong>${suppressed}</strong></div><div><span>Closed trades</span><strong>${stats.closed.length}</strong></div></div></div>
+        ${[['Win rate', stats.winRate == null || noTrades ? '—' : `${stats.wins.length}/${stats.closed.length} (${Math.round(stats.winRate * 100)}%)`]].map(([label, value]) => `<div class="metric"><div class="label">${label}</div><div class="value">${esc(value)}</div></div>`).join('')}
+        <div class="card replay-diagnosis"><div><h2>${noTrades ? 'No closed trades' : 'What happened?'}</h2><p>${noTrades ? `Strategy remained flat across ${esc(String(result.bars_seen ?? 0))} bars. The strategy did not find an entry meeting all conditions.` : `The replay produced ${stats.closed.length} closed trade${stats.closed.length === 1 ? '' : 's'} across ${esc(String(result.bars_seen ?? 0))} market bars.`}</p></div><div class="replay-breakdown"><div><span>Entry candidates</span><strong>${candidates}</strong></div><div><span>Rejected signals</span><strong>${rejected}</strong></div><div><span>Risk blocks</span><strong>${suppressed}</strong></div><div><span>Closed trades</span><strong>${stats.closed.length}</strong></div></div></div>
       </div>
-      <div class="replay-details"><section><h2>Trade ledger</h2><div class="details-body"><table class="performance-table"><thead><tr><th>Entry time</th><th>Exit time</th><th>Side</th><th>Lots</th><th>Entry price</th><th>Exit price</th><th>P&amp;L</th><th>Exit reason</th></tr></thead><tbody>${tradeRows}</tbody></table></div></section><p class="replay-footnote">Runtime telemetry: Run ${esc(run.run_id || 'not reported')} · ${esc(String(run.status || '').toLowerCase())} · ${esc(String(result.bars_seen ?? 0))} bars processed.</p></div>
-      <div class="replay-causal-grid"><section class="replay-causal-stream"><h2>Decision stream</h2><p class="replay-intro">A compact causal story for each accepted signal, rejection, and exit.</p>${causalStream}</section></div>`;
+      <div class="replay-details"><section><h2>Trade ledger</h2><div class="details-body"><table class="performance-table"><thead><tr><th>Entry time</th><th>Exit time</th><th>Side</th><th>Quantity</th><th>Entry price</th><th>Exit price</th><th>P&amp;L</th><th>Exit reason</th></tr></thead><tbody>${tradeRows}</tbody></table></div></section><p class="replay-footnote">Replay run ${esc(run.run_id || 'not reported')} · ${esc(String(run.status || '').toLowerCase())} · ${esc(String(result.bars_seen ?? 0))} market bars processed.</p></div>
+      <div class="replay-causal-grid"><section class="replay-causal-stream"><h2>Decision stream</h2><p class="replay-intro">Why each candidate was allowed, rejected, risk-blocked, or exited.</p>${causalStream}</section></div>`;
     }
 
     function render(data) {
@@ -1575,7 +1604,7 @@
         body = performancePage(data.replays.runs || [], runtime, data.broker || {});
       } else if (page === 'investigate') {
         const runs = data.replays.runs || [];
-        body = `<div class="card"><div class="section-head"><div><h2>Decision replay</h2><p class="replay-intro">Trace the strategy’s decisions bar by bar when you need to understand the performance result.</p></div><a class="investigation-link" href="/replay">← Back to performance</a></div><div class="replay-note">Technical view: replay is isolated from live positions and never submits broker orders.</div></div><div class="card"><div class="section-head"><div><h2>Replay runs</h2><span class="label">Newest first</span></div></div>${replayFilterOptions(runs)}<div id="replay-results">${renderReplayPage(runs)}</div></div>`;
+        body = `<div class="card"><div class="section-head"><div><h2>Investigate replay</h2><p class="replay-intro">Trace the strategy’s decisions bar by bar when you need to understand the replay result.</p></div><a class="investigation-link" href="/replay">← Back to replay</a></div><div class="replay-note">Technical view: replay is isolated from live positions and never submits broker orders.</div></div><div class="card"><div class="section-head"><div><h2>Replay runs</h2><span class="label">Newest first</span></div></div>${replayFilterOptions(runs)}<div id="replay-results">${renderReplayPage(runs)}</div></div>`;
       } else if (page === 'dashboard') {
         body = `<div class="card">
           <div class="section-head">
