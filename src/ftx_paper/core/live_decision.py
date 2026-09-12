@@ -17,6 +17,7 @@ from ftx_paper.strategy.config import (
     AFTERNOON_ENTRY_MINUTES,
     MORNING_CELL_POLICIES,
     MORNING_ENTRY_MINUTES,
+    CellPolicyConfig,
     Session,
 )
 
@@ -57,6 +58,18 @@ def _decision_datetime(bundle: DecisionBundle) -> datetime:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
     return parsed
+
+
+def _configured_policies_for_cell(
+    cell_policies: dict[tuple[Session, str], CellPolicyConfig],
+    session: Session,
+    detected_cell: Cell,
+) -> list[tuple[Cell, CellPolicyConfig]]:
+    """Return policies whose canonical composite exactly matches the event."""
+    return [
+        (Cell.parse(name), policy) for (policy_session, name), policy in cell_policies.items()
+        if policy_session is session and Cell.parse(name) == detected_cell
+    ]
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,10 +208,12 @@ class IndependentLiveDecisionEngine:
                           "pcr": pcr}
         if location_snapshot.cell is None:
             return ()
-        configured = [
-            (Cell.parse(name), policy) for (session, name), policy in self._cell_policies.items()
-            if session is decision_session and Cell.parse(name).locations.issubset(set(location_snapshot.locations))
-        ]
+        # Policy cells are canonical simultaneous-location composites. Paper
+        # must require the detected composite to match exactly; subset
+        # matching would accept session_high+or_high when VWAP is also active.
+        configured = _configured_policies_for_cell(
+            self._cell_policies, decision_session, location_snapshot.cell,
+        )
         if not configured:
             return ()
         round_level = round(current / 50) * 50

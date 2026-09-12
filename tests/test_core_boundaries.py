@@ -8,6 +8,9 @@ from ftx_paper.broker import PaperBroker
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderIntent, OrderRole, OrderSide, parse_role, role_to_key
 from ftx_paper.core import CompletedBarAggregator, DecisionBundle, ExitAction, ExitStateMachine, IndependentLiveDecisionEngine, LiveFeatureCalculator, PaperEngine, PositionState, RiskSizer, SetupPolicy, adaptive_stop_bp, option_pcr_at_event, replay, vix_open_and_event
 from ftx_paper.core import LiveSession
+from ftx_paper.core.location_engine import Cell, Location
+from ftx_paper.core.live_decision import _configured_policies_for_cell
+from ftx_paper.strategy.config import Session
 from ftx_paper.strategy import ConfiguredLiveStrategy
 from ftx_paper.strategy.config import CAPITAL
 
@@ -546,6 +549,15 @@ def test_live_decision_engine_suppresses_unconfigured_cells() -> None:
     third = engine.evaluate(bundle("10:22", {}))
 
     assert third == ()
+
+
+def test_configured_policy_requires_exact_location_composite() -> None:
+    engine = IndependentLiveDecisionEngine(version="test", config_hash="hash", capital=CAPITAL)
+    exact = Cell(Location.SESSION_HIGH, Location.OR_HIGH)
+    with_vwap = Cell(Location.VWAP_ZONE, Location.SESSION_HIGH, Location.OR_HIGH)
+
+    assert _configured_policies_for_cell(engine._cell_policies, Session.MORNING, exact)
+    assert not _configured_policies_for_cell(engine._cell_policies, Session.MORNING, with_vwap)
 
 
 def test_live_decision_engine_persists_score_and_quality_bucket() -> None:
