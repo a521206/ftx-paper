@@ -5,13 +5,15 @@ from collections.abc import Sequence
 
 from ftx_paper.contracts import MarketBar, SyntheticPremiumPair
 from .adaptive_stop import adaptive_stop_bp
+from ftx_paper.config import NIFTY_LOT_SIZE
 
 
 @dataclass(frozen=True, slots=True)
 class RiskConfig:
     risk_fraction: float = 0.02
     max_drawdown_fraction: float = 0.15
-    lot_size: int = 1
+    lot_size: int = 1  # sizing quantity is expressed in whole lots
+    contract_lot_size: int = NIFTY_LOT_SIZE
     max_quantity: int = 10
     margin_per_lot: float = 175_000.0
     margin_utilization_cap: float = 0.80
@@ -41,6 +43,8 @@ class RiskSizer:
             raise ValueError("invalid quantity limits")
         if config.margin_per_lot < 0 or not 0 < config.margin_utilization_cap <= 1:
             raise ValueError("invalid margin configuration")
+        if config.contract_lot_size < 1:
+            raise ValueError("invalid contract lot size")
         self.config = config
 
     def size(
@@ -70,7 +74,7 @@ class RiskSizer:
         if distance <= 0:
             return RiskDecision(False, 0, "invalid_stop_distance", vehicle=normalized_vehicle)
         risk_budget = min(float(capital), float(equity)) * self.config.risk_fraction
-        raw_quantity = int(risk_budget // distance)
+        raw_quantity = int(risk_budget // (distance * self.config.contract_lot_size))
         score_multiplier = 1.0 if score is None else (1.5 if score >= 8 else 1.0 if score >= 5 else 0.5)
         vix_multiplier = self.config.low_vix_multiplier if vix is not None and vix < self.config.low_vix_threshold else 1.0
         multiplier = score_multiplier * vix_multiplier

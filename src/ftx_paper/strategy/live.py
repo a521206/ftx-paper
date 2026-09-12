@@ -50,6 +50,8 @@ class ConfiguredLiveStrategy:
         self._decision_positions: dict[str, tuple[PositionState, ExitStateMachine]] = {}
         self._pending_exits: dict[str, str] = {}
         self._capital = capital
+        self._equity = capital
+        self._peak_equity = capital
         self._decision_engine = IndependentLiveDecisionEngine(
             version=self.version, config_hash=self.metadata.config_hash,
             cooldown_minutes=config.cooldown_minutes, capital=capital,
@@ -57,6 +59,21 @@ class ConfiguredLiveStrategy:
             afternoon_entry_minutes=config.afternoon_entry_minutes,
             expiry_dates=expiry_dates,
         )
+
+    @property
+    def portfolio_state(self) -> dict[str, float]:
+        """Return the equity inputs used by the risk/sizing layer."""
+        return {
+            "initial_capital": float(self._capital),
+            "current_equity": float(self._equity),
+            "peak_equity": float(self._peak_equity),
+        }
+
+    def update_portfolio_state(self, *, equity: float, peak_equity: float | None = None) -> None:
+        """Update replay/live sizing inputs after a settled portfolio event."""
+        self._equity = float(equity)
+        self._peak_equity = max(float(peak_equity if peak_equity is not None else self._peak_equity), self._equity)
+        self._decision_engine.update_portfolio_state(equity=self._equity, peak_equity=self._peak_equity)
 
     @property
     def metadata(self) -> StrategyMetadata:
@@ -78,6 +95,8 @@ class ConfiguredLiveStrategy:
         self._exits = ExitStateMachine(trail_distance=10.0)
         self._decision_positions.clear()
         self._pending_exits.clear()
+        self._equity = self._capital
+        self._peak_equity = self._capital
         self._decision_engine = IndependentLiveDecisionEngine(
             version=self.version, config_hash=self.metadata.config_hash,
             cooldown_minutes=self.config.cooldown_minutes, capital=self._capital,
@@ -165,7 +184,7 @@ class ConfiguredLiveStrategy:
             float(bar.close), float(bar.close), None,
             abs(bar.close - features.vwap) <= self._policy.proximity,
         )
-        sized = self._risk.size(capital=self._capital, equity=self._capital, peak_equity=self._capital, entry=bar.close, stop=stop, score=score)
+        sized = self._risk.size(capital=self._capital, equity=self._equity, peak_equity=self._peak_equity, entry=bar.close, stop=stop, score=score)
         if not sized.approved:
             return ()
         self._position = PositionState(bar.instrument, bar.close, stop, sized.quantity, decision.side,

@@ -258,7 +258,7 @@ def test_replay_completes_entry_fill_exit_and_realized_trade() -> None:
     assert [order.client_order_id for order in result.orders] == ["entry-1", "exit-entry-1"]
     assert len(result.trades) == 1
     trade = result.trades[0]
-    assert (trade.entry_price, trade.exit_price, trade.exit_reason, trade.realized_pnl, trade.status) == (100, 108.0, "target", 16.0, "closed")
+    assert (trade.entry_price, trade.exit_price, trade.exit_reason, trade.realized_pnl, trade.status) == (100, 108.0, "target", 1040.0, "closed")
     assert [event["event_type"] for event in result.events if "event_type" in event] == ["FILL", "EXITDECISION", "FILL"]
 
 

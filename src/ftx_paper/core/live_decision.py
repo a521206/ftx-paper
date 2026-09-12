@@ -77,6 +77,8 @@ class IndependentLiveDecisionEngine:
         self.version, self.config_hash = version, config_hash
         self.cooldown_minutes = cooldown_minutes
         self.capital = capital
+        self._equity = capital
+        self._peak_equity = capital
         self.prior_day_high, self.prior_day_low = prior_day_high, prior_day_low
         self.morning_entry_minutes = morning_entry_minutes
         self.afternoon_entry_minutes = afternoon_entry_minutes
@@ -227,7 +229,7 @@ class IndependentLiveDecisionEngine:
             self._last_decision = decision_dt
             side = cell_policy.direction
             stop = stop_price(current, side.value, stop_basis)
-            sizing = RiskSizer().size(capital=self.capital, equity=self.capital, peak_equity=self.capital, entry=current, stop=stop, score=score, vix=float(vix_bar.close), is_expiry_day=bundle.trading_date in self.expiry_dates)
+            sizing = RiskSizer().size(capital=self.capital, equity=self._equity, peak_equity=self._peak_equity, entry=current, stop=stop, score=score, vix=float(vix_bar.close), is_expiry_day=bundle.trading_date in self.expiry_dates)
             candidate.update(requested_quantity=sizing.quantity, score_multiplier=sizing.score_multiplier, risk_amount=sizing.risk_amount)
             events.append(LiveDecision("ACCEPTEDDECISION", {**candidate, "outcome": "accepted", "reason": "eligible"}))
             if not sizing.approved:
@@ -255,6 +257,11 @@ class IndependentLiveDecisionEngine:
             cell=cell, reason=reason, entry_bar=entry_bar, exit_bar=exit_bar,
             date=date,
         )
+
+    def update_portfolio_state(self, *, equity: float, peak_equity: float | None = None) -> None:
+        """Update the capital inputs used for subsequent replay decisions."""
+        self._equity = float(equity)
+        self._peak_equity = max(float(peak_equity if peak_equity is not None else self._peak_equity), self._equity)
 
     def risk_snapshot(self) -> dict[str, object]:
         """Return JSON-safe gate state for persistence across segments."""

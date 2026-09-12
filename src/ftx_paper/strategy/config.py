@@ -9,6 +9,7 @@ from hashlib import sha256
 from typing import TYPE_CHECKING
 
 from ftx_paper.contracts import OrderSide
+from ftx_paper.config import INITIAL_CAPITAL, NIFTY_LOT_SIZE
 
 if TYPE_CHECKING:
     from ftx_paper.core.location_engine import TransitionPattern
@@ -19,7 +20,8 @@ STRATEGY_VERSION = "0.2.0-live-composition"
 MORNING_ENTRY_MINUTES = (60, 120)
 AFTERNOON_ENTRY_MINUTES = (255, 300)
 COOLDOWN_MINUTES = 30
-CAPITAL = 2_500_000.0
+CAPITAL = INITIAL_CAPITAL
+LOT_SIZE = NIFTY_LOT_SIZE
 
 
 class Session(StrEnum):
@@ -99,6 +101,7 @@ DEFAULT_CONFIG = StrategyConfig()
 __all__ = [
     "AFTERNOON_ENTRY_MINUTES",
     "CAPITAL",
+    "LOT_SIZE",
     "COOLDOWN_MINUTES",
     "MORNING_ENTRY_MINUTES",
     "STRATEGY_NAME",

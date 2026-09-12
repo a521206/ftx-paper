@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from typing import Literal
 from ftx_paper.contracts import MarketBar, OrderIntent, OrderRole, OrderSide
 from .engine import PaperEngine
+from ftx_paper.config import NIFTY_LOT_SIZE
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,7 +157,7 @@ def _settle_trade(
         exit_timestamp=bar.timestamp.isoformat(),
         exit_price=exit_price,
         exit_reason=exit_reason,
-        realized_pnl=(exit_price - trade.entry_price) * trade.quantity * signed,
+        realized_pnl=(exit_price - trade.entry_price) * NIFTY_LOT_SIZE * trade.quantity * signed,
         status="closed",
     )
     trades.append(settled)

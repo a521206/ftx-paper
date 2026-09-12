@@ -11,6 +11,11 @@ def _path(name: str, default: Path) -> Path:
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
+# Local paper-runtime contract settings. Keep these independent from the
+# research package so ftx-paper remains deployable as a standalone application.
+NIFTY_LOT_SIZE = 65
+INITIAL_CAPITAL = 2_500_000.0
+
 
 @dataclass(frozen=True, slots=True)
 class PaperConfig:

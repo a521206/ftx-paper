@@ -11,6 +11,7 @@ from ftx_paper.core import AggregatorConfig, CompletedBarAggregator, InstrumentK
 from ftx_paper.runtime.store import RuntimeStore
 from ftx_paper.strategy import ConfiguredLiveStrategy
 from ftx_paper.strategy.config import CAPITAL
+from ftx_paper.config import NIFTY_LOT_SIZE
 
 
 class ReplayWorker:
@@ -87,6 +88,10 @@ class ReplayWorker:
         all_events: list[dict[str, Any]] = []
         diagnostic_trades: list[dict[str, Any]] = []
         bars_seen = 0
+        initial_capital = float(CAPITAL)
+        current_equity = initial_capital
+        peak_equity = initial_capital
+        max_drawdown = 0.0
         # This engine/strategy is private to this replay run and never shared
         # with RuntimeSession, its broker, ledger, or risk state.
         for date in dates:
@@ -95,6 +100,8 @@ class ReplayWorker:
             # A date is an independent simulation session. No positions,
             # cooldowns, or risk state may leak into the next date.
             engine = PaperEngine(ConfiguredLiveStrategy(capital=CAPITAL))
+            strategy = engine.strategy
+            strategy.update_portfolio_state(equity=current_equity, peak_equity=peak_equity)
             bars = self._bars(date)
             aggregator = self._aggregator(bars)
             open_trades: list[dict[str, Any]] = []
@@ -111,8 +118,17 @@ class ReplayWorker:
                                        "timestamp": futures_bar.timestamp.isoformat(), "reason": action.reason,
                                        "price": action.price, "source": "replay", "session_date": date})
                     engine.settle_exit(action.intent.client_order_id, filled=True)
-                    self._settle_trade(open_trades, diagnostic_trades, action.intent, futures_bar,
-                                       action.price, action.reason)
+                    realized = self._settle_trade(open_trades, diagnostic_trades, action.intent, futures_bar,
+                                                  action.price, action.reason)
+                    if realized is not None:
+                        if realized.get("cell"):
+                            engine.record_exit(cell=str(realized["cell"]), reason=action.reason,
+                                               entry_bar=int(realized["entry_bar"]), exit_bar=engine.bars_seen,
+                                               date=date)
+                        current_equity += realized["realized_pnl"]
+                        peak_equity = max(peak_equity, current_equity)
+                        max_drawdown = min(max_drawdown, current_equity - peak_equity)
+                        strategy.update_portfolio_state(equity=current_equity, peak_equity=peak_equity)
                 result = engine.on_bundle(bundle)
                 bars_seen += 1
                 all_events.extend({**event, "source": "replay", "session_date": date} for event in result.events)
@@ -128,12 +144,24 @@ class ReplayWorker:
                                             "instrument": order.instrument.symbol,
                                             "side": order.side.value, "quantity": order.quantity,
                                             "entry_timestamp": futures_bar.timestamp.isoformat(),
-                                            "entry_price": fill_price})
+                                            "entry_price": fill_price, "cell": order.cell,
+                                            "entry_bar": order.entry_bar or engine.bars_seen})
                     elif order.role is OrderRole.EXIT:
-                        self._settle_trade(open_trades, diagnostic_trades, order, futures_bar,
-                                           futures_bar.close, order.reason)
+                        realized = self._settle_trade(open_trades, diagnostic_trades, order, futures_bar,
+                                                      futures_bar.close, order.reason)
+                        if realized is not None:
+                            if realized.get("cell"):
+                                engine.record_exit(cell=str(realized["cell"]), reason=order.reason,
+                                                   entry_bar=int(realized["entry_bar"]), exit_bar=engine.bars_seen,
+                                                   date=date)
+                            current_equity += realized["realized_pnl"]
+                            peak_equity = max(peak_equity, current_equity)
+                            max_drawdown = min(max_drawdown, current_equity - peak_equity)
+                            strategy.update_portfolio_state(equity=current_equity, peak_equity=peak_equity)
             # Preserve open positions as mark-to-market/open replay results.
             diagnostic_trades.extend({**trade, "status": "open"} for trade in open_trades)
+        scores = [int(event["score"]) for event in all_events
+                  if isinstance(event.get("score"), (int, float))]
         return {
             "source": "replay",
             "bars_seen": bars_seen,
@@ -142,23 +170,40 @@ class ReplayWorker:
             # are never written to runtime_events, the broker ledger, or the
             # live trades/capital projections.
             "diagnostic_trades": diagnostic_trades,
+            "capital": {
+                "initial_capital": initial_capital,
+                "current_equity": current_equity,
+                "realized_pnl": current_equity - initial_capital,
+                "peak_equity": peak_equity,
+                "max_drawdown": max_drawdown,
+                "lot_size": NIFTY_LOT_SIZE,
+            },
+            "scoring": {
+                "decisions_scored": len(scores),
+                "score_min": min(scores) if scores else None,
+                "score_max": max(scores) if scores else None,
+                "score_average": sum(scores) / len(scores) if scores else None,
+            },
         }
 
     @staticmethod
     def _settle_trade(open_trades: list[dict[str, Any]], trades: list[dict[str, Any]],
-                      order: Any, bar: MarketBar, exit_price: float, reason: str) -> None:
+                      order: Any, bar: MarketBar, exit_price: float, reason: str) -> dict[str, Any] | None:
         opposite = "SELL" if order.side.value == "BUY" else "BUY"
         index = next((i for i, trade in enumerate(open_trades)
                       if trade["instrument"] == order.instrument.symbol and trade["side"] == opposite), None)
         if index is None:
-            return
+            return None
         trade = open_trades.pop(index)
         signed = 1.0 if trade["side"] == "BUY" else -1.0
+        realized_pnl = (exit_price - trade["entry_price"]) * NIFTY_LOT_SIZE * trade["quantity"] * signed
         trades.append({**trade, "exit_order_id": order.client_order_id,
                        "exit_timestamp": bar.timestamp.isoformat(), "exit_price": exit_price,
                        "exit_reason": reason,
-                       "realized_pnl": (exit_price - trade["entry_price"]) * trade["quantity"] * signed,
+                       "realized_pnl": realized_pnl,
                        "status": "closed"})
+        return {"realized_pnl": realized_pnl, "cell": trade.get("cell"),
+                "entry_bar": trade.get("entry_bar", 0), "exit_bar": len(trades)}
 
     def _dates(self) -> list[str]:
         return self.store.read_market_dates()
