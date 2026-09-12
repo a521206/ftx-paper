@@ -67,9 +67,24 @@ class RuntimeStore:
 
     def __init__(self, runtime_dir: str | Path) -> None:
         self.root = Path(runtime_dir)
-        self.root.mkdir(parents=True, exist_ok=True)
         self.database = self.root / "runtime.sqlite3"
         self._event_counts_cache: dict[str, Any] | None = None
+        self.initialize()
+
+    @classmethod
+    def open_read_only(cls, runtime_dir: str | Path) -> RuntimeStore:
+        """Open an existing runtime without creating directories or schema."""
+        instance = cls.__new__(cls)
+        instance.root = Path(runtime_dir)
+        instance.database = instance.root / "runtime.sqlite3"
+        instance._event_counts_cache = None
+        if not instance.database.is_file():
+            raise FileNotFoundError(f"runtime database not found: {instance.database}")
+        return instance
+
+    def initialize(self) -> None:
+        """Create the runtime directory and schema for a writable store."""
+        self.root.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.database) as connection:
             connection.executescript(
                 """
@@ -397,6 +412,25 @@ class RuntimeStore:
                 (limit,),
             ).fetchall()
         return self._events_from_rows(rows)
+
+    def read_market_bar_stats(self) -> dict[str, Any]:
+        """Read market-bar coverage for diagnostics without mutating state."""
+        with sqlite3.connect(self.database) as connection:
+            row = connection.execute(
+                "SELECT COUNT(*), COUNT(DISTINCT substr(minute, 1, 10)), "
+                "MIN(minute), MAX(minute) FROM market_bars",
+            ).fetchone()
+            instrument_rows = connection.execute(
+                "SELECT COALESCE(instrument_type, 'UNKNOWN'), COUNT(*) "
+                "FROM market_bars GROUP BY instrument_type ORDER BY instrument_type",
+            ).fetchall()
+        return {
+            "bars": int(row[0]),
+            "days": int(row[1]),
+            "from": str(row[2])[:10] if row[2] else None,
+            "to": str(row[3])[:10] if row[3] else None,
+            "by_instrument": {str(kind): int(count) for kind, count in instrument_rows},
+        }
 
     def read_decision_events(self, session_date: str | None = None, limit: int = 1000) -> list[dict[str, Any]]:
         """Read decision events on their own, independent of the general event stream.

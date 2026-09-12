@@ -4,6 +4,25 @@ Status: P0 specification. The current `ftx-paper` implementation does not
 yet satisfy this contract; Tracks P1-P10 are the implementation work required
 to do so.
 
+## P9 phased verification
+
+P9 verifies this contract in two phases:
+
+1. **Phase 1 — canonical-run trade comparison.** Run the canonical pipeline
+   for the requested date range and use its audit bundle as the baseline for
+   comparing FTX Paper accepted decisions and fills. This is the current
+   `scripts/ftx/compare_pipeline_to_paper.py` comparator. It is a practical
+   entry/trade diagnostic and may report exits or P&L as `unavailable` when
+   Paper does not persist a reliable linked value.
+2. **Phase 2 — detailed decision replay comparison.** Run both independent
+   implementations against the same deterministic input replay and compare
+   the complete ordered decision, execution, exit, and ledger streams.
+
+Phase 1 is not a claim that this full contract has passed. The complete
+decision-parity and production-cutover gate remains Phase 2. The detailed
+scope, reports, and completion criteria are defined in
+`P9_DECISION_REPLAY_COMPARATOR.md`.
+
 ## Scope
 
 Parity means that `ftx-paper` and the canonical FTX implementation produce the
