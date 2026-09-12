@@ -69,6 +69,7 @@ class RuntimeStore:
         self.root = Path(runtime_dir)
         self.database = self.root / "runtime.sqlite3"
         self._event_counts_cache: dict[str, Any] | None = None
+        self._read_only = False
         self.initialize()
 
     @classmethod
@@ -78,9 +79,16 @@ class RuntimeStore:
         instance.root = Path(runtime_dir)
         instance.database = instance.root / "runtime.sqlite3"
         instance._event_counts_cache = None
+        instance._read_only = True
         if not instance.database.is_file():
             raise FileNotFoundError(f"runtime database not found: {instance.database}")
         return instance
+
+    def _connect(self) -> sqlite3.Connection:
+        if self._read_only:
+            uri = f"file:{self.database.resolve().as_posix()}?mode=ro"
+            return sqlite3.connect(uri, uri=True)
+        return sqlite3.connect(self.database)
 
     def initialize(self) -> None:
         """Create the runtime directory and schema for a writable store."""
@@ -406,7 +414,7 @@ class RuntimeStore:
     def read_events(self, limit: int = 100) -> list[dict[str, Any]]:
         if limit < 1:
             return []
-        with sqlite3.connect(self.database) as connection:
+        with self._connect() as connection:
             rows = connection.execute(
                 "SELECT event_type, payload, created_at FROM runtime_events ORDER BY id DESC LIMIT ?",
                 (limit,),
@@ -415,7 +423,7 @@ class RuntimeStore:
 
     def read_market_bar_stats(self) -> dict[str, Any]:
         """Read market-bar coverage for diagnostics without mutating state."""
-        with sqlite3.connect(self.database) as connection:
+        with self._connect() as connection:
             row = connection.execute(
                 "SELECT COUNT(*), COUNT(DISTINCT substr(minute, 1, 10)), "
                 "MIN(minute), MAX(minute) FROM market_bars",
