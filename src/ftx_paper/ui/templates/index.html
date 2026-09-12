@@ -454,6 +454,130 @@
       overflow: auto;
     }
 
+    .replay-intro {
+      color: var(--md-on-surface-variant);
+      line-height: 22px;
+      margin: -4px 0 16px;
+      max-width: 760px;
+    }
+
+    .replay-note {
+      background: var(--md-primary-container);
+      color: var(--md-on-primary-container);
+      border-radius: 10px;
+      padding: 11px 13px;
+      margin-top: 14px;
+      font-size: 13px;
+      line-height: 19px;
+    }
+
+    .replay-form {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: end;
+      gap: 10px;
+    }
+
+    .replay-form label {
+      display: grid;
+      gap: 5px;
+      color: var(--md-on-surface-variant);
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .replay-form input {
+      min-height: 40px;
+      min-width: 180px;
+      border: 1px solid var(--md-outline-variant);
+      border-radius: 8px;
+      background: var(--md-surface);
+      color: var(--md-on-surface);
+      padding: 8px 10px;
+      font: inherit;
+    }
+
+    .replay-run {
+      border: 1px solid var(--md-outline-variant);
+      border-radius: 10px;
+      padding: 14px;
+      margin-top: 12px;
+      background: var(--md-surface);
+    }
+
+    .replay-run:first-child {
+      margin-top: 0;
+    }
+
+    .replay-run-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: start;
+      gap: 12px;
+    }
+
+    .replay-run-title {
+      font-weight: 700;
+      line-height: 20px;
+    }
+
+    .replay-run-meta {
+      color: var(--md-on-surface-variant);
+      font-size: 12px;
+      margin-top: 3px;
+    }
+
+    .replay-metrics {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(90px, 1fr));
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .replay-metric {
+      background: var(--md-surface-container-low);
+      border-radius: 8px;
+      padding: 9px;
+    }
+
+    .replay-metric .value {
+      font-size: 18px;
+      line-height: 24px;
+      margin-top: 2px;
+    }
+
+    .replay-event-list {
+      margin-top: 12px;
+      border-top: 1px solid var(--md-outline-variant);
+    }
+
+    .replay-event {
+      display: grid;
+      grid-template-columns: 150px 130px 1fr;
+      gap: 12px;
+      padding: 9px 0;
+      border-bottom: 1px solid var(--md-outline-variant);
+      font-size: 13px;
+    }
+
+    .replay-event small {
+      display: block;
+      color: var(--md-on-surface-variant);
+      margin-top: 2px;
+    }
+
+    .replay-advanced {
+      margin-top: 12px;
+      color: var(--md-primary);
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .replay-advanced .payload {
+      color: var(--md-on-surface-variant);
+      font-weight: 400;
+    }
+
     summary {
       cursor: pointer;
       list-style: none;
@@ -500,6 +624,14 @@
         grid-template-columns: 1fr 1fr;
       }
 
+      .replay-metrics {
+        grid-template-columns: repeat(3, 1fr);
+      }
+
+      .replay-event {
+        grid-template-columns: 1fr 1fr;
+      }
+
       header {
         align-items: flex-start;
         gap: 12px;
@@ -517,6 +649,10 @@
     @media (max-width: 480px) {
       .activity-toolbar {
         grid-template-columns: 1fr;
+      }
+
+      .replay-metrics {
+        grid-template-columns: repeat(2, 1fr);
       }
     }
   </style>
@@ -870,6 +1006,100 @@
       return rows.filter((raw) => decisionSession(raw) === selectedDecisionSession);
     }
 
+    function replayEvents(run) {
+      return Array.isArray(run?.result?.events) ? run.result.events.filter((event) => event && typeof event === 'object') : [];
+    }
+
+    function replayEventCount(events, eventType) {
+      return events.filter((event) => String(event.event_type || '').toUpperCase() === eventType).length;
+    }
+
+    function replayStatusLabel(status) {
+      return ({ queued: 'Queued', running: 'Running', completed: 'Completed', failed: 'Failed', cancelled: 'Cancelled', rejected: 'Rejected' }[status] || status || 'Unknown');
+    }
+
+    function replayStatusTone(status) {
+      if (status === 'completed') return 'good';
+      if (status === 'failed' || status === 'rejected') return 'bad';
+      return 'warn';
+    }
+
+    function replayEventTime(event) {
+      return event.decision_at || event.timestamp || event.created_at || event.session_date || '';
+    }
+
+    function replayEventLabel(event) {
+      return String(event.event_type || 'Event').replace(/_/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase().replace(/(^|\s)\S/g, (x) => x.toUpperCase());
+    }
+
+    function replayEventDetail(event) {
+      const direction = event.direction && event.direction !== 'NONE' ? ` · ${event.direction}` : '';
+      const price = event.price ?? event.entry_price;
+      const priceLabel = price == null ? '' : ` · ₹${Number(price).toLocaleString('en-IN')}`;
+      const reason = event.reason ? `Reason: ${event.reason}` : event.outcome || '';
+      return `${esc(event.setup_type || event.cell || 'Replay event')}${esc(direction)}${esc(priceLabel)}${reason ? ` <small>${esc(reason)}</small>` : ''}`;
+    }
+
+    function replayReasonSummary(events) {
+      const reasons = {};
+      events.filter((event) => String(event.event_type || '').toUpperCase() === 'REJECTEDDECISION').forEach((event) => {
+        const reason = String(event.reason || 'unspecified').replace(/_/g, ' ');
+        reasons[reason] = (reasons[reason] || 0) + 1;
+      });
+      return Object.entries(reasons).sort((a, b) => b[1] - a[1]).slice(0, 5);
+    }
+
+    function replayRunView(run) {
+      const events = replayEvents(run);
+      const result = run.result || {};
+      const status = String(run.status || '').toLowerCase();
+      const accepted = replayEventCount(events, 'ACCEPTEDDECISION');
+      const rejected = replayEventCount(events, 'REJECTEDDECISION');
+      const exits = replayEventCount(events, 'EXITDECISION');
+      const suppressed = replayEventCount(events, 'ORDER_SUPPRESSED');
+      const notable = events.filter((event) => ['ACCEPTEDDECISION', 'EXITDECISION'].includes(String(event.event_type || '').toUpperCase()));
+      const reasons = replayReasonSummary(events);
+      const trades = Array.isArray(result.trades) ? result.trades.length : 0;
+      const requestDate = run.request?.session_date || 'All available dates';
+      const eventSummary = notable.length
+        ? `<div class="replay-event-list">${notable.map((event) => `<div class="replay-event">
+              <div><strong>${esc(replayEventLabel(event))}</strong><small>${esc(date(replayEventTime(event)))}</small></div>
+              <div>${badge(event.event_type === 'ACCEPTEDDECISION' ? 'Decision accepted' : 'Exit recorded', event.event_type === 'ACCEPTEDDECISION' ? 'good' : 'warn')}</div>
+              <div>${replayEventDetail(event)}</div>
+            </div>`).join('')}</div>`
+        : `<div class="empty">No accepted decisions or exits recorded yet.</div>`;
+      const reasonSummary = reasons.length
+        ? `<div class="review-summary"><span class="label">Top rejection reasons</span>${reasons.map(([reason, count]) => badge(`${esc(reason)} · ${count}`)).join('')}</div>`
+        : '';
+
+      return `<article class="replay-run">
+        <div class="replay-run-head">
+          <div><div class="replay-run-title">${esc(requestDate)}</div><div class="replay-run-meta">Queued ${esc(date(run.created_at))} · Run ID ${esc(run.run_id || 'not reported')}</div></div>
+          ${badge(replayStatusLabel(status), replayStatusTone(status))}
+        </div>
+        ${run.error ? `<div class="flash">${esc(run.error)}</div>` : ''}
+        <div class="replay-metrics">
+          ${[
+            ['Bars', result.bars_seen ?? '—'],
+            ['Events', events.length],
+            ['Accepted', accepted],
+            ['Rejected', rejected],
+            ['Exits', exits],
+            ['Trades', trades],
+          ].map(([label, value]) => `<div class="replay-metric"><div class="label">${label}</div><div class="value">${esc(value)}</div></div>`).join('')}
+        </div>
+        ${suppressed ? `<div class="replay-note">${suppressed} order${suppressed === 1 ? '' : 's'} were suppressed. Replay is audit-only and does not create live positions or trades.</div>` : ''}
+        ${reasonSummary}
+        ${eventSummary}
+        <details class="replay-advanced"><summary>Show full replay data</summary><div class="payload">${esc(JSON.stringify(run, null, 2))}</div></details>
+      </article>`;
+    }
+
+    function renderReplayPage(runs) {
+      if (!runs?.length) return '<div class="empty">No replay runs yet. Choose a session date and queue the first replay.</div>';
+      return runs.map(replayRunView).join('');
+    }
+
     function render(data) {
       const runtime = data.runtime || {};
       const capital = data.capital || {};
@@ -907,7 +1137,16 @@
       let body = '';
 
       if (page === 'replay') {
-        body = `<div class="card"><h2>Replay runs</h2><p>Replay runs in an isolated in-process worker and never submits orders or mutates live positions.</p><form id="replay-form"><label>Session date (optional) <input id="replay-date" placeholder="YYYY-MM-DD"></label><button>Queue replay</button></form></div><div class="card"><h2>Run history</h2>${table(data.replays.runs || [])}</div>`;
+        body = `<div class="card">
+          <h2>Replay runs</h2>
+          <p class="replay-intro">Replay historical market data through the paper strategy to review what it would have decided. Results are isolated from the live runtime.</p>
+          <form id="replay-form" class="replay-form">
+            <label>Session date (optional)<input id="replay-date" type="date" aria-label="Session date (optional)"></label>
+            <button>Queue replay</button>
+          </form>
+          <div class="replay-note">Replay never submits broker orders and never changes live positions, trades, or capital. Use the event counts below to review decisions and exits.</div>
+        </div>
+        <div class="card"><div class="section-head"><h2>Run history</h2><span class="label">Newest first</span></div>${renderReplayPage(data.replays.runs || [])}</div>`;
       } else if (page === 'dashboard') {
         body = `<div class="card">
           <div class="section-head">
