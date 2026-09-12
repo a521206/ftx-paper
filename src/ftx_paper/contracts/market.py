@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
 import math
+from typing import Mapping
 from zoneinfo import ZoneInfo
 
 
@@ -107,3 +108,43 @@ class SyntheticPremiumPair:
     def __post_init__(self) -> None:
         if not all(math.isfinite(value) and value > 0 for value in (self.ce, self.pe)):
             raise ValueError("synthetic CE and PE premiums must be finite and positive")
+
+
+@dataclass(frozen=True, slots=True)
+class SyntheticFutureQuote:
+    """A same-strike CE/PE pair and its synthetic-future mark."""
+
+    strike: float
+    ce: MarketBar
+    pe: MarketBar
+
+    @property
+    def price(self) -> float:
+        # Long synthetic future = long CE + short PE + strike.
+        return self.strike + self.ce.close - self.pe.close
+
+
+def synthetic_future_quote(
+    futures: MarketBar,
+    option_bars: Mapping[Role, MarketBar],
+    *,
+    symbols: tuple[str, str] | None = None,
+) -> SyntheticFutureQuote | None:
+    """Select the closest same-strike CE/PE pair available for a futures bar."""
+    candidates = [bar for bar in option_bars.values()
+                  if bar.instrument.instrument_type.upper() in {"CE", "PE"}
+                  and bar.instrument.strike is not None
+                  and bar.close > 0]
+    if symbols is not None:
+        candidates = [bar for bar in candidates if bar.instrument.symbol in symbols]
+    grouped: dict[tuple[str | None, float], dict[str, MarketBar]] = {}
+    for bar in candidates:
+        key = (bar.instrument.expiry, float(bar.instrument.strike))
+        grouped.setdefault(key, {})[bar.instrument.instrument_type.upper()] = bar
+    pairs = [(expiry_strike, legs) for expiry_strike, legs in grouped.items()
+             if "CE" in legs and "PE" in legs]
+    if not pairs:
+        return None
+    _, legs = min(pairs, key=lambda item: abs(item[0][1] - futures.close))
+    strike = float(legs["CE"].instrument.strike)
+    return SyntheticFutureQuote(strike, legs["CE"], legs["PE"])

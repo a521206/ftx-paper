@@ -6,7 +6,7 @@ from threading import Event, Lock, Thread
 from typing import Any
 from uuid import uuid4
 
-from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderRole
+from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderRole, SyntheticFutureQuote, synthetic_future_quote
 from ftx_paper.core import AggregatorConfig, CompletedBarAggregator, InstrumentKey, PaperEngine
 from ftx_paper.runtime.store import RuntimeStore
 from ftx_paper.strategy import ConfiguredLiveStrategy
@@ -112,14 +112,25 @@ class ReplayWorker:
                 if bundle is None:
                     continue
                 futures_bar = bundle.bars[MarketRole.FUTURES]
+                option_bars = (bundle.supporting_inputs or {}).get("bars", {})
                 exit_actions = engine.on_closed_bar(futures_bar)
                 for action in exit_actions:
+                    open_trade = next((trade for trade in open_trades
+                                       if trade["instrument"] == action.intent.instrument.symbol), None)
+                    exit_quote = synthetic_future_quote(
+                        futures_bar, option_bars,
+                        symbols=(open_trade["ce_symbol"], open_trade["pe_symbol"]),
+                    ) if open_trade else None
+                    if exit_quote is None:
+                        continue
                     all_events.append({"event_type": "EXITDECISION", "decision_id": action.intent.client_order_id,
                                        "timestamp": futures_bar.timestamp.isoformat(), "reason": action.reason,
-                                       "price": action.price, "source": "replay", "session_date": date})
+                                       "price": exit_quote.price, "synthetic_future_price": exit_quote.price,
+                                       "ce_strike": exit_quote.strike, "ce_exit_price": exit_quote.ce.close,
+                                       "pe_exit_price": exit_quote.pe.close, "source": "replay", "session_date": date})
                     engine.settle_exit(action.intent.client_order_id, filled=True)
                     realized = self._settle_trade(open_trades, diagnostic_trades, action.intent, futures_bar,
-                                                  action.price, action.reason)
+                                                  exit_quote, action.reason)
                     if realized is not None:
                         if realized.get("cell"):
                             engine.record_exit(cell=str(realized["cell"]), reason=action.reason,
@@ -131,24 +142,48 @@ class ReplayWorker:
                         strategy.update_portfolio_state(equity=current_equity, peak_equity=peak_equity)
                 result = engine.on_bundle(bundle)
                 bars_seen += 1
-                all_events.extend({**event, "source": "replay", "session_date": date} for event in result.events)
+                result_events = [{**event, "source": "replay", "session_date": date} for event in result.events]
+                all_events.extend(result_events)
                 for order in result.orders:
                     all_events.append({"event_type": "ORDER_SUPPRESSED", "decision_id": order.client_order_id,
                                        "timestamp": futures_bar.timestamp.isoformat(), "source": "replay",
                                        "session_date": date, "execution_allowed": False})
                     if order.role is OrderRole.ENTRY:
-                        fill_price = futures_bar.close
+                        entry_quote = synthetic_future_quote(futures_bar, option_bars)
+                        if entry_quote is None:
+                            all_events.append({"event_type": "EXECUTION_ERROR", "decision_id": order.client_order_id,
+                                               "reason": "missing_synthetic_future_quote", "source": "replay", "session_date": date})
+                            continue
+                        fill_price = entry_quote.price
+                        for event in reversed(all_events):
+                            if event.get("decision_id") == order.client_order_id:
+                                event.update({"vehicle": "synthetic", "ce_symbol": entry_quote.ce.instrument.symbol,
+                                              "pe_symbol": entry_quote.pe.instrument.symbol, "ce_strike": entry_quote.strike,
+                                              "ce_entry_price": entry_quote.ce.close, "pe_entry_price": entry_quote.pe.close,
+                                              "synthetic_entry_price": entry_quote.price, "entry_price": entry_quote.price})
+                                break
                         engine.register_entry(order, fill_price=fill_price,
                                               entry_fill_time=futures_bar.timestamp)
                         open_trades.append({"entry_order_id": order.client_order_id,
                                             "instrument": order.instrument.symbol,
                                             "side": order.side.value, "quantity": order.quantity,
                                             "entry_timestamp": futures_bar.timestamp.isoformat(),
-                                            "entry_price": fill_price, "cell": order.cell,
+                                            "entry_price": fill_price, "vehicle": "synthetic",
+                                            "ce_symbol": entry_quote.ce.instrument.symbol, "pe_symbol": entry_quote.pe.instrument.symbol,
+                                            "ce_strike": entry_quote.strike, "ce_entry_price": entry_quote.ce.close,
+                                            "pe_entry_price": entry_quote.pe.close, "cell": order.cell,
                                             "entry_bar": order.entry_bar or engine.bars_seen})
                     elif order.role is OrderRole.EXIT:
+                        open_trade = next((trade for trade in open_trades
+                                           if trade["instrument"] == order.instrument.symbol), None)
+                        exit_quote = synthetic_future_quote(
+                            futures_bar, option_bars,
+                            symbols=(open_trade["ce_symbol"], open_trade["pe_symbol"]),
+                        ) if open_trade else None
+                        if exit_quote is None:
+                            continue
                         realized = self._settle_trade(open_trades, diagnostic_trades, order, futures_bar,
-                                                      futures_bar.close, order.reason)
+                                                      exit_quote, order.reason)
                         if realized is not None:
                             if realized.get("cell"):
                                 engine.record_exit(cell=str(realized["cell"]), reason=order.reason,
@@ -188,7 +223,7 @@ class ReplayWorker:
 
     @staticmethod
     def _settle_trade(open_trades: list[dict[str, Any]], trades: list[dict[str, Any]],
-                      order: Any, bar: MarketBar, exit_price: float, reason: str) -> dict[str, Any] | None:
+                      order: Any, bar: MarketBar, quote: SyntheticFutureQuote, reason: str) -> dict[str, Any] | None:
         opposite = "SELL" if order.side.value == "BUY" else "BUY"
         index = next((i for i, trade in enumerate(open_trades)
                       if trade["instrument"] == order.instrument.symbol and trade["side"] == opposite), None)
@@ -196,9 +231,12 @@ class ReplayWorker:
             return None
         trade = open_trades.pop(index)
         signed = 1.0 if trade["side"] == "BUY" else -1.0
+        exit_price = quote.price
         realized_pnl = (exit_price - trade["entry_price"]) * NIFTY_LOT_SIZE * trade["quantity"] * signed
         trades.append({**trade, "exit_order_id": order.client_order_id,
                        "exit_timestamp": bar.timestamp.isoformat(), "exit_price": exit_price,
+                       "synthetic_exit_price": exit_price, "ce_exit_price": quote.ce.close,
+                       "pe_exit_price": quote.pe.close,
                        "exit_reason": reason,
                        "realized_pnl": realized_pnl,
                        "status": "closed"})

@@ -10,7 +10,8 @@ from zoneinfo import ZoneInfo
 
 from ftx_paper.broker import Broker, PaperBroker
 from ftx_paper.contracts import (
-    Instrument, MarketBar, MarketRole, OptionRole, OptionType, OrderSide, normalize_exchange_timestamp, parse_role,
+    Instrument, MarketBar, MarketRole, OptionRole, OptionType, OrderRole, OrderSide, SyntheticFutureQuote, normalize_exchange_timestamp, parse_role,
+    synthetic_future_quote,
     role_to_key,
 )
 from ftx_paper.core import AggregatorConfig, CompletedBarAggregator, InstrumentKey, PaperEngine
@@ -56,6 +57,8 @@ class RuntimeSession:
         self._replaying = False
         self._replay_date: str | None = None
         self._last_execution_fill: dict[str, object] | None = None
+        self._latest_option_bars: dict[OptionRole, MarketBar] = {}
+        self._synthetic_symbols_by_order: dict[str, tuple[str, str]] = {}
 
     def _restore_ledger_state(self) -> None:
         if self.ledger is None:
@@ -277,10 +280,21 @@ class RuntimeSession:
                     "execution_allowed": False, "reason": "startup_recovery",
                 }, f"order_suppressed:{bundle.trading_date}:{order.client_order_id}", timestamp=timestamp)
             else:
-                self._execute_paper_order(order, session_date=bundle.trading_date, timestamp=timestamp)
+                option_bars = (getattr(bundle, "supporting_inputs", None) or {}).get("bars", {})
+                futures_bar = bundle.bars.get(MarketRole.FUTURES)
+                quote = synthetic_future_quote(futures_bar, option_bars) if isinstance(futures_bar, MarketBar) else None
+                if isinstance(futures_bar, MarketBar) and quote is None:
+                    self.store.append_event("EXECUTION_ERROR", {
+                        "decision_id": order.client_order_id, "decision_source": source,
+                        "session_date": bundle.trading_date, "execution_allowed": True,
+                        "outcome": "execution_error", "reason": "missing_synthetic_future_quote",
+                    }, f"execution_error:synthetic_quote:{order.client_order_id}", timestamp=timestamp)
+                    continue
+                self._execute_paper_order(order, session_date=bundle.trading_date, timestamp=timestamp, synthetic_quote=quote)
 
     def _execute_paper_order(self, order, *, session_date: str | None = None,
-                             timestamp: str | None = None) -> bool:
+                             timestamp: str | None = None,
+                             synthetic_quote: SyntheticFutureQuote | None = None) -> bool:
         self._last_execution_fill = None
         context = {
             "decision_id": order.client_order_id,
@@ -290,6 +304,23 @@ class RuntimeSession:
             "execution_allowed": True,
             "reason": order.reason,
         }
+        if synthetic_quote is not None:
+            context.update({"vehicle": "synthetic", "ce_symbol": synthetic_quote.ce.instrument.symbol,
+                            "pe_symbol": synthetic_quote.pe.instrument.symbol, "ce_strike": synthetic_quote.strike,
+                            "ce_price": synthetic_quote.ce.close, "pe_price": synthetic_quote.pe.close,
+                            "synthetic_price": synthetic_quote.price})
+            context.update({
+                ("ce_entry_price" if order.role is OrderRole.ENTRY else "ce_exit_price"): synthetic_quote.ce.close,
+                ("pe_entry_price" if order.role is OrderRole.ENTRY else "pe_exit_price"): synthetic_quote.pe.close,
+                ("synthetic_entry_price" if order.role is OrderRole.ENTRY else "synthetic_exit_price"): synthetic_quote.price,
+            })
+            if order.role is OrderRole.ENTRY:
+                self._synthetic_symbols_by_order[order.client_order_id] = (
+                    synthetic_quote.ce.instrument.symbol, synthetic_quote.pe.instrument.symbol,
+                )
+            if isinstance(self.broker, PaperBroker):
+                # One paper fill represents both option legs at the current quote.
+                self.broker.update_price(order.instrument.symbol, synthetic_quote.price)
         if self.broker is None:
             self.store.append_event("EXECUTION_ERROR", {**context,
                                                          "outcome": "execution_error",
@@ -367,10 +398,17 @@ class RuntimeSession:
                 "average_price": p.average_price} for p in self.ledger.positions()]})
         return bool(fill)
 
+    def _synthetic_symbols_for_exit(self, order) -> tuple[str, str] | None:
+        prefix = "exit-"
+        entry_id = str(order.client_order_id).removeprefix(prefix).split("-", 1)[0]
+        return self._synthetic_symbols_by_order.get(entry_id)
+
     def on_closed_bar(self, bar) -> None:
         with self._lock:
             if self._stopping or self.store.read_status().get("state") != "RUNNING":
                 return
+            if bar.instrument.instrument_type.upper() in {"CE", "PE"}:
+                self._latest_option_bars[OptionRole(bar.instrument.symbol)] = bar
             if isinstance(self.broker, PaperBroker):
                 self.broker.update_price(bar.instrument.symbol, bar.close)
             now = datetime.now(timezone.utc).isoformat()
@@ -405,6 +443,10 @@ class RuntimeSession:
                         action.intent,
                         session_date=bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat(),
                         timestamp=bar.timestamp.isoformat(),
+                        synthetic_quote=synthetic_future_quote(
+                            bar, self._latest_option_bars,
+                            symbols=self._synthetic_symbols_for_exit(action.intent),
+                        ),
                     )
                     self.engine.settle_exit(action.intent.client_order_id, filled=filled)
                     self.store.append_event("EXITDECISION", {
@@ -437,11 +479,21 @@ class RuntimeSession:
         with self._lock:
             if self._stopping or self._replaying or self.store.read_status().get("state") != "RUNNING":
                 return
+            if bar.instrument.instrument_type.upper() in {"CE", "PE"}:
+                self._latest_option_bars[OptionRole(bar.instrument.symbol)] = bar
             if isinstance(self.broker, PaperBroker):
                 self.broker.update_price(bar.instrument.symbol, bar.close)
             result = self.engine.on_tick(bar)
             for action in result:
-                filled = self._execute_paper_order(action.intent, session_date=bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat(), timestamp=bar.timestamp.isoformat())
+                filled = self._execute_paper_order(
+                    action.intent,
+                    session_date=bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat(),
+                    timestamp=bar.timestamp.isoformat(),
+                    synthetic_quote=synthetic_future_quote(
+                        bar, self._latest_option_bars,
+                        symbols=self._synthetic_symbols_for_exit(action.intent),
+                    ),
+                )
                 self.engine.settle_exit(action.intent.client_order_id, filled=filled)
                 self.store.append_event("EXITDECISION", {
                     "decision_id": action.intent.client_order_id,

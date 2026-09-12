@@ -857,6 +857,12 @@
 
     const badge = (s, c = '') => `<span class="badge ${c}">${esc(s)}</span>`;
 
+    const syntheticLegs = (trade) => {
+      if (!trade || trade.vehicle !== 'synthetic') return '';
+      const strike = trade.ce_strike ?? trade.pe_strike;
+      return `<br><strong>Synthetic future · Strike:</strong> ${esc(strike ?? '—')}<br><strong>CE:</strong> ${esc(trade.ce_entry_price ?? '—')} → ${esc(trade.ce_exit_price ?? 'Open')} · <strong>PE:</strong> ${esc(trade.pe_entry_price ?? '—')} → ${esc(trade.pe_exit_price ?? 'Open')}`;
+    };
+
     const date = (s) => {
       if (!s) return 'Not reported';
       const d = new Date(s);
@@ -1119,7 +1125,8 @@
         .map(
           (raw) => {
             const payload = raw.payload && typeof raw.payload === 'object' ? raw.payload : {};
-            const x = { ...raw, ...payload, event_type: raw.event_type || payload.event_type };
+            const executionPayload = payload.execution?.payload && typeof payload.execution.payload === 'object' ? payload.execution.payload : {};
+            const x = { ...raw, ...payload, ...executionPayload, event_type: raw.event_type || payload.event_type };
             const eventType = String(x.event_type || '').toUpperCase();
             const decisionAt = payload.decision_at;
             // Get decision-relevant fields exclusively from payload when available
@@ -1139,7 +1146,7 @@
               <span>${esc(displayDetail)}</span>
               <span>${badge(outcomeLabel, outcomeTone)}</span>
             </summary>
-            <div class="payload"><strong>Entry price:</strong> ${esc(x.entry_price ?? '—')} · <strong>Score:</strong> ${esc(x.score ?? x.setup_score ?? 'Not calculated')} · <strong>Setup type:</strong> ${esc(x.setup_type || '—')}<br><strong>Stop basis:</strong> ${esc(x.stop_basis ?? x.stop_bp ?? 'Not calculated')} · <strong>VIX:</strong> ${esc(x.vix_at_event ?? x.vix ?? x.feature_values?.vix ?? 'Not reported')} · <strong>PCR:</strong> ${esc(x.pcr_at_event ?? x.pcr ?? x.feature_values?.pcr ?? 'Not reported')}<br><strong>Sequence:</strong> ${esc(x.sequence ?? 'Not calculated')} · <strong>Decision source:</strong> ${esc(x.decision_source || '—')} · <strong>Decision ID:</strong> ${esc(x.decision_id || '—')}</div>
+            <div class="payload"><strong>Execution:</strong> ${esc(x.vehicle === 'synthetic' ? 'Synthetic future' : '—')} · <strong>Entry price:</strong> ${esc(x.synthetic_entry_price ?? x.entry_price ?? '—')} · <strong>Exit price:</strong> ${esc(x.synthetic_exit_price ?? x.exit_price ?? 'Open')}<br>${x.vehicle === 'synthetic' ? `<strong>CE/PE:</strong> ${esc(x.ce_symbol || 'CE')} / ${esc(x.pe_symbol || 'PE')} · <strong>Strike:</strong> ${esc(x.ce_strike ?? x.pe_strike ?? '—')} · <strong>Entry:</strong> ${esc(x.ce_entry_price ?? '—')} / ${esc(x.pe_entry_price ?? '—')} · <strong>Exit:</strong> ${esc(x.ce_exit_price ?? 'Open')} / ${esc(x.pe_exit_price ?? 'Open')}<br>` : ''}<strong>Score:</strong> ${esc(x.score ?? x.setup_score ?? 'Not calculated')} · <strong>Setup type:</strong> ${esc(x.setup_type || '—')}<br><strong>Stop basis:</strong> ${esc(x.stop_basis ?? x.stop_bp ?? 'Not calculated')} · <strong>VIX:</strong> ${esc(x.vix_at_event ?? x.vix ?? x.feature_values?.vix ?? 'Not reported')} · <strong>PCR:</strong> ${esc(x.pcr_at_event ?? x.pcr ?? x.feature_values?.pcr ?? 'Not reported')}<br><strong>Sequence:</strong> ${esc(x.sequence ?? 'Not calculated')} · <strong>Decision source:</strong> ${esc(x.decision_source || '—')} · <strong>Decision ID:</strong> ${esc(x.decision_id || '—')}</div>
           </details>`; }
         )
         .join('');
@@ -1183,7 +1190,10 @@
       const price = event.price ?? event.entry_price;
       const priceLabel = price == null ? '' : ` · ₹${Number(price).toLocaleString('en-IN')}`;
       const reason = event.reason ? `Reason: ${event.reason}` : event.outcome || '';
-      return `${esc(event.setup_type || event.cell || 'Replay event')}${esc(direction)}${esc(priceLabel)}${reason ? ` <small>${esc(reason)}</small>` : ''}`;
+      const synthetic = event.vehicle === 'synthetic'
+        ? ` · ${esc(event.ce_symbol || 'CE')}/${esc(event.pe_symbol || 'PE')} ${esc(event.ce_strike ?? '—')} · CE ₹${esc(event.ce_entry_price ?? event.ce_exit_price ?? '—')} · PE ₹${esc(event.pe_entry_price ?? event.pe_exit_price ?? '—')}`
+        : '';
+      return `${esc(event.setup_type || event.cell || 'Replay event')}${esc(direction)}${esc(priceLabel)}${synthetic}${reason ? ` <small>${esc(reason)}</small>` : ''}`;
     }
 
     function replayReasonSummary(events) {
@@ -1338,7 +1348,7 @@
         <div class="insight"><strong>${stats.wins.length}</strong> winners offset <strong>${stats.losses.length}</strong> losing trade${stats.losses.length === 1 ? '' : 's'} (${Math.round(stats.winRate * 100)}% win rate).</div>
         ${best ? `<div class="insight">Best trade: <strong>${esc(money(best.realized_pnl))}</strong> at ${esc(date(best.entry_timestamp))}.</div>` : ''}
         ${worst ? `<div class="insight">Worst trade: <strong class="negative">${esc(money(worst.realized_pnl))}</strong> at ${esc(date(worst.entry_timestamp))}.</div>` : ''}` : '<div class="insight">This replay did not produce a closed trade. Review Decision replay to understand whether the strategy stayed flat or data was incomplete.</div>';
-      const tradeRows = stats.trades.length ? stats.trades.map((trade) => `<tr><td>${esc(date(trade.entry_timestamp))}</td><td>${esc(date(trade.exit_timestamp))}</td><td>${esc(String(trade.side || '').toUpperCase())}</td><td>${esc(trade.quantity ?? '—')}</td><td>${esc(money(trade.entry_price))}</td><td>${esc(trade.exit_price == null ? 'Open' : money(trade.exit_price))}</td><td class="pnl ${Number(trade.realized_pnl || 0) < 0 ? 'negative' : ''}">${trade.realized_pnl == null ? 'Open' : esc(money(trade.realized_pnl))}</td><td>${esc(String(trade.exit_reason || 'Still open').replaceAll('_', ' '))}</td></tr>`).join('') : '<tr><td colspan="8" class="empty">No trades recorded.</td></tr>';
+      const tradeRows = stats.trades.length ? stats.trades.map((trade) => `<tr><td>${esc(date(trade.entry_timestamp))}</td><td>${esc(date(trade.exit_timestamp))}</td><td>${esc(String(trade.side || '').toUpperCase())}</td><td>${esc(trade.quantity ?? '—')}</td><td>${esc(money(trade.entry_price))}${syntheticLegs(trade)}</td><td>${esc(trade.exit_price == null ? 'Open' : money(trade.exit_price))}</td><td class="pnl ${Number(trade.realized_pnl || 0) < 0 ? 'negative' : ''}">${trade.realized_pnl == null ? 'Open' : esc(money(trade.realized_pnl))}</td><td>${esc(String(trade.exit_reason || 'Still open').replaceAll('_', ' '))}</td></tr>`).join('') : '<tr><td colspan="8" class="empty">No trades recorded.</td></tr>';
       return `<div class="card">
         <div class="section-head"><div><h2>Strategy performance</h2><p class="replay-intro">${esc(requestDate)} · Run completed ${esc(date(run.updated_at || run.created_at))}</p></div><a class="investigation-link" href="/replay/investigate">Investigate decisions →</a></div>
         <div class="performance-hero">
