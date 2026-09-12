@@ -3,7 +3,6 @@ from __future__ import annotations
 import threading
 import time
 import logging
-from copy import deepcopy
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable
 from zoneinfo import ZoneInfo
@@ -54,8 +53,6 @@ class RuntimeSession:
         self._stopping = False
         self._started = threading.Event()
         self._aggregator: CompletedBarAggregator | None = None
-        self._replaying = False
-        self._replay_date: str | None = None
         self._last_execution_fill: dict[str, object] | None = None
         self._latest_option_bars: dict[OptionRole, MarketBar] = {}
         self._synthetic_symbols_by_order: dict[str, tuple[str, str]] = {}
@@ -115,18 +112,11 @@ class RuntimeSession:
                 role_map, AggregatorConfig(required_roles=(MarketRole.FUTURES,), deadline_seconds=10.0),
             )
             self.broker = (self.broker_factory or (lambda _client: PaperBroker()))(client)
-            self._replaying = True
             reset = getattr(self.engine, "reset", None)
             if callable(reset):
                 reset()
-            self.store.patch_status({"phase": "REPLAYING", "execution_enabled": False,
-                                     "replay_date": None, "replay_bars_seen": 0})
-            # Replay every resolved instrument so supporting inputs (notably
-            # option volumes used for PCR) are present in decision bundles.
             backfill = load_startup_backfill(client, resolved)
             self.store.append_market_bars(backfill, source="historical_backfill")
-            self._replay_dates(backfill)
-            self._replaying = False
             normalize = self.normalize_payload or self._make_normalizer(resolved)
             socket = create_kite_socket(self.auth.api_key, self.auth.access_token())
             feed_type = self.feed_factory or ZerodhaFeed
@@ -188,44 +178,6 @@ class RuntimeSession:
 
         return normalize
 
-    def _replay_dates(self, bars: tuple[MarketBar, ...]) -> None:
-        """Rebuild every stored trading date without executing orders."""
-        if self._aggregator is None:
-            return
-        dates = sorted({
-            bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat()
-            for bar in bars
-        })
-        replayed_bars = 0
-        # Clear any recovered live engine state before taking the isolated
-        # replay copy. The live engine is not used to evaluate replay bars.
-        live_reset = getattr(self.engine, "reset", None)
-        if callable(live_reset):
-            live_reset()
-        replay_engine = deepcopy(self.engine)
-        reset = getattr(replay_engine, "reset", None)
-        if callable(reset):
-            reset()
-        for index, session_date in enumerate(dates):
-            if index:
-                reset = getattr(replay_engine, "reset", None)
-                if callable(reset):
-                    reset()
-            self._replay_date = session_date
-            self.store.patch_status({"replay_date": session_date})
-            self.store.clear_replay_events(session_date)
-            for bar in bars:
-                bar_date = bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat()
-                if bar_date != session_date:
-                    continue
-                replayed_bars += 1
-                bundle = self._aggregator.ingest(bar)
-                if bundle is not None:
-                    self._process_replay_bundle(bundle, replay_engine)
-                    self.store.patch_status({"replay_last_bar": bundle.minute, "replay_bars_seen": replayed_bars})
-            for bundle in self._aggregator.flush(incomplete=False):
-                self._process_replay_bundle(bundle, replay_engine)
-
     def _persist_engine_event(self, event: dict[str, object], *, source: str, bundle_id: str,
                               session_date: str, decision_at: datetime, timestamp: str,
                               engine: PaperEngine | None = None) -> None:
@@ -245,10 +197,6 @@ class RuntimeSession:
     def _process_bundle(self, bundle, *, source: str, engine: PaperEngine | None = None) -> None:
         active_engine = engine or self.engine
         self._process_bundle_for_source(bundle, source=source, engine=active_engine)
-
-    def _process_replay_bundle(self, bundle, replay_engine: PaperEngine) -> None:
-        """Process startup replay without entering the live bundle path."""
-        self._process_bundle_for_source(bundle, source="replay", engine=replay_engine)
 
     def _process_bundle_for_source(self, bundle, *, source: str, engine: PaperEngine) -> None:
         """Persist a bundle result, with live execution kept behind the source gate."""
@@ -500,7 +448,7 @@ class RuntimeSession:
     def on_tick(self, bar: MarketBar) -> None:
         """Evaluate protective exits immediately on each live market tick."""
         with self._lock:
-            if self._stopping or self._replaying or self.store.read_status().get("state") != "RUNNING":
+            if self._stopping or self.store.read_status().get("state") != "RUNNING":
                 return
             if bar.instrument.instrument_type.upper() in {"CE", "PE"}:
                 self._latest_option_bars[OptionRole(bar.instrument.symbol)] = bar

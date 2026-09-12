@@ -97,6 +97,7 @@ class IndependentLiveDecisionEngine:
         self._last_decision: datetime | None = None
         self._trading_date: str | None = None
         self._decision_session: Session | None = None
+        self._decision_segment: tuple[Session, int] | None = None
         self._vix_open: float | None = None
         self.risk_gate = risk_gate or RiskGateState()
 
@@ -108,6 +109,24 @@ class IndependentLiveDecisionEngine:
         if self.afternoon_entry_minutes[0] <= minutes_from_open < self.afternoon_entry_minutes[1]:
             return Session.AFTERNOON
         return Session.OUTSIDE
+
+    def _session_segment(self, decision_at: datetime) -> tuple[Session, int] | None:
+        """Return the canonical cooldown segment containing ``decision_at``."""
+        session = self._session_for_time(decision_at)
+        if session is Session.OUTSIDE:
+            return None
+        ist_time = decision_at.astimezone(ZoneInfo("Asia/Kolkata"))
+        minutes_from_open = ist_time.hour * 60 + ist_time.minute - (9 * 60 + 15)
+        entry_minutes = (
+            self.morning_entry_minutes
+            if session is Session.MORNING else self.afternoon_entry_minutes
+        )
+        segment_start = entry_minutes[0]
+        if self.cooldown_minutes > 0:
+            segment_start += (
+                (minutes_from_open - entry_minutes[0]) // self.cooldown_minutes
+            ) * self.cooldown_minutes
+        return session, segment_start
 
     def evaluate(self, bundle: DecisionBundle) -> tuple[LiveDecision, ...]:
         if self._trading_date != bundle.trading_date:
@@ -121,12 +140,15 @@ class IndependentLiveDecisionEngine:
             self._location_detector.reset(prior_day_high=self.prior_day_high, prior_day_low=self.prior_day_low)
             self._last_decision = None
             self._decision_session = None
+            self._decision_segment = None
             self._trading_date = bundle.trading_date
         self.risk_gate._new_day(bundle.trading_date)
         decision_at = _decision_datetime(bundle)
         decision_session = self._session_for_time(decision_at)
-        if decision_session is not self._decision_session:
+        decision_segment = self._session_segment(decision_at)
+        if decision_segment != self._decision_segment:
             self._last_decision = None
+            self._decision_segment = decision_segment
             self._decision_session = decision_session
         current_pcr = _option_pcr(bundle)
         pcr = current_pcr
@@ -230,7 +252,15 @@ class IndependentLiveDecisionEngine:
             side = cell_policy.direction
             stop = stop_price(current, side.value, stop_basis)
             sizing = RiskSizer().size(capital=self.capital, equity=self._equity, peak_equity=self._peak_equity, entry=current, stop=stop, score=score, vix=float(vix_bar.close), is_expiry_day=bundle.trading_date in self.expiry_dates)
-            candidate.update(requested_quantity=sizing.quantity, score_multiplier=sizing.score_multiplier, risk_amount=sizing.risk_amount)
+            quantity = sizing.quantity
+            if sizing.approved and cell_policy.stability < 1.0:
+                quantity = max(1, int(quantity * cell_policy.stability))
+            candidate.update(
+                requested_quantity=quantity,
+                score_multiplier=sizing.score_multiplier,
+                stability=cell_policy.stability,
+                risk_amount=sizing.risk_amount,
+            )
             events.append(LiveDecision("ACCEPTEDDECISION", {**candidate, "outcome": "accepted", "reason": "eligible"}))
             if not sizing.approved:
                 events.append(LiveDecision("SIZING_REJECTED", {
@@ -245,8 +275,8 @@ class IndependentLiveDecisionEngine:
                      "decision_id": sha256(f"{candidate_id}:{gate_reason}".encode()).hexdigest()[:24]},
                 ))
                 continue
-            self.risk_gate.record_entry(cell=cell.name, direction=direction, quantity=sizing.quantity, date=bundle.trading_date)
-            order = OrderIntent(candidate_id, futures.instrument, side, sizing.quantity, reason="live_policy_accepted", cell=cell.name, stop_price=stop, exit_mode=cell_policy.exit_mode.value, entry_bar=sequence, role=OrderRole.ENTRY)
+            self.risk_gate.record_entry(cell=cell.name, direction=direction, quantity=quantity, date=bundle.trading_date)
+            order = OrderIntent(candidate_id, futures.instrument, side, quantity, reason="live_policy_accepted", cell=cell.name, stop_price=stop, exit_mode=cell_policy.exit_mode.value, entry_bar=sequence, role=OrderRole.ENTRY)
             events[-1] = LiveDecision("ACCEPTEDDECISION", {**candidate, "outcome": "accepted", "reason": "eligible"}, order=order)
         return tuple(events)
 

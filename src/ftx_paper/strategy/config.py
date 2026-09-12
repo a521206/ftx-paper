@@ -42,18 +42,23 @@ class CellPolicyConfig:
     cell: str
     direction: OrderSide
     exit_mode: ExitMode = ExitMode.SIGNAL
+    stability: float = 1.0
     transition_patterns: tuple[TransitionPattern, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not 0 < self.stability <= 1:
+            raise ValueError("stability must be greater than zero and at most one")
 
 
 MORNING_CELL_POLICIES = (
     CellPolicyConfig("session_low+or_low", OrderSide.BUY, ExitMode.SIGNAL),
     CellPolicyConfig("vwap_zone+session_low+or_low", OrderSide.BUY, ExitMode.SIGNAL),
-    CellPolicyConfig("session_high+or_high", OrderSide.SELL, ExitMode.SIGNAL),
-    CellPolicyConfig("vwap_zone+or_low", OrderSide.SELL, ExitMode.TRAIL),
+    CellPolicyConfig("session_high+or_high", OrderSide.SELL, ExitMode.SIGNAL, 0.5),
+    CellPolicyConfig("vwap_zone+or_low", OrderSide.SELL, ExitMode.TRAIL, 0.5),
 )
 AFTERNOON_CELL_POLICIES = (
-    CellPolicyConfig("session_high+or_high", OrderSide.BUY, ExitMode.TRAIL),
-    CellPolicyConfig("or_low", OrderSide.BUY, ExitMode.SIGNAL),
+    CellPolicyConfig("session_high+or_high", OrderSide.BUY, ExitMode.TRAIL, 0.5),
+    CellPolicyConfig("or_low", OrderSide.BUY, ExitMode.SIGNAL, 0.5),
     CellPolicyConfig("vwap_zone+prior_day_high", OrderSide.SELL, ExitMode.TRAIL),
 )
 
