@@ -59,6 +59,7 @@ class RuntimeSession:
         self._last_execution_fill: dict[str, object] | None = None
         self._latest_option_bars: dict[OptionRole, MarketBar] = {}
         self._synthetic_symbols_by_order: dict[str, tuple[str, str]] = {}
+        self._last_synthetic_quote_by_order: dict[str, SyntheticFutureQuote] = {}
 
     def _restore_ledger_state(self) -> None:
         if self.ledger is None:
@@ -318,6 +319,10 @@ class RuntimeSession:
                 self._synthetic_symbols_by_order[order.client_order_id] = (
                     synthetic_quote.ce.instrument.symbol, synthetic_quote.pe.instrument.symbol,
                 )
+                self._last_synthetic_quote_by_order[order.client_order_id] = synthetic_quote
+            else:
+                entry_id = self._synthetic_entry_id(order)
+                self._last_synthetic_quote_by_order[entry_id] = synthetic_quote
             if isinstance(self.broker, PaperBroker):
                 # One paper fill represents both option legs at the current quote.
                 self.broker.update_price(order.instrument.symbol, synthetic_quote.price)
@@ -399,9 +404,26 @@ class RuntimeSession:
         return bool(fill)
 
     def _synthetic_symbols_for_exit(self, order) -> tuple[str, str] | None:
-        prefix = "exit-"
-        entry_id = str(order.client_order_id).removeprefix(prefix).split("-", 1)[0]
+        entry_id = self._synthetic_entry_id(order)
         return self._synthetic_symbols_by_order.get(entry_id)
+
+    @staticmethod
+    def _synthetic_entry_id(order) -> str:
+        return str(order.client_order_id).removeprefix("exit-").split("-", 1)[0]
+
+    def _synthetic_exit_quote(self, order, bar: MarketBar) -> SyntheticFutureQuote | None:
+        quote = synthetic_future_quote(
+            bar, self._latest_option_bars,
+            symbols=self._synthetic_symbols_for_exit(order),
+        )
+        return quote or self._last_synthetic_quote_by_order.get(self._synthetic_entry_id(order))
+
+    def _record_missing_synthetic_exit(self, order, timestamp: str) -> None:
+        self.store.append_event("EXECUTION_ERROR", {
+            "decision_id": order.client_order_id, "decision_source": "live",
+            "execution_allowed": True, "outcome": "execution_error",
+            "reason": "missing_synthetic_future_quote",
+        }, f"execution_error:synthetic_quote:{order.client_order_id}", timestamp=timestamp)
 
     def on_closed_bar(self, bar) -> None:
         with self._lock:
@@ -439,14 +461,15 @@ class RuntimeSession:
                 # Settle positions carried into this bar before evaluating a
                 # new bundle, matching the deterministic replay ordering.
                 for action in self.engine.on_closed_bar(bar):
+                    synthetic_quote = self._synthetic_exit_quote(action.intent, bar)
+                    if synthetic_quote is None:
+                        self._record_missing_synthetic_exit(action.intent, bar.timestamp.isoformat())
+                        continue
                     filled = self._execute_paper_order(
                         action.intent,
                         session_date=bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat(),
                         timestamp=bar.timestamp.isoformat(),
-                        synthetic_quote=synthetic_future_quote(
-                            bar, self._latest_option_bars,
-                            symbols=self._synthetic_symbols_for_exit(action.intent),
-                        ),
+                        synthetic_quote=synthetic_quote,
                     )
                     self.engine.settle_exit(action.intent.client_order_id, filled=filled)
                     self.store.append_event("EXITDECISION", {
@@ -485,14 +508,15 @@ class RuntimeSession:
                 self.broker.update_price(bar.instrument.symbol, bar.close)
             result = self.engine.on_tick(bar)
             for action in result:
+                synthetic_quote = self._synthetic_exit_quote(action.intent, bar)
+                if synthetic_quote is None:
+                    self._record_missing_synthetic_exit(action.intent, bar.timestamp.isoformat())
+                    continue
                 filled = self._execute_paper_order(
                     action.intent,
                     session_date=bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat(),
                     timestamp=bar.timestamp.isoformat(),
-                    synthetic_quote=synthetic_future_quote(
-                        bar, self._latest_option_bars,
-                        symbols=self._synthetic_symbols_for_exit(action.intent),
-                    ),
+                    synthetic_quote=synthetic_quote,
                 )
                 self.engine.settle_exit(action.intent.client_order_id, filled=filled)
                 self.store.append_event("EXITDECISION", {

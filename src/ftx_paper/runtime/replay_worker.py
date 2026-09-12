@@ -1,17 +1,26 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread
 from typing import Any
 from uuid import uuid4
 
-from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderRole, SyntheticFutureQuote, synthetic_future_quote
-from ftx_paper.core import AggregatorConfig, CompletedBarAggregator, InstrumentKey, PaperEngine
+from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderRole, Role, SyntheticFutureQuote, synthetic_future_quote
+from ftx_paper.core import AggregatorConfig, Cell, CompletedBarAggregator, InstrumentKey, PaperEngine
 from ftx_paper.runtime.store import RuntimeStore
 from ftx_paper.strategy import ConfiguredLiveStrategy
 from ftx_paper.strategy.config import CAPITAL
 from ftx_paper.config import NIFTY_LOT_SIZE
+
+
+@dataclass(frozen=True, slots=True)
+class TradeSettlement:
+    cell: Cell
+    entry_bar: int
+    exit_bar: int
+    realized_pnl: float
 
 
 class ReplayWorker:
@@ -68,14 +77,17 @@ class ReplayWorker:
             except Empty:
                 continue
             try:
-                if self.store.read_replay_run(run_id).get("status") == "cancelled":
+                run = self.store.read_replay_run(run_id)
+                if run is None or run.get("status") == "cancelled":
                     continue
                 self.store.update_replay_run(run_id, status="running")
                 result = self._execute(request, cancel)
-                if self.store.read_replay_run(run_id).get("status") != "cancelled":
+                run = self.store.read_replay_run(run_id)
+                if run is not None and run.get("status") != "cancelled":
                     self.store.update_replay_run(run_id, status="completed", result=result)
             except Exception as exc:
-                if self.store.read_replay_run(run_id).get("status") != "cancelled":
+                run = self.store.read_replay_run(run_id)
+                if run is not None and run.get("status") != "cancelled":
                     self.store.update_replay_run(run_id, status="failed", error=str(exc))
             finally:
                 with self._lock:
@@ -99,12 +111,13 @@ class ReplayWorker:
                 break
             # A date is an independent simulation session. No positions,
             # cooldowns, or risk state may leak into the next date.
-            engine = PaperEngine(ConfiguredLiveStrategy(capital=CAPITAL))
-            strategy = engine.strategy
+            strategy = ConfiguredLiveStrategy(capital=CAPITAL)
+            engine = PaperEngine(strategy)
             strategy.update_portfolio_state(equity=current_equity, peak_equity=peak_equity)
             bars = self._bars(date)
             aggregator = self._aggregator(bars)
             open_trades: list[dict[str, Any]] = []
+            last_quotes: dict[str, SyntheticFutureQuote] = {}
             for bar in bars:
                 if cancel.is_set():
                     break
@@ -112,7 +125,18 @@ class ReplayWorker:
                 if bundle is None:
                     continue
                 futures_bar = bundle.bars[MarketRole.FUTURES]
-                option_bars = (bundle.supporting_inputs or {}).get("bars", {})
+                raw_supporting_bars = (bundle.supporting_inputs or {}).get("bars", {})
+                option_bars: dict[Role, MarketBar] = {
+                    role: bar for role, bar in raw_supporting_bars.items()
+                    if isinstance(role, (MarketRole, OptionRole))
+                }
+                for trade in open_trades:
+                    quote = synthetic_future_quote(
+                        futures_bar, option_bars,
+                        symbols=(trade["ce_symbol"], trade["pe_symbol"]),
+                    )
+                    if quote is not None:
+                        last_quotes[trade["entry_order_id"]] = quote
                 exit_actions = engine.on_closed_bar(futures_bar)
                 for action in exit_actions:
                     open_trade = next((trade for trade in open_trades
@@ -121,7 +145,11 @@ class ReplayWorker:
                         futures_bar, option_bars,
                         symbols=(open_trade["ce_symbol"], open_trade["pe_symbol"]),
                     ) if open_trade else None
+                    if exit_quote is None and open_trade:
+                        exit_quote = last_quotes.get(open_trade["entry_order_id"])
                     if exit_quote is None:
+                        all_events.append({"event_type": "EXECUTION_ERROR", "decision_id": action.intent.client_order_id,
+                                           "reason": "missing_synthetic_future_quote", "source": "replay", "session_date": date})
                         continue
                     all_events.append({"event_type": "EXITDECISION", "decision_id": action.intent.client_order_id,
                                        "timestamp": futures_bar.timestamp.isoformat(), "reason": action.reason,
@@ -132,11 +160,10 @@ class ReplayWorker:
                     realized = self._settle_trade(open_trades, diagnostic_trades, action.intent, futures_bar,
                                                   exit_quote, action.reason)
                     if realized is not None:
-                        if realized.get("cell"):
-                            engine.record_exit(cell=str(realized["cell"]), reason=action.reason,
-                                               entry_bar=int(realized["entry_bar"]), exit_bar=engine.bars_seen,
-                                               date=date)
-                        current_equity += realized["realized_pnl"]
+                        engine.record_exit(cell=realized.cell.name, reason=action.reason,
+                                           entry_bar=realized.entry_bar, exit_bar=engine.bars_seen,
+                                           date=date)
+                        current_equity += realized.realized_pnl
                         peak_equity = max(peak_equity, current_equity)
                         max_drawdown = min(max_drawdown, current_equity - peak_equity)
                         strategy.update_portfolio_state(equity=current_equity, peak_equity=peak_equity)
@@ -173,6 +200,7 @@ class ReplayWorker:
                                             "ce_strike": entry_quote.strike, "ce_entry_price": entry_quote.ce.close,
                                             "pe_entry_price": entry_quote.pe.close, "cell": order.cell,
                                             "entry_bar": order.entry_bar or engine.bars_seen})
+                        last_quotes[order.client_order_id] = entry_quote
                     elif order.role is OrderRole.EXIT:
                         open_trade = next((trade for trade in open_trades
                                            if trade["instrument"] == order.instrument.symbol), None)
@@ -180,16 +208,19 @@ class ReplayWorker:
                             futures_bar, option_bars,
                             symbols=(open_trade["ce_symbol"], open_trade["pe_symbol"]),
                         ) if open_trade else None
+                        if exit_quote is None and open_trade:
+                            exit_quote = last_quotes.get(open_trade["entry_order_id"])
                         if exit_quote is None:
+                            all_events.append({"event_type": "EXECUTION_ERROR", "decision_id": order.client_order_id,
+                                               "reason": "missing_synthetic_future_quote", "source": "replay", "session_date": date})
                             continue
                         realized = self._settle_trade(open_trades, diagnostic_trades, order, futures_bar,
                                                       exit_quote, order.reason)
                         if realized is not None:
-                            if realized.get("cell"):
-                                engine.record_exit(cell=str(realized["cell"]), reason=order.reason,
-                                                   entry_bar=int(realized["entry_bar"]), exit_bar=engine.bars_seen,
-                                                   date=date)
-                            current_equity += realized["realized_pnl"]
+                            engine.record_exit(cell=realized.cell.name, reason=order.reason,
+                                               entry_bar=realized.entry_bar, exit_bar=engine.bars_seen,
+                                               date=date)
+                            current_equity += realized.realized_pnl
                             peak_equity = max(peak_equity, current_equity)
                             max_drawdown = min(max_drawdown, current_equity - peak_equity)
                             strategy.update_portfolio_state(equity=current_equity, peak_equity=peak_equity)
@@ -223,7 +254,7 @@ class ReplayWorker:
 
     @staticmethod
     def _settle_trade(open_trades: list[dict[str, Any]], trades: list[dict[str, Any]],
-                      order: Any, bar: MarketBar, quote: SyntheticFutureQuote, reason: str) -> dict[str, Any] | None:
+                      order: Any, bar: MarketBar, quote: SyntheticFutureQuote, reason: str) -> TradeSettlement | None:
         opposite = "SELL" if order.side.value == "BUY" else "BUY"
         index = next((i for i, trade in enumerate(open_trades)
                       if trade["instrument"] == order.instrument.symbol and trade["side"] == opposite), None)
@@ -240,8 +271,14 @@ class ReplayWorker:
                        "exit_reason": reason,
                        "realized_pnl": realized_pnl,
                        "status": "closed"})
-        return {"realized_pnl": realized_pnl, "cell": trade.get("cell"),
-                "entry_bar": trade.get("entry_bar", 0), "exit_bar": len(trades)}
+        cell = trade.get("cell")
+        if not isinstance(cell, str):
+            raise TypeError("settled trade cell must be a canonical name")
+        parsed_cell = Cell.parse(cell)
+        entry_bar = trade.get("entry_bar", 0)
+        if not isinstance(entry_bar, int) or isinstance(entry_bar, bool):
+            raise TypeError("settled trade entry_bar must be an integer")
+        return TradeSettlement(parsed_cell, entry_bar, len(trades), realized_pnl)
 
     def _dates(self) -> list[str]:
         return self.store.read_market_dates()
