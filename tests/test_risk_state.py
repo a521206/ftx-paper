@@ -21,6 +21,15 @@ def test_remaining_directional_headroom_tracks_allocated_lots() -> None:
     assert gate.remaining_directional_lots("long") == 6
 
 
+def test_zero_directional_headroom_rejects_without_consuming_entry() -> None:
+    gate = RiskGateState(max_net_directional_lots=2)
+    gate.record_entry(cell="low", direction="short", quantity=2, date="2026-09-10")
+    assert gate.rejection_reason(
+        cell="low", direction="short", bar=20, quantity=0, date="2026-09-10",
+    ) == "insufficient_directional_headroom"
+    assert gate.cells["low"].total_entries == 1
+
+
 def test_segment_reset_clears_cell_cooldown_but_preserves_exposure() -> None:
     gate = RiskGateState(max_net_directional_lots=8)
     gate.record_entry(cell="high", direction="long", quantity=2, date="2026-09-11")

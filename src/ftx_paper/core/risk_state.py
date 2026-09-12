@@ -47,6 +47,8 @@ class RiskGateState:
     def rejection_reason(self, *, cell: str, direction: str, bar: int,
                          quantity: int, date: str | None = None) -> str | None:
         self._new_day(date)
+        if quantity < 1:
+            return "insufficient_directional_headroom"
         state = self.cells.setdefault(cell, CellGateState())
         if abs(self.net_directional_lots + self._signed(direction, quantity)) > self.max_net_directional_lots:
             return "directional_exposure_limit"
