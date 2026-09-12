@@ -70,6 +70,12 @@ class ReplayWorker:
     def submit(self, request: dict[str, Any]) -> str:
         run_id = uuid4().hex
         cancel = Event()
+        session_date = str(request.get("session_date") or request.get("date") or "").strip()[:10]
+        if session_date:
+            # The replay page is a date-level diagnostic view.  Re-running a
+            # date replaces its prior stored result so stale trades cannot
+            # remain visible beside the fresh run.
+            self.store.clear_replay_runs_for_date(session_date)
         with self._lock:
             self._cancel[run_id] = cancel
         self.store.create_replay_run(run_id, request)

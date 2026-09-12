@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 from ftx_paper.contracts import Instrument, MarketBar, OptionType
 from ftx_paper.runtime import RuntimeStore
+from ftx_paper.runtime.replay_worker import ReplayWorker
 
 
 def test_runtime_store_bootstraps_event_indexes(tmp_path):
@@ -87,3 +88,24 @@ def test_runtime_store_clears_only_replay_runs(tmp_path):
     assert store.clear_replay_runs() == 1
     assert store.read_replay_runs() == []
     assert store.read_market_bars("2026-01-05") == []
+
+
+def test_runtime_store_clears_replay_runs_for_one_date_only(tmp_path):
+    store = RuntimeStore(tmp_path)
+    store.create_replay_run("old-jan-5", {"session_date": "2026-01-05"})
+    store.create_replay_run("old-jan-6", {"session_date": "2026-01-06"})
+
+    assert store.clear_replay_runs_for_date("2026-01-05") == 1
+    assert [run["run_id"] for run in store.read_replay_runs()] == ["old-jan-6"]
+
+
+def test_replay_submit_replaces_prior_run_for_same_date(tmp_path):
+    store = RuntimeStore(tmp_path)
+    worker = ReplayWorker(store)
+    worker._ensure_started = lambda: None
+
+    first = worker.submit({"session_date": "2026-09-10"})
+    second = worker.submit({"session_date": "2026-09-10"})
+
+    assert [run["run_id"] for run in store.read_replay_runs()] == [second]
+    assert store.read_replay_run(first) is None

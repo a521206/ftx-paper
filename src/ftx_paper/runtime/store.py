@@ -378,6 +378,20 @@ class RuntimeStore:
             deleted = cursor.rowcount
         return deleted
 
+    def clear_replay_runs_for_date(self, session_date: str) -> int:
+        """Delete stored replay runs whose requested session is this date."""
+        normalized = str(session_date).strip()[:10]
+        if not normalized:
+            return 0
+        with sqlite3.connect(self.database) as connection:
+            cursor = connection.execute(
+                "DELETE FROM replay_runs "
+                "WHERE substr(json_extract(request, '$.session_date'), 1, 10) = ? "
+                "OR substr(json_extract(request, '$.date'), 1, 10) = ?",
+                (normalized, normalized),
+            )
+            return cursor.rowcount
+
     def recover_interrupted(self) -> bool:
         status = self.read_status()
         if status.get("state") not in {"RUNNING", "STARTING", "START_REQUESTED"}:
