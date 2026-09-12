@@ -139,12 +139,14 @@ def synthetic_future_quote(
         candidates = [bar for bar in candidates if bar.instrument.symbol in symbols]
     grouped: dict[tuple[str | None, float], dict[str, MarketBar]] = {}
     for bar in candidates:
-        key = (bar.instrument.expiry, float(bar.instrument.strike))
+        strike = bar.instrument.strike
+        if strike is None:
+            continue
+        key = (bar.instrument.expiry, float(strike))
         grouped.setdefault(key, {})[bar.instrument.instrument_type.upper()] = bar
     pairs = [(expiry_strike, legs) for expiry_strike, legs in grouped.items()
              if "CE" in legs and "PE" in legs]
     if not pairs:
         return None
-    _, legs = min(pairs, key=lambda item: abs(item[0][1] - futures.close))
-    strike = float(legs["CE"].instrument.strike)
+    (_, strike), legs = min(pairs, key=lambda item: abs(item[0][1] - futures.close))
     return SyntheticFutureQuote(strike, legs["CE"], legs["PE"])
