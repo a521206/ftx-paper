@@ -20,4 +20,8 @@ def create_ui_app(api_base_url: str | None = None) -> Flask:
             return "Not found", 404
         return render_template("index.html", api_base_url=configured_api.rstrip("/"), page=page)
 
+    @app.get("/replay/investigate")
+    def replay_investigation():
+        return render_template("index.html", api_base_url=configured_api.rstrip("/"), page="investigate")
+
     return app

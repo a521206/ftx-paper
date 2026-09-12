@@ -578,6 +578,75 @@
       font-weight: 400;
     }
 
+    .performance-hero {
+      display: grid;
+      grid-template-columns: 1.5fr repeat(4, 1fr);
+      gap: 10px;
+      align-items: stretch;
+    }
+
+    .performance-hero .metric {
+      min-height: 96px;
+    }
+
+    .performance-hero .headline {
+      background: var(--md-primary);
+      color: var(--md-on-primary);
+      border-color: var(--md-primary);
+    }
+
+    .performance-hero .headline .label { color: #d6e3ff; }
+    .performance-hero .headline .value { font-size: 30px; }
+
+    .performance-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.35fr) minmax(280px, .65fr);
+      gap: 14px;
+    }
+
+    .performance-chart {
+      min-height: 220px;
+      display: flex;
+      align-items: end;
+      gap: 5px;
+      padding: 22px 8px 8px;
+      border-bottom: 1px solid var(--md-outline-variant);
+      border-top: 1px solid var(--md-outline-variant);
+    }
+
+    .performance-bar {
+      flex: 1;
+      min-width: 3px;
+      border-radius: 4px 4px 0 0;
+      background: var(--md-success);
+      opacity: .85;
+    }
+
+    .performance-bar.negative { background: var(--md-error); }
+
+    .insight {
+      padding: 12px 0;
+      border-bottom: 1px solid var(--md-outline-variant);
+      line-height: 20px;
+    }
+
+    .insight:last-child { border-bottom: 0; }
+    .performance-table td:first-child { font-weight: 600; }
+    .performance-table .pnl { font-weight: 700; text-align: right; }
+    .performance-table .pnl.negative { color: var(--md-error); }
+
+    .investigation-link {
+      color: var(--md-primary);
+      font-weight: 600;
+      text-decoration: none;
+    }
+
+    @media (max-width: 800px) {
+      .performance-hero { grid-template-columns: repeat(2, 1fr); }
+      .performance-hero .headline { grid-column: 1 / -1; }
+      .performance-grid { grid-template-columns: 1fr; }
+    }
+
     summary {
       cursor: pointer;
       list-style: none;
@@ -675,11 +744,12 @@
         ('positions', 'Positions'),
         ('trades', 'Trades'),
         ('capital', 'Capital'),
-        ('replay', 'Replay'),
+        ('replay', 'Performance'),
+        ('investigate', 'Decision replay'),
         ('activity', 'Activity')
       ] %}
         <a class="{% if page == item[0] %}active{% endif %}"
-           href="{% if item[0] == 'dashboard' %}/{% else %}/{{ item[0] }}{% endif %}">
+           href="{% if item[0] == 'dashboard' %}/{% elif item[0] == 'investigate' %}/replay/investigate{% else %}/{{ item[0] }}{% endif %}">
           {{ item[1] }}
         </a>
       {% endfor %}
@@ -1100,6 +1170,51 @@
       return runs.map(replayRunView).join('');
     }
 
+    function performanceStats(run) {
+      const trades = Array.isArray(run?.result?.trades) ? run.result.trades : [];
+      const closed = trades.filter((trade) => trade.status === 'closed' && trade.realized_pnl != null);
+      const pnls = closed.map((trade) => Number(trade.realized_pnl));
+      const net = pnls.reduce((sum, value) => sum + value, 0);
+      const wins = pnls.filter((value) => value > 0);
+      const losses = pnls.filter((value) => value < 0);
+      let running = 0;
+      let peak = 0;
+      let drawdown = 0;
+      pnls.forEach((value) => { running += value; peak = Math.max(peak, running); drawdown = Math.min(drawdown, running - peak); });
+      return { trades, closed, pnls, net, wins, losses, drawdown, winRate: closed.length ? wins.length / closed.length : null };
+    }
+
+    function performancePage(runs) {
+      const completed = (runs || []).filter((run) => String(run.status).toLowerCase() === 'completed');
+      const run = completed[0] || runs?.[0];
+      if (!run) return `<div class="card"><div class="empty">No performance runs yet. Choose a session date to replay your strategy.</div></div>`;
+      const stats = performanceStats(run);
+      const result = run.result || {};
+      const requestDate = run.request?.session_date || 'All available dates';
+      const bars = stats.pnls.length ? stats.pnls.map((pnl) => `<span class="performance-bar ${pnl < 0 ? 'negative' : ''}" style="height:${Math.max(8, Math.min(100, Math.abs(pnl) / Math.max(...stats.pnls.map((value) => Math.abs(value)), 1) * 100))}%" title="${esc(money(pnl))}"></span>`).join('') : '<div class="empty">No closed trades to chart yet.</div>';
+      const best = stats.closed.length ? stats.closed.reduce((a, b) => Number(a.realized_pnl) > Number(b.realized_pnl) ? a : b) : null;
+      const worst = stats.closed.length ? stats.closed.reduce((a, b) => Number(a.realized_pnl) < Number(b.realized_pnl) ? a : b) : null;
+      const insights = stats.closed.length ? `
+        <div class="insight">The strategy took <strong>${stats.closed.length}</strong> closed trade${stats.closed.length === 1 ? '' : 's'} and finished <strong class="${stats.net < 0 ? 'negative' : 'positive'}">${esc(money(stats.net))}</strong>.</div>
+        <div class="insight"><strong>${stats.wins.length}</strong> winners offset <strong>${stats.losses.length}</strong> losing trade${stats.losses.length === 1 ? '' : 's'} (${Math.round(stats.winRate * 100)}% win rate).</div>
+        ${best ? `<div class="insight">Best trade: <strong>${esc(money(best.realized_pnl))}</strong> at ${esc(date(best.entry_timestamp))}.</div>` : ''}
+        ${worst ? `<div class="insight">Worst trade: <strong class="negative">${esc(money(worst.realized_pnl))}</strong> at ${esc(date(worst.entry_timestamp))}.</div>` : ''}` : '<div class="insight">This replay did not produce a closed trade. Review Decision replay to understand whether the strategy stayed flat or data was incomplete.</div>';
+      const tradeRows = stats.trades.length ? stats.trades.map((trade) => `<tr><td>${esc(date(trade.entry_timestamp))}</td><td>${esc(String(trade.side || '').toUpperCase())}</td><td>${esc(money(trade.entry_price))}</td><td>${esc(trade.exit_price == null ? 'Open' : money(trade.exit_price))}</td><td class="pnl ${Number(trade.realized_pnl || 0) < 0 ? 'negative' : ''}">${trade.realized_pnl == null ? 'Open' : esc(money(trade.realized_pnl))}</td><td>${esc(String(trade.exit_reason || 'Still open').replaceAll('_', ' '))}</td></tr>`).join('') : '<tr><td colspan="6" class="empty">No trades recorded.</td></tr>';
+      return `<div class="card">
+        <div class="section-head"><div><h2>Strategy performance</h2><p class="replay-intro">${esc(requestDate)} · Run completed ${esc(date(run.updated_at || run.created_at))}</p></div><a class="investigation-link" href="/replay/investigate">Investigate decisions →</a></div>
+        <div class="performance-hero">
+          <div class="metric headline"><div class="label">Net P&amp;L</div><div class="value">${esc(stats.closed.length ? money(stats.net) : 'Not reported')}</div><div>${stats.closed.length ? (stats.net >= 0 ? 'Strategy finished positive' : 'Strategy finished negative') : 'No settled trades'}</div></div>
+          ${[['Return', 'Not reported'], ['Trades', stats.trades.length], ['Win rate', stats.winRate == null ? '—' : `${Math.round(stats.winRate * 100)}%`], ['Max drawdown', stats.closed.length ? money(stats.drawdown) : 'Not reported']].map(([label, value]) => `<div class="metric"><div class="label">${label}</div><div class="value">${esc(value)}</div></div>`).join('')}
+        </div>
+      </div>
+      <div class="performance-grid">
+        <div class="card"><div class="section-head"><h2>Trade outcomes</h2><span class="label">Each bar is one trade</span></div><div class="performance-chart">${bars}</div><div class="review-summary"><span class="label">Green = profit</span><span class="label">Red = loss</span></div></div>
+        <div class="card"><h2>What happened?</h2>${insights}</div>
+      </div>
+      <div class="card"><div class="section-head"><h2>Trade-by-trade results</h2><span class="label">${esc(String(result.bars_seen ?? '—'))} market bars replayed</span></div><table class="performance-table"><thead><tr><th>Entry</th><th>Side</th><th>Entry price</th><th>Exit price</th><th>P&amp;L</th><th>Exit reason</th></tr></thead><tbody>${tradeRows}</tbody></table></div>
+      <div class="card"><div class="section-head"><h2>Run another session</h2><span class="label">Simulation only</span></div><form id="replay-form" class="replay-form"><label>Session date<input id="replay-date" type="date" aria-label="Session date"></label><button>Replay strategy</button></form><div class="replay-note">This replay never submits broker orders and never changes live positions, trades, or capital.</div></div>`;
+    }
+
     function render(data) {
       const runtime = data.runtime || {};
       const capital = data.capital || {};
@@ -1137,16 +1252,9 @@
       let body = '';
 
       if (page === 'replay') {
-        body = `<div class="card">
-          <h2>Replay runs</h2>
-          <p class="replay-intro">Replay historical market data through the paper strategy to review what it would have decided. Results are isolated from the live runtime.</p>
-          <form id="replay-form" class="replay-form">
-            <label>Session date (optional)<input id="replay-date" type="date" aria-label="Session date (optional)"></label>
-            <button>Queue replay</button>
-          </form>
-          <div class="replay-note">Replay never submits broker orders and never changes live positions, trades, or capital. Use the event counts below to review decisions and exits.</div>
-        </div>
-        <div class="card"><div class="section-head"><h2>Run history</h2><span class="label">Newest first</span></div>${renderReplayPage(data.replays.runs || [])}</div>`;
+        body = performancePage(data.replays.runs || []);
+      } else if (page === 'investigate') {
+        body = `<div class="card"><div class="section-head"><div><h2>Decision replay</h2><p class="replay-intro">Trace the strategy’s decisions bar by bar when you need to understand the performance result.</p></div><a class="investigation-link" href="/replay">← Back to performance</a></div><div class="replay-note">Technical view: replay is isolated from live positions and never submits broker orders.</div></div><div class="card"><div class="section-head"><h2>Replay runs</h2><span class="label">Newest first</span></div>${renderReplayPage(data.replays.runs || [])}</div>`;
       } else if (page === 'dashboard') {
         body = `<div class="card">
           <div class="section-head">
