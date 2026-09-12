@@ -92,6 +92,10 @@ class RiskGateState:
         self.trading_date = None
         self.cells.clear()
 
+    def reset_segment(self) -> None:
+        """Reset thesis/cell state at a session cooldown segment boundary."""
+        self.cells.clear()
+
     def snapshot(self) -> dict[str, object]:
         return {
             "schema_version": 1,

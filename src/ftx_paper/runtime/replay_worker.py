@@ -150,7 +150,11 @@ class ReplayWorker:
                 if bundle is None:
                     continue
                 futures_bar = bundle.bars[MarketRole.FUTURES]
+                # Synthetic contract selection is anchored to the spot/index
+                # level, matching the Paper entry contract rule. Futures is
+                # still the decision and exit-state instrument.
                 raw_supporting_bars = (bundle.supporting_inputs or {}).get("bars", {})
+                quote_selection_bar = raw_supporting_bars.get(MarketRole.SPOT, futures_bar)
                 option_bars: dict[Role, MarketBar] = {
                     role: bar for role, bar in raw_supporting_bars.items()
                     if isinstance(role, (MarketRole, OptionRole))
@@ -159,7 +163,7 @@ class ReplayWorker:
                     if vehicle == "futures":
                         continue
                     quote = synthetic_future_quote(
-                        futures_bar, option_bars,
+                        quote_selection_bar, option_bars,
                         symbols=(trade["ce_symbol"], trade["pe_symbol"]),
                     )
                     if quote is not None:
@@ -169,7 +173,7 @@ class ReplayWorker:
                     open_trade = next((trade for trade in open_trades
                                        if trade["instrument"] == action.intent.instrument.symbol), None)
                     exit_quote = synthetic_future_quote(
-                        futures_bar, option_bars,
+                        quote_selection_bar, option_bars,
                         symbols=(open_trade["ce_symbol"], open_trade["pe_symbol"]),
                     ) if open_trade and vehicle == "synthetic" else None
                     if exit_quote is None and open_trade and vehicle == "synthetic":
@@ -207,7 +211,7 @@ class ReplayWorker:
                                        "timestamp": futures_bar.timestamp.isoformat(), "source": "replay",
                                        "session_date": date, "execution_allowed": False})
                     if order.role is OrderRole.ENTRY:
-                        entry_quote = synthetic_future_quote(futures_bar, option_bars) if vehicle == "synthetic" else None
+                        entry_quote = synthetic_future_quote(quote_selection_bar, option_bars) if vehicle == "synthetic" else None
                         if entry_quote is None and vehicle == "synthetic":
                             all_events.append({"event_type": "EXECUTION_ERROR", "decision_id": order.client_order_id,
                                                "reason": "missing_synthetic_future_quote", "source": "replay", "session_date": date})
@@ -245,7 +249,7 @@ class ReplayWorker:
                         open_trade = next((trade for trade in open_trades
                                            if trade["instrument"] == order.instrument.symbol), None)
                         exit_quote = synthetic_future_quote(
-                            futures_bar, option_bars,
+                            quote_selection_bar, option_bars,
                             symbols=(open_trade["ce_symbol"], open_trade["pe_symbol"]),
                         ) if open_trade and vehicle == "synthetic" else None
                         if exit_quote is None and open_trade and vehicle == "synthetic":
@@ -320,7 +324,11 @@ class ReplayWorker:
             "gross_pnl_rs": float(trade["gross_pnl_rs"]) if trade.get("gross_pnl_rs") is not None else None,
             "cost_rs": float(trade["cost_rs"]) if trade.get("cost_rs") is not None else None,
             "net_pnl_rs": float(trade["net_pnl_rs"]) if trade.get("net_pnl_rs") is not None else None,
-            "exit_reason": trade.get("exit_reason"),
+            # The normalized replay API uses the canonical audit vocabulary;
+            # Paper’s internal state machine keeps its more descriptive name.
+            "exit_reason": {
+                "trailing_stop": "trail_stop",
+            }.get(str(trade.get("exit_reason")), trade.get("exit_reason")),
         }
 
     @staticmethod
@@ -375,7 +383,7 @@ class ReplayWorker:
         bars = []
         for row in rows:
             instrument_type = str(row.get("instrument_type", "")).upper()
-            if instrument_type not in {"FUT", "FUTURES", "INDEX", "CE", "PE"}:
+            if instrument_type not in {"FUT", "FUTURES", "INDEX", "EQ", "CE", "PE"}:
                 continue
             bars.append(MarketBar(
                 instrument=Instrument(symbol=str(row["symbol"]), exchange=str(row["exchange"]),
@@ -385,7 +393,16 @@ class ReplayWorker:
                 open=float(row["open"]), high=float(row["high"]), low=float(row["low"]), close=float(row["close"]),
                 volume=row.get("volume"), open_interest=row.get("open_interest"),
             ))
-        return tuple(sorted(bars, key=lambda bar: bar.timestamp))
+        # The futures bar is the decision clock and is emitted immediately by
+        # the aggregator. Ingest same-minute supporting bars first so spot,
+        # VIX, and option inputs are available in that completed bundle.
+        return tuple(sorted(
+            bars,
+            key=lambda bar: (
+                bar.timestamp,
+                str(bar.instrument.instrument_type).upper() in {"FUT", "FUTURES"},
+            ),
+        ))
 
     @staticmethod
     def _aggregator(bars: tuple[MarketBar, ...]) -> CompletedBarAggregator:

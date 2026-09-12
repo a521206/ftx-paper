@@ -10,6 +10,8 @@ from .config import (
     COOLDOWN_MINUTES,
     DEFAULT_CONFIG,
     MORNING_ENTRY_MINUTES,
+    TRAIL_ACTIVATE_BP,
+    TRAIL_DISTANCE_BP,
     STRATEGY_NAME,
     STRATEGY_VERSION,
     StrategyConfig,
@@ -208,9 +210,12 @@ class ConfiguredLiveStrategy:
             exit_mode=order.exit_mode or "signal",
             entry_fill_time=entry_fill_time,
         )
-        trail_distance = 10.0 if order.exit_mode == "trail" else None
+        trail_kwargs = (
+            {"trail_activation_bp": TRAIL_ACTIVATE_BP, "trail_distance_bp": TRAIL_DISTANCE_BP}
+            if order.exit_mode == "trail" else {}
+        )
         self._decision_positions[order.client_order_id] = (
-            position, ExitStateMachine(trail_distance=trail_distance, close_time=time(15, 20)),
+            position, ExitStateMachine(**trail_kwargs, close_time=time(15, 20)),
         )
 
     def on_tick(self, bar: MarketBar):

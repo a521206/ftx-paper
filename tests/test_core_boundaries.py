@@ -171,6 +171,32 @@ def test_exit_state_machine_emits_protective_exit() -> None:
     assert action.intent.role is OrderRole.EXIT
 
 
+def test_trailing_exit_activates_on_next_bar_and_uses_basis_points() -> None:
+    instrument = Instrument("NIFTY", "NFO", "FUTURES")
+    position = PositionState(instrument, 23450.0, 23411.0, 1, OrderSide.BUY, exit_mode="trail")
+    machine = ExitStateMachine(trail_activation_bp=20.0, trail_distance_bp=20.0)
+    bars = (
+        (23445.0, 23475.0, 23438.9, 23467.5),
+        (23466.3, 23467.8, 23452.2, 23464.0),
+        (23463.8, 23500.0, 23453.1, 23490.1),
+        (23490.1, 23517.4, 23489.8, 23505.0),
+        (23506.6, 23506.6, 23493.3, 23500.0),
+        (23499.1, 23505.0, 23487.3, 23495.9),
+        (23495.9, 23495.9, 23477.5, 23490.0),
+        (23490.0, 23490.0, 23475.0, 23476.4),
+        (23476.4, 23479.0, 23470.0, 23473.0),
+    )
+    actions = [
+        machine.evaluate(position, timestamp=datetime(2026, 9, 11, 14, index),
+                         high=high, low=low, close=close,
+                         client_order_id=f"exit-{index}")
+        for index, (_, high, low, close) in enumerate(bars)
+    ]
+    assert all(action is None for action in actions[:-1])
+    assert actions[-1] is not None
+    assert actions[-1].reason == "trailing_stop"
+
+
 def test_order_without_explicit_role_fails_fast() -> None:
     instrument = Instrument("NIFTY", "NSE", "INDEX")
     try:

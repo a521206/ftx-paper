@@ -161,6 +161,8 @@ class IndependentLiveDecisionEngine:
         decision_segment = self._session_segment(decision_at)
         if decision_segment != self._decision_segment:
             self._last_decision = None
+            if self._decision_segment is not None:
+                self.risk_gate.reset_segment()
             self._decision_segment = decision_segment
             self._decision_session = decision_session
         current_pcr = _option_pcr(bundle)
