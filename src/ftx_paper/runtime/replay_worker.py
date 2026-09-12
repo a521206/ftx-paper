@@ -142,7 +142,7 @@ class ReplayWorker:
                 break
             # A date is an independent simulation session. No positions,
             # cooldowns, or risk state may leak into the next date.
-            strategy = ConfiguredLiveStrategy(capital=CAPITAL)
+            strategy = ConfiguredLiveStrategy(capital=CAPITAL, vehicle=vehicle)
             engine = PaperEngine(strategy)
             strategy.update_portfolio_state(equity=current_equity, peak_equity=peak_equity)
             bars = self._bars(date)

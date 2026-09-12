@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
 from zoneinfo import ZoneInfo
 from .bundles import DecisionBundle
-from ftx_paper.contracts import MarketRole, OptionRole, OrderIntent, OrderRole, Role, role_to_key
+from ftx_paper.contracts import MarketBar, MarketRole, OptionRole, OrderIntent, OrderRole, Role, SyntheticPremiumPair, synthetic_future_quote, role_to_key
 from .features import option_pcr_at_event, vix_open_and_event
 from .location_engine import Cell, LocationDetector, TransitionPattern, transition_patterns_allow
 from .risk import RiskSizer
@@ -17,6 +18,7 @@ from ftx_paper.strategy.config import (
     AFTERNOON_ENTRY_MINUTES,
     MORNING_CELL_POLICIES,
     MORNING_ENTRY_MINUTES,
+    VEHICLE_MAX_RISK_LOTS,
     CellPolicyConfig,
     Session,
 )
@@ -47,6 +49,29 @@ def _supporting_bar(bundle: DecisionBundle, role: Role):
     supporting = bundle.supporting_inputs or {}
     bars = supporting.get("bars", {})
     return bars.get(role) if isinstance(bars, dict) else None
+
+
+def _synthetic_premiums(bundle: DecisionBundle) -> SyntheticPremiumPair | None:
+    """Return the causal same-minute option pair for synthetic sizing."""
+    futures = bundle.bars.get(MarketRole.FUTURES)
+    supporting = bundle.supporting_inputs or {}
+    bars = supporting.get("bars", {})
+    if futures is None or not isinstance(bars, Mapping):
+        return None
+    sources = supporting.get("sources", {})
+    option_bars: dict[Role, MarketBar] = {
+        role: bar
+        for role, bar in bars.items()
+        if isinstance(role, (MarketRole, OptionRole))
+        and (
+            not isinstance(sources, Mapping)
+            or sources.get(role_to_key(role), "same_minute") == "same_minute"
+        )
+    }
+    quote = synthetic_future_quote(futures, option_bars)
+    if quote is None:
+        return None
+    return SyntheticPremiumPair(quote.ce.close, quote.pe.close)
 
 
 def _decision_datetime(bundle: DecisionBundle) -> datetime:
@@ -86,10 +111,13 @@ class IndependentLiveDecisionEngine:
     direction, and cooldown logic.  It has no historical-pipeline imports.
     """
 
-    def __init__(self, *, version: str, config_hash: str, capital: float, cooldown_minutes: int = 30, prior_day_high: float | None = None, prior_day_low: float | None = None, morning_entry_minutes: tuple[int, int] = MORNING_ENTRY_MINUTES, afternoon_entry_minutes: tuple[int, int] = AFTERNOON_ENTRY_MINUTES, transition_patterns: tuple[TransitionPattern, ...] = (), expiry_dates: frozenset[str] = frozenset(), risk_gate: RiskGateState | None = None) -> None:
+    def __init__(self, *, version: str, config_hash: str, capital: float, cooldown_minutes: int = 30, prior_day_high: float | None = None, prior_day_low: float | None = None, morning_entry_minutes: tuple[int, int] = MORNING_ENTRY_MINUTES, afternoon_entry_minutes: tuple[int, int] = AFTERNOON_ENTRY_MINUTES, transition_patterns: tuple[TransitionPattern, ...] = (), expiry_dates: frozenset[str] = frozenset(), risk_gate: RiskGateState | None = None, vehicle: str = "futures") -> None:
         self.version, self.config_hash = version, config_hash
         self.cooldown_minutes = cooldown_minutes
         self.capital = capital
+        self.vehicle = str(vehicle).lower()
+        if self.vehicle not in {"futures", "synthetic"}:
+            raise ValueError("vehicle must be 'futures' or 'synthetic'")
         self._equity = capital
         self._peak_equity = capital
         self.prior_day_high, self.prior_day_low = prior_day_high, prior_day_low
@@ -254,8 +282,6 @@ class IndependentLiveDecisionEngine:
                 reason = "setup_score_skip"
             elif not transition_patterns_allow(location_snapshot, cell_policy.transition_patterns or self.transition_patterns):
                 reason = "transition_policy_mismatch"
-            elif self._last_decision and (decision_dt - self._last_decision).total_seconds() < self.cooldown_minutes * 60:
-                reason = "cooldown"
             elif vix_bar.close <= 0:
                 reason = "vix_gate"
             if reason:
@@ -265,11 +291,20 @@ class IndependentLiveDecisionEngine:
                      "decision_id": sha256(f"{candidate_id}:{reason}".encode()).hexdigest()[:24]},
                 ))
                 continue
-            self._last_decision = decision_dt
             side = cell_policy.direction
             stop = stop_price(current, side.value, stop_basis)
-            sizing = RiskSizer().size(capital=self.capital, equity=self._equity, peak_equity=self._peak_equity, entry=current, stop=stop, score=score, vix=float(vix_bar.close), is_expiry_day=bundle.trading_date in self.expiry_dates)
+            sizing = RiskSizer().size(
+                capital=self.capital, equity=self._equity, peak_equity=self._peak_equity,
+                entry=current, stop=stop, score=score, vix=float(vix_bar.close),
+                is_expiry_day=bundle.trading_date in self.expiry_dates,
+                vehicle=self.vehicle,
+                synthetic_premiums=_synthetic_premiums(bundle),
+            )
             quantity = sizing.quantity
+            staged_cap = VEHICLE_MAX_RISK_LOTS[self.vehicle] // (
+                self.risk_gate.entries_for(cell.name) + 1
+            )
+            quantity = min(quantity, max(1, staged_cap))
             if sizing.approved and cell_policy.stability < 1.0:
                 quantity = max(1, int(quantity * cell_policy.stability))
             candidate.update(
@@ -284,7 +319,9 @@ class IndependentLiveDecisionEngine:
                     **candidate, "outcome": "sizing rejection", "reason": sizing.reason,
                 }))
                 continue
-            gate_reason = self.risk_gate.rejection_reason(cell=cell.name, direction=direction, bar=sequence, quantity=sizing.quantity, date=bundle.trading_date)
+            # Gate the executable, stability-adjusted size rather than the
+            # pre-stability risk ceiling.
+            gate_reason = self.risk_gate.rejection_reason(cell=cell.name, direction=direction, bar=sequence, quantity=quantity, date=bundle.trading_date)
             if gate_reason is not None:
                 events.append(LiveDecision(
                     "REJECTEDDECISION",
@@ -292,6 +329,8 @@ class IndependentLiveDecisionEngine:
                      "decision_id": sha256(f"{candidate_id}:{gate_reason}".encode()).hexdigest()[:24]},
                 ))
                 continue
+            # A rejected candidate must not consume the policy cooldown.
+            self._last_decision = decision_dt
             self.risk_gate.record_entry(cell=cell.name, direction=direction, quantity=quantity, date=bundle.trading_date)
             order = OrderIntent(candidate_id, futures.instrument, side, quantity, reason="live_policy_accepted", cell=cell.name, stop_price=stop, exit_mode=cell_policy.exit_mode.value, entry_bar=sequence, role=OrderRole.ENTRY)
             events[-1] = LiveDecision("ACCEPTEDDECISION", {**candidate, "outcome": "accepted", "reason": "eligible"}, order=order)

@@ -66,6 +66,10 @@ class RiskGateState:
             cell=cell, direction=direction, bar=bar, quantity=quantity, date=date,
         ) is None
 
+    def entries_for(self, cell: str) -> int:
+        """Return the number of accepted entries for a cell today."""
+        return self.cells.get(cell, CellGateState()).total_entries
+
     def record_entry(self, *, cell: str, direction: str, quantity: int,
                      date: str | None = None) -> None:
         self._new_day(date)
@@ -93,8 +97,12 @@ class RiskGateState:
         self.cells.clear()
 
     def reset_segment(self) -> None:
-        """Reset thesis/cell state at a session cooldown segment boundary."""
-        self.cells.clear()
+        """Reset cooldown/thesis state while preserving daily entry counts."""
+        for state in self.cells.values():
+            state.consecutive_stops = 0
+            state.locked_until_bar = 0
+            state.cooldown_until_bar = 0
+            state.failed_today = False
 
     def snapshot(self) -> dict[str, object]:
         return {

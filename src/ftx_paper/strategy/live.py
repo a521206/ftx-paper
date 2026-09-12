@@ -40,6 +40,7 @@ class ConfiguredLiveStrategy:
         decide: Callable[[MarketBar], tuple[OrderIntent, ...]] | None = None,
         config: StrategyConfig = DEFAULT_CONFIG,
         expiry_dates: frozenset[str] = frozenset(),
+        vehicle: str = "futures",
     ) -> None:
         self._decide = decide
         self.config = config
@@ -52,6 +53,9 @@ class ConfiguredLiveStrategy:
         self._decision_positions: dict[str, tuple[PositionState, ExitStateMachine]] = {}
         self._pending_exits: dict[str, str] = {}
         self._capital = capital
+        self.vehicle = str(vehicle).lower()
+        if self.vehicle not in {"futures", "synthetic"}:
+            raise ValueError("vehicle must be 'futures' or 'synthetic'")
         self._equity = capital
         self._peak_equity = capital
         self._decision_engine = IndependentLiveDecisionEngine(
@@ -60,6 +64,7 @@ class ConfiguredLiveStrategy:
             morning_entry_minutes=config.morning_entry_minutes,
             afternoon_entry_minutes=config.afternoon_entry_minutes,
             expiry_dates=expiry_dates,
+            vehicle=self.vehicle,
         )
 
     @property
@@ -105,6 +110,7 @@ class ConfiguredLiveStrategy:
             morning_entry_minutes=self.config.morning_entry_minutes,
             afternoon_entry_minutes=self.config.afternoon_entry_minutes,
             expiry_dates=self._decision_engine.expiry_dates,
+            vehicle=self.vehicle,
         )
 
     @classmethod
