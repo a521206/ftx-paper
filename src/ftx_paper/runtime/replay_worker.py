@@ -6,7 +6,7 @@ from threading import Event, Lock, Thread
 from typing import Any
 from uuid import uuid4
 
-from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole
+from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderRole
 from ftx_paper.core import AggregatorConfig, CompletedBarAggregator, InstrumentKey, PaperEngine
 from ftx_paper.runtime.store import RuntimeStore
 from ftx_paper.strategy import ConfiguredLiveStrategy
@@ -85,7 +85,7 @@ class ReplayWorker:
         session_date = str(request.get("session_date") or request.get("date") or "")[:10]
         dates = [session_date] if session_date else self._dates()
         all_events: list[dict[str, Any]] = []
-        trades: list[dict[str, Any]] = []
+        diagnostic_trades: list[dict[str, Any]] = []
         bars_seen = 0
         # This engine/strategy is private to this replay run and never shared
         # with RuntimeSession, its broker, ledger, or risk state.
@@ -111,7 +111,7 @@ class ReplayWorker:
                                        "timestamp": futures_bar.timestamp.isoformat(), "reason": action.reason,
                                        "price": action.price, "source": "replay", "session_date": date})
                     engine.settle_exit(action.intent.client_order_id, filled=True)
-                    self._settle_trade(open_trades, trades, action.intent, futures_bar,
+                    self._settle_trade(open_trades, diagnostic_trades, action.intent, futures_bar,
                                        action.price, action.reason)
                 result = engine.on_bundle(bundle)
                 bars_seen += 1
@@ -120,7 +120,7 @@ class ReplayWorker:
                     all_events.append({"event_type": "ORDER_SUPPRESSED", "decision_id": order.client_order_id,
                                        "timestamp": futures_bar.timestamp.isoformat(), "source": "replay",
                                        "session_date": date, "execution_allowed": False})
-                    if order.role.value == "ENTRY":
+                    if order.role is OrderRole.ENTRY:
                         fill_price = futures_bar.close
                         engine.register_entry(order, fill_price=fill_price,
                                               entry_fill_time=futures_bar.timestamp)
@@ -129,12 +129,20 @@ class ReplayWorker:
                                             "side": order.side.value, "quantity": order.quantity,
                                             "entry_timestamp": futures_bar.timestamp.isoformat(),
                                             "entry_price": fill_price})
-                    elif order.role.value == "EXIT":
-                        self._settle_trade(open_trades, trades, order, futures_bar,
+                    elif order.role is OrderRole.EXIT:
+                        self._settle_trade(open_trades, diagnostic_trades, order, futures_bar,
                                            futures_bar.close, order.reason)
             # Preserve open positions as mark-to-market/open replay results.
-            trades.extend({**trade, "status": "open"} for trade in open_trades)
-        return {"source": "replay", "bars_seen": bars_seen, "events": all_events, "trades": trades}
+            diagnostic_trades.extend({**trade, "status": "open"} for trade in open_trades)
+        return {
+            "source": "replay",
+            "bars_seen": bars_seen,
+            "events": all_events,
+            # Diagnostic-only trades live inside the replay run result. They
+            # are never written to runtime_events, the broker ledger, or the
+            # live trades/capital projections.
+            "diagnostic_trades": diagnostic_trades,
+        }
 
     @staticmethod
     def _settle_trade(open_trades: list[dict[str, Any]], trades: list[dict[str, Any]],

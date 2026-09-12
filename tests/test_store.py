@@ -78,3 +78,12 @@ def test_runtime_store_persists_exportable_market_bars(tmp_path):
         "expiry": "2024-01-25", "strike": 18000.0, "option_type": "CE",
         "source": "historical_backfill", "ingested_at": rows[0]["ingested_at"],
     }]
+
+
+def test_runtime_store_clears_only_replay_runs(tmp_path):
+    store = RuntimeStore(tmp_path)
+    store.create_replay_run("diagnostic-run", {"session_date": "2026-01-05"})
+
+    assert store.clear_replay_runs() == 1
+    assert store.read_replay_runs() == []
+    assert store.read_market_bars("2026-01-05") == []

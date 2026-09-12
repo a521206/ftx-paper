@@ -55,6 +55,7 @@ class RuntimeSession:
         self._aggregator: CompletedBarAggregator | None = None
         self._replaying = False
         self._replay_date: str | None = None
+        self._last_execution_fill: dict[str, object] | None = None
 
     def _restore_ledger_state(self) -> None:
         if self.ledger is None:
@@ -280,6 +281,7 @@ class RuntimeSession:
 
     def _execute_paper_order(self, order, *, session_date: str | None = None,
                              timestamp: str | None = None) -> bool:
+        self._last_execution_fill = None
         context = {
             "decision_id": order.client_order_id,
             "client_order_id": order.client_order_id,
@@ -322,6 +324,12 @@ class RuntimeSession:
                                     f"execution_error:fill_poll:{order.client_order_id}", timestamp=timestamp)
             return False
         if fill:
+            self._last_execution_fill = {
+                "price": fill.price,
+                "fill_timestamp": fill.timestamp,
+                "symbol": fill.instrument.symbol,
+                "quantity": fill.quantity,
+            }
             register_entry = getattr(self.engine, "register_entry", None)
             if callable(register_entry):
                 try:
@@ -404,6 +412,11 @@ class RuntimeSession:
                         "cell": action.cell,
                         "reason": action.reason,
                         "exit_price": action.price,
+                        "trigger_price": action.price,
+                        "fill_price": (self._last_execution_fill or {}).get("price"),
+                        "market_time": bar.timestamp.isoformat(),
+                        "processing_time": datetime.now(timezone.utc).isoformat(),
+                        "trigger_source": "on_closed_bar",
                         "decision_at": bar.timestamp.isoformat(),
                         "decision_source": "live",
                         "execution_allowed": True,
@@ -435,6 +448,11 @@ class RuntimeSession:
                     "cell": action.cell,
                     "reason": action.reason,
                     "exit_price": action.price,
+                    "trigger_price": action.price,
+                    "fill_price": (self._last_execution_fill or {}).get("price"),
+                    "market_time": bar.timestamp.isoformat(),
+                    "processing_time": datetime.now(timezone.utc).isoformat(),
+                    "trigger_source": "on_tick",
                     "decision_at": bar.timestamp.isoformat(),
                     "decision_source": "live",
                     "execution_allowed": True,

@@ -348,6 +348,13 @@ class RuntimeStore:
             ids = connection.execute("SELECT run_id FROM replay_runs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
         return [run for row in ids if (run := self.read_replay_run(str(row[0]))) is not None]
 
+    def clear_replay_runs(self) -> int:
+        """Delete diagnostic replay history without touching live runtime data."""
+        with sqlite3.connect(self.database) as connection:
+            cursor = connection.execute("DELETE FROM replay_runs")
+            deleted = cursor.rowcount
+        return deleted
+
     def recover_interrupted(self) -> bool:
         status = self.read_status()
         if status.get("state") not in {"RUNNING", "STARTING", "START_REQUESTED"}:
