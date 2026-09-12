@@ -14,6 +14,13 @@ def test_net_directional_exposure_is_signed_and_persists_across_segments() -> No
     assert gate.net_directional_lots == 4
 
 
+def test_remaining_directional_headroom_tracks_allocated_lots() -> None:
+    gate = RiskGateState(max_net_directional_lots=4)
+    gate.record_entry(cell="low", direction="short", quantity=2, date="2026-09-10")
+    assert gate.remaining_directional_lots("short") == 2
+    assert gate.remaining_directional_lots("long") == 6
+
+
 def test_segment_reset_clears_cell_cooldown_but_preserves_exposure() -> None:
     gate = RiskGateState(max_net_directional_lots=8)
     gate.record_entry(cell="high", direction="long", quantity=2, date="2026-09-11")

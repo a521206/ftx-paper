@@ -63,6 +63,12 @@ def test_production_strategy_is_versioned_and_injectable() -> None:
     assert strategy.from_snapshot(strategy.snapshot(), capital=CAPITAL).metadata.version == strategy.version
 
 
+def test_strategy_snapshot_restores_vehicle_for_synthetic_replay() -> None:
+    strategy = ConfiguredLiveStrategy(capital=CAPITAL, vehicle="synthetic")
+    restored = ConfiguredLiveStrategy.from_snapshot(strategy.snapshot(), capital=CAPITAL)
+    assert restored.vehicle == "synthetic"
+
+
 def test_live_features_are_causal_and_deterministic() -> None:
     instrument = Instrument("NIFTY", "NSE", "INDEX")
     bars = tuple(MarketBar(instrument, datetime(2026, 1, 1, 9, 15 + i), 100 + i, 102 + i, 99 + i, 101 + i, 10) for i in range(3))

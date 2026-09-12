@@ -66,9 +66,15 @@ class RiskGateState:
             cell=cell, direction=direction, bar=bar, quantity=quantity, date=date,
         ) is None
 
-    def entries_for(self, cell: str) -> int:
-        """Return the number of accepted entries for a cell today."""
-        return self.cells.get(cell, CellGateState()).total_entries
+    def remaining_directional_lots(self, direction: str) -> float:
+        """Return directional headroom for the next executable entry."""
+        signed = self._signed(direction, 1)
+        return max(
+            0.0,
+            self.max_net_directional_lots - self.net_directional_lots
+            if signed > 0
+            else self.max_net_directional_lots + self.net_directional_lots,
+        )
 
     def record_entry(self, *, cell: str, direction: str, quantity: int,
                      date: str | None = None) -> None:

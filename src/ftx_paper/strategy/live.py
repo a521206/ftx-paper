@@ -90,6 +90,7 @@ class ConfiguredLiveStrategy:
     def snapshot(self) -> Mapping[str, object]:
         return {
             "schema_version": 1,
+            "vehicle": self.vehicle,
             "config": self.config.as_dict(),
             "risk_gate": self._decision_engine.risk_snapshot(),
         }
@@ -118,6 +119,9 @@ class ConfiguredLiveStrategy:
         schema_version = snapshot.get("schema_version", 0)
         if not isinstance(schema_version, int) or isinstance(schema_version, bool) or schema_version != 1:
             raise ValueError("unsupported strategy snapshot schema")
+        vehicle = snapshot.get("vehicle", "futures")
+        if not isinstance(vehicle, str) or vehicle.lower() not in {"futures", "synthetic"}:
+            raise ValueError("snapshot vehicle must be 'futures' or 'synthetic'")
         raw_config = snapshot.get("config", {})
         if not isinstance(raw_config, Mapping):
             raise ValueError("strategy snapshot config must be an object")
@@ -151,7 +155,7 @@ class ConfiguredLiveStrategy:
             afternoon_entry_minutes=afternoon_entry_minutes,
             cooldown_minutes=cooldown_minutes,
         )
-        strategy = cls(config=config, capital=capital)
+        strategy = cls(config=config, capital=capital, vehicle=vehicle.lower())
         risk_snapshot = snapshot.get("risk_gate")
         if isinstance(risk_snapshot, Mapping):
             strategy._decision_engine.restore_risk_snapshot(dict(risk_snapshot))

@@ -135,12 +135,13 @@ class IndependentLiveDecisionEngine:
         self._previous_vix = None
         self._vix_history: list = []
         self._location_detector = LocationDetector()
-        self._last_decision: datetime | None = None
         self._trading_date: str | None = None
         self._decision_session: Session | None = None
         self._decision_segment: tuple[Session, int] | None = None
         self._vix_open: float | None = None
-        self.risk_gate = risk_gate or RiskGateState()
+        self.risk_gate = risk_gate or RiskGateState(
+            max_net_directional_lots=VEHICLE_MAX_RISK_LOTS[self.vehicle],
+        )
 
     def _session_for_time(self, decision_at: datetime) -> Session:
         ist_time = decision_at.astimezone(ZoneInfo("Asia/Kolkata"))
@@ -179,7 +180,6 @@ class IndependentLiveDecisionEngine:
             self._vix_history.clear()
             self._vix_open = None
             self._location_detector.reset(prior_day_high=self.prior_day_high, prior_day_low=self.prior_day_low)
-            self._last_decision = None
             self._decision_session = None
             self._decision_segment = None
             self._trading_date = bundle.trading_date
@@ -188,7 +188,6 @@ class IndependentLiveDecisionEngine:
         decision_session = self._session_for_time(decision_at)
         decision_segment = self._session_segment(decision_at)
         if decision_segment != self._decision_segment:
-            self._last_decision = None
             if self._decision_segment is not None:
                 self.risk_gate.reset_segment()
             self._decision_segment = decision_segment
@@ -225,7 +224,6 @@ class IndependentLiveDecisionEngine:
         session_high, session_low = features.session_high, features.session_low
         or_high, or_low = features.opening_range_high, features.opening_range_low
         current = futures.close
-        decision_dt = decision_at
         stop_basis = adaptive_stop_bp(
             prior, float(vix_bar.close),
             is_expiry_day=bundle.trading_date in self.expiry_dates,
@@ -301,10 +299,12 @@ class IndependentLiveDecisionEngine:
                 synthetic_premiums=_synthetic_premiums(bundle),
             )
             quantity = sizing.quantity
-            staged_cap = VEHICLE_MAX_RISK_LOTS[self.vehicle] // (
-                self.risk_gate.entries_for(cell.name) + 1
+            # Allocate from actual remaining directional headroom, not entry
+            # count, before applying cell-policy stability.
+            quantity = min(
+                quantity,
+                int(self.risk_gate.remaining_directional_lots(direction)),
             )
-            quantity = min(quantity, max(1, staged_cap))
             if sizing.approved and cell_policy.stability < 1.0:
                 quantity = max(1, int(quantity * cell_policy.stability))
             candidate.update(
@@ -329,8 +329,6 @@ class IndependentLiveDecisionEngine:
                      "decision_id": sha256(f"{candidate_id}:{gate_reason}".encode()).hexdigest()[:24]},
                 ))
                 continue
-            # A rejected candidate must not consume the policy cooldown.
-            self._last_decision = decision_dt
             self.risk_gate.record_entry(cell=cell.name, direction=direction, quantity=quantity, date=bundle.trading_date)
             order = OrderIntent(candidate_id, futures.instrument, side, quantity, reason="live_policy_accepted", cell=cell.name, stop_price=stop, exit_mode=cell_policy.exit_mode.value, entry_bar=sequence, role=OrderRole.ENTRY)
             events[-1] = LiveDecision("ACCEPTEDDECISION", {**candidate, "outcome": "accepted", "reason": "eligible"}, order=order)
