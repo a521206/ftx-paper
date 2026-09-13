@@ -20,6 +20,7 @@ class PositionState:
     # protective exit is driven by the underlying futures bar.  Keep the
     # reference entry separate so the stop/trail never mixes price domains.
     exit_reference_price: float | None = None
+    target_price: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,7 +37,7 @@ class ExitStateMachine:
     def __init__(self, *, trail_distance: float | None = None,
                  trail_activation_bp: float | None = None,
                  trail_distance_bp: float | None = None,
-                 close_time: time = time(15, 20)) -> None:
+                 close_time: time = time(15, 30)) -> None:
         if trail_distance is not None and trail_distance <= 0:
             raise ValueError("trail distance must be positive")
         if trail_activation_bp is not None and trail_activation_bp <= 0:
@@ -63,8 +64,16 @@ class ExitStateMachine:
                 stop_fill = open_price if open_price < position.stop_price else position.stop_price
             else:
                 stop_fill = open_price if open_price > position.stop_price else position.stop_price
-            return self._action(position, stop_fill, "stop", client_order_id)
+            return self._action(position, stop_fill, "hard_stop", client_order_id)
         favorable = high if position.side is OrderSide.BUY else low
+        if position.exit_mode == "target" and position.target_price is not None:
+            target_hit = (high >= position.target_price if position.side is OrderSide.BUY
+                          else low <= position.target_price)
+            if target_hit:
+                target_fill = (open_price if (open_price > position.target_price if position.side is OrderSide.BUY
+                                              else open_price < position.target_price)
+                               else position.target_price)
+                return self._action(position, target_fill, "target", client_order_id)
         previous_active = self._trail_active
         if self._max_favorable_price is None:
             self._max_favorable_price = favorable
@@ -80,19 +89,19 @@ class ExitStateMachine:
                 self._trail_active = True
             if previous_active:
                 distance = self.trail_distance_bp / 10000
-                trail = (max(reference_entry * ((self._max_favorable_price / reference_entry) - distance), reference_entry)
+                trail = (max(self._max_favorable_price * (1 - distance), reference_entry)
                          if position.side is OrderSide.BUY else
-                         min(reference_entry * ((self._max_favorable_price / reference_entry) + distance), reference_entry))
+                         min(self._max_favorable_price * (1 + distance), reference_entry))
                 if (position.side is OrderSide.BUY and low <= trail) or (position.side is OrderSide.SELL and high >= trail):
                     fill = open_price if (open_price < trail if position.side is OrderSide.BUY else open_price > trail) else trail
-                    return self._action(position, fill, "trailing_stop", client_order_id)
+                    return self._action(position, fill, "trail_stop", client_order_id)
         elif self.trail_distance is not None:
             trail = (self._max_favorable_price - self.trail_distance if position.side is OrderSide.BUY
                      else self._max_favorable_price + self.trail_distance)
             if ((position.side is OrderSide.BUY and low <= trail and favorable > reference_entry) or
                     (position.side is OrderSide.SELL and high >= trail and favorable < reference_entry)):
                 fill = open_price if (open_price < trail if position.side is OrderSide.BUY else open_price > trail) else trail
-                return self._action(position, fill, "trailing_stop", client_order_id)
+                return self._action(position, fill, "trail_stop", client_order_id)
         if include_signal and position.exit_mode == "signal" and len(self._closes) >= 3:
             recent = self._closes[-3:]
             adverse = (recent[0] > recent[1] > recent[2] if position.side is OrderSide.BUY
@@ -100,7 +109,7 @@ class ExitStateMachine:
             if adverse:
                 return self._action(position, close, "counter_move", client_order_id)
         if timestamp.timetz().replace(tzinfo=None) >= self.close_time:
-            return self._action(position, close, "session_close", client_order_id)
+            return self._action(position, close, "eod", client_order_id)
         return None
 
     def evaluate_tick(self, position: PositionState, *, timestamp: datetime, price: float,

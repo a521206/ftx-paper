@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import math
 import json
 from pathlib import Path
 import time
@@ -172,7 +173,7 @@ def test_exit_state_machine_emits_protective_exit() -> None:
     position = PositionState(instrument, 100, 95, 2, OrderSide.BUY)
     action = ExitStateMachine().evaluate(position, timestamp=datetime(2026, 1, 1, 11), high=101, low=94, close=96, client_order_id="exit-1")
     assert action is not None
-    assert action.reason == "stop"
+    assert action.reason == "hard_stop"
     assert action.intent.side is OrderSide.SELL
     assert action.intent.role is OrderRole.EXIT
 
@@ -200,7 +201,7 @@ def test_trailing_exit_activates_on_next_bar_and_uses_basis_points() -> None:
     ]
     assert all(action is None for action in actions[:-1])
     assert actions[-1] is not None
-    assert actions[-1].reason == "trailing_stop"
+    assert actions[-1].reason == "trail_stop"
 
 
 def test_trailing_exit_uses_underlying_reference_for_synthetic_fill() -> None:
@@ -222,8 +223,8 @@ def test_trailing_exit_uses_underlying_reference_for_synthetic_fill() -> None:
     )
     assert first is None
     assert second is not None
-    assert second.reason == "trailing_stop"
-    assert second.price == 108.12
+    assert second.reason == "trail_stop"
+    assert math.isclose(second.price, 108.1158, rel_tol=0.0, abs_tol=1e-9)
 
 
 def test_order_without_explicit_role_fails_fast() -> None:
@@ -257,7 +258,7 @@ def test_production_strategy_composes_features_policy_risk_and_exit() -> None:
     orders = [order for bar in bars for order in strategy.on_bar(bar)]
     assert orders and orders[0].quantity > 0
     exit_orders = strategy.on_bar(MarketBar(instrument, datetime(2026, 1, 1, 15, 20), 90, 91, 89, 90, 10))
-    assert exit_orders and exit_orders[0].reason in {"stop", "trailing_stop", "session_close"}
+    assert exit_orders and exit_orders[0].reason in {"hard_stop", "trail_stop", "eod"}
 
 
 def test_on_bar_sizing_scales_with_setup_score() -> None:

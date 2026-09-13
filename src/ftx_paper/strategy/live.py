@@ -225,13 +225,14 @@ class ConfiguredLiveStrategy:
             exit_mode=order.exit_mode or "signal",
             entry_fill_time=entry_fill_time,
             exit_reference_price=reference_price,
+            target_price=getattr(order, "target_price", None),
         )
         trail_kwargs = (
             {"trail_activation_bp": TRAIL_ACTIVATE_BP, "trail_distance_bp": TRAIL_DISTANCE_BP}
             if order.exit_mode == "trail" else {}
         )
         self._decision_positions[order.client_order_id] = (
-            position, ExitStateMachine(**trail_kwargs, close_time=time(15, 20)),
+            position, ExitStateMachine(**trail_kwargs, close_time=time(15, 30)),
         )
 
     def on_tick(self, bar: MarketBar):
@@ -253,7 +254,7 @@ class ConfiguredLiveStrategy:
         for order_id, (position, exits) in tuple(self._decision_positions.items()):
             if bar.instrument != position.instrument or order_id in self._pending_exits.values():
                 continue
-            if position.entry_fill_time is not None and bar.timestamp <= position.entry_fill_time:
+            if position.entry_fill_time is not None and bar.timestamp < position.entry_fill_time:
                 continue
             action = exits.evaluate(position, timestamp=bar.timestamp, high=bar.high, low=bar.low,
                                     close=bar.close, open=bar.open,

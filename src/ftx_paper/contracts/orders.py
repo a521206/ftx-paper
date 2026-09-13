@@ -41,5 +41,6 @@ class OrderIntent:
     cell: str | None = None
     stop_price: float | None = None
     exit_mode: str | None = None
+    target_price: float | None = None
     entry_bar: int | None = None
     role: OrderRole = field(kw_only=True)

@@ -240,11 +240,14 @@ class RuntimeSession:
                         "outcome": "execution_error", "reason": "missing_synthetic_future_quote",
                     }, f"execution_error:synthetic_quote:{order.client_order_id}", timestamp=timestamp)
                     continue
-                self._execute_paper_order(order, session_date=bundle.trading_date, timestamp=timestamp, synthetic_quote=quote)
+                self._execute_paper_order(order, session_date=bundle.trading_date, timestamp=timestamp,
+                                           synthetic_quote=quote,
+                                           reference_price=futures_bar.close if isinstance(futures_bar, MarketBar) else None)
 
     def _execute_paper_order(self, order, *, session_date: str | None = None,
                              timestamp: str | None = None,
-                             synthetic_quote: SyntheticFutureQuote | None = None) -> bool:
+                             synthetic_quote: SyntheticFutureQuote | None = None,
+                             reference_price: float | None = None) -> bool:
         self._last_execution_fill = None
         context = {
             "decision_id": order.client_order_id,
@@ -328,7 +331,8 @@ class RuntimeSession:
             register_entry = getattr(self.engine, "register_entry", None)
             if callable(register_entry):
                 try:
-                    register_entry(order, fill_price=fill.price, entry_fill_time=timestamp)
+                    register_entry(order, fill_price=fill.price, entry_fill_time=timestamp,
+                                   reference_price=reference_price)
                 except TypeError as exc:
                     if "entry_fill_time" not in str(exc):
                         raise
@@ -416,6 +420,7 @@ class RuntimeSession:
                         order,
                         session_date=bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat(),
                         timestamp=bar.timestamp.isoformat(),
+                        reference_price=bar.close,
                     )
             else:
                 # Settle positions carried into this bar before evaluating a
