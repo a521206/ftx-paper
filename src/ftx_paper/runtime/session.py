@@ -135,7 +135,11 @@ class RuntimeSession:
             self._aggregator = CompletedBarAggregator(
                 role_map, AggregatorConfig(required_roles=(MarketRole.FUTURES,), deadline_seconds=10.0),
             )
-            self.broker = (self.broker_factory or (lambda _client: PaperBroker()))(client)
+            if self.broker_factory:
+                self.broker = self.broker_factory(client)
+            else:
+                from ftx_paper.broker.zerodha import ZerodhaBroker
+                self.broker = ZerodhaBroker(client)
             reset = getattr(self.engine, "reset", None)
             if callable(reset):
                 reset()
@@ -262,6 +266,7 @@ class RuntimeSession:
                         futures_bar, option_bars,
                         symbols=tuple(leg.symbol for leg in order.synthetic_legs)
                         if order.synthetic_legs else None,
+                        same_minute=True,
                     )
                     if synthetic and isinstance(futures_bar, MarketBar) else None
                 )
@@ -282,6 +287,22 @@ class RuntimeSession:
                              synthetic_quote: SyntheticFutureQuote | None = None,
                              reference_price: float | None = None) -> bool:
         self._last_execution_fill = None
+        def cancel_reservation() -> None:
+            if order.role is OrderRole.ENTRY and order.cell and session_date:
+                self.engine.cancel_entry(cell=order.cell,
+                                         direction="long" if order.side is OrderSide.BUY else "short",
+                                         quantity=order.quantity, date=session_date, vehicle=order.vehicle)
+        def compensate_fills(fills: tuple, broker_order_id: str) -> bool:
+            handler = getattr(self.broker, "abort_partial", None)
+            if not callable(handler):
+                return False
+            try:
+                return bool(handler(order, broker_order_id, fills))
+            except Exception as exc:
+                self.store.append_event("EXECUTION_ERROR", {**context, "outcome": "execution_error",
+                    "phase": "compensation", "error_type": type(exc).__name__, "reason": str(exc)},
+                    f"execution_error:compensation:{order.client_order_id}", timestamp=timestamp)
+                return False
         context = {
             "decision_id": order.client_order_id,
             "client_order_id": order.client_order_id,
@@ -301,32 +322,13 @@ class RuntimeSession:
                 ("pe_entry_price" if order.role is OrderRole.ENTRY else "pe_exit_price"): synthetic_quote.pe.close,
                 ("synthetic_entry_price" if order.role is OrderRole.ENTRY else "synthetic_exit_price"): synthetic_quote.price,
             })
-            if order.role is OrderRole.ENTRY:
-                self._synthetic_symbols_by_order[order.client_order_id] = (
-                    synthetic_quote.ce.instrument.symbol, synthetic_quote.pe.instrument.symbol,
-                )
-                self._last_synthetic_quote_by_order[order.client_order_id] = synthetic_quote
-            else:
-                entry_id = self._synthetic_entry_id(order)
-                self._last_synthetic_quote_by_order[entry_id] = synthetic_quote
-            if isinstance(self.broker, PaperBroker):
-                # One paper fill represents both option legs at the current quote.
-                self.broker.update_price(order.instrument.symbol, synthetic_quote.price)
         if self.broker is None:
             self.store.append_event("EXECUTION_ERROR", {**context,
                                                          "outcome": "execution_error",
                                                          "phase": "submit",
                                                          "reason": "broker_unavailable"},
                                     f"execution_error:submit:{order.client_order_id}", timestamp=timestamp)
-            return False
-        if order.vehicle == "synthetic" and not isinstance(self.broker, PaperBroker):
-            self.store.append_event(
-                "EXECUTION_ERROR",
-                {**context, "outcome": "execution_error", "phase": "submit",
-                 "reason": "synthetic_two_leg_execution_unsupported"},
-                f"execution_error:synthetic_execution:{order.client_order_id}",
-                timestamp=timestamp,
-            )
+            cancel_reservation()
             return False
         try:
             ack = self.broker.submit(order)
@@ -337,6 +339,7 @@ class RuntimeSession:
                                                          "error_type": type(exc).__name__,
                                                          "reason": str(exc)},
                                     f"execution_error:submit:{order.client_order_id}", timestamp=timestamp)
+            cancel_reservation()
             return False
         self.store.append_event("ORDER_ACK", {**context,
                                                "client_order_id": ack.client_order_id,
@@ -344,7 +347,10 @@ class RuntimeSession:
                                                "status": ack.status,
                                                "outcome": "acknowledged"}, f"order_ack:{ack.client_order_id}", timestamp=timestamp)
         try:
-            fill = self.broker.poll_fill(order, ack.broker_order_id)
+            poll_fills = getattr(self.broker, "poll_fills", None)
+            fills = tuple(poll_fills(order, ack.broker_order_id)) if callable(poll_fills) else tuple(
+                fill for fill in (self.broker.poll_fill(order, ack.broker_order_id),) if fill
+            )
         except Exception as exc:
             self.store.append_event("EXECUTION_ERROR", {**context,
                                                          "broker_order_id": ack.broker_order_id,
@@ -353,9 +359,11 @@ class RuntimeSession:
                                                          "error_type": type(exc).__name__,
                                                          "reason": str(exc)},
                                     f"execution_error:fill_poll:{order.client_order_id}", timestamp=timestamp)
+            cancel_reservation()
             return False
-        if fill:
-            if fill.vehicle != order.vehicle:
+        fill = fills[0] if fills else None
+        if fills:
+            if any(item.vehicle != order.vehicle for item in fills):
                 self.store.append_event(
                     "EXECUTION_ERROR",
                     {**context, "outcome": "execution_error",
@@ -365,6 +373,25 @@ class RuntimeSession:
                     f"execution_error:fill_vehicle:{order.client_order_id}",
                     timestamp=timestamp,
                 )
+                cancel_reservation()
+                return False
+            if order.vehicle == "synthetic" and len(fills) != 2:
+                compensated = compensate_fills(fills, ack.broker_order_id)
+                if compensated:
+                    cancel_reservation()
+                self.store.append_event("EXECUTION_ERROR", {**context, "outcome": "execution_error",
+                    "phase": "fill_validation", "reason": "synthetic_leg_count_mismatch"},
+                    f"execution_error:synthetic_legs:{order.client_order_id}", timestamp=timestamp)
+                return False
+            if order.vehicle == "synthetic" and any(item.quantity != order.quantity for item in fills):
+                compensated = compensate_fills(fills, ack.broker_order_id)
+                if compensated:
+                    cancel_reservation()
+                self.store.append_event("EXECUTION_ERROR", {**context, "outcome": "execution_error",
+                    "phase": "fill_validation", "reason": "synthetic_quantity_mismatch",
+                    "fill_quantities": [item.quantity for item in fills],
+                    "requested_quantity": order.quantity},
+                    f"execution_error:synthetic_quantity:{order.client_order_id}", timestamp=timestamp)
                 return False
             entry_cost = None
             if order.role is OrderRole.ENTRY:
@@ -377,7 +404,7 @@ class RuntimeSession:
                 else:
                     entry_cost = futures_cost(fill.quantity)
             self._last_execution_fill = {
-                "price": fill.price,
+                "price": synthetic_quote.price if synthetic_quote is not None else fill.price,
                 "fill_timestamp": fill.timestamp,
                 "symbol": fill.instrument.symbol,
                 "quantity": fill.quantity,
@@ -385,24 +412,61 @@ class RuntimeSession:
             register_entry = getattr(self.engine, "register_entry", None)
             if callable(register_entry):
                 try:
-                    register_entry(order, fill_price=fill.price, entry_fill_time=timestamp,
+                    register_entry(order, fill_price=synthetic_quote.price if synthetic_quote is not None else fill.price,
+                                   entry_fill_time=timestamp,
                                    reference_price=reference_price)
                 except TypeError as exc:
                     if "entry_fill_time" not in str(exc):
                         raise
-                    register_entry(order, fill_price=fill.price)
+                    try:
+                        register_entry(order, fill_price=synthetic_quote.price if synthetic_quote is not None else fill.price)
+                    except Exception as exc:
+                        compensated = compensate_fills(fills, ack.broker_order_id)
+                        if compensated:
+                            cancel_reservation()
+                        self.store.append_event("EXECUTION_ERROR", {**context, "outcome": "execution_error",
+                            "phase": "ledger", "error_type": type(exc).__name__, "reason": str(exc)},
+                            f"execution_error:register_entry:{order.client_order_id}", timestamp=timestamp)
+                        return False
+                except Exception as exc:
+                    compensated = compensate_fills(fills, ack.broker_order_id)
+                    if compensated:
+                        cancel_reservation()
+                    self.store.append_event("EXECUTION_ERROR", {**context, "outcome": "execution_error",
+                        "phase": "register_entry", "error_type": type(exc).__name__, "reason": str(exc)},
+                        f"execution_error:register_entry:{order.client_order_id}", timestamp=timestamp)
+                    return False
+            if synthetic_quote is not None and order.role is OrderRole.ENTRY:
+                self._synthetic_symbols_by_order[order.client_order_id] = (
+                    synthetic_quote.ce.instrument.symbol, synthetic_quote.pe.instrument.symbol,
+                )
+                self._last_synthetic_quote_by_order[order.client_order_id] = synthetic_quote
+            elif synthetic_quote is not None:
+                self._last_synthetic_quote_by_order[self._synthetic_entry_id(order)] = synthetic_quote
             position = None
             if self.ledger:
-                position = self.ledger.apply_fill(
-                    fill,
-                    order.side if order.side in (OrderSide.BUY, OrderSide.SELL) else OrderSide.BUY,
-                    vehicle=order.vehicle,
-                )
+                try:
+                    for item in fills:
+                        leg_side = order.side
+                        if order.vehicle == "synthetic" and item.instrument.instrument_type.upper() == "PE":
+                            leg_side = OrderSide.SELL if order.side is OrderSide.BUY else OrderSide.BUY
+                        position = self.ledger.apply_fill(item, leg_side, vehicle=order.vehicle)
+                except Exception as exc:
+                    compensated = compensate_fills(fills, ack.broker_order_id)
+                    if compensated:
+                        cancel_reservation()
+                    self.store.append_event("EXECUTION_ERROR", {**context, "outcome": "execution_error",
+                        "phase": "ledger", "error_type": type(exc).__name__, "reason": str(exc)},
+                        f"execution_error:ledger:{order.client_order_id}", timestamp=timestamp)
+                    return False
             self.store.append_event("FILL", {**context,
                                               "broker_order_id": ack.broker_order_id,
                                               "symbol": fill.instrument.symbol,
                                               "quantity": fill.quantity,
-                                              "price": fill.price,
+                                              "price": synthetic_quote.price if synthetic_quote is not None else fill.price,
+                                              "legs": [{"symbol": item.instrument.symbol, "quantity": item.quantity,
+                                                        "price": item.price, "side": (order.side if item.instrument.instrument_type.upper() != "PE" else (OrderSide.SELL if order.side is OrderSide.BUY else OrderSide.BUY)).value}
+                                                       for item in fills] if order.vehicle == "synthetic" else None,
                                               "fill_timestamp": fill.timestamp,
                                               **({"cost_rs": entry_cost} if entry_cost is not None else {}),
                                               "outcome": "filled",
@@ -419,8 +483,15 @@ class RuntimeSession:
                                                         "outcome": "unfilled",
                                                         "reason": "no_fill_available"},
                                      f"order_unfilled:{order.client_order_id}", timestamp=timestamp)
+            cancel_reservation()
             return False
         if fill and self.ledger:
+            marks = {p.symbol: p.average_price for p in self.ledger.positions()}
+            marks.update({item.instrument.symbol: item.price for item in fills})
+            equity = self.ledger.equity(marks)
+            update_portfolio = getattr(self.engine, "update_portfolio_state", None)
+            if callable(update_portfolio):
+                update_portfolio(equity=equity)
             self.store.patch_status({"initial_capital": self.capital_config.initial_capital,
                                      "max_daily_loss": self.capital_config.max_daily_loss,
                                      "max_net_directional_lots": self.capital_config.max_net_directional_lots,

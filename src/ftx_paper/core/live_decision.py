@@ -359,20 +359,26 @@ class IndependentLiveDecisionEngine:
                          "decision_id": sha256(f"{candidate_id}:{vehicle}:{gate_reason}".encode()).hexdigest()[:24]},
                     ))
                     continue
+                quote = None
+                if vehicle == "synthetic":
+                    supporting = bundle.supporting_inputs or {}
+                    quote = synthetic_future_quote(futures, supporting.get("bars", {}), same_minute=True)
+                    if quote is None:
+                        events[-1] = LiveDecision("SIZING_REJECTED", {
+                            **vehicle_candidate, "outcome": "sizing rejection",
+                            "reason": "missing_synthetic_premium",
+                        })
+                        continue
+                legs = (quote.ce.instrument, quote.pe.instrument) if quote is not None else None
+                order = OrderIntent(candidate_id + f":{vehicle}", futures.instrument, side, quantity,
+                                    reason="live_policy_accepted", cell=cell.name, stop_price=stop,
+                                    exit_mode=cell_policy.exit_mode.value, entry_bar=sequence,
+                    role=OrderRole.ENTRY, vehicle=vehicle, synthetic_legs=legs)
                 self.risk_gate.record_entry(cell=cell.name, direction=direction, quantity=quantity, date=bundle.trading_date)
                 self._vehicle_risk_gates[vehicle].record_entry(
                     cell=cell.name, direction=direction, quantity=quantity,
                     date=bundle.trading_date,
                 )
-                quote = None
-                if vehicle == "synthetic":
-                    supporting = bundle.supporting_inputs or {}
-                    quote = synthetic_future_quote(futures, supporting.get("bars", {}))
-                legs = (quote.ce.instrument, quote.pe.instrument) if quote is not None else None
-                order = OrderIntent(candidate_id + f":{vehicle}", futures.instrument, side, quantity,
-                                    reason="live_policy_accepted", cell=cell.name, stop_price=stop,
-                                    exit_mode=cell_policy.exit_mode.value, entry_bar=sequence,
-                                    role=OrderRole.ENTRY, vehicle=vehicle, synthetic_legs=legs)
                 events[-1] = LiveDecision("ACCEPTEDDECISION", {**vehicle_candidate, "outcome": "accepted", "reason": "eligible"}, order=order)
         return tuple(events)
 
@@ -390,6 +396,13 @@ class IndependentLiveDecisionEngine:
                 cell=cell, reason=reason, entry_bar=entry_bar, exit_bar=exit_bar,
                 date=date, direction=direction, quantity=quantity,
             )
+
+    def cancel_entry(self, *, cell: str, direction: str, quantity: int,
+                     date: str, vehicle: str = "futures") -> None:
+        self.risk_gate.cancel_entry(cell=cell, direction=direction, quantity=quantity, date=date)
+        gate = self._vehicle_risk_gates.get(str(vehicle).lower())
+        if gate is not None:
+            gate.cancel_entry(cell=cell, direction=direction, quantity=quantity, date=date)
 
     def update_portfolio_state(self, *, equity: float, peak_equity: float | None = None) -> None:
         """Update the capital inputs used for subsequent replay decisions."""

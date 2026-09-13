@@ -88,6 +88,17 @@ class RiskGateState:
         self.cells.setdefault(cell, CellGateState()).total_entries += 1
         self.net_directional_lots += self._signed(direction, quantity)
 
+    def cancel_entry(self, *, cell: str, direction: str, quantity: int,
+                     date: str | None = None) -> None:
+        """Release an entry reservation that never reached the broker."""
+        self._new_day(date)
+        state = self.cells.get(cell)
+        if state is not None:
+            state.total_entries = max(0, state.total_entries - 1)
+            if state.total_entries == 0 and state.consecutive_stops == 0:
+                self.cells.pop(cell, None)
+        self.net_directional_lots -= self._signed(direction, quantity)
+
     def record_exit(self, *, cell: str, reason: str, exit_bar: int,
                     entry_bar: int = 0, date: str | None = None,
                     direction: str | None = None, quantity: int = 0) -> None:

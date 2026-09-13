@@ -18,7 +18,7 @@ from .config import (
     StrategyConfig,
 )
 from ftx_paper.core.strategy import StrategyMetadata
-from ftx_paper.core import ExitStateMachine, LiveFeatureCalculator, PositionState, RiskSizer, SetupPolicy
+from ftx_paper.core import ExitStateMachine, LiveFeatureCalculator, PositionState, RiskSizer, SetupPolicy, VehicleRiskLimits
 from ftx_paper.contracts import OrderSide
 from ftx_paper.core import DecisionBundle, IndependentLiveDecisionEngine
 from ftx_paper.core.scoring import calculate_setup_score, compute_selling_structure
@@ -48,6 +48,7 @@ class ConfiguredLiveStrategy:
         expiry_dates: frozenset[str] = frozenset(),
         enabled_vehicles: Sequence[str] = ("futures", "synthetic"),
         vehicle: str | None = None,
+        vehicle_risk_limits: Mapping[str, VehicleRiskLimits] | None = None,
     ) -> None:
         self._decide = decide
         self.config = config
@@ -66,6 +67,7 @@ class ConfiguredLiveStrategy:
         if vehicle is not None:
             enabled_vehicles = (vehicle,)
         self.enabled_vehicles = tuple(dict.fromkeys(str(item).lower() for item in enabled_vehicles))
+        self.vehicle_risk_limits = {str(k).lower(): v for k, v in (vehicle_risk_limits or {}).items()}
         if not self.enabled_vehicles or any(item not in {"futures", "synthetic"} for item in self.enabled_vehicles):
             raise ValueError("enabled_vehicles must contain 'futures' and/or 'synthetic'")
         self._equity = self._capital
@@ -81,6 +83,7 @@ class ConfiguredLiveStrategy:
             afternoon_entry_minutes=config.afternoon_entry_minutes,
             expiry_dates=expiry_dates,
             enabled_vehicles=self.enabled_vehicles,
+            vehicle_risk_limits=self.vehicle_risk_limits,
         )
 
     @property
@@ -114,6 +117,8 @@ class ConfiguredLiveStrategy:
             },
             "config": self.config.as_dict(),
             "risk_gate": self._decision_engine.risk_snapshot(),
+            "vehicle_risk_limits": {k: {"max_quantity": v.max_quantity, "margin_per_lot": v.margin_per_lot}
+                                    for k, v in self.vehicle_risk_limits.items()},
         }
 
     def reset(self) -> None:
@@ -135,6 +140,7 @@ class ConfiguredLiveStrategy:
             afternoon_entry_minutes=self.config.afternoon_entry_minutes,
             expiry_dates=self._decision_engine.expiry_dates,
             enabled_vehicles=self.enabled_vehicles,
+            vehicle_risk_limits=self.vehicle_risk_limits,
         )
 
     @classmethod
@@ -195,7 +201,19 @@ class ConfiguredLiveStrategy:
             afternoon_entry_minutes=afternoon_entry_minutes,
             cooldown_minutes=cooldown_minutes,
         )
-        strategy = cls(config=config, capital_config=capital_config, enabled_vehicles=enabled_vehicles)
+        raw_limits = snapshot.get("vehicle_risk_limits", {})
+        if not isinstance(raw_limits, Mapping):
+            raise ValueError("strategy snapshot vehicle_risk_limits must be an object")
+        limits = {}
+        for key, value in raw_limits.items():
+            if not isinstance(value, Mapping):
+                raise ValueError(f"vehicle risk limits for {key!r} must be an object")
+            try:
+                limits[str(key).lower()] = VehicleRiskLimits(**dict(value))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid vehicle risk limits for {key!r}") from exc
+        strategy = cls(config=config, capital_config=capital_config, enabled_vehicles=enabled_vehicles,
+                       vehicle_risk_limits=limits)
         risk_snapshot = snapshot.get("risk_gate")
         if isinstance(risk_snapshot, Mapping):
             strategy._decision_engine.restore_risk_snapshot(dict(risk_snapshot))
@@ -330,3 +348,8 @@ class ConfiguredLiveStrategy:
             cell=cell, reason=reason, entry_bar=entry_bar, exit_bar=exit_bar,
             date=date, vehicle=vehicle, direction=direction, quantity=quantity,
         )
+
+    def cancel_entry(self, *, cell: str, direction: str, quantity: int,
+                     date: str, vehicle: str = "futures") -> None:
+        self._decision_engine.cancel_entry(cell=cell, direction=direction, quantity=quantity,
+                                           date=date, vehicle=vehicle)

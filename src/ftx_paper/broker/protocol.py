@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from ftx_paper.contracts import Instrument, OrderAck, OrderIntent
+from ftx_paper.contracts import Instrument, OrderAck, OrderIntent, OrderSide
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +44,18 @@ class PaperBroker:
         self.prices[symbol] = price
 
     def submit(self, order: OrderIntent) -> OrderAck:
+        if order.vehicle == "synthetic":
+            assert order.synthetic_legs is not None
+            call, put = order.synthetic_legs
+            prices = [(call, order.side), (put, OrderSide.SELL if order.side is OrderSide.BUY else OrderSide.BUY)]
+            if any(leg.symbol not in self.prices for leg, _ in prices):
+                missing = next(leg.symbol for leg, _ in prices if leg.symbol not in self.prices)
+                raise RuntimeError(f"No paper price available for {missing}")
+            from datetime import datetime, timezone
+            for leg, side in prices:
+                self.fills.append(Fill(order.client_order_id, leg, order.quantity,
+                                       self.prices[leg.symbol], datetime.now(timezone.utc).isoformat(), order.vehicle))
+            return OrderAck(order.client_order_id, f"paper-{len(self.fills)}", "FILLED")
         price = self.prices.get(order.instrument.symbol)
         if price is None:
             raise RuntimeError(f"No paper price available for {order.instrument.symbol}")
@@ -60,6 +72,9 @@ class PaperBroker:
             (fill for fill in reversed(self.fills) if fill.client_order_id == order.client_order_id),
             None,
         )
+
+    def poll_fills(self, order: OrderIntent, broker_order_id: str) -> tuple[Fill, ...]:
+        return tuple(fill for fill in self.fills if fill.client_order_id == order.client_order_id)
 
     def close(self) -> None:
         return None

@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 from ftx_paper.broker.protocol import Fill
 from ftx_paper.contracts import (
-    Instrument, MarketBar, MarketRole, OptionType, OrderAck, OrderIntent, Role,
+    Instrument, MarketBar, MarketRole, OptionType, OrderAck, OrderIntent, OrderSide, Role,
     normalize_exchange_timestamp, parse_role,
 )
 
@@ -220,13 +220,41 @@ def load_startup_backfill(client: Any, instruments: list[ZerodhaInstrument], *, 
 
 
 class ZerodhaBroker:
-    """Disabled order boundary; ftx-paper is a simulated trading runtime."""
+    """Kite execution adapter for futures and two-leg synthetic orders."""
 
     def __init__(self, client: Any) -> None:
         self._client = client
 
+    def _place(self, instrument: Instrument, side: OrderSide, quantity: int) -> str:
+        return str(self._client.place_order(
+            variety="regular", exchange=instrument.exchange,
+            tradingsymbol=instrument.symbol, transaction_type=side.value,
+            quantity=quantity, product="NRML", order_type="MARKET",
+        ))
+
     def submit(self, order: OrderIntent) -> OrderAck:
-        raise RuntimeError("Real Zerodha order submission is disabled in ftx-paper")
+        if order.vehicle == "synthetic":
+            if order.synthetic_legs is None:
+                raise ValueError("synthetic order is missing its CE/PE legs")
+            call, put = order.synthetic_legs
+            put_side = OrderSide.SELL if order.side is OrderSide.BUY else OrderSide.BUY
+            first_id = self._place(call, order.side, order.quantity)
+            try:
+                second_id = self._place(put, put_side, order.quantity)
+            except Exception:
+                cancel = getattr(self._client, "cancel_order", None)
+                if not callable(cancel):
+                    raise RuntimeError("cannot compensate first synthetic leg")
+                cancel(variety="regular", order_id=first_id)
+                history = self._client.order_history(order_id=first_id)
+                if any(str(item.get("status", "")).upper() == "COMPLETE"
+                       for item in (history or ())):
+                    raise RuntimeError("first synthetic leg filled before second-leg failure")
+                raise
+            ids = (first_id, second_id)
+            broker_id = ",".join(ids)
+            return OrderAck(order.client_order_id, broker_id, "OPEN")
+        return OrderAck(order.client_order_id, self._place(order.instrument, order.side, order.quantity), "OPEN")
 
     def close(self) -> None:
         return None
@@ -246,3 +274,52 @@ class ZerodhaBroker:
         if quantity <= 0 or price <= 0 or not timestamp:
             raise RuntimeError("Zerodha returned an incomplete fill record")
         return Fill(order.client_order_id, order.instrument, quantity, price, timestamp, order.vehicle)
+
+    def poll_fills(self, order: OrderIntent, broker_order_id: str) -> tuple[Fill, ...]:
+        if order.vehicle != "synthetic":
+            fill = self.poll_fill(order, broker_order_id)
+            return (fill,) if fill is not None else ()
+        if order.synthetic_legs is None:
+            return ()
+        ids = tuple(broker_order_id.split(","))
+        fills: list[Fill] = []
+        sides = (order.side, OrderSide.SELL if order.side is OrderSide.BUY else OrderSide.BUY)
+        for leg, leg_id, side in zip(order.synthetic_legs, ids, sides):
+            history = self._client.order_history(order_id=leg_id)
+            completed = next((item for item in reversed(history or ()) if str(item.get("status", "")).upper() == "COMPLETE"), None)
+            if completed is None:
+                continue
+            quantity = int(completed.get("filled_quantity", 0))
+            price = float(completed.get("average_price", 0))
+            timestamp = str(completed.get("exchange_timestamp") or completed.get("order_timestamp") or "")
+            if quantity <= 0 or price <= 0 or not timestamp:
+                raise RuntimeError("Zerodha returned an incomplete synthetic leg fill")
+            fills.append(Fill(order.client_order_id, leg, quantity, price, timestamp, order.vehicle))
+        return tuple(fills)
+
+    def abort_partial(self, order: OrderIntent, broker_order_id: str,
+                      fills: tuple[Fill, ...]) -> bool:
+        """Cancel open legs and verify that every filled leg was flattened."""
+        ids = tuple(broker_order_id.split(","))
+        completed_symbols = {fill.instrument.symbol for fill in fills}
+        legs = order.synthetic_legs or (order.instrument,)
+        sides = (order.side, OrderSide.SELL if order.side is OrderSide.BUY else OrderSide.BUY)
+        for leg, leg_id, side in zip(legs, ids, sides):
+            history = self._client.order_history(order_id=leg_id)
+            complete = next((item for item in reversed(history or ())
+                             if str(item.get("status", "")).upper() == "COMPLETE"), None)
+            if complete is None:
+                cancel = getattr(self._client, "cancel_order", None)
+                if not callable(cancel):
+                    return False
+                cancel(variety="regular", order_id=leg_id)
+                continue
+            if leg.symbol in completed_symbols:
+                quantity = int(complete.get("filled_quantity", 0))
+                reverse = OrderSide.SELL if side is OrderSide.BUY else OrderSide.BUY
+                reverse_id = self._place(leg, reverse, quantity)
+                reverse_history = self._client.order_history(order_id=reverse_id)
+                if not any(str(item.get("status", "")).upper() == "COMPLETE"
+                           for item in (reverse_history or ())):
+                    raise RuntimeError(f"failed to verify flatten order for {leg.symbol}")
+        return True

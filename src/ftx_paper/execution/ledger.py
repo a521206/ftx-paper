@@ -70,3 +70,10 @@ class PositionLedger:
             for (vehicle, symbol), quantity in self._quantities.items()
             if quantity
         )
+
+    def equity(self, marks: Mapping[str, float]) -> float:
+        """Mark open positions using the latest execution/market prices."""
+        return self.cash + sum(
+            quantity * float(marks.get(symbol, abs(self._costs[(vehicle, symbol)] / quantity)))
+            for (vehicle, symbol), quantity in self._quantities.items() if quantity
+        )

@@ -129,12 +129,16 @@ def synthetic_future_quote(
     option_bars: Mapping[Role, MarketBar],
     *,
     symbols: tuple[str, str] | None = None,
+    same_minute: bool = False,
 ) -> SyntheticFutureQuote | None:
     """Select the closest same-strike CE/PE pair available for a futures bar."""
     candidates = [bar for bar in option_bars.values()
                   if bar.instrument.instrument_type.upper() in {"CE", "PE"}
                   and bar.instrument.strike is not None
                   and bar.close > 0]
+    if same_minute:
+        futures_minute = market_minute_key(futures.timestamp)
+        candidates = [bar for bar in candidates if market_minute_key(bar.timestamp) == futures_minute]
     if symbols is not None:
         candidates = [bar for bar in candidates if bar.instrument.symbol in symbols]
     grouped: dict[tuple[str | None, float], dict[str, MarketBar]] = {}

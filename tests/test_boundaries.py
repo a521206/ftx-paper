@@ -476,7 +476,7 @@ def test_zerodha_feed_uses_long_cooldown_for_rate_limited_close() -> None:
     assert socket.connections == 3
 
 
-def test_zerodha_order_submission_is_disabled_for_paper_runtime() -> None:
+def test_zerodha_order_submission_returns_live_ack() -> None:
     class Client:
         def place_order(self, **kwargs):
             return "kite-1"
@@ -486,12 +486,9 @@ def test_zerodha_order_submission_is_disabled_for_paper_runtime() -> None:
     instrument = Instrument("NIFTY", "NSE", "INDEX")
     order = OrderIntent("client-1", instrument, OrderSide.BUY, 2, role=OrderRole.ENTRY)
     broker = ZerodhaBroker(Client())
-    try:
-        broker.submit(order)
-    except RuntimeError as exc:
-        assert "disabled" in str(exc)
-    else:
-        raise AssertionError("paper runtime submitted a real Zerodha order")
+    ack = broker.submit(order)
+    assert ack.broker_order_id == "kite-1"
+    assert ack.status == "OPEN"
 
 
 def test_zerodha_socket_defers_subscription_until_connected(monkeypatch) -> None:
