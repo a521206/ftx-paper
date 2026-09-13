@@ -668,7 +668,7 @@ class RuntimeSession:
             self._last_execution_fill.get("realized_pnl")
             if self._last_execution_fill is not None else None
         )
-        if isinstance(realized_pnl, (int, float)):
+        if self.coordinator is None and isinstance(realized_pnl, (int, float)):
             strategy = getattr(self.engine, "strategy", None)
             update_portfolio_state = getattr(strategy, "update_portfolio_state", None)
             portfolio_state = getattr(strategy, "portfolio_state", {})
