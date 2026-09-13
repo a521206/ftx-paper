@@ -12,6 +12,7 @@ from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, O
 from ftx_paper.capital_config import FtxCapitalConfig
 from ftx_paper.core import AggregatorConfig, Cell, CompletedBarAggregator, InstrumentKey, PaperEngine
 from ftx_paper.core.cost import futures_cost, synthetic_futures_cost
+from ftx_paper.execution import PaperExecutionCoordinator
 from ftx_paper.core.settlement import ExitValidationError, validate_exit_order
 from ftx_paper.runtime.store import RuntimeStore
 from ftx_paper.strategy import ConfiguredLiveStrategy
@@ -151,6 +152,7 @@ class ReplayWorker:
             # A date is an independent simulation session. No positions,
             # cooldowns, or risk state may leak into the next date.
             strategy = ConfiguredLiveStrategy(capital_config=self.capital_config, enabled_vehicles=vehicles)
+            coordinator = PaperExecutionCoordinator(strategy.portfolio)
             engine = PaperEngine(strategy)
             strategy.update_portfolio_state(equity=current_equity, peak_equity=peak_equity)
             bars = self._bars(date)
@@ -217,6 +219,7 @@ class ReplayWorker:
                     realized = self._settle_trade(open_trades, diagnostic_trades, action.intent, futures_bar,
                                                   exit_quote, action.reason, exit_price=exit_price,
                                                   trade=open_trade)
+                    coordinator.fill(action.intent, price=exit_price, timestamp=futures_bar.timestamp.isoformat())
                     engine.settle_exit(action.intent.client_order_id, filled=True)
                     if realized is not None:
                         engine.record_exit(cell=realized.cell.name, reason=action.reason,
@@ -266,6 +269,9 @@ class ReplayWorker:
                         engine.register_entry(order, fill_price=fill_price,
                                               entry_fill_time=futures_bar.timestamp,
                                               reference_price=futures_bar.close)
+                        coordinator.fill(order, price=fill_price, timestamp=futures_bar.timestamp.isoformat(),
+                                         synthetic_entry_prices=(entry_quote.ce.close, entry_quote.pe.close)
+                                         if entry_quote is not None else None)
                         open_trades.append({"entry_order_id": order.client_order_id,
                                             "instrument": order.instrument.symbol,
                                             "side": order.side.value, "quantity": order.quantity,
@@ -304,6 +310,8 @@ class ReplayWorker:
                                                       exit_quote, order.reason,
                                                       exit_price=exit_quote.price if exit_quote is not None else futures_bar.close,
                                                       trade=open_trade)
+                        coordinator.fill(order, price=exit_quote.price if exit_quote is not None else futures_bar.close,
+                                         timestamp=futures_bar.timestamp.isoformat())
                         engine.record_exit(cell=realized.cell.name, reason=order.reason,
                                            entry_bar=realized.entry_bar, exit_bar=engine.bars_seen,
                                            date=date, vehicle=order.vehicle,
@@ -319,10 +327,19 @@ class ReplayWorker:
                   if isinstance(event.get("score"), (int, float))]
         normalized_trades = [self._normalize_trade(trade) for trade in diagnostic_trades]
         return {
+            "result_schema_version": 2,
             "source": "replay",
             "vehicles": list(vehicles),
+            "vehicle_semantics": "shared_portfolio_directional_and_margin",
+            "strategy": {"name": ConfiguredLiveStrategy.name, "version": ConfiguredLiveStrategy.version},
+            "configuration": {"initial_capital": initial_capital,
+                               "max_daily_loss": self.capital_config.max_daily_loss,
+                               "max_net_directional_lots": self.capital_config.max_net_directional_lots,
+                               "lot_size": NIFTY_LOT_SIZE},
             "bars_seen": bars_seen,
             "events": all_events,
+            "decisions": [event for event in all_events if str(event.get("event_type", "")).endswith("DECISION")],
+            "first_divergent_stage": None,
             # Diagnostic-only trades live inside the replay run result. They
             # are never written to runtime_events, the broker ledger, or the
             # live trades/capital projections.

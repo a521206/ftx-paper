@@ -20,7 +20,7 @@ from .config import (
 from ftx_paper.core.strategy import StrategyMetadata
 from ftx_paper.core import ExitStateMachine, LiveFeatureCalculator, PositionState, RiskSizer, SetupPolicy, VehicleRiskLimits
 from ftx_paper.contracts import OrderSide
-from ftx_paper.core import DecisionBundle, IndependentLiveDecisionEngine
+from ftx_paper.core import DecisionBundle, IndependentLiveDecisionEngine, PaperPortfolio
 from ftx_paper.core.scoring import calculate_setup_score, compute_selling_structure
 
 
@@ -49,6 +49,7 @@ class ConfiguredLiveStrategy:
         enabled_vehicles: Sequence[str] = ("futures", "synthetic"),
         vehicle: str | None = None,
         vehicle_risk_limits: Mapping[str, VehicleRiskLimits] | None = None,
+        portfolio: PaperPortfolio | None = None,
     ) -> None:
         self._decide = decide
         self.config = config
@@ -64,7 +65,8 @@ class ConfiguredLiveStrategy:
         self._decision_positions: dict[str, tuple[PositionState, ExitStateMachine]] = {}
         self._pending_exits: dict[str, str] = {}
         self.capital_config = capital_config
-        self._capital = capital_config.initial_capital
+        self.portfolio = portfolio or PaperPortfolio(capital_config.initial_capital)
+        self._capital = self.portfolio.initial_capital
         self._daily_date: str | None = None
         self._daily_start_equity = self._capital
         if vehicle is not None:
@@ -80,6 +82,7 @@ class ConfiguredLiveStrategy:
         self._decision_engine = IndependentLiveDecisionEngine(
             version=self.version, config_hash=self.metadata.config_hash,
             cooldown_minutes=config.cooldown_minutes, capital=self._capital,
+            portfolio=self.portfolio,
             max_daily_loss=capital_config.max_daily_loss,
             max_net_directional_lots=capital_config.max_net_directional_lots,
             morning_entry_minutes=config.morning_entry_minutes,
@@ -93,15 +96,17 @@ class ConfiguredLiveStrategy:
     def portfolio_state(self) -> dict[str, float]:
         """Return the equity inputs used by the risk/sizing layer."""
         return {
-            "initial_capital": float(self._capital),
-            "current_equity": float(self._equity),
-            "peak_equity": float(self._peak_equity),
+            "initial_capital": float(self.portfolio.initial_capital),
+            "current_equity": float(self.portfolio.equity),
+            "peak_equity": float(self.portfolio.peak_equity),
         }
 
     def update_portfolio_state(self, *, equity: float, peak_equity: float | None = None) -> None:
         """Update replay/live sizing inputs after a settled portfolio event."""
         self._equity = float(equity)
         self._peak_equity = max(float(peak_equity if peak_equity is not None else self._peak_equity), self._equity)
+        self.portfolio.equity = self._equity
+        self.portfolio.peak_equity = self._peak_equity
         self._decision_engine.update_portfolio_state(equity=self._equity, peak_equity=self._peak_equity)
 
     @property
@@ -120,6 +125,7 @@ class ConfiguredLiveStrategy:
             },
             "config": self.config.as_dict(),
             "risk_gate": self._decision_engine.risk_snapshot(),
+            "portfolio": self.portfolio.snapshot(),
             "vehicle_risk_limits": {k: {"max_quantity": v.max_quantity, "margin_per_lot": v.margin_per_lot}
                                     for k, v in self.vehicle_risk_limits.items()},
         }
@@ -137,9 +143,11 @@ class ConfiguredLiveStrategy:
         self._pending_exits.clear()
         self._equity = self._capital
         self._peak_equity = self._capital
+        self.portfolio.reset()
         self._decision_engine = IndependentLiveDecisionEngine(
             version=self.version, config_hash=self.metadata.config_hash,
             cooldown_minutes=self.config.cooldown_minutes, capital=self._capital,
+            portfolio=self.portfolio,
             max_daily_loss=self.capital_config.max_daily_loss,
             max_net_directional_lots=self.capital_config.max_net_directional_lots,
             morning_entry_minutes=self.config.morning_entry_minutes,
@@ -314,7 +322,10 @@ class ConfiguredLiveStrategy:
         self._decision_positions[order.client_order_id] = (
             position, ExitStateMachine(**trail_kwargs, close_time=time(15, 30)),
         )
-        self._decision_engine.register_entry_margin(vehicle=order.vehicle, quantity=order.quantity)
+        self.portfolio.fill_entry(
+            order, price=position.entry_price,
+            timestamp=entry_fill_time.isoformat() if isinstance(entry_fill_time, datetime) else None,
+        )
 
     def on_tick(self, bar: MarketBar):
         actions = []
@@ -350,9 +361,7 @@ class ConfiguredLiveStrategy:
         if filled and entry_order_id is not None:
             position_entry = self._decision_positions.pop(entry_order_id, None)
             if position_entry is not None:
-                self._decision_engine.release_entry_margin(
-                    vehicle=position_entry[0].vehicle, quantity=position_entry[0].quantity,
-                )
+                self.portfolio.release_reservation(entry_order_id)
 
     def record_exit(self, *, cell: str, reason: str, entry_bar: int,
                     exit_bar: int, date: str, vehicle: str = "futures",

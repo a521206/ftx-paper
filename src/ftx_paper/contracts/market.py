@@ -124,6 +124,23 @@ class SyntheticFutureQuote:
         return self.strike + self.ce.close - self.pe.close
 
 
+@dataclass(frozen=True, slots=True)
+class SyntheticQuoteSelection:
+    """Auditable synthetic quote selection; fallback is never implicit."""
+    anchor_source: str
+    weekly_expiry: str | None
+    ce_symbol: str
+    pe_symbol: str
+    strike: float
+    anchor_timestamp: str
+    ce_timestamp: str
+    pe_timestamp: str
+    same_minute: bool
+    entry_mark: float
+    exit_mark: float | None = None
+    fallback_classification: str = "same_minute"
+
+
 def synthetic_future_quote(
     futures: MarketBar,
     option_bars: Mapping[Role, MarketBar],
@@ -154,3 +171,26 @@ def synthetic_future_quote(
         return None
     (_, strike), legs = min(pairs, key=lambda item: abs(item[0][1] - futures.close))
     return SyntheticFutureQuote(strike, legs["CE"], legs["PE"])
+
+
+def select_synthetic_quote(
+    anchor: MarketBar, option_bars: Mapping[Role, MarketBar], *,
+    symbols: tuple[str, str] | None = None, same_minute: bool = True,
+    allow_fallback: bool = False,
+) -> tuple[SyntheticFutureQuote, SyntheticQuoteSelection] | None:
+    quote = synthetic_future_quote(anchor, option_bars, symbols=symbols, same_minute=same_minute)
+    fallback = "same_minute"
+    if quote is None and same_minute and allow_fallback:
+        quote = synthetic_future_quote(anchor, option_bars, symbols=symbols)
+        fallback = "explicit_stale_fallback" if quote is not None else "unavailable"
+    if quote is None:
+        return None
+    selection = SyntheticQuoteSelection(
+        anchor_source="spot" if anchor.instrument.instrument_type.upper() in {"INDEX", "EQ"} else "futures",
+        weekly_expiry=quote.ce.instrument.expiry, ce_symbol=quote.ce.instrument.symbol,
+        pe_symbol=quote.pe.instrument.symbol, strike=quote.strike,
+        anchor_timestamp=anchor.timestamp.isoformat(), ce_timestamp=quote.ce.timestamp.isoformat(),
+        pe_timestamp=quote.pe.timestamp.isoformat(), same_minute=quote.ce.timestamp == anchor.timestamp == quote.pe.timestamp,
+        entry_mark=quote.price, fallback_classification=fallback,
+    )
+    return quote, selection

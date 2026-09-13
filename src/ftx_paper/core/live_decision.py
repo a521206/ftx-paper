@@ -11,6 +11,7 @@ from .features import option_pcr_at_event, vix_open_and_event
 from .location_engine import Cell, LocationDetector, TransitionPattern, transition_patterns_allow
 from .risk import RiskConfig, RiskSizer, VehicleRiskLimits
 from .risk_state import RiskGateState
+from .portfolio import MarginReservation, PaperPortfolio
 from .adaptive_stop import adaptive_stop_bp, stop_price
 from .scoring import calculate_setup_score, compute_selling_structure, score_to_setup_type
 from ftx_paper.strategy.config import (
@@ -122,18 +123,19 @@ class IndependentLiveDecisionEngine:
     direction, and cooldown logic.  It has no historical-pipeline imports.
     """
 
-    def __init__(self, *, version: str, config_hash: str, capital: float, max_daily_loss: float = 0.05, max_net_directional_lots: float = 8.0, cooldown_minutes: int = 30, prior_day_high: float | None = None, prior_day_low: float | None = None, morning_entry_minutes: tuple[int, int] = MORNING_ENTRY_MINUTES, afternoon_entry_minutes: tuple[int, int] = AFTERNOON_ENTRY_MINUTES, transition_patterns: tuple[TransitionPattern, ...] = (), expiry_dates: frozenset[str] = frozenset(), risk_gate: RiskGateState | None = None, enabled_vehicles: tuple[str, ...] = ("futures", "synthetic"), vehicle: str | None = None, vehicle_risk_limits: Mapping[str, VehicleRiskLimits] | None = None) -> None:
+    def __init__(self, *, version: str, config_hash: str, capital: float, portfolio: PaperPortfolio | None = None, max_daily_loss: float = 0.05, max_net_directional_lots: float = 8.0, cooldown_minutes: int = 30, prior_day_high: float | None = None, prior_day_low: float | None = None, morning_entry_minutes: tuple[int, int] = MORNING_ENTRY_MINUTES, afternoon_entry_minutes: tuple[int, int] = AFTERNOON_ENTRY_MINUTES, transition_patterns: tuple[TransitionPattern, ...] = (), expiry_dates: frozenset[str] = frozenset(), risk_gate: RiskGateState | None = None, enabled_vehicles: tuple[str, ...] = ("futures", "synthetic"), vehicle: str | None = None, vehicle_risk_limits: Mapping[str, VehicleRiskLimits] | None = None) -> None:
         self.version, self.config_hash = version, config_hash
         self.cooldown_minutes = cooldown_minutes
-        self.capital = capital
+        self.portfolio = portfolio or PaperPortfolio(capital)
+        self.capital = self.portfolio.initial_capital
         if vehicle is not None:
             enabled_vehicles = (str(vehicle).lower(),)
         self.enabled_vehicles = tuple(dict.fromkeys(str(item).lower() for item in enabled_vehicles))
         if not self.enabled_vehicles or any(item not in {"futures", "synthetic"} for item in self.enabled_vehicles):
             raise ValueError("enabled_vehicles must contain 'futures' and/or 'synthetic'")
-        self._equity = capital
-        self._peak_equity = capital
-        self._daily_start_equity = capital
+        self._equity = self.portfolio.equity
+        self._peak_equity = self.portfolio.peak_equity
+        self._daily_start_equity = self.portfolio.daily_baseline
         self.max_daily_loss = max_daily_loss
         self.prior_day_high, self.prior_day_low = prior_day_high, prior_day_low
         self.morning_entry_minutes = morning_entry_minutes
@@ -169,20 +171,22 @@ class IndependentLiveDecisionEngine:
 
     @property
     def open_margin_used(self) -> float:
-        return self._open_margin_used
+        return self.portfolio.open_margin
 
     def register_entry_margin(self, *, vehicle: str, quantity: int) -> None:
+        # Legacy callback compatibility: the aggregate remains the owner;
+        # real execution always uses the order-id keyed reservation path.
         normalized = str(vehicle).lower()
-        limits = self._vehicle_sizers[normalized].vehicle_limits[normalized]
-        self._open_margin_used += max(int(quantity), 0) * float(limits.margin_per_lot)
+        key = f"legacy:{normalized}:{len(self.portfolio.reservations)}"
+        amount = max(int(quantity), 0) * float(self._vehicle_sizers[normalized].vehicle_limits[normalized].margin_per_lot)
+        self.portfolio.reservations[key] = MarginReservation(key, normalized, int(quantity), amount)
 
     def release_entry_margin(self, *, vehicle: str, quantity: int) -> None:
         normalized = str(vehicle).lower()
-        limits = self._vehicle_sizers[normalized].vehicle_limits[normalized]
-        self._open_margin_used = max(
-            0.0,
-            self._open_margin_used - max(int(quantity), 0) * float(limits.margin_per_lot),
-        )
+        for key, reservation in tuple(self.portfolio.reservations.items()):
+            if key.startswith(f"legacy:{normalized}:") and reservation.quantity == int(quantity):
+                self.portfolio.reservations.pop(key, None)
+                break
 
     def _session_for_time(self, decision_at: datetime) -> Session:
         ist_time = decision_at.astimezone(ZoneInfo("Asia/Kolkata"))
@@ -350,11 +354,11 @@ class IndependentLiveDecisionEngine:
             for vehicle_index, vehicle in enumerate(self.enabled_vehicles):
                 synthetic_quote = _synthetic_premiums(bundle)
                 sizing = self._vehicle_sizers[vehicle].size(
-                    capital=self.capital, equity=self._equity, peak_equity=self._peak_equity,
+                    capital=self.portfolio.initial_capital, equity=self.portfolio.equity, peak_equity=self.portfolio.peak_equity,
                     entry=current, stop=stop, score=score, vix=float(vix_bar.close),
                     is_expiry_day=bundle.trading_date in self.expiry_dates,
                     vehicle=vehicle, synthetic_premiums=synthetic_quote,
-                    open_margin_used=self._open_margin_used,
+                    open_margin_used=self.portfolio.open_margin,
                 )
                 quantity = sizing.quantity
                 quantity_before_stability = quantity
@@ -469,6 +473,8 @@ class IndependentLiveDecisionEngine:
         """Update the capital inputs used for subsequent replay decisions."""
         self._equity = float(equity)
         self._peak_equity = max(float(peak_equity if peak_equity is not None else self._peak_equity), self._equity)
+        self.portfolio.equity = self._equity
+        self.portfolio.peak_equity = self._peak_equity
 
     def risk_snapshot(self) -> dict[str, object]:
         """Return JSON-safe gate state for persistence across segments."""

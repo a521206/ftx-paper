@@ -7,8 +7,9 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from ftx_paper.broker import PaperBroker
-from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderIntent, OrderRole, OrderSide, parse_role, role_to_key
-from ftx_paper.core import CompletedBarAggregator, DecisionBundle, ExitAction, ExitStateMachine, IndependentLiveDecisionEngine, LiveFeatureCalculator, PaperEngine, PositionState, RiskConfig, RiskSizer, SetupPolicy, adaptive_stop_bp, option_pcr_at_event, replay, vix_open_and_event
+from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderIntent, OrderRole, OrderSide, parse_role, role_to_key, select_synthetic_quote
+from ftx_paper.core import CompletedBarAggregator, DecisionBundle, ExitAction, ExitStateMachine, IndependentLiveDecisionEngine, LiveFeatureCalculator, PaperEngine, PaperPortfolio, PositionState, RiskConfig, RiskSizer, SetupPolicy, adaptive_stop_bp, option_pcr_at_event, replay, vix_open_and_event
+from ftx_paper.execution import PaperExecutionCoordinator
 from ftx_paper.core import LiveSession
 from ftx_paper.core.location_engine import Cell, Location
 from ftx_paper.core.live_decision import _configured_policies_for_cell
@@ -16,6 +17,63 @@ from ftx_paper.strategy.config import Session
 from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.strategy import ConfiguredLiveStrategy
 from ftx_paper.capital_config import FtxCapitalConfig, RESEARCH_CAPITAL_CONFIG as CAPITAL_CONFIG
+
+
+def test_paper_portfolio_lifecycle_is_idempotent_and_restorable() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    entry = OrderIntent("entry-portfolio", instrument, OrderSide.BUY, 2, role=OrderRole.ENTRY)
+    exit_order = OrderIntent("exit-portfolio", instrument, OrderSide.SELL, 2, role=OrderRole.EXIT,
+                             entry_order_id=entry.client_order_id)
+    portfolio = PaperPortfolio(2_500_000)
+    coordinator = PaperExecutionCoordinator(portfolio)
+    coordinator.submit(entry)
+    coordinator.submit(entry)
+    assert portfolio.open_margin == pytest.approx(350_000)
+    coordinator.fill(entry, price=100, timestamp="2026-01-01T10:20:00+05:30")
+    coordinator.fill(entry, price=100, timestamp="2026-01-01T10:20:00+05:30")
+    assert len(portfolio.positions) == 1
+    coordinator.fill(exit_order, price=105, cost=10)
+    coordinator.fill(exit_order, price=105, cost=10)
+    assert portfolio.open_margin == 0
+    assert portfolio.realized_pnl == pytest.approx(640)
+    restored = PaperPortfolio.from_snapshot(portfolio.snapshot())
+    assert restored.capital_snapshot() == portfolio.capital_snapshot()
+
+
+def test_paper_portfolio_failed_entry_releases_reservation_and_failed_exit_keeps_position() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    entry = OrderIntent("entry-failed", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY)
+    portfolio = PaperPortfolio(2_500_000)
+    coordinator = PaperExecutionCoordinator(portfolio)
+    coordinator.submit(entry)
+    assert coordinator.cancel(entry)
+    assert portfolio.open_margin == 0
+    coordinator.submit(entry)
+    coordinator.fill(entry, price=100)
+    exit_order = OrderIntent("exit-failed", instrument, OrderSide.SELL, 1, role=OrderRole.EXIT,
+                             entry_order_id=entry.client_order_id)
+    coordinator.failed_exit(exit_order)
+    assert entry.client_order_id in portfolio.positions
+    assert portfolio.open_margin > 0
+
+
+def test_synthetic_quote_selection_requires_same_minute_unless_fallback_is_explicit() -> None:
+    anchor_time = datetime(2026, 1, 1, 10, 20, tzinfo=timezone.utc)
+    anchor = MarketBar(Instrument("NIFTY", "NSE", "INDEX"), anchor_time, 100, 100, 100, 100)
+    ce = MarketBar(Instrument("NIFTYCE", "NFO", "CE", "2026-01-01", 100), anchor_time, 5, 5, 5, 5)
+    pe = MarketBar(Instrument("NIFTYPE", "NFO", "PE", "2026-01-01", 100), anchor_time, 4, 4, 4, 4)
+    selected = select_synthetic_quote(anchor, {OptionRole("NIFTYCE"): ce, OptionRole("NIFTYPE"): pe})
+    assert selected is not None
+    _, provenance = selected
+    assert provenance.anchor_source == "spot"
+    assert provenance.same_minute
+    stale = {OptionRole("NIFTYCE"): ce, OptionRole("NIFTYPE"): pe}
+    later = anchor_time.replace(minute=21)
+    stale[OptionRole("NIFTYCE")] = MarketBar(ce.instrument, later, 5, 5, 5, 5)
+    assert select_synthetic_quote(anchor, stale) is None
+    fallback = select_synthetic_quote(anchor, stale, allow_fallback=True)
+    assert fallback is not None
+    assert fallback[1].fallback_classification == "explicit_stale_fallback"
 
 
 def test_p6_stop_and_quantity_golden_fixture() -> None:

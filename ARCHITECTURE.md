@@ -25,6 +25,16 @@ translates broker requests and order acknowledgements into package contracts.
 Fill reconciliation and paper-position state belong to the session/execution
 layer. `OrderAck` and `Fill` are deliberately separate types.
 
+## Paper portfolio semantics
+
+Paper intentionally uses one shared portfolio across all enabled vehicles.
+Directional exposure, margin reservations, equity, drawdown, positions, and
+settlement are portfolio-level state; vehicle sizing remains a vehicle gate.
+Replay and live execution use the same `PaperPortfolio` and execution
+coordinator lifecycle. This differs from the canonical runner when it creates
+one portfolio per vehicle, so parity comparisons must explicitly configure the
+canonical side to the shared semantics above.
+
 ## Event timestamp contract
 
 `decision_at` is the sole decision timestamp field in decision event payloads.

@@ -254,6 +254,11 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
     @app.get("/api/v1/capital")
     def capital():
         status = store.read_status()
+        strategy = getattr(getattr(session, "engine", None), "strategy", None)
+        portfolio = getattr(strategy, "portfolio", None)
+        if portfolio is not None:
+            values = portfolio.capital_snapshot()
+            return jsonify({**values, "capital": values["current_equity"], "currency": "INR"})
         raw = status.get("capital", 0)
         values = raw if isinstance(raw, dict) else {}
         return jsonify({

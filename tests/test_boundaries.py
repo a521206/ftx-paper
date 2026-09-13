@@ -14,6 +14,9 @@ import ftx_paper.broker.zerodha.adapter as zerodha_adapter
 from ftx_paper.contracts import OrderIntent, OrderRole, OrderSide
 from ftx_paper.contracts import Instrument, MarketBar
 from ftx_paper.runtime.events import DecisionTimestampError, decision_session_bucket
+from ftx_paper.core import PaperEngine, PaperPortfolio
+from ftx_paper.strategy import ConfiguredLiveStrategy
+from ftx_paper.capital_config import FtxCapitalConfig
 
 
 def test_api_reads_runtime_store(tmp_path: Path) -> None:
@@ -31,6 +34,23 @@ def test_health_is_available_without_broker_or_niftyzoning(tmp_path: Path) -> No
 
     assert response.status_code == 200
     assert response.get_json()["status"] == "pass"
+
+
+def test_capital_endpoint_reads_authoritative_portfolio(tmp_path: Path) -> None:
+    store = RuntimeStore(tmp_path)
+    portfolio = PaperPortfolio(100_000)
+    portfolio.equity = 97_500
+    portfolio.realized_pnl = -2_500
+    strategy = ConfiguredLiveStrategy(
+        capital_config=FtxCapitalConfig(initial_capital=100_000), portfolio=portfolio,
+    )
+    from ftx_paper.runtime import RuntimeSession
+    session = RuntimeSession(store, None, [], engine=PaperEngine(strategy))
+    response = create_app(store, session=session).test_client().get("/api/v1/capital")
+    assert response.status_code == 200
+    assert response.get_json()["initial_capital"] == 100_000
+    assert response.get_json()["current_equity"] == 97_500
+    assert response.get_json()["total_pnl"] == -2_500
 
 
 def test_replay_rejects_legacy_scalar_vehicle_request(tmp_path: Path) -> None:
