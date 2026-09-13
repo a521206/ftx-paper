@@ -203,6 +203,7 @@ class ConfiguredLiveStrategy:
         sized = self._risk.size(capital=self._capital, equity=self._equity, peak_equity=self._peak_equity, entry=bar.close, stop=stop, score=score)
         if not sized.approved:
             return ()
+        self._exits.reset()
         self._position = PositionState(bar.instrument, bar.close, stop, sized.quantity, decision.side,
                                        exit_mode="trail", entry_fill_time=bar.timestamp)
         return (self._policy.to_order(decision, bar, sized.quantity, f"entry-{bar.timestamp.isoformat()}"),)

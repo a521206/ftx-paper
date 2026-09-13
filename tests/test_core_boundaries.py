@@ -178,6 +178,31 @@ def test_exit_state_machine_emits_protective_exit() -> None:
     assert action.intent.role is OrderRole.EXIT
 
 
+def test_exit_state_machine_rejects_ambiguous_trailing_configuration() -> None:
+    for kwargs in (
+        {"trail_activation_bp": 20.0},
+        {"trail_distance_bp": 20.0},
+        {"trail_distance": 10.0, "trail_activation_bp": 20.0, "trail_distance_bp": 20.0},
+    ):
+        try:
+            ExitStateMachine(**kwargs)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"ambiguous trailing configuration was accepted: {kwargs}")
+
+
+def test_exit_state_machine_can_reset_for_another_position() -> None:
+    instrument = Instrument("NIFTY", "NSE", "INDEX")
+    first = PositionState(instrument, 100, 95, 1, OrderSide.BUY)
+    machine = ExitStateMachine()
+    machine.evaluate(first, timestamp=datetime(2026, 1, 1, 11), high=101, low=99, close=100, client_order_id="exit-1")
+    machine.reset()
+    second = PositionState(instrument, 100, 95, 1, OrderSide.BUY)
+    action = machine.evaluate(second, timestamp=datetime(2026, 1, 1, 11), high=101, low=99, close=100, client_order_id="exit-2")
+    assert action is None
+
+
 def test_trailing_exit_activates_on_next_bar_and_uses_basis_points() -> None:
     instrument = Instrument("NIFTY", "NFO", "FUTURES")
     position = PositionState(instrument, 23450.0, 23411.0, 1, OrderSide.BUY, exit_mode="trail")
