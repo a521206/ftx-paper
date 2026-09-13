@@ -48,6 +48,12 @@ class RiskDecision:
     stop_bp: float | None = None
     risk_budget: float = 0.0
     vehicle: str = "futures"
+    available_capital: float = 0.0
+    open_margin_used: float = 0.0
+    raw_quantity: int = 0
+    margin_lots: int = 0
+    risk_ceiling: int = 0
+    drawdown_multiplier: float = 1.0
 
 
 class RiskSizer:
@@ -124,5 +130,13 @@ class RiskSizer:
         quantity = min(int(round(risk_ceiling * multiplier)), risk_ceiling)
         quantity -= quantity % self.config.lot_size
         if quantity < self.config.lot_size:
-            return RiskDecision(False, 0, "insufficient_risk_budget", risk_budget, multiplier, stop_bp, risk_budget, normalized_vehicle)
-        return RiskDecision(True, quantity, "approved", risk_budget, multiplier, stop_bp, risk_budget, normalized_vehicle)
+            return RiskDecision(
+                False, 0, "insufficient_risk_budget", risk_budget, multiplier, stop_bp,
+                risk_budget, normalized_vehicle, available, float(open_margin_used),
+                raw_quantity, margin_lots, risk_ceiling, drawdown_multiplier,
+            )
+        return RiskDecision(
+            True, quantity, "approved", risk_budget, multiplier, stop_bp, risk_budget,
+            normalized_vehicle, available, float(open_margin_used), raw_quantity,
+            margin_lots, risk_ceiling, drawdown_multiplier,
+        )

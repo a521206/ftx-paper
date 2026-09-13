@@ -8,7 +8,7 @@ import pytest
 
 from ftx_paper.broker import PaperBroker
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderIntent, OrderRole, OrderSide, parse_role, role_to_key
-from ftx_paper.core import CompletedBarAggregator, DecisionBundle, ExitAction, ExitStateMachine, IndependentLiveDecisionEngine, LiveFeatureCalculator, PaperEngine, PositionState, RiskSizer, SetupPolicy, adaptive_stop_bp, option_pcr_at_event, replay, vix_open_and_event
+from ftx_paper.core import CompletedBarAggregator, DecisionBundle, ExitAction, ExitStateMachine, IndependentLiveDecisionEngine, LiveFeatureCalculator, PaperEngine, PositionState, RiskConfig, RiskSizer, SetupPolicy, adaptive_stop_bp, option_pcr_at_event, replay, vix_open_and_event
 from ftx_paper.core import LiveSession
 from ftx_paper.core.location_engine import Cell, Location
 from ftx_paper.core.live_decision import _configured_policies_for_cell
@@ -788,6 +788,28 @@ def test_risk_sizer_never_exceeds_risk_budget_when_budget_is_marginal() -> None:
         score=2,
     )
     assert not weak.approved and weak.reason == "insufficient_risk_budget"
+
+
+def test_risk_sizer_reserves_open_margin_before_score_sizing() -> None:
+    sizer = RiskSizer(config=RiskConfig(margin_utilization_cap=0.80))
+    decision = sizer.size(
+        capital=2_500_000, equity=2_500_000, peak_equity=2_500_000,
+        entry=23_450, stop=23_411.65, score=3, open_margin_used=350_000,
+    )
+    assert decision.available_capital == pytest.approx(2_150_000)
+    assert decision.open_margin_used == pytest.approx(350_000)
+    assert decision.raw_quantity == 17
+    assert decision.margin_lots == 9
+    assert decision.risk_ceiling == 9
+    assert decision.quantity == 4
+
+
+def test_decision_engine_tracks_margin_across_entry_and_exit() -> None:
+    engine = IndependentLiveDecisionEngine(version="test", config_hash="hash", capital=2_500_000)
+    engine.register_entry_margin(vehicle="synthetic", quantity=2)
+    assert engine.open_margin_used == pytest.approx(350_000)
+    engine.release_entry_margin(vehicle="synthetic", quantity=2)
+    assert engine.open_margin_used == pytest.approx(0)
 
 
 def test_paper_engine_preserves_live_decision_domain_values_at_boundary() -> None:

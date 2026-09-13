@@ -165,6 +165,24 @@ class IndependentLiveDecisionEngine:
             item: RiskSizer(config=RiskConfig(margin_utilization_cap=0.80), vehicle_limits=vehicle_risk_limits)
             for item in self.enabled_vehicles
         }
+        self._open_margin_used = 0.0
+
+    @property
+    def open_margin_used(self) -> float:
+        return self._open_margin_used
+
+    def register_entry_margin(self, *, vehicle: str, quantity: int) -> None:
+        normalized = str(vehicle).lower()
+        limits = self._vehicle_sizers[normalized].vehicle_limits[normalized]
+        self._open_margin_used += max(int(quantity), 0) * float(limits.margin_per_lot)
+
+    def release_entry_margin(self, *, vehicle: str, quantity: int) -> None:
+        normalized = str(vehicle).lower()
+        limits = self._vehicle_sizers[normalized].vehicle_limits[normalized]
+        self._open_margin_used = max(
+            0.0,
+            self._open_margin_used - max(int(quantity), 0) * float(limits.margin_per_lot),
+        )
 
     def _session_for_time(self, decision_at: datetime) -> Session:
         ist_time = decision_at.astimezone(ZoneInfo("Asia/Kolkata"))
@@ -336,6 +354,7 @@ class IndependentLiveDecisionEngine:
                     entry=current, stop=stop, score=score, vix=float(vix_bar.close),
                     is_expiry_day=bundle.trading_date in self.expiry_dates,
                     vehicle=vehicle, synthetic_premiums=synthetic_quote,
+                    open_margin_used=self._open_margin_used,
                 )
                 quantity = sizing.quantity
                 quantity_before_stability = quantity
@@ -358,6 +377,20 @@ class IndependentLiveDecisionEngine:
                                      "stability": cell_policy.stability, "risk_amount": sizing.risk_amount,
                                      "quantity_before_stability": quantity_before_stability,
                                      "risk_budget": sizing.risk_budget, "stop_bp": sizing.stop_bp}
+                vehicle_candidate.update({
+                    "available_capital": sizing.available_capital,
+                    "open_margin_used": sizing.open_margin_used,
+                    "raw_risk_quantity": sizing.raw_quantity,
+                    "margin_lots": sizing.margin_lots,
+                    "risk_ceiling": sizing.risk_ceiling,
+                    "drawdown_multiplier": sizing.drawdown_multiplier,
+                    "risk_fraction": self._vehicle_sizers[vehicle].config.risk_fraction,
+                    "margin_utilization_cap": self._vehicle_sizers[vehicle].config.margin_utilization_cap,
+                    "margin_per_lot": self._vehicle_sizers[vehicle].vehicle_limits[vehicle].margin_per_lot,
+                    "max_quantity": self._vehicle_sizers[vehicle].vehicle_limits[vehicle].max_quantity,
+                    "shared_directional_headroom": self.risk_gate.remaining_directional_lots(direction),
+                    "vehicle_directional_headroom": self._vehicle_risk_gates[vehicle].remaining_directional_lots(direction),
+                })
                 events.append(LiveDecision("ACCEPTEDDECISION", {**vehicle_candidate, "outcome": "accepted", "reason": "eligible"}))
                 if not sizing.approved:
                     events.append(LiveDecision("SIZING_REJECTED", {
@@ -430,6 +463,7 @@ class IndependentLiveDecisionEngine:
         gate = self._vehicle_risk_gates.get(str(vehicle).lower())
         if gate is not None:
             gate.cancel_entry(cell=cell, direction=direction, quantity=quantity, date=date)
+        self.release_entry_margin(vehicle=vehicle, quantity=quantity)
 
     def update_portfolio_state(self, *, equity: float, peak_equity: float | None = None) -> None:
         """Update the capital inputs used for subsequent replay decisions."""

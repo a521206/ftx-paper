@@ -275,8 +275,13 @@ class ReplayWorker:
                                             "entry_bar": order.entry_bar or engine.bars_seen})
                         if entry_quote is not None:
                             open_trades[-1].update({"ce_symbol": entry_quote.ce.instrument.symbol, "pe_symbol": entry_quote.pe.instrument.symbol,
-                                                    "ce_strike": entry_quote.strike, "ce_entry_price": entry_quote.ce.close,
-                                                    "pe_entry_price": entry_quote.pe.close})
+                                                     "ce_expiry": entry_quote.ce.instrument.expiry,
+                                                     "pe_expiry": entry_quote.pe.instrument.expiry,
+                                                     "ce_strike": entry_quote.strike, "ce_entry_price": entry_quote.ce.close,
+                                                     "pe_entry_price": entry_quote.pe.close,
+                                                     "synthetic_entry_price": entry_quote.price,
+                                                     "quote_timestamp": entry_quote.ce.timestamp.isoformat(),
+                                                     "quote_source": "same_minute_bundle"})
                             last_quotes[order.client_order_id] = entry_quote
                     elif order.role is OrderRole.EXIT:
                         try:
@@ -378,6 +383,15 @@ class ReplayWorker:
             "pe_exit_price": trade.get("pe_exit_price"),
             "synthetic_entry_price": trade.get("synthetic_entry_price"),
             "synthetic_exit_price": trade.get("synthetic_exit_price"),
+            "ce_symbol": trade.get("ce_symbol"),
+            "pe_symbol": trade.get("pe_symbol"),
+            "expiry": trade.get("ce_expiry") or trade.get("pe_expiry"),
+            "quote_timestamp": trade.get("quote_timestamp"),
+            "quote_source": trade.get("quote_source"),
+            "ce_exit_symbol": trade.get("ce_exit_symbol"),
+            "pe_exit_symbol": trade.get("pe_exit_symbol"),
+            "exit_quote_timestamp": trade.get("exit_quote_timestamp"),
+            "exit_quote_source": trade.get("exit_quote_source"),
         }
 
     @staticmethod
@@ -428,7 +442,11 @@ class ReplayWorker:
                        "status": "closed"}
         if quote is not None:
             settled.update({"synthetic_exit_price": exit_price, "ce_exit_price": quote.ce.close,
-                            "pe_exit_price": quote.pe.close})
+                            "pe_exit_price": quote.pe.close,
+                            "ce_exit_symbol": quote.ce.instrument.symbol,
+                            "pe_exit_symbol": quote.pe.instrument.symbol,
+                            "exit_quote_timestamp": quote.ce.timestamp.isoformat(),
+                            "exit_quote_source": "same_minute_bundle"})
         trades.append(settled)
         cell = trade.get("cell")
         if not isinstance(cell, str):

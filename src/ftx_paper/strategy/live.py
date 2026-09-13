@@ -314,6 +314,7 @@ class ConfiguredLiveStrategy:
         self._decision_positions[order.client_order_id] = (
             position, ExitStateMachine(**trail_kwargs, close_time=time(15, 30)),
         )
+        self._decision_engine.register_entry_margin(vehicle=order.vehicle, quantity=order.quantity)
 
     def on_tick(self, bar: MarketBar):
         actions = []
@@ -347,7 +348,11 @@ class ConfiguredLiveStrategy:
     def settle_exit(self, exit_order_id: str, *, filled: bool) -> None:
         entry_order_id = self._pending_exits.pop(exit_order_id, None)
         if filled and entry_order_id is not None:
-            self._decision_positions.pop(entry_order_id, None)
+            position_entry = self._decision_positions.pop(entry_order_id, None)
+            if position_entry is not None:
+                self._decision_engine.release_entry_margin(
+                    vehicle=position_entry[0].vehicle, quantity=position_entry[0].quantity,
+                )
 
     def record_exit(self, *, cell: str, reason: str, entry_bar: int,
                     exit_bar: int, date: str, vehicle: str = "futures",
