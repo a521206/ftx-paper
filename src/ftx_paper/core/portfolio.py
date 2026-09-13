@@ -146,6 +146,7 @@ class PaperPortfolio:
     def snapshot(self) -> dict[str, object]:
         return {"schema_version": 1, "capital": self.capital_snapshot(), "peak_equity": self.peak_equity,
                 "daily_baseline": self.daily_baseline, "total_costs": self.total_costs,
+                "margin_per_lot": dict(self.margin_per_lot),
                 "reservations": {k: asdict(v) for k, v in self.reservations.items()},
                 "positions": {k: {**asdict(v), "side": v.side.value} for k, v in self.positions.items()},
                 "pending_orders": dict(self.pending_orders), "settled_orders": sorted(self.settled_orders),
@@ -157,7 +158,9 @@ class PaperPortfolio:
             raise ValueError("unsupported portfolio snapshot schema")
         capital = snapshot["capital"]
         assert isinstance(capital, Mapping)
-        portfolio = cls(float(capital["initial_capital"]))
+        raw_margin = snapshot.get("margin_per_lot", {})
+        margin_per_lot = dict(raw_margin) if isinstance(raw_margin, Mapping) else None
+        portfolio = cls(float(capital["initial_capital"]), margin_per_lot or {"futures": 175000.0, "synthetic": 175000.0})
         portfolio.equity = float(capital.get("current_equity", portfolio.initial_capital))
         portfolio.peak_equity = float(snapshot.get("peak_equity", portfolio.equity))
         portfolio.daily_baseline = float(snapshot.get("daily_baseline", portfolio.equity))
@@ -175,6 +178,10 @@ class PaperPortfolio:
         raw = snapshot.get("pending_orders", {})
         portfolio.pending_orders = dict(raw) if isinstance(raw, Mapping) else {}
         portfolio.settled_orders = {str(v) for v in snapshot.get("settled_orders", [])}
+        raw = snapshot.get("gates", {})
+        portfolio.gate_snapshot = dict(raw) if isinstance(raw, Mapping) else {}
+        raw = snapshot.get("quote_provenance", {})
+        portfolio.quote_provenance = dict(raw) if isinstance(raw, Mapping) else {}
         return portfolio
 
 

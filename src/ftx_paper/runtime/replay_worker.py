@@ -219,7 +219,8 @@ class ReplayWorker:
                     realized = self._settle_trade(open_trades, diagnostic_trades, action.intent, futures_bar,
                                                   exit_quote, action.reason, exit_price=exit_price,
                                                   trade=open_trade)
-                    coordinator.fill(action.intent, price=exit_price, timestamp=futures_bar.timestamp.isoformat())
+                    coordinator.fill(action.intent, price=exit_price, timestamp=futures_bar.timestamp.isoformat(),
+                                     cost=_execution_cost(open_trade))
                     engine.settle_exit(action.intent.client_order_id, filled=True)
                     if realized is not None:
                         engine.record_exit(cell=realized.cell.name, reason=action.reason,
@@ -227,8 +228,8 @@ class ReplayWorker:
                                            date=date, vehicle=action.intent.vehicle,
                                            direction="long" if action.intent.side.value == "SELL" else "short",
                                            quantity=action.intent.quantity)
-                        current_equity += realized.realized_pnl
-                        peak_equity = max(peak_equity, current_equity)
+                        current_equity = strategy.portfolio.equity
+                        peak_equity = strategy.portfolio.peak_equity
                         max_drawdown = min(max_drawdown, current_equity - peak_equity)
                         strategy.update_portfolio_state(equity=current_equity, peak_equity=peak_equity)
                 result = engine.on_bundle(bundle)
@@ -311,14 +312,14 @@ class ReplayWorker:
                                                       exit_price=exit_quote.price if exit_quote is not None else futures_bar.close,
                                                       trade=open_trade)
                         coordinator.fill(order, price=exit_quote.price if exit_quote is not None else futures_bar.close,
-                                         timestamp=futures_bar.timestamp.isoformat())
+                                         timestamp=futures_bar.timestamp.isoformat(), cost=_execution_cost(open_trade))
                         engine.record_exit(cell=realized.cell.name, reason=order.reason,
                                            entry_bar=realized.entry_bar, exit_bar=engine.bars_seen,
                                            date=date, vehicle=order.vehicle,
                                            direction="long" if order.side.value == "SELL" else "short",
                                            quantity=order.quantity)
-                        current_equity += realized.realized_pnl
-                        peak_equity = max(peak_equity, current_equity)
+                        current_equity = strategy.portfolio.equity
+                        peak_equity = strategy.portfolio.peak_equity
                         max_drawdown = min(max_drawdown, current_equity - peak_equity)
                         strategy.update_portfolio_state(equity=current_equity, peak_equity=peak_equity)
             # Preserve open positions as mark-to-market/open replay results.

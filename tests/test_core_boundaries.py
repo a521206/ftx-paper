@@ -25,10 +25,13 @@ def test_paper_portfolio_lifecycle_is_idempotent_and_restorable() -> None:
     exit_order = OrderIntent("exit-portfolio", instrument, OrderSide.SELL, 2, role=OrderRole.EXIT,
                              entry_order_id=entry.client_order_id)
     portfolio = PaperPortfolio(2_500_000)
+    portfolio.gate_snapshot = {"revision": 4}
+    portfolio.quote_provenance = {"entry": "same_minute"}
+    portfolio.margin_per_lot = {"futures": 120_000.0, "synthetic": 130_000.0}
     coordinator = PaperExecutionCoordinator(portfolio)
     coordinator.submit(entry)
     coordinator.submit(entry)
-    assert portfolio.open_margin == pytest.approx(350_000)
+    assert portfolio.open_margin == pytest.approx(240_000)
     coordinator.fill(entry, price=100, timestamp="2026-01-01T10:20:00+05:30")
     coordinator.fill(entry, price=100, timestamp="2026-01-01T10:20:00+05:30")
     assert len(portfolio.positions) == 1
@@ -38,6 +41,9 @@ def test_paper_portfolio_lifecycle_is_idempotent_and_restorable() -> None:
     assert portfolio.realized_pnl == pytest.approx(640)
     restored = PaperPortfolio.from_snapshot(portfolio.snapshot())
     assert restored.capital_snapshot() == portfolio.capital_snapshot()
+    assert restored.margin_per_lot == portfolio.margin_per_lot
+    assert restored.gate_snapshot == portfolio.gate_snapshot
+    assert restored.quote_provenance == portfolio.quote_provenance
 
 
 def test_paper_portfolio_failed_entry_releases_reservation_and_failed_exit_keeps_position() -> None:

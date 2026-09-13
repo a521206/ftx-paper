@@ -20,6 +20,7 @@ from ftx_paper.core.cost import futures_cost, synthetic_futures_cost
 from ftx_paper.core.settlement import ExitValidationError, validate_exit_order
 from ftx_paper.config import NIFTY_LOT_SIZE
 from ftx_paper.execution import PositionLedger
+from ftx_paper.execution import PaperExecutionCoordinator
 from .events import is_decision_event, serialize_datetime
 from .store import RuntimeStore
 
@@ -72,6 +73,9 @@ class RuntimeSession:
         self.store, self.auth, self.specifications = store, auth, specifications
         self.capital_config = capital_config
         self.engine, self.ledger = engine or PaperEngine(), ledger
+        strategy = getattr(self.engine, "strategy", None)
+        portfolio = getattr(strategy, "portfolio", None)
+        self.coordinator = PaperExecutionCoordinator(portfolio) if portfolio is not None else None
         self.feed_factory, self.broker_factory = feed_factory, broker_factory
         self.client_factory, self.normalize_payload = client_factory, normalize_payload
         self.feed = None
@@ -337,6 +341,8 @@ class RuntimeSession:
                              reference_price: float | None = None) -> bool:
         self._last_execution_fill = None
         def cancel_reservation() -> None:
+            if self.coordinator is not None and order.role is OrderRole.ENTRY:
+                self.coordinator.cancel(order)
             if order.role is OrderRole.ENTRY and order.cell and session_date:
                 self.engine.cancel_entry(cell=order.cell,
                                          direction="long" if order.side is OrderSide.BUY else "short",
@@ -369,6 +375,8 @@ class RuntimeSession:
             "reason": order.reason,
             "vehicle": order.vehicle,
         }
+        if self.coordinator is not None:
+            self.coordinator.submit(order)
         entry: LiveEntryTrade | None = None
         entry_order_id = order.entry_order_id
         if order.role is OrderRole.EXIT:
@@ -654,6 +662,8 @@ class RuntimeSession:
                                      f"order_unfilled:{order.client_order_id}", timestamp=timestamp)
             cancel_reservation()
             return False
+        if order.role is OrderRole.EXIT and self.coordinator is not None:
+            self.coordinator.fill(order, price=execution_price, timestamp=timestamp, cost=cost)
         realized_pnl = (
             self._last_execution_fill.get("realized_pnl")
             if self._last_execution_fill is not None else None
