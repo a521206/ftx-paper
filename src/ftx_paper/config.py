@@ -10,11 +10,7 @@ def _path(name: str, default: Path) -> Path:
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
-
-# Local paper-runtime contract settings. Keep these independent from the
-# research package so ftx-paper remains deployable as a standalone application.
 NIFTY_LOT_SIZE = 65
-INITIAL_CAPITAL = 2_500_000.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +19,7 @@ class PaperConfig:
     runtime_dir: Path
     auth_db: Path
     zerodha_config: Path
+    capital_config: Path
     host: str = "127.0.0.1"
     port: int = 8501
 
@@ -40,6 +37,7 @@ class PaperConfig:
                 "FTX_PAPER_CONFIG_PATH",
                 PACKAGE_ROOT / "config" / "zerodha.json" if (PACKAGE_ROOT / "config" / "zerodha.json").exists() else home / "config" / "zerodha.json",
             ),
+            capital_config=_path("FTX_PAPER_CAPITAL_CONFIG", PACKAGE_ROOT / "config" / "ftx.json"),
             host=os.getenv("FTX_WEB_HOST", "127.0.0.1"),
             port=int(os.getenv("FTX_WEB_PORT", "8501")),
         )

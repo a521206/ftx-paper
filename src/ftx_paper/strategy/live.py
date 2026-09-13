@@ -4,6 +4,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, time
 
 from ftx_paper.contracts import MarketBar, OrderIntent
+from ftx_paper.capital_config import FtxCapitalConfig
 
 from .config import (
     AFTERNOON_ENTRY_MINUTES,
@@ -36,7 +37,7 @@ class ConfiguredLiveStrategy:
 
     def __init__(
         self,
-        capital: float,
+        capital_config: FtxCapitalConfig,
         decide: Callable[[MarketBar], tuple[OrderIntent, ...]] | None = None,
         config: StrategyConfig = DEFAULT_CONFIG,
         expiry_dates: frozenset[str] = frozenset(),
@@ -52,15 +53,22 @@ class ConfiguredLiveStrategy:
         self._exits = ExitStateMachine(trail_distance=10.0)
         self._decision_positions: dict[str, tuple[PositionState, ExitStateMachine]] = {}
         self._pending_exits: dict[str, str] = {}
-        self._capital = capital
+        self.capital_config = capital_config
+        self._capital = capital_config.initial_capital
+        self._daily_date: str | None = None
+        self._daily_start_equity = self._capital
         self.vehicle = str(vehicle).lower()
         if self.vehicle not in {"futures", "synthetic"}:
             raise ValueError("vehicle must be 'futures' or 'synthetic'")
-        self._equity = capital
-        self._peak_equity = capital
+        self._equity = self._capital
+        self._peak_equity = self._capital
+        self._daily_date = None
+        self._daily_start_equity = self._capital
         self._decision_engine = IndependentLiveDecisionEngine(
             version=self.version, config_hash=self.metadata.config_hash,
-            cooldown_minutes=config.cooldown_minutes, capital=capital,
+            cooldown_minutes=config.cooldown_minutes, capital=self._capital,
+            max_daily_loss=capital_config.max_daily_loss,
+            max_net_directional_lots=capital_config.max_net_directional_lots,
             morning_entry_minutes=config.morning_entry_minutes,
             afternoon_entry_minutes=config.afternoon_entry_minutes,
             expiry_dates=expiry_dates,
@@ -91,6 +99,11 @@ class ConfiguredLiveStrategy:
         return {
             "schema_version": 1,
             "vehicle": self.vehicle,
+            "capital": {
+                "initial_capital": self.capital_config.initial_capital,
+                "max_daily_loss": self.capital_config.max_daily_loss,
+                "max_net_directional_lots": self.capital_config.max_net_directional_lots,
+            },
             "config": self.config.as_dict(),
             "risk_gate": self._decision_engine.risk_snapshot(),
         }
@@ -108,6 +121,8 @@ class ConfiguredLiveStrategy:
         self._decision_engine = IndependentLiveDecisionEngine(
             version=self.version, config_hash=self.metadata.config_hash,
             cooldown_minutes=self.config.cooldown_minutes, capital=self._capital,
+            max_daily_loss=self.capital_config.max_daily_loss,
+            max_net_directional_lots=self.capital_config.max_net_directional_lots,
             morning_entry_minutes=self.config.morning_entry_minutes,
             afternoon_entry_minutes=self.config.afternoon_entry_minutes,
             expiry_dates=self._decision_engine.expiry_dates,
@@ -115,13 +130,27 @@ class ConfiguredLiveStrategy:
         )
 
     @classmethod
-    def from_snapshot(cls, snapshot: Mapping[str, object], *, capital: float) -> "ConfiguredLiveStrategy":
+    def from_snapshot(cls, snapshot: Mapping[str, object], *, capital_config: FtxCapitalConfig) -> "ConfiguredLiveStrategy":
         schema_version = snapshot.get("schema_version", 0)
         if not isinstance(schema_version, int) or isinstance(schema_version, bool) or schema_version != 1:
             raise ValueError("unsupported strategy snapshot schema")
         vehicle = snapshot.get("vehicle", "futures")
         if not isinstance(vehicle, str) or vehicle.lower() not in {"futures", "synthetic"}:
             raise ValueError("snapshot vehicle must be 'futures' or 'synthetic'")
+        raw_capital = snapshot.get("capital")
+        if not isinstance(raw_capital, Mapping):
+            raise ValueError("strategy snapshot capital must be an object")
+        for name, configured in (
+            ("initial_capital", capital_config.initial_capital),
+            ("max_daily_loss", capital_config.max_daily_loss),
+            ("max_net_directional_lots", capital_config.max_net_directional_lots),
+        ):
+            persisted = raw_capital.get(name)
+            if isinstance(persisted, bool) or not isinstance(persisted, (int, float)) or float(persisted) != configured:
+                raise ValueError(
+                    f"capital config does not match strategy snapshot for {name}: "
+                    f"configured={configured}, snapshot={persisted}"
+                )
         raw_config = snapshot.get("config", {})
         if not isinstance(raw_config, Mapping):
             raise ValueError("strategy snapshot config must be an object")
@@ -155,7 +184,7 @@ class ConfiguredLiveStrategy:
             afternoon_entry_minutes=afternoon_entry_minutes,
             cooldown_minutes=cooldown_minutes,
         )
-        strategy = cls(config=config, capital=capital, vehicle=vehicle.lower())
+        strategy = cls(config=config, capital_config=capital_config, vehicle=vehicle.lower())
         risk_snapshot = snapshot.get("risk_gate")
         if isinstance(risk_snapshot, Mapping):
             strategy._decision_engine.restore_risk_snapshot(dict(risk_snapshot))
@@ -188,6 +217,12 @@ class ConfiguredLiveStrategy:
             return ()
         if features.vwap is None:
             return ()
+        trading_date = bar.timestamp.date().isoformat()
+        if trading_date != self._daily_date:
+            self._daily_date = trading_date
+            self._daily_start_equity = self._equity
+        if self._equity < self._daily_start_equity * (1 - self.capital_config.max_daily_loss):
+            return ()
         stop = bar.close - features.atr if decision.side is OrderSide.BUY and features.atr else bar.close + features.atr if features.atr else bar.close - 5 if decision.side is OrderSide.BUY else bar.close + 5
         prior = tuple(self._bars[:-1])
         selling = compute_selling_structure(
@@ -203,10 +238,13 @@ class ConfiguredLiveStrategy:
         sized = self._risk.size(capital=self._capital, equity=self._equity, peak_equity=self._peak_equity, entry=bar.close, stop=stop, score=score)
         if not sized.approved:
             return ()
+        quantity = min(sized.quantity, int(self.capital_config.max_net_directional_lots))
+        if quantity < 1:
+            return ()
         self._exits.reset()
-        self._position = PositionState(bar.instrument, bar.close, stop, sized.quantity, decision.side,
+        self._position = PositionState(bar.instrument, bar.close, stop, quantity, decision.side,
                                        exit_mode="trail", entry_fill_time=bar.timestamp)
-        return (self._policy.to_order(decision, bar, sized.quantity, f"entry-{bar.timestamp.isoformat()}"),)
+        return (self._policy.to_order(decision, bar, quantity, f"entry-{bar.timestamp.isoformat()}"),)
 
     def on_bundle(self, bundle: DecisionBundle):
         if self._decide is not None:

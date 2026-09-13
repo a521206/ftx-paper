@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import time
 from zoneinfo import ZoneInfo
+import pytest
 
 from ftx_paper.broker import PaperBroker
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderIntent, OrderRole, OrderSide, parse_role, role_to_key
@@ -14,7 +15,7 @@ from ftx_paper.core.live_decision import _configured_policies_for_cell
 from ftx_paper.strategy.config import Session
 from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.strategy import ConfiguredLiveStrategy
-from ftx_paper.strategy.config import CAPITAL
+from ftx_paper.capital_config import FtxCapitalConfig, RESEARCH_CAPITAL_CONFIG as CAPITAL_CONFIG
 
 
 def test_p6_stop_and_quantity_golden_fixture() -> None:
@@ -55,19 +56,42 @@ def test_live_session_owns_session_state() -> None:
 
 
 def test_production_strategy_is_versioned_and_injectable() -> None:
-    strategy = ConfiguredLiveStrategy(capital=CAPITAL, decide=lambda bar: ())
+    strategy = ConfiguredLiveStrategy(capital_config=CAPITAL_CONFIG, decide=lambda bar: ())
 
     assert strategy.name.startswith("ftx-paper-")
     assert strategy.on_bar(None) == ()
     assert strategy.metadata.config_hash
     assert strategy.snapshot()["schema_version"] == 1
-    assert strategy.from_snapshot(strategy.snapshot(), capital=CAPITAL).metadata.version == strategy.version
+    assert strategy.from_snapshot(strategy.snapshot(), capital_config=CAPITAL_CONFIG).metadata.version == strategy.version
 
 
 def test_strategy_snapshot_restores_vehicle_for_synthetic_replay() -> None:
-    strategy = ConfiguredLiveStrategy(capital=CAPITAL, vehicle="synthetic")
-    restored = ConfiguredLiveStrategy.from_snapshot(strategy.snapshot(), capital=CAPITAL)
+    strategy = ConfiguredLiveStrategy(capital_config=CAPITAL_CONFIG, vehicle="synthetic")
+    restored = ConfiguredLiveStrategy.from_snapshot(strategy.snapshot(), capital_config=CAPITAL_CONFIG)
     assert restored.vehicle == "synthetic"
+
+
+def test_strategy_uses_explicit_capital_limits_and_rejects_mismatch() -> None:
+    capital_config = FtxCapitalConfig(
+        initial_capital=100_000.0, max_daily_loss=0.02, max_net_directional_lots=3.0,
+    )
+    strategy = ConfiguredLiveStrategy(capital_config=capital_config)
+
+    assert strategy.portfolio_state["initial_capital"] == 100_000.0
+    assert strategy._decision_engine.max_daily_loss == 0.02
+    assert strategy._decision_engine.risk_gate.max_net_directional_lots == 3.0
+
+    mismatched = FtxCapitalConfig(initial_capital=200_000.0, max_daily_loss=0.02, max_net_directional_lots=3.0)
+    with pytest.raises(ValueError, match="does not match strategy snapshot"):
+        ConfiguredLiveStrategy.from_snapshot(strategy.snapshot(), capital_config=mismatched)
+
+
+def test_capital_config_rejects_non_object_json(tmp_path) -> None:
+    path = tmp_path / "ftx.json"
+    path.write_text('{"capital": []}', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Invalid FTX paper capital config"):
+        FtxCapitalConfig.from_file(path)
 
 
 def test_live_features_are_causal_and_deterministic() -> None:
@@ -278,7 +302,7 @@ def test_replay_is_deterministic_and_rejects_reordering() -> None:
 
 def test_production_strategy_composes_features_policy_risk_and_exit() -> None:
     instrument = Instrument("NIFTY", "NSE", "INDEX")
-    strategy = ConfiguredLiveStrategy(capital=CAPITAL)
+    strategy = ConfiguredLiveStrategy(capital_config=CAPITAL_CONFIG)
     bars = tuple(MarketBar(instrument, datetime(2026, 1, 1, 10, 15 + i), 100 + i, 102 + i, 99 + i, 101 + i, 10) for i in range(2))
     orders = [order for bar in bars for order in strategy.on_bar(bar)]
     assert orders and orders[0].quantity > 0
@@ -288,12 +312,12 @@ def test_production_strategy_composes_features_policy_risk_and_exit() -> None:
 
 def test_on_bar_sizing_scales_with_setup_score() -> None:
     instrument = Instrument("NIFTY", "NSE", "INDEX")
-    weak_strategy = ConfiguredLiveStrategy(capital=CAPITAL)
+    weak_strategy = ConfiguredLiveStrategy(capital_config=CAPITAL_CONFIG)
     weak_orders = [order for order in weak_strategy.on_bar(MarketBar(instrument, datetime(2026, 1, 1, 10, 15), 100, 102, 99, 101, 10))]
 
     closes = (110, 108, 106, 104, 102, 100, 98, 96)
     volumes = (3, 3, 3, 20, 3, 3, 2, 2)
-    strong_strategy = ConfiguredLiveStrategy(capital=CAPITAL)
+    strong_strategy = ConfiguredLiveStrategy(capital_config=CAPITAL_CONFIG)
     strong_orders = []
     for i, close in enumerate(closes):
         strong_orders.extend(strong_strategy.on_bar(
@@ -313,7 +337,7 @@ def test_replay_fixture_has_stable_production_transcript() -> None:
         MarketBar(instrument, datetime(2026, 1, 1, 10, 15 + i), 100 + i, 102 + i, 99 + i, 101 + i, 10)
         for i in range(3)
     )
-    result = replay(PaperEngine(ConfiguredLiveStrategy(capital=CAPITAL)), fixture)
+    result = replay(PaperEngine(ConfiguredLiveStrategy(capital_config=CAPITAL_CONFIG)), fixture)
     assert result.bars_seen == 3
     assert [(order.client_order_id, order.quantity, order.side.value) for order in result.orders] == [
         ("entry-2026-01-01T10:15:00", 5, "BUY"),
@@ -457,7 +481,7 @@ def test_late_vix_reaches_configured_strategy_without_repeated_missing_vix() -> 
         ("NFO", "NIFTYFUT"): "futures",
         ("NSE", "INDIA VIX"): "vix",
     }, required_roles=("futures",))
-    engine = PaperEngine(ConfiguredLiveStrategy(capital=CAPITAL))
+    engine = PaperEngine(ConfiguredLiveStrategy(capital_config=CAPITAL_CONFIG))
     first_minute = datetime(2026, 1, 1, 10, 20, tzinfo=ZoneInfo("Asia/Kolkata"))
     bars = (
         MarketBar(future, first_minute, 100, 102, 99, 101),
@@ -619,7 +643,7 @@ def test_live_decision_engine_suppresses_unconfigured_cells() -> None:
     vix = Instrument("INDIA VIX", "NSE", "VIX")
     call = Instrument("NIFTYCE", "NFO", "CE")
     put = Instrument("NIFTYPE", "NFO", "PE")
-    engine = IndependentLiveDecisionEngine(version="test", config_hash="hash", capital=CAPITAL)
+    engine = IndependentLiveDecisionEngine(version="test", config_hash="hash", capital=CAPITAL_CONFIG.initial_capital)
 
     def bundle(minute: str, options: dict[str, MarketBar]) -> DecisionBundle:
         timestamp = datetime.fromisoformat(f"2026-01-01T{minute}:00+05:30")
@@ -643,7 +667,7 @@ def test_live_decision_engine_suppresses_unconfigured_cells() -> None:
 
 
 def test_configured_policy_requires_exact_location_composite() -> None:
-    engine = IndependentLiveDecisionEngine(version="test", config_hash="hash", capital=CAPITAL)
+    engine = IndependentLiveDecisionEngine(version="test", config_hash="hash", capital=CAPITAL_CONFIG.initial_capital)
     exact = Cell(Location.SESSION_HIGH, Location.OR_HIGH)
     with_vwap = Cell(Location.VWAP_ZONE, Location.SESSION_HIGH, Location.OR_HIGH)
 
@@ -654,7 +678,7 @@ def test_configured_policy_requires_exact_location_composite() -> None:
 def test_live_decision_engine_persists_score_and_quality_bucket() -> None:
     instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
     vix = Instrument("INDIA VIX", "NSE", "VIX")
-    engine = IndependentLiveDecisionEngine(version="test", config_hash="hash", capital=CAPITAL)
+    engine = IndependentLiveDecisionEngine(version="test", config_hash="hash", capital=CAPITAL_CONFIG.initial_capital)
 
     def bundle(index: int) -> DecisionBundle:
         timestamp = datetime(2026, 1, 1, 10, 20 + index, tzinfo=timezone.utc)

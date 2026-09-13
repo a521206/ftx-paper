@@ -110,7 +110,7 @@ class IndependentLiveDecisionEngine:
     direction, and cooldown logic.  It has no historical-pipeline imports.
     """
 
-    def __init__(self, *, version: str, config_hash: str, capital: float, cooldown_minutes: int = 30, prior_day_high: float | None = None, prior_day_low: float | None = None, morning_entry_minutes: tuple[int, int] = MORNING_ENTRY_MINUTES, afternoon_entry_minutes: tuple[int, int] = AFTERNOON_ENTRY_MINUTES, transition_patterns: tuple[TransitionPattern, ...] = (), expiry_dates: frozenset[str] = frozenset(), risk_gate: RiskGateState | None = None, vehicle: str = "futures") -> None:
+    def __init__(self, *, version: str, config_hash: str, capital: float, max_daily_loss: float = 0.05, max_net_directional_lots: float = 8.0, cooldown_minutes: int = 30, prior_day_high: float | None = None, prior_day_low: float | None = None, morning_entry_minutes: tuple[int, int] = MORNING_ENTRY_MINUTES, afternoon_entry_minutes: tuple[int, int] = AFTERNOON_ENTRY_MINUTES, transition_patterns: tuple[TransitionPattern, ...] = (), expiry_dates: frozenset[str] = frozenset(), risk_gate: RiskGateState | None = None, vehicle: str = "futures") -> None:
         self.version, self.config_hash = version, config_hash
         self.cooldown_minutes = cooldown_minutes
         self.capital = capital
@@ -119,6 +119,8 @@ class IndependentLiveDecisionEngine:
             raise ValueError("vehicle must be 'futures' or 'synthetic'")
         self._equity = capital
         self._peak_equity = capital
+        self._daily_start_equity = capital
+        self.max_daily_loss = max_daily_loss
         self.prior_day_high, self.prior_day_low = prior_day_high, prior_day_low
         self.morning_entry_minutes = morning_entry_minutes
         self.afternoon_entry_minutes = afternoon_entry_minutes
@@ -140,7 +142,7 @@ class IndependentLiveDecisionEngine:
         self._vix_open: float | None = None
         # Canonical uses one shared directional cap for both execution
         # vehicles. Vehicle selection changes pricing/cost inputs, not lots.
-        self.risk_gate = risk_gate or RiskGateState(max_net_directional_lots=8.0)
+        self.risk_gate = risk_gate or RiskGateState(max_net_directional_lots=max_net_directional_lots)
 
     def _session_for_time(self, decision_at: datetime) -> Session:
         ist_time = decision_at.astimezone(ZoneInfo("Asia/Kolkata"))
@@ -171,6 +173,7 @@ class IndependentLiveDecisionEngine:
 
     def evaluate(self, bundle: DecisionBundle) -> tuple[LiveDecision, ...]:
         if self._trading_date != bundle.trading_date:
+            self._daily_start_equity = self._equity
             if self._futures:
                 self._location_detector.close_day()
                 self.prior_day_high, self.prior_day_low = self._location_detector.prior_day_levels
@@ -198,6 +201,8 @@ class IndependentLiveDecisionEngine:
                 "required_input_availability": {r: r not in bundle.missing_roles for r in bundle.required_roles}}
         if not bundle.complete:
             return ()
+        if self._equity < self._daily_start_equity * (1 - self.max_daily_loss):
+            return (LiveDecision("REJECTEDDECISION", {**base, "reason": "daily_loss_limit"}),)
         current_vix = bundle.bars.get(MarketRole.VIX) or _supporting_bar(bundle, MarketRole.VIX)
         if current_vix is not None:
             self._previous_vix = current_vix

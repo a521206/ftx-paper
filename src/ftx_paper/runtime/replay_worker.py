@@ -9,13 +9,13 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderRole, Role, SyntheticFutureQuote, synthetic_future_quote
+from ftx_paper.capital_config import FtxCapitalConfig
 from ftx_paper.core import AggregatorConfig, Cell, CompletedBarAggregator, InstrumentKey, PaperEngine
 from ftx_paper.core.cost import futures_cost, synthetic_futures_cost
 from ftx_paper.runtime.store import RuntimeStore
 from ftx_paper.strategy import ConfiguredLiveStrategy
 from ftx_paper.strategy.config import (
     AFTERNOON_ENTRY_MINUTES,
-    CAPITAL,
     MORNING_ENTRY_MINUTES,
 )
 from ftx_paper.config import NIFTY_LOT_SIZE
@@ -48,8 +48,9 @@ def _execution_cost(trade: dict[str, Any]) -> float:
 class ReplayWorker:
     """Bounded in-process replay queue with a fresh engine per job."""
 
-    def __init__(self, store: RuntimeStore, *, max_queue_size: int = 8) -> None:
+    def __init__(self, store: RuntimeStore, *, capital_config: FtxCapitalConfig, max_queue_size: int = 8) -> None:
         self.store = store
+        self.capital_config = capital_config
         self._queue: Queue[tuple[str, dict[str, Any], Event]] = Queue(maxsize=max_queue_size)
         self._lock = Lock()
         self._cancel: dict[str, Event] = {}
@@ -131,7 +132,7 @@ class ReplayWorker:
         all_events: list[dict[str, Any]] = []
         diagnostic_trades: list[dict[str, Any]] = []
         bars_seen = 0
-        initial_capital = float(CAPITAL)
+        initial_capital = self.capital_config.initial_capital
         current_equity = initial_capital
         peak_equity = initial_capital
         max_drawdown = 0.0
@@ -142,7 +143,7 @@ class ReplayWorker:
                 break
             # A date is an independent simulation session. No positions,
             # cooldowns, or risk state may leak into the next date.
-            strategy = ConfiguredLiveStrategy(capital=CAPITAL, vehicle=vehicle)
+            strategy = ConfiguredLiveStrategy(capital_config=self.capital_config, vehicle=vehicle)
             engine = PaperEngine(strategy)
             strategy.update_portfolio_state(equity=current_equity, peak_equity=peak_equity)
             bars = self._bars(date)

@@ -101,7 +101,8 @@ def test_runtime_store_clears_replay_runs_for_one_date_only(tmp_path):
 
 def test_replay_submit_replaces_prior_run_for_same_date(tmp_path):
     store = RuntimeStore(tmp_path)
-    worker = ReplayWorker(store)
+    from ftx_paper.capital_config import RESEARCH_CAPITAL_CONFIG
+    worker = ReplayWorker(store, capital_config=RESEARCH_CAPITAL_CONFIG)
     worker._ensure_started = lambda: None
 
     first = worker.submit({"session_date": "2026-09-10"})

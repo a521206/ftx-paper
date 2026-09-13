@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from zoneinfo import ZoneInfo
 
 from ftx_paper.broker import Broker, PaperBroker
+from ftx_paper.capital_config import FtxCapitalConfig
 from ftx_paper.contracts import (
     Instrument, MarketBar, MarketRole, OptionRole, OptionType, OrderRole, OrderSide, SyntheticFutureQuote, normalize_exchange_timestamp, parse_role,
     synthetic_future_quote,
@@ -40,9 +41,13 @@ class RuntimeSession:
 
     def __init__(self, store: RuntimeStore, auth: Any, specifications: list[dict[str, object]],
                  *, engine: PaperEngine | None = None, ledger: PositionLedger | None = None,
+                 capital_config: FtxCapitalConfig | None = None,
                  feed_factory: Callable[..., Any] | None = None, broker_factory: Callable[[Any], Broker] | None = None,
                  client_factory: Callable[[], Any] | None = None, normalize_payload: Callable[..., Any] | None = None) -> None:
+        if ledger is not None and capital_config is None:
+            raise ValueError("capital_config is required when a ledger is configured")
         self.store, self.auth, self.specifications = store, auth, specifications
+        self.capital_config = capital_config
         self.engine, self.ledger = engine or PaperEngine(), ledger
         self._restore_ledger_state()
         self.feed_factory, self.broker_factory = feed_factory, broker_factory
@@ -63,9 +68,23 @@ class RuntimeSession:
         if self.ledger is None:
             return
         status = self.store.read_status()
-        raw_cash = status.get("capital", self.ledger.cash)
+        raw_cash = status.get("capital")
+        if raw_cash is None:
+            if status:
+                raise ValueError("runtime status has no persisted capital")
+            return
         if isinstance(raw_cash, dict):
-            raw_cash = raw_cash.get("capital", raw_cash.get("current_equity", self.ledger.cash))
+            raw_cash = raw_cash.get("capital")
+        if raw_cash is None:
+            raise ValueError("runtime status has no persisted capital")
+        persisted_initial = status.get("initial_capital")
+        if persisted_initial is None:
+            raise ValueError("runtime status has no persisted initial_capital")
+        if float(persisted_initial) != self.capital_config.initial_capital:
+            raise ValueError(
+                "capital config does not match runtime status: "
+                f"configured={self.capital_config.initial_capital}, persisted={persisted_initial}"
+            )
         raw_positions = status.get("open_positions", ())
         if not isinstance(raw_positions, (list, tuple)):
             raw_positions = ()
@@ -78,6 +97,10 @@ class RuntimeSession:
             self._stopping = False
             self._started.clear()
             self.store.patch_status({"state": "STARTING", "error": None, "started_at": datetime.now(timezone.utc).isoformat(),
+                                     "initial_capital": self.capital_config.initial_capital if self.capital_config else None,
+                                     "max_daily_loss": self.capital_config.max_daily_loss if self.capital_config else None,
+                                     "max_net_directional_lots": self.capital_config.max_net_directional_lots if self.capital_config else None,
+                                     "capital": self.ledger.cash if self.ledger else None,
                                      "pending_bundle_minutes": [], "pending_bundle_details": []})
             self._thread = threading.Thread(target=self._start_impl, daemon=True, name="ftx-paper-runtime")
             self._thread.start()
@@ -232,8 +255,10 @@ class RuntimeSession:
             else:
                 option_bars = (getattr(bundle, "supporting_inputs", None) or {}).get("bars", {})
                 futures_bar = bundle.bars.get(MarketRole.FUTURES)
-                quote = synthetic_future_quote(futures_bar, option_bars) if isinstance(futures_bar, MarketBar) else None
-                if isinstance(futures_bar, MarketBar) and quote is None:
+                synthetic = self._uses_synthetic_vehicle(active_engine)
+                quote = (synthetic_future_quote(futures_bar, option_bars)
+                         if synthetic and isinstance(futures_bar, MarketBar) else None)
+                if synthetic and isinstance(futures_bar, MarketBar) and quote is None:
                     self.store.append_event("EXECUTION_ERROR", {
                         "decision_id": order.client_order_id, "decision_source": source,
                         "session_date": bundle.trading_date, "execution_allowed": True,
@@ -362,7 +387,10 @@ class RuntimeSession:
                                      f"order_unfilled:{order.client_order_id}", timestamp=timestamp)
             return False
         if fill and self.ledger:
-            self.store.patch_status({"capital": self.ledger.cash, "open_positions": [
+            self.store.patch_status({"initial_capital": self.capital_config.initial_capital,
+                                     "max_daily_loss": self.capital_config.max_daily_loss,
+                                     "max_net_directional_lots": self.capital_config.max_net_directional_lots,
+                                     "capital": self.ledger.cash, "open_positions": [
                 p.__dict__ if hasattr(p, "__dict__") else {"symbol": p.symbol, "quantity": p.quantity,
                 "average_price": p.average_price} for p in self.ledger.positions()]})
         return bool(fill)
@@ -381,6 +409,11 @@ class RuntimeSession:
             symbols=self._synthetic_symbols_for_exit(order),
         )
         return quote or self._last_synthetic_quote_by_order.get(self._synthetic_entry_id(order))
+
+    @staticmethod
+    def _uses_synthetic_vehicle(engine: PaperEngine) -> bool:
+        strategy = getattr(engine, "strategy", None)
+        return str(getattr(strategy, "vehicle", "futures")).lower() == "synthetic"
 
     def _record_missing_synthetic_exit(self, order, timestamp: str) -> None:
         self.store.append_event("EXECUTION_ERROR", {
@@ -426,8 +459,9 @@ class RuntimeSession:
                 # Settle positions carried into this bar before evaluating a
                 # new bundle, matching the deterministic replay ordering.
                 for action in self.engine.on_closed_bar(bar):
-                    synthetic_quote = self._synthetic_exit_quote(action.intent, bar)
-                    if synthetic_quote is None:
+                    synthetic_quote = (self._synthetic_exit_quote(action.intent, bar)
+                                       if self._uses_synthetic_vehicle(self.engine) else None)
+                    if self._uses_synthetic_vehicle(self.engine) and synthetic_quote is None:
                         self._record_missing_synthetic_exit(action.intent, bar.timestamp.isoformat())
                         continue
                     filled = self._execute_paper_order(
@@ -473,8 +507,9 @@ class RuntimeSession:
                 self.broker.update_price(bar.instrument.symbol, bar.close)
             result = self.engine.on_tick(bar)
             for action in result:
-                synthetic_quote = self._synthetic_exit_quote(action.intent, bar)
-                if synthetic_quote is None:
+                synthetic_quote = (self._synthetic_exit_quote(action.intent, bar)
+                                   if self._uses_synthetic_vehicle(self.engine) else None)
+                if self._uses_synthetic_vehicle(self.engine) and synthetic_quote is None:
                     self._record_missing_synthetic_exit(action.intent, bar.timestamp.isoformat())
                     continue
                 filled = self._execute_paper_order(

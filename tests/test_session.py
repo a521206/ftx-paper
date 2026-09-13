@@ -8,6 +8,7 @@ from ftx_paper.core import EngineResult, PaperEngine
 from ftx_paper.core import CompletedBarAggregator
 from ftx_paper.runtime import RuntimeSession, RuntimeStore
 from ftx_paper.execution import PositionLedger
+from ftx_paper.capital_config import FtxCapitalConfig
 import ftx_paper.broker.zerodha as zerodha
 
 
@@ -145,11 +146,15 @@ def test_session_restores_ledger_from_runtime_status(tmp_path):
     store.write_status({
         "state": "STOPPED",
         "capital": 800.0,
+        "initial_capital": 1000.0,
         "open_positions": [{"symbol": "NIFTYFUT", "quantity": 2, "average_price": 100.0}],
     })
 
     ledger = PositionLedger(1000.0)
-    RuntimeSession(store, None, [], ledger=ledger)
+    RuntimeSession(
+        store, None, [], ledger=ledger,
+        capital_config=FtxCapitalConfig(initial_capital=1000.0),
+    )
 
     assert ledger.cash == 800.0
     assert ledger.positions()[0].quantity == 2
