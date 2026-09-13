@@ -322,11 +322,6 @@ class IndependentLiveDecisionEngine:
                     entry=current, stop=stop, score=score, vix=float(vix_bar.close),
                     is_expiry_day=bundle.trading_date in self.expiry_dates,
                     vehicle=vehicle, synthetic_premiums=synthetic_quote,
-                    open_margin_used=sum(
-                        position.quantity
-                        * self._vehicle_sizers[position.vehicle].vehicle_limits[position.vehicle].margin_per_lot
-                        for position, _ in self._decision_positions.values()
-                    ),
                 )
                 quantity = sizing.quantity
                 # Allocate from actual remaining directional headroom, not
