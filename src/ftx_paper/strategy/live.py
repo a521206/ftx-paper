@@ -226,8 +226,15 @@ class ConfiguredLiveStrategy:
                 limits[str(key).lower()] = VehicleRiskLimits(**dict(value))
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"invalid vehicle risk limits for {key!r}") from exc
+        raw_portfolio = snapshot.get("portfolio")
+        portfolio = PaperPortfolio.from_snapshot(raw_portfolio) if isinstance(raw_portfolio, Mapping) else None
+        if portfolio is not None and portfolio.positions:
+            raise ValueError("strategy snapshots with open positions are unsupported")
         strategy = cls(config=config, capital_config=capital_config, enabled_vehicles=enabled_vehicles,
-                       vehicle_risk_limits=limits)
+                       vehicle_risk_limits=limits, portfolio=portfolio)
+        strategy._equity = strategy.portfolio.equity
+        strategy._peak_equity = strategy.portfolio.peak_equity
+        strategy._daily_start_equity = strategy.portfolio.daily_baseline
         risk_snapshot = snapshot.get("risk_gate")
         if isinstance(risk_snapshot, Mapping):
             strategy._decision_engine.restore_risk_snapshot(dict(risk_snapshot))

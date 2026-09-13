@@ -7,6 +7,7 @@ from ftx_paper.contracts import MarketBar, OrderIntent, OrderRole, OrderSide
 from .settlement import ExitValidationError, validate_exit_order
 from .engine import PaperEngine
 from ftx_paper.config import NIFTY_LOT_SIZE
+from ftx_paper.execution import PaperExecutionCoordinator
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +52,8 @@ def replay(engine: PaperEngine, bars: Iterable[MarketBar]) -> ReplayResult:
     events: list[dict[str, object]] = []
     open_trades: list[ReplayTrade] = []
     trades: list[ReplayTrade] = []
+    portfolio = getattr(engine.strategy, "portfolio", None)
+    coordinator = PaperExecutionCoordinator(portfolio) if portfolio is not None else None
     for bar in bars:
         if previous is not None and bar.timestamp <= previous:
             raise ValueError("replay bars must be strictly increasing")
@@ -92,6 +95,8 @@ def replay(engine: PaperEngine, bars: Iterable[MarketBar]) -> ReplayResult:
                 "quantity": action.intent.quantity,
                 "price": action.price,
             })
+            if coordinator is not None:
+                coordinator.fill(action.intent, price=action.price, timestamp=bar.timestamp.isoformat())
             engine.settle_exit(action.intent.client_order_id, filled=True)
 
         result = engine.on_bar(bar)
@@ -130,6 +135,8 @@ def replay(engine: PaperEngine, bars: Iterable[MarketBar]) -> ReplayResult:
                     "quantity": order.quantity,
                     "price": fill_price,
                 })
+                if coordinator is not None:
+                    coordinator.fill(order, price=fill_price, timestamp=bar.timestamp.isoformat())
                 engine.settle_exit(order.client_order_id, filled=True)
             else:
                 events.append({
@@ -151,6 +158,8 @@ def replay(engine: PaperEngine, bars: Iterable[MarketBar]) -> ReplayResult:
                     vehicle=order.vehicle,
                 ))
                 engine.register_entry(order, fill_price=fill_price)
+                if coordinator is not None:
+                    coordinator.fill(order, price=fill_price, timestamp=bar.timestamp.isoformat())
 
     return ReplayResult(tuple(orders), tuple(events), engine.bars_seen, tuple(trades + open_trades))
 
