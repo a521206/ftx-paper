@@ -24,6 +24,7 @@ class PositionState:
     vehicle: str = "futures"
     synthetic_legs: tuple[Instrument, Instrument] | None = None
     entry_bar: int | None = None
+    entry_order_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,5 +158,6 @@ class ExitStateMachine:
             reason=reason, role=OrderRole.EXIT, vehicle=position.vehicle,
             synthetic_legs=position.synthetic_legs,
             entry_bar=position.entry_bar,
+            entry_order_id=position.entry_order_id,
         )
         return ExitAction(reason, price, intent, position.cell)

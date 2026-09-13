@@ -49,6 +49,7 @@ class OrderIntent:
     # and carry the selected CE/PE legs explicitly for the execution layer.
     vehicle: str = field(default="futures", kw_only=True)
     synthetic_legs: tuple[Instrument, Instrument] | None = field(default=None, kw_only=True)
+    entry_order_id: str | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         vehicle = str(self.vehicle).lower()

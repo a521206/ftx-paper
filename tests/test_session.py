@@ -32,13 +32,17 @@ class Feed:
 def test_closed_bar_is_processed_under_session_lifecycle(tmp_path):
     store = RuntimeStore(tmp_path)
     session = RuntimeSession(store, None, [], engine=PaperEngine())
+    session._aggregator = CompletedBarAggregator(
+        {("NSE", "NIFTY"): MarketRole.FUTURES},
+        required_roles=(MarketRole.FUTURES,), deadline_seconds=0,
+    )
     session.feed = Feed(session.on_closed_bar)
     session.broker = PaperBroker()
     store.write_status({"state": "RUNNING"})
-    bar = MarketBar(Instrument("NIFTY", "NSE", "INDEX"), datetime.now(timezone.utc), 1, 2, 0, 1)
+    bar = MarketBar(Instrument("NIFTY", "NSE", "FUTURES"), datetime.now(timezone.utc), 1, 2, 0, 1)
     session.on_closed_bar(bar)
     assert session.engine.bars_seen == 1
-    assert any(event["event_type"] == "ENGINE_EVENT" for event in store.read_events())
+    assert any(event["event_type"] == "BUNDLE_COMPLETE" for event in store.read_events())
     session_date = bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat()
     assert len(store.read_market_bars(session_date)) == 1
 
@@ -46,6 +50,16 @@ def test_closed_bar_is_processed_under_session_lifecycle(tmp_path):
 def test_role_objects_are_json_safe_at_runtime_boundary():
     payload = _json_safe({MarketRole.FUTURES: 1, OptionRole("NIFTYCE"): 2}, path="payload")
     assert payload == {"futures": 1, "option:NIFTYCE": 2}
+
+
+def test_exit_order_carries_explicit_entry_identity():
+    entry_id = "entry-2026-01-01T10:20:00+05:30"
+    order = OrderIntent(
+        "exit-1", Instrument("NIFTY", "NSE", "INDEX"), OrderSide.SELL, 1,
+        role=OrderRole.EXIT, entry_order_id=entry_id,
+    )
+
+    assert order.entry_order_id == entry_id
 
 
 def test_stop_orders_feed_cleanup_before_broker(tmp_path):

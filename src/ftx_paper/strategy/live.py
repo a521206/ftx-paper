@@ -271,9 +271,11 @@ class ConfiguredLiveStrategy:
         if quantity < 1:
             return ()
         self._exits.reset()
+        entry_order_id = f"entry-{bar.timestamp.isoformat()}"
         self._position = PositionState(bar.instrument, bar.close, stop, quantity, decision.side,
-                                       exit_mode="trail", entry_fill_time=bar.timestamp)
-        return (self._policy.to_order(decision, bar, quantity, f"entry-{bar.timestamp.isoformat()}"),)
+                                       exit_mode="trail", entry_fill_time=bar.timestamp,
+                                       entry_order_id=entry_order_id)
+        return (self._policy.to_order(decision, bar, quantity, entry_order_id),)
 
     def on_bundle(self, bundle: DecisionBundle):
         if self._decide is not None:
@@ -297,6 +299,7 @@ class ConfiguredLiveStrategy:
             vehicle=order.vehicle,
             synthetic_legs=order.synthetic_legs,
             entry_bar=order.entry_bar,
+            entry_order_id=order.client_order_id,
         )
         trail_kwargs = (
             {"trail_activation_bp": TRAIL_ACTIVATE_BP, "trail_distance_bp": TRAIL_DISTANCE_BP}

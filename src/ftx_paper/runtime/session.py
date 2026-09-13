@@ -3,25 +3,44 @@ from __future__ import annotations
 import threading
 import time
 import logging
+from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, NotRequired, TypedDict
 from zoneinfo import ZoneInfo
 
-from ftx_paper.broker import Broker, PaperBroker
+from ftx_paper.broker import Broker, Fill, PaperBroker
 from ftx_paper.capital_config import FtxCapitalConfig
 from ftx_paper.contracts import (
-    Instrument, MarketBar, MarketRole, OptionRole, OptionType, OrderRole, OrderSide, SyntheticFutureQuote, normalize_exchange_timestamp, parse_role,
+    Instrument, MarketBar, MarketRole, OptionRole, OptionType, OrderRole, OrderSide, Role, SyntheticFutureQuote, normalize_exchange_timestamp, parse_role,
     synthetic_future_quote,
     role_to_key,
 )
 from ftx_paper.core import AggregatorConfig, CompletedBarAggregator, InstrumentKey, PaperEngine
 from ftx_paper.core.cost import futures_cost, synthetic_futures_cost
+from ftx_paper.config import NIFTY_LOT_SIZE
 from ftx_paper.execution import PositionLedger
 from .events import is_decision_event, serialize_datetime
 from .store import RuntimeStore
 
 
 logger = logging.getLogger("ftx-paper")
+
+
+class LiveEntryTrade(TypedDict):
+    entry_price: float
+    quantity: int
+    side: OrderSide
+    vehicle: str
+    ce_entry_price: float | None
+    pe_entry_price: float | None
+
+
+class LastExecutionFill(TypedDict):
+    price: float
+    fill_timestamp: str
+    symbol: str
+    quantity: int
+    realized_pnl: NotRequired[float]
 
 if TYPE_CHECKING:
     from ftx_paper.broker.zerodha import ZerodhaInstrument
@@ -59,14 +78,18 @@ class RuntimeSession:
         self._stopping = False
         self._started = threading.Event()
         self._aggregator: CompletedBarAggregator | None = None
-        self._last_execution_fill: dict[str, object] | None = None
-        self._latest_option_bars: dict[OptionRole, MarketBar] = {}
+        self._last_execution_fill: LastExecutionFill | None = None
+        self._latest_option_bars: dict[Role, MarketBar] = {}
         self._synthetic_symbols_by_order: dict[str, tuple[str, str]] = {}
         self._last_synthetic_quote_by_order: dict[str, SyntheticFutureQuote] = {}
+        self._live_entry_trades: dict[str, LiveEntryTrade] = {}
 
     def _restore_ledger_state(self) -> None:
         if self.ledger is None:
             return
+        capital_config = self.capital_config
+        if capital_config is None:
+            raise ValueError("capital_config is required when a ledger is configured")
         status = self.store.read_status()
         raw_cash = status.get("capital")
         if raw_cash is None:
@@ -80,10 +103,12 @@ class RuntimeSession:
         persisted_initial = status.get("initial_capital")
         if persisted_initial is None:
             raise ValueError("runtime status has no persisted initial_capital")
-        if float(persisted_initial) != self.capital_config.initial_capital:
+        if isinstance(persisted_initial, bool) or not isinstance(persisted_initial, (int, float)):
+            raise ValueError("runtime status has an invalid initial_capital")
+        if float(persisted_initial) != capital_config.initial_capital:
             raise ValueError(
                 "capital config does not match runtime status: "
-                f"configured={self.capital_config.initial_capital}, persisted={persisted_initial}"
+                f"configured={capital_config.initial_capital}, persisted={persisted_initial}"
             )
         raw_positions = status.get("open_positions", ())
         if not isinstance(raw_positions, (list, tuple)):
@@ -264,7 +289,7 @@ class RuntimeSession:
                 quote = (
                     synthetic_future_quote(
                         futures_bar, option_bars,
-                        symbols=tuple(leg.symbol for leg in order.synthetic_legs)
+                        symbols=(order.synthetic_legs[0].symbol, order.synthetic_legs[1].symbol)
                         if order.synthetic_legs else None,
                         same_minute=True,
                     )
@@ -348,9 +373,16 @@ class RuntimeSession:
                                                "outcome": "acknowledged"}, f"order_ack:{ack.client_order_id}", timestamp=timestamp)
         try:
             poll_fills = getattr(self.broker, "poll_fills", None)
-            fills = tuple(poll_fills(order, ack.broker_order_id)) if callable(poll_fills) else tuple(
-                fill for fill in (self.broker.poll_fill(order, ack.broker_order_id),) if fill
-            )
+            if callable(poll_fills):
+                raw_fills = poll_fills(order, ack.broker_order_id)
+                if not isinstance(raw_fills, Iterable):
+                    raise TypeError("broker poll_fills() must return an iterable")
+                fills = tuple(raw_fills)
+                if any(not isinstance(item, Fill) for item in fills):
+                    raise TypeError("broker poll_fills() returned an invalid fill")
+            else:
+                fill = self.broker.poll_fill(order, ack.broker_order_id)
+                fills = (fill,) if fill is not None else ()
         except Exception as exc:
             self.store.append_event("EXECUTION_ERROR", {**context,
                                                          "broker_order_id": ack.broker_order_id,
@@ -363,13 +395,14 @@ class RuntimeSession:
             return False
         fill = fills[0] if fills else None
         if fills:
+            fill = fills[0]
             if any(item.vehicle != order.vehicle for item in fills):
                 self.store.append_event(
                     "EXECUTION_ERROR",
                     {**context, "outcome": "execution_error",
                      "phase": "fill_validation",
                      "reason": "fill_vehicle_mismatch",
-                     "fill_vehicle": fill.vehicle},
+                     "fill_vehicle": fills[0].vehicle},
                     f"execution_error:fill_vehicle:{order.client_order_id}",
                     timestamp=timestamp,
                 )
@@ -403,23 +436,49 @@ class RuntimeSession:
                     )
                 else:
                     entry_cost = futures_cost(fill.quantity)
+            execution_price = synthetic_quote.price if synthetic_quote is not None else fill.price
             self._last_execution_fill = {
-                "price": synthetic_quote.price if synthetic_quote is not None else fill.price,
+                "price": execution_price,
                 "fill_timestamp": fill.timestamp,
                 "symbol": fill.instrument.symbol,
                 "quantity": fill.quantity,
             }
+            entry: LiveEntryTrade | None = None
+            entry_order_id = order.entry_order_id
+            if order.role is OrderRole.EXIT and entry_order_id is not None:
+                entry = self._live_entry_trades.get(entry_order_id)
+                if entry is not None:
+                    entry_side = entry["side"]
+                    signed = 1.0 if entry_side is OrderSide.BUY else -1.0
+                    gross_pnl = (
+                        (execution_price - entry["entry_price"])
+                        * NIFTY_LOT_SIZE * entry["quantity"] * signed
+                    )
+                    if entry["vehicle"] == "synthetic":
+                        ce_entry_price = entry["ce_entry_price"]
+                        pe_entry_price = entry["pe_entry_price"]
+                        if ce_entry_price is None or pe_entry_price is None:
+                            raise ValueError("synthetic entry is missing leg prices")
+                        cost = synthetic_futures_cost(
+                            ce_entry_price,
+                            pe_entry_price,
+                            entry["quantity"],
+                            is_short=entry_side is OrderSide.SELL,
+                        )
+                    else:
+                        cost = futures_cost(entry["quantity"])
+                    self._last_execution_fill["realized_pnl"] = gross_pnl - cost
             register_entry = getattr(self.engine, "register_entry", None)
-            if callable(register_entry):
+            if callable(register_entry) and order.role is OrderRole.ENTRY:
                 try:
-                    register_entry(order, fill_price=synthetic_quote.price if synthetic_quote is not None else fill.price,
+                    register_entry(order, fill_price=execution_price,
                                    entry_fill_time=timestamp,
                                    reference_price=reference_price)
                 except TypeError as exc:
                     if "entry_fill_time" not in str(exc):
                         raise
                     try:
-                        register_entry(order, fill_price=synthetic_quote.price if synthetic_quote is not None else fill.price)
+                        register_entry(order, fill_price=execution_price)
                     except Exception as exc:
                         compensated = compensate_fills(fills, ack.broker_order_id)
                         if compensated:
@@ -442,7 +501,8 @@ class RuntimeSession:
                 )
                 self._last_synthetic_quote_by_order[order.client_order_id] = synthetic_quote
             elif synthetic_quote is not None:
-                self._last_synthetic_quote_by_order[self._synthetic_entry_id(order)] = synthetic_quote
+                if order.entry_order_id is not None:
+                    self._last_synthetic_quote_by_order[order.entry_order_id] = synthetic_quote
             position = None
             if self.ledger:
                 try:
@@ -459,11 +519,22 @@ class RuntimeSession:
                         "phase": "ledger", "error_type": type(exc).__name__, "reason": str(exc)},
                         f"execution_error:ledger:{order.client_order_id}", timestamp=timestamp)
                     return False
+            if order.role is OrderRole.EXIT and entry is not None and entry_order_id is not None:
+                self._live_entry_trades.pop(entry_order_id, None)
+            if order.role is OrderRole.ENTRY:
+                self._live_entry_trades[order.client_order_id] = {
+                    "entry_price": execution_price,
+                    "quantity": fill.quantity,
+                    "side": order.side,
+                    "vehicle": order.vehicle,
+                    "ce_entry_price": synthetic_quote.ce.close if synthetic_quote is not None else None,
+                    "pe_entry_price": synthetic_quote.pe.close if synthetic_quote is not None else None,
+                }
             self.store.append_event("FILL", {**context,
                                               "broker_order_id": ack.broker_order_id,
                                               "symbol": fill.instrument.symbol,
                                               "quantity": fill.quantity,
-                                              "price": synthetic_quote.price if synthetic_quote is not None else fill.price,
+                                              "price": execution_price,
                                               "legs": [{"symbol": item.instrument.symbol, "quantity": item.quantity,
                                                         "price": item.price, "side": (order.side if item.instrument.instrument_type.upper() != "PE" else (OrderSide.SELL if order.side is OrderSide.BUY else OrderSide.BUY)).value}
                                                        for item in fills] if order.vehicle == "synthetic" else None,
@@ -485,16 +556,25 @@ class RuntimeSession:
                                      f"order_unfilled:{order.client_order_id}", timestamp=timestamp)
             cancel_reservation()
             return False
+        realized_pnl = (
+            self._last_execution_fill.get("realized_pnl")
+            if self._last_execution_fill is not None else None
+        )
+        if isinstance(realized_pnl, (int, float)):
+            strategy = getattr(self.engine, "strategy", None)
+            update_portfolio_state = getattr(strategy, "update_portfolio_state", None)
+            portfolio_state = getattr(strategy, "portfolio_state", {})
+            if callable(update_portfolio_state) and isinstance(portfolio_state, dict):
+                current_equity = float(portfolio_state.get("current_equity", 0.0)) + float(realized_pnl)
+                peak_equity = max(float(portfolio_state.get("peak_equity", current_equity)), current_equity)
+                update_portfolio_state(equity=current_equity, peak_equity=peak_equity)
         if fill and self.ledger:
-            marks = {p.symbol: p.average_price for p in self.ledger.positions()}
-            marks.update({item.instrument.symbol: item.price for item in fills})
-            equity = self.ledger.equity(marks)
-            update_portfolio = getattr(self.engine, "update_portfolio_state", None)
-            if callable(update_portfolio):
-                update_portfolio(equity=equity)
-            self.store.patch_status({"initial_capital": self.capital_config.initial_capital,
-                                     "max_daily_loss": self.capital_config.max_daily_loss,
-                                     "max_net_directional_lots": self.capital_config.max_net_directional_lots,
+            capital_config = self.capital_config
+            if capital_config is None:
+                raise RuntimeError("capital_config is required when a ledger is configured")
+            self.store.patch_status({"initial_capital": capital_config.initial_capital,
+                                     "max_daily_loss": capital_config.max_daily_loss,
+                                     "max_net_directional_lots": capital_config.max_net_directional_lots,
                                      "capital": self.ledger.cash, "open_positions": [
                 p.__dict__ if hasattr(p, "__dict__") else {"symbol": p.symbol, "quantity": p.quantity,
                 "average_price": p.average_price, "vehicle": p.vehicle} for p in self.ledger.positions()]})
@@ -503,19 +583,17 @@ class RuntimeSession:
     def _synthetic_symbols_for_exit(self, order) -> tuple[str, str] | None:
         if order.synthetic_legs:
             return tuple(leg.symbol for leg in order.synthetic_legs)
-        entry_id = self._synthetic_entry_id(order)
-        return self._synthetic_symbols_by_order.get(entry_id)
+        return self._synthetic_symbols_by_order.get(order.entry_order_id)
 
-    @staticmethod
-    def _synthetic_entry_id(order) -> str:
-        return str(order.client_order_id).removeprefix("exit-").split("-", 1)[0]
-
-    def _synthetic_exit_quote(self, order, bar: MarketBar) -> SyntheticFutureQuote | None:
+    def _synthetic_exit_quote(self, order, bar: MarketBar,
+                              option_bars: Mapping[Role, MarketBar] | None = None) -> SyntheticFutureQuote | None:
         quote = synthetic_future_quote(
-            bar, self._latest_option_bars,
+            bar, self._latest_option_bars if option_bars is None else option_bars,
             symbols=self._synthetic_symbols_for_exit(order),
         )
-        return quote or self._last_synthetic_quote_by_order.get(self._synthetic_entry_id(order))
+        if quote is not None or option_bars is not None:
+            return quote
+        return self._last_synthetic_quote_by_order.get(order.entry_order_id)
 
     def _record_missing_synthetic_exit(self, order, timestamp: str) -> None:
         self.store.append_event("EXECUTION_ERROR", {
@@ -545,70 +623,73 @@ class RuntimeSession:
                 "close": bar.close,
             }, f"bar_closed:{bar_key}", timestamp=bar.timestamp.isoformat())
             if self._aggregator is None:
-                result = self.engine.on_bar(bar)
-                for event in result.events:
-                    self._persist_engine_event(event, source="live", bundle_id=bar.timestamp.isoformat(),
-                                                session_date=bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat(),
-                                                decision_at=bar.timestamp, timestamp=bar.timestamp.isoformat())
-                for order in result.orders:
-                    self._execute_paper_order(
-                        order,
-                        session_date=bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat(),
-                        timestamp=bar.timestamp.isoformat(),
-                        reference_price=bar.close,
+                return
+            expired = self._aggregator.expire(now=time.monotonic())
+            for incomplete in expired:
+                self._record_incomplete(incomplete)
+            bundle = self._aggregator.ingest(bar)
+            option_snapshot: dict[Role, MarketBar] | None = None
+            if bundle is not None:
+                supporting = getattr(bundle, "supporting_inputs", None) or {}
+                raw_bars = supporting.get("bars", {})
+                if isinstance(raw_bars, dict):
+                    option_snapshot = {
+                        role: value for role, value in raw_bars.items()
+                        if isinstance(role, OptionRole) and isinstance(value, MarketBar)
+                    }
+
+            # Settle positions carried into this bar before evaluating a new
+            # bundle, matching the deterministic replay ordering.
+            for action in self.engine.on_closed_bar(bar):
+                synthetic_quote = (
+                    self._synthetic_exit_quote(action.intent, bar, option_snapshot)
+                    if action.intent.vehicle == "synthetic" else None
+                )
+                if action.intent.vehicle == "synthetic" and synthetic_quote is None:
+                    self._record_missing_synthetic_exit(action.intent, bar.timestamp.isoformat())
+                    continue
+                filled = self._execute_paper_order(
+                    action.intent,
+                    session_date=bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat(),
+                    timestamp=bar.timestamp.isoformat(),
+                    synthetic_quote=synthetic_quote,
+                )
+                self.engine.settle_exit(action.intent.client_order_id, filled=filled)
+                if filled and action.cell is not None:
+                    self.engine.record_exit(
+                        cell=action.cell,
+                        reason=action.reason,
+                        entry_bar=action.intent.entry_bar or 0,
+                        exit_bar=self.engine.bars_seen,
+                        date=bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat(),
+                        vehicle=action.intent.vehicle,
+                        direction="long" if action.intent.side.value == "SELL" else "short",
+                        quantity=action.intent.quantity,
                     )
-            else:
-                # Settle positions carried into this bar before evaluating a
-                # new bundle, matching the deterministic replay ordering.
-                for action in self.engine.on_closed_bar(bar):
-                    synthetic_quote = (self._synthetic_exit_quote(action.intent, bar)
-                                       if action.intent.vehicle == "synthetic" else None)
-                    if action.intent.vehicle == "synthetic" and synthetic_quote is None:
-                        self._record_missing_synthetic_exit(action.intent, bar.timestamp.isoformat())
-                        continue
-                    filled = self._execute_paper_order(
-                        action.intent,
-                        session_date=bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat(),
-                        timestamp=bar.timestamp.isoformat(),
-                        synthetic_quote=synthetic_quote,
-                    )
-                    self.engine.settle_exit(action.intent.client_order_id, filled=filled)
-                    if filled and action.cell is not None:
-                        self.engine.record_exit(
-                            cell=action.cell,
-                            reason=action.reason,
-                            entry_bar=action.intent.entry_bar or 0,
-                            exit_bar=self.engine.bars_seen,
-                            date=bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat(),
-                            vehicle=action.intent.vehicle,
-                            direction="long" if action.intent.side.value == "SELL" else "short",
-                            quantity=action.intent.quantity,
-                        )
-                    self.store.append_event("EXITDECISION", {
-                        "decision_id": action.intent.client_order_id,
-                        "vehicle": action.intent.vehicle,
-                        "cell": action.cell,
-                        "reason": action.reason,
-                        "exit_price": action.price,
-                        "trigger_price": action.price,
-                        "fill_price": (self._last_execution_fill or {}).get("price"),
-                        "market_time": bar.timestamp.isoformat(),
-                        "processing_time": datetime.now(timezone.utc).isoformat(),
-                        "trigger_source": "on_closed_bar",
-                        "decision_at": bar.timestamp.isoformat(),
-                        "decision_source": "live",
-                        "execution_allowed": True,
-                        "outcome": "exit_triggered",
-                    }, f"exit_decision:{action.intent.client_order_id}", timestamp=bar.timestamp.isoformat())
-                expired = self._aggregator.expire(now=time.monotonic())
-                for incomplete in expired:
-                    self._record_incomplete(incomplete)
-                bundle = self._aggregator.ingest(bar)
-                self._refresh_pending_status()
-                if bundle is not None:
-                    self.store.patch_status({"last_completed_bundle_minute": bundle.minute,
-                                             "last_strategy_evaluation_minute": bundle.minute})
-                    self._process_bundle(bundle, source="live")
+                self.store.append_event("EXITDECISION", {
+                    "decision_id": action.intent.client_order_id,
+                    "vehicle": action.intent.vehicle,
+                    "cell": action.cell,
+                    "reason": action.reason,
+                    "exit_price": action.price,
+                    "trigger_price": action.price,
+                    "fill_price": (
+                        self._last_execution_fill["price"]
+                        if self._last_execution_fill is not None else None
+                    ),
+                    "market_time": bar.timestamp.isoformat(),
+                    "processing_time": datetime.now(timezone.utc).isoformat(),
+                    "trigger_source": "on_closed_bar",
+                    "decision_at": bar.timestamp.isoformat(),
+                    "decision_source": "live",
+                    "execution_allowed": True,
+                    "outcome": "exit_triggered",
+                }, f"exit_decision:{action.intent.client_order_id}", timestamp=bar.timestamp.isoformat())
+            self._refresh_pending_status()
+            if bundle is not None:
+                self.store.patch_status({"last_completed_bundle_minute": bundle.minute,
+                                         "last_strategy_evaluation_minute": bundle.minute})
+                self._process_bundle(bundle, source="live")
 
     def on_tick(self, bar: MarketBar) -> None:
         """Evaluate protective exits immediately on each live market tick."""
@@ -651,7 +732,10 @@ class RuntimeSession:
                     "reason": action.reason,
                     "exit_price": action.price,
                     "trigger_price": action.price,
-                    "fill_price": (self._last_execution_fill or {}).get("price"),
+                    "fill_price": (
+                        self._last_execution_fill["price"]
+                        if self._last_execution_fill is not None else None
+                    ),
                     "market_time": bar.timestamp.isoformat(),
                     "processing_time": datetime.now(timezone.utc).isoformat(),
                     "trigger_source": "on_tick",

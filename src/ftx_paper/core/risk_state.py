@@ -158,7 +158,10 @@ class RiskGateState:
         raw_cells = snapshot.get("cells", {})
         if not isinstance(raw_cells, Mapping):
             raise ValueError("risk-gate snapshot cells must be an object")
-        self.net_directional_lots = float(snapshot.get("net_directional_lots", 0.0))
+        raw_net_directional_lots = snapshot.get("net_directional_lots", 0.0)
+        if isinstance(raw_net_directional_lots, bool) or not isinstance(raw_net_directional_lots, (int, float)):
+            raise ValueError("risk-gate snapshot net_directional_lots is invalid")
+        self.net_directional_lots = float(raw_net_directional_lots)
         raw_date = snapshot.get("trading_date")
         self.trading_date = str(raw_date) if raw_date is not None else None
         self.cells = {
