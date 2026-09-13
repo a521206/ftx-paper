@@ -24,12 +24,6 @@ TRAIL_ACTIVATE_BP = 20.0
 TRAIL_DISTANCE_BP = 20.0
 CAPITAL = INITIAL_CAPITAL
 LOT_SIZE = NIFTY_LOT_SIZE
-# Vehicle risk ceilings are expressed in lots before cell-policy stability.
-# The per-cell staged cap mirrors canonical sequential allocation: each later
-# entry in the same cell receives the remaining staged tranche.
-VEHICLE_MAX_RISK_LOTS = {"futures": 4, "synthetic": 8}
-
-
 class Session(StrEnum):
     MORNING = "morning"
     AFTERNOON = "afternoon"
@@ -112,7 +106,6 @@ __all__ = [
     "AFTERNOON_ENTRY_MINUTES",
     "CAPITAL",
     "LOT_SIZE",
-    "VEHICLE_MAX_RISK_LOTS",
     "COOLDOWN_MINUTES",
     "TRAIL_ACTIVATE_BP",
     "TRAIL_DISTANCE_BP",

@@ -18,7 +18,6 @@ from ftx_paper.strategy.config import (
     AFTERNOON_ENTRY_MINUTES,
     MORNING_CELL_POLICIES,
     MORNING_ENTRY_MINUTES,
-    VEHICLE_MAX_RISK_LOTS,
     CellPolicyConfig,
     Session,
 )
@@ -139,9 +138,9 @@ class IndependentLiveDecisionEngine:
         self._decision_session: Session | None = None
         self._decision_segment: tuple[Session, int] | None = None
         self._vix_open: float | None = None
-        self.risk_gate = risk_gate or RiskGateState(
-            max_net_directional_lots=VEHICLE_MAX_RISK_LOTS[self.vehicle],
-        )
+        # Canonical uses one shared directional cap for both execution
+        # vehicles. Vehicle selection changes pricing/cost inputs, not lots.
+        self.risk_gate = risk_gate or RiskGateState(max_net_directional_lots=8.0)
 
     def _session_for_time(self, decision_at: datetime) -> Session:
         ist_time = decision_at.astimezone(ZoneInfo("Asia/Kolkata"))
