@@ -26,11 +26,15 @@ class RiskConfig:
     contract_lot_size: int = NIFTY_LOT_SIZE
     max_quantity: int = 10
     margin_per_lot: float = 175_000.0
-    margin_utilization_cap: float = 0.80
+    margin_utilization_cap: float = 0.40
     low_vix_threshold: float = 13.0
     # Canonical capital sizing applies the score multiplier and policy
     # stability, but does not apply an additional VIX multiplier.
     low_vix_multiplier: float = 1.0
+    drawdown_tiers: tuple[tuple[float, float], ...] = (
+        (-100_000.0, 0.50),
+        (-200_000.0, 0.25),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +79,7 @@ class RiskSizer:
         bars_before: Sequence[MarketBar] | None = None, vix: float | None = None,
         is_expiry_day: bool = False, vehicle: str = "futures",
         synthetic_premiums: SyntheticPremiumPair | None = None,
+        open_margin_used: float = 0.0,
     ) -> RiskDecision:
         if capital <= 0 or equity <= 0 or peak_equity <= 0:
             return RiskDecision(False, 0, "non_positive_capital")
@@ -96,14 +101,25 @@ class RiskSizer:
             return RiskDecision(False, 0, "invalid_stop_distance", vehicle=normalized_vehicle)
         if distance <= 0:
             return RiskDecision(False, 0, "invalid_stop_distance", vehicle=normalized_vehicle)
-        risk_budget = min(float(capital), float(equity)) * self.config.risk_fraction
+        available = max(0.0, min(float(capital), float(equity)) - float(open_margin_used))
+        if available <= 0:
+            return RiskDecision(False, 0, "capital_exhausted", vehicle=normalized_vehicle)
+        risk_budget = available * self.config.risk_fraction
         raw_quantity = int(risk_budget // (distance * self.config.contract_lot_size))
         score_multiplier = 1.0 if score is None else (1.5 if score >= 8 else 1.0 if score >= 5 else 0.5)
         vix_multiplier = self.config.low_vix_multiplier if vix is not None and vix < self.config.low_vix_threshold else 1.0
         multiplier = score_multiplier * vix_multiplier
-        available = min(float(capital), float(equity))
         margin_lots = int(available * self.config.margin_utilization_cap // limits.margin_per_lot) if limits.margin_per_lot else limits.max_quantity
         risk_ceiling = min(raw_quantity, limits.max_quantity, margin_lots)
+        cumulative_pnl = float(equity) - float(capital)
+        peak_pnl = float(peak_equity) - float(capital)
+        drawdown = cumulative_pnl - peak_pnl
+        drawdown_multiplier = 1.0
+        for threshold, scale in sorted(self.config.drawdown_tiers, reverse=True):
+            if drawdown <= threshold:
+                drawdown_multiplier = scale
+                break
+        multiplier *= drawdown_multiplier
         quantity = min(int(round(risk_ceiling * multiplier)), risk_ceiling)
         quantity -= quantity % self.config.lot_size
         if quantity < self.config.lot_size:

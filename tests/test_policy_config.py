@@ -46,6 +46,7 @@ def test_configured_cell_matrix_has_fixed_session_directions() -> None:
 
     assert morning == {
         "session_low+or_low": "buy",
+        "vwap_zone+session_low+or_low": "buy",
         "vwap_zone+or_low": "sell",
         "session_high+or_high": "sell",
     }
@@ -66,10 +67,12 @@ def test_configured_cell_policies_expose_canonical_stability_factors() -> None:
     morning = {item.cell: item.stability for item in MORNING_CELL_POLICIES}
     afternoon = {item.cell: item.stability for item in AFTERNOON_CELL_POLICIES}
 
-    assert morning["session_high+or_high"] == 0.5
+    assert morning["session_high+or_high"] == 0.8
     assert morning["vwap_zone+or_low"] == 0.5
-    assert afternoon["session_high+or_high"] == 0.5
-    assert afternoon["or_low"] == 0.5
+    assert morning["vwap_zone+session_low+or_low"] == 0.5
+    assert afternoon["session_high+or_high"] == 0.8
+    assert afternoon["or_low"] == 0.8
+    assert afternoon["vwap_zone+prior_day_high"] == 0.5
 
 
 def test_policy_manifest_is_separate_from_runtime_snapshot() -> None:

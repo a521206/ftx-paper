@@ -340,9 +340,9 @@ def test_replay_fixture_has_stable_production_transcript() -> None:
     result = replay(PaperEngine(ConfiguredLiveStrategy(capital_config=CAPITAL_CONFIG)), fixture)
     assert result.bars_seen == 3
     assert [(order.client_order_id, order.quantity, order.side.value) for order in result.orders] == [
-        ("entry-2026-01-01T10:15:00", 5, "BUY"),
-        ("entry-2026-01-01T10:16:00", 5, "BUY"),
-        ("entry-2026-01-01T10:17:00", 5, "BUY"),
+        ("entry-2026-01-01T10:15:00", 2, "BUY"),
+        ("entry-2026-01-01T10:16:00", 2, "BUY"),
+        ("entry-2026-01-01T10:17:00", 2, "BUY"),
     ]
 
 
@@ -714,7 +714,7 @@ def test_supporting_role_is_ignored_and_expired_bundle_has_diagnostics() -> None
     assert expired[0].bars["futures"].timestamp == minute
 
 
-def test_live_decision_engine_suppresses_unconfigured_cells() -> None:
+def test_live_decision_engine_reports_unconfigured_cells() -> None:
     instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
     vix = Instrument("INDIA VIX", "NSE", "VIX")
     call = Instrument("NIFTYCE", "NFO", "CE")
@@ -739,7 +739,9 @@ def test_live_decision_engine_suppresses_unconfigured_cells() -> None:
     engine.evaluate(bundle("10:21", {}))
     third = engine.evaluate(bundle("10:22", {}))
 
-    assert third == ()
+    assert len(third) == 1
+    assert third[0].event_type == "REJECTEDDECISION"
+    assert third[0].payload["reason"] == "cell_not_configured"
 
 
 def test_configured_policy_requires_exact_location_composite() -> None:
@@ -770,7 +772,9 @@ def test_live_decision_engine_persists_score_and_quality_bucket() -> None:
     engine.evaluate(bundle(1))
     engine.evaluate(bundle(2))
     events = engine.evaluate(bundle(3))
-    assert events == ()
+    assert len(events) == 1
+    assert events[0].event_type == "REJECTEDDECISION"
+    assert events[0].payload["reason"] == "cell_not_configured"
 
 
 def test_risk_sizer_never_exceeds_risk_budget_when_budget_is_marginal() -> None:

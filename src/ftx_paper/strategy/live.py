@@ -57,7 +57,10 @@ class ConfiguredLiveStrategy:
         self._features = LiveFeatureCalculator()
         self._policy = SetupPolicy()
         self._risk = RiskSizer()
-        self._exits = ExitStateMachine(trail_distance=10.0)
+        self._exits = ExitStateMachine(
+            trail_activation_bp=TRAIL_ACTIVATE_BP,
+            trail_distance_bp=TRAIL_DISTANCE_BP,
+        )
         self._decision_positions: dict[str, tuple[PositionState, ExitStateMachine]] = {}
         self._pending_exits: dict[str, str] = {}
         self.capital_config = capital_config
@@ -126,7 +129,10 @@ class ConfiguredLiveStrategy:
         self._bars.clear()
         self._position = None
         self._features = LiveFeatureCalculator()
-        self._exits = ExitStateMachine(trail_distance=10.0)
+        self._exits = ExitStateMachine(
+            trail_activation_bp=TRAIL_ACTIVATE_BP,
+            trail_distance_bp=TRAIL_DISTANCE_BP,
+        )
         self._decision_positions.clear()
         self._pending_exits.clear()
         self._equity = self._capital

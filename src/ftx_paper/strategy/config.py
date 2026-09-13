@@ -51,13 +51,14 @@ class CellPolicyConfig:
 
 MORNING_CELL_POLICIES = (
     CellPolicyConfig("session_low+or_low", OrderSide.BUY, ExitMode.SIGNAL),
+    CellPolicyConfig("vwap_zone+session_low+or_low", OrderSide.BUY, ExitMode.SIGNAL, 0.5),
     CellPolicyConfig("vwap_zone+or_low", OrderSide.SELL, ExitMode.TRAIL, 0.5),
-    CellPolicyConfig("session_high+or_high", OrderSide.SELL, ExitMode.SIGNAL, 0.5),
+    CellPolicyConfig("session_high+or_high", OrderSide.SELL, ExitMode.SIGNAL, 0.8),
 )
 AFTERNOON_CELL_POLICIES = (
-    CellPolicyConfig("session_high+or_high", OrderSide.BUY, ExitMode.TRAIL, 0.5),
-    CellPolicyConfig("or_low", OrderSide.BUY, ExitMode.SIGNAL, 0.5),
-    CellPolicyConfig("vwap_zone+prior_day_high", OrderSide.SELL, ExitMode.TRAIL),
+    CellPolicyConfig("session_high+or_high", OrderSide.BUY, ExitMode.TRAIL, 0.8),
+    CellPolicyConfig("or_low", OrderSide.BUY, ExitMode.SIGNAL, 0.8),
+    CellPolicyConfig("vwap_zone+prior_day_high", OrderSide.SELL, ExitMode.TRAIL, 0.5),
 )
 
 

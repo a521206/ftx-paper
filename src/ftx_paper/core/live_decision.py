@@ -224,7 +224,10 @@ class IndependentLiveDecisionEngine:
             opening, _ = vix_open_and_event(tuple(self._vix_history), current_vix)
             if opening is not None:
                 self._vix_open = opening
-        vix_bar = current_vix or self._previous_vix
+        # Canonical decisions require an event-time VIX value.  A prior VIX
+        # observation is retained only for opening-value calculation; it must
+        # not be carried forward as the current event input.
+        vix_bar = current_vix
         if vix_bar is None:
             decision_id = sha256(f"{bundle.bundle_id}:missing_vix".encode()).hexdigest()[:24]
             return (LiveDecision("REJECTEDDECISION", {**base, "decision_id": decision_id, "cell": "NONE", "direction": "NONE", "setup_type": "Skip", "outcome": "policy rejection", "reason": "missing_vix", "required_input_availability": {**base["required_input_availability"], "vix": False}, "feature_values": {}}),)
@@ -260,8 +263,6 @@ class IndependentLiveDecisionEngine:
         configured = _configured_policies_for_cell(
             self._cell_policies, decision_session, location_snapshot.cell,
         )
-        if not configured:
-            return ()
         round_level = round(current / 50) * 50
         structural_proximity = (
             (self.prior_day_low is not None and abs(current - self.prior_day_low) <= 15)
@@ -281,20 +282,25 @@ class IndependentLiveDecisionEngine:
         score_setup_type, score_multiplier = score_to_setup_type(score)
         sequence = len(self._futures)
         events = []
-        for cell, cell_policy in configured:
-            direction = cell_policy.direction.value.lower()
+        policies = configured or [(location_snapshot.cell, None)]
+        for cell, cell_policy in policies:
+            direction = cell_policy.direction.value.lower() if cell_policy is not None else "NONE"
             candidate_id = sha256(f"{decision_at.isoformat()}:{sequence}:{cell.name}".encode()).hexdigest()[:24]
             candidate = {**base, "decision_id": candidate_id, "cell": cell.name, "locations": [item.value for item in cell.ordered_locations], "direction": direction,
                          "setup_type": score_setup_type, "score": score, "score_factors": score_factors,
                          "score_multiplier": score_multiplier, "sequence": sequence,
                          "feature_values": feature_values, "entry_price": current, "outcome": "candidate",
-                         "exit_mode": cell_policy.exit_mode.value}
+                         "exit_mode": cell_policy.exit_mode.value if cell_policy is not None else "signal"}
             candidate.update(vix_at_event=vix_bar.close, pcr_at_event=pcr, stop_basis=stop_basis,
                              transitions=[{"reference": item.reference.value, "kind": item.kind.value,
                                            "from": item.from_side.value, "to": item.to_side.value}
                                           for item in location_snapshot.transitions])
             reason = None
-            if score_setup_type == "Skip":
+            if decision_session is Session.OUTSIDE:
+                reason = "outside_session_window"
+            elif cell_policy is None:
+                reason = "cell_not_configured"
+            elif score_setup_type == "Skip":
                 reason = "setup_score_skip"
             elif not transition_patterns_allow(location_snapshot, cell_policy.transition_patterns or self.transition_patterns):
                 reason = "transition_policy_mismatch"
@@ -316,6 +322,11 @@ class IndependentLiveDecisionEngine:
                     entry=current, stop=stop, score=score, vix=float(vix_bar.close),
                     is_expiry_day=bundle.trading_date in self.expiry_dates,
                     vehicle=vehicle, synthetic_premiums=synthetic_quote,
+                    open_margin_used=sum(
+                        position.quantity
+                        * self._vehicle_sizers[position.vehicle].vehicle_limits[position.vehicle].margin_per_lot
+                        for position, _ in self._decision_positions.values()
+                    ),
                 )
                 quantity = sizing.quantity
                 # Allocate from actual remaining directional headroom, not
