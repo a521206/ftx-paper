@@ -125,9 +125,15 @@ class ReplayWorker:
 
     def _execute(self, request: dict[str, Any], cancel: Event) -> dict[str, Any]:
         session_date = str(request.get("session_date") or request.get("date") or "")[:10]
-        vehicle = str(request.get("vehicle") or "synthetic").lower()
-        if vehicle not in {"futures", "synthetic"}:
-            raise ValueError(f"unsupported replay vehicle: {vehicle}")
+        raw_vehicles = request.get("vehicles")
+        if raw_vehicles is None:
+            vehicles = ("futures", "synthetic")
+        elif isinstance(raw_vehicles, (list, tuple)):
+            vehicles = tuple(dict.fromkeys(str(item).lower() for item in raw_vehicles))
+        else:
+            raise ValueError("replay vehicles must be an array containing 'futures' and/or 'synthetic'")
+        if not vehicles or any(item not in {"futures", "synthetic"} for item in vehicles):
+            raise ValueError(f"unsupported replay vehicles: {vehicles}")
         dates = [session_date] if session_date else self._dates()
         all_events: list[dict[str, Any]] = []
         diagnostic_trades: list[dict[str, Any]] = []
@@ -143,7 +149,7 @@ class ReplayWorker:
                 break
             # A date is an independent simulation session. No positions,
             # cooldowns, or risk state may leak into the next date.
-            strategy = ConfiguredLiveStrategy(capital_config=self.capital_config, vehicle=vehicle)
+            strategy = ConfiguredLiveStrategy(capital_config=self.capital_config, enabled_vehicles=vehicles)
             engine = PaperEngine(strategy)
             strategy.update_portfolio_state(equity=current_equity, peak_equity=peak_equity)
             bars = self._bars(date)
@@ -167,7 +173,7 @@ class ReplayWorker:
                     if isinstance(role, (MarketRole, OptionRole))
                 }
                 for trade in open_trades:
-                    if vehicle == "futures":
+                    if trade.get("vehicle") == "futures":
                         continue
                     quote = synthetic_future_quote(
                         quote_selection_bar, option_bars,
@@ -178,12 +184,13 @@ class ReplayWorker:
                 exit_actions = engine.on_closed_bar(futures_bar)
                 for action in exit_actions:
                     open_trade = next((trade for trade in open_trades
-                                       if trade["instrument"] == action.intent.instrument.symbol), None)
+                                       if trade["instrument"] == action.intent.instrument.symbol
+                                       and trade.get("vehicle") == action.intent.vehicle), None)
                     exit_quote = synthetic_future_quote(
                         quote_selection_bar, option_bars,
                         symbols=(open_trade["ce_symbol"], open_trade["pe_symbol"]),
-                    ) if open_trade and vehicle == "synthetic" else None
-                    if exit_quote is None and vehicle == "synthetic":
+                    ) if open_trade and action.intent.vehicle == "synthetic" else None
+                    if exit_quote is None and action.intent.vehicle == "synthetic":
                         all_events.append({"event_type": "EXECUTION_ERROR", "decision_id": action.intent.client_order_id,
                                            "reason": "missing_synthetic_future_quote", "source": "replay", "session_date": date})
                         continue
@@ -193,6 +200,7 @@ class ReplayWorker:
                     # then settles at its same-minute synthetic quote.
                     exit_price = exit_quote.price if exit_quote is not None else action.price
                     exit_event = {"event_type": "EXITDECISION", "decision_id": action.intent.client_order_id,
+                                  "vehicle": action.intent.vehicle,
                                   "entry_decision_id": open_trade["entry_order_id"] if open_trade else None,
                                   "timestamp": futures_bar.timestamp.isoformat(), "reason": action.reason,
                                   "price": exit_price, "source": "replay", "session_date": date}
@@ -206,7 +214,9 @@ class ReplayWorker:
                     if realized is not None:
                         engine.record_exit(cell=realized.cell.name, reason=action.reason,
                                            entry_bar=realized.entry_bar, exit_bar=engine.bars_seen,
-                                           date=date)
+                                           date=date, vehicle=action.intent.vehicle,
+                                           direction="long" if action.intent.side.value == "SELL" else "short",
+                                           quantity=action.intent.quantity)
                         current_equity += realized.realized_pnl
                         peak_equity = max(peak_equity, current_equity)
                         max_drawdown = min(max_drawdown, current_equity - peak_equity)
@@ -217,18 +227,24 @@ class ReplayWorker:
                 all_events.extend(result_events)
                 for order in result.orders:
                     all_events.append({"event_type": "ORDER_SUPPRESSED", "decision_id": order.client_order_id,
+                                       "vehicle": order.vehicle,
                                        "timestamp": futures_bar.timestamp.isoformat(), "source": "replay",
                                        "session_date": date, "execution_allowed": False})
                     if order.role is OrderRole.ENTRY:
-                        entry_quote = synthetic_future_quote(quote_selection_bar, option_bars) if vehicle == "synthetic" else None
-                        if entry_quote is None and vehicle == "synthetic":
+                        entry_quote = synthetic_future_quote(
+                            quote_selection_bar, option_bars,
+                            symbols=tuple(leg.symbol for leg in order.synthetic_legs)
+                            if order.synthetic_legs else None,
+                        ) if order.vehicle == "synthetic" else None
+                        if entry_quote is None and order.vehicle == "synthetic":
                             all_events.append({"event_type": "EXECUTION_ERROR", "decision_id": order.client_order_id,
+                                               "vehicle": order.vehicle,
                                                "reason": "missing_synthetic_future_quote", "source": "replay", "session_date": date})
                             continue
                         fill_price = entry_quote.price if entry_quote is not None else futures_bar.close
                         for event in reversed(all_events):
                             if event.get("decision_id") == order.client_order_id:
-                                event.update({"vehicle": vehicle, "entry_price": fill_price})
+                                event.update({"vehicle": order.vehicle, "entry_price": fill_price})
                                 if entry_quote is not None:
                                     event.update({"ce_symbol": entry_quote.ce.instrument.symbol,
                                                   "pe_symbol": entry_quote.pe.instrument.symbol, "ce_strike": entry_quote.strike,
@@ -238,7 +254,7 @@ class ReplayWorker:
                         all_events.append({"event_type": "FILL", "decision_id": order.client_order_id,
                                            "fill_timestamp": futures_bar.timestamp.isoformat(),
                                            "price": fill_price, "quantity": order.quantity,
-                                           "vehicle": vehicle, "source": "replay",
+                                           "vehicle": order.vehicle, "source": "replay",
                                            "session_date": date})
                         engine.register_entry(order, fill_price=fill_price,
                                               entry_fill_time=futures_bar.timestamp,
@@ -247,7 +263,7 @@ class ReplayWorker:
                                             "instrument": order.instrument.symbol,
                                             "side": order.side.value, "quantity": order.quantity,
                                             "entry_timestamp": futures_bar.timestamp.isoformat(),
-                                            "entry_price": fill_price, "vehicle": vehicle,
+                                            "entry_price": fill_price, "vehicle": order.vehicle,
                                             "cell": order.cell,
                                             "entry_bar": order.entry_bar or engine.bars_seen})
                         if entry_quote is not None:
@@ -257,12 +273,13 @@ class ReplayWorker:
                             last_quotes[order.client_order_id] = entry_quote
                     elif order.role is OrderRole.EXIT:
                         open_trade = next((trade for trade in open_trades
-                                           if trade["instrument"] == order.instrument.symbol), None)
+                                           if trade["instrument"] == order.instrument.symbol
+                                           and trade.get("vehicle") == order.vehicle), None)
                         exit_quote = synthetic_future_quote(
                             quote_selection_bar, option_bars,
                             symbols=(open_trade["ce_symbol"], open_trade["pe_symbol"]),
-                        ) if open_trade and vehicle == "synthetic" else None
-                        if exit_quote is None and vehicle == "synthetic":
+                        ) if open_trade and order.vehicle == "synthetic" else None
+                        if exit_quote is None and order.vehicle == "synthetic":
                             all_events.append({"event_type": "EXECUTION_ERROR", "decision_id": order.client_order_id,
                                                "reason": "missing_synthetic_future_quote", "source": "replay", "session_date": date})
                             continue
@@ -272,7 +289,9 @@ class ReplayWorker:
                         if realized is not None:
                             engine.record_exit(cell=realized.cell.name, reason=order.reason,
                                                entry_bar=realized.entry_bar, exit_bar=engine.bars_seen,
-                                               date=date)
+                                               date=date, vehicle=order.vehicle,
+                                               direction="long" if order.side.value == "SELL" else "short",
+                                               quantity=order.quantity)
                             current_equity += realized.realized_pnl
                             peak_equity = max(peak_equity, current_equity)
                             max_drawdown = min(max_drawdown, current_equity - peak_equity)
@@ -284,6 +303,7 @@ class ReplayWorker:
         normalized_trades = [self._normalize_trade(trade) for trade in diagnostic_trades]
         return {
             "source": "replay",
+            "vehicles": list(vehicles),
             "bars_seen": bars_seen,
             "events": all_events,
             # Diagnostic-only trades live inside the replay run result. They
@@ -354,7 +374,9 @@ class ReplayWorker:
                       reason: str, *, exit_price: float) -> TradeSettlement | None:
         opposite = "SELL" if order.side.value == "BUY" else "BUY"
         index = next((i for i, trade in enumerate(open_trades)
-                      if trade["instrument"] == order.instrument.symbol and trade["side"] == opposite), None)
+                      if trade["instrument"] == order.instrument.symbol
+                      and trade.get("vehicle") == order.vehicle
+                      and trade["side"] == opposite), None)
         if index is None:
             return None
         trade = open_trades.pop(index)

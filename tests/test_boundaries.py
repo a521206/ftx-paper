@@ -33,6 +33,15 @@ def test_health_is_available_without_broker_or_niftyzoning(tmp_path: Path) -> No
     assert response.get_json()["status"] == "pass"
 
 
+def test_replay_rejects_legacy_scalar_vehicle_request(tmp_path: Path) -> None:
+    response = create_app(RuntimeStore(tmp_path)).test_client().post(
+        "/api/v1/replay", json={"vehicle": "synthetic"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"]["code"] == "invalid_request"
+
+
 def test_api_exposes_persisted_events(tmp_path: Path) -> None:
     store = RuntimeStore(tmp_path)
     store.append_event("TEST", {"value": 1})

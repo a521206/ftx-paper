@@ -35,13 +35,19 @@ class ConfiguredLiveStrategy:
     name = STRATEGY_NAME
     version = STRATEGY_VERSION
 
+    @property
+    def vehicle(self) -> str:
+        """Legacy single-vehicle view; orders remain explicitly per vehicle."""
+        return self.enabled_vehicles[0] if len(self.enabled_vehicles) == 1 else "mixed"
+
     def __init__(
         self,
         capital_config: FtxCapitalConfig,
         decide: Callable[[MarketBar], tuple[OrderIntent, ...]] | None = None,
         config: StrategyConfig = DEFAULT_CONFIG,
         expiry_dates: frozenset[str] = frozenset(),
-        vehicle: str = "futures",
+        enabled_vehicles: Sequence[str] = ("futures", "synthetic"),
+        vehicle: str | None = None,
     ) -> None:
         self._decide = decide
         self.config = config
@@ -57,9 +63,11 @@ class ConfiguredLiveStrategy:
         self._capital = capital_config.initial_capital
         self._daily_date: str | None = None
         self._daily_start_equity = self._capital
-        self.vehicle = str(vehicle).lower()
-        if self.vehicle not in {"futures", "synthetic"}:
-            raise ValueError("vehicle must be 'futures' or 'synthetic'")
+        if vehicle is not None:
+            enabled_vehicles = (vehicle,)
+        self.enabled_vehicles = tuple(dict.fromkeys(str(item).lower() for item in enabled_vehicles))
+        if not self.enabled_vehicles or any(item not in {"futures", "synthetic"} for item in self.enabled_vehicles):
+            raise ValueError("enabled_vehicles must contain 'futures' and/or 'synthetic'")
         self._equity = self._capital
         self._peak_equity = self._capital
         self._daily_date = None
@@ -72,7 +80,7 @@ class ConfiguredLiveStrategy:
             morning_entry_minutes=config.morning_entry_minutes,
             afternoon_entry_minutes=config.afternoon_entry_minutes,
             expiry_dates=expiry_dates,
-            vehicle=self.vehicle,
+            enabled_vehicles=self.enabled_vehicles,
         )
 
     @property
@@ -98,7 +106,7 @@ class ConfiguredLiveStrategy:
     def snapshot(self) -> Mapping[str, object]:
         return {
             "schema_version": 1,
-            "vehicle": self.vehicle,
+            "enabled_vehicles": list(self.enabled_vehicles),
             "capital": {
                 "initial_capital": self.capital_config.initial_capital,
                 "max_daily_loss": self.capital_config.max_daily_loss,
@@ -126,7 +134,7 @@ class ConfiguredLiveStrategy:
             morning_entry_minutes=self.config.morning_entry_minutes,
             afternoon_entry_minutes=self.config.afternoon_entry_minutes,
             expiry_dates=self._decision_engine.expiry_dates,
-            vehicle=self.vehicle,
+            enabled_vehicles=self.enabled_vehicles,
         )
 
     @classmethod
@@ -134,9 +142,12 @@ class ConfiguredLiveStrategy:
         schema_version = snapshot.get("schema_version", 0)
         if not isinstance(schema_version, int) or isinstance(schema_version, bool) or schema_version != 1:
             raise ValueError("unsupported strategy snapshot schema")
-        vehicle = snapshot.get("vehicle", "futures")
-        if not isinstance(vehicle, str) or vehicle.lower() not in {"futures", "synthetic"}:
-            raise ValueError("snapshot vehicle must be 'futures' or 'synthetic'")
+        raw_vehicles = snapshot.get("enabled_vehicles", (snapshot.get("vehicle", "futures"),))
+        if isinstance(raw_vehicles, str) or not isinstance(raw_vehicles, Sequence):
+            raise ValueError("snapshot enabled_vehicles must be a sequence")
+        enabled_vehicles = tuple(str(item).lower() for item in raw_vehicles)
+        if not enabled_vehicles or any(item not in {"futures", "synthetic"} for item in enabled_vehicles):
+            raise ValueError("snapshot enabled_vehicles must contain 'futures' and/or 'synthetic'")
         raw_capital = snapshot.get("capital")
         if not isinstance(raw_capital, Mapping):
             raise ValueError("strategy snapshot capital must be an object")
@@ -184,7 +195,7 @@ class ConfiguredLiveStrategy:
             afternoon_entry_minutes=afternoon_entry_minutes,
             cooldown_minutes=cooldown_minutes,
         )
-        strategy = cls(config=config, capital_config=capital_config, vehicle=vehicle.lower())
+        strategy = cls(config=config, capital_config=capital_config, enabled_vehicles=enabled_vehicles)
         risk_snapshot = snapshot.get("risk_gate")
         if isinstance(risk_snapshot, Mapping):
             strategy._decision_engine.restore_risk_snapshot(dict(risk_snapshot))
@@ -265,6 +276,9 @@ class ConfiguredLiveStrategy:
             entry_fill_time=entry_fill_time,
             exit_reference_price=reference_price,
             target_price=getattr(order, "target_price", None),
+            vehicle=order.vehicle,
+            synthetic_legs=order.synthetic_legs,
+            entry_bar=order.entry_bar,
         )
         trail_kwargs = (
             {"trail_activation_bp": TRAIL_ACTIVATE_BP, "trail_distance_bp": TRAIL_DISTANCE_BP}
@@ -309,9 +323,10 @@ class ConfiguredLiveStrategy:
             self._decision_positions.pop(entry_order_id, None)
 
     def record_exit(self, *, cell: str, reason: str, entry_bar: int,
-                    exit_bar: int, date: str) -> None:
+                    exit_bar: int, date: str, vehicle: str = "futures",
+                    direction: str | None = None, quantity: int = 0) -> None:
         """Apply an execution-layer exit settlement to the decision gate."""
         self._decision_engine.record_exit(
             cell=cell, reason=reason, entry_bar=entry_bar, exit_bar=exit_bar,
-            date=date,
+            date=date, vehicle=vehicle, direction=direction, quantity=quantity,
         )

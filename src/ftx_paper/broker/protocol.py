@@ -13,6 +13,7 @@ class Fill:
     quantity: int
     price: float
     timestamp: str
+    vehicle: str = "futures"
 
 
 class MarketFeed(Protocol):
@@ -48,7 +49,10 @@ class PaperBroker:
             raise RuntimeError(f"No paper price available for {order.instrument.symbol}")
         order_ack = OrderAck(order.client_order_id, f"paper-{len(self.fills) + 1}", "FILLED")
         from datetime import datetime, timezone
-        self.fills.append(Fill(order.client_order_id, order.instrument, order.quantity, price, datetime.now(timezone.utc).isoformat()))
+        self.fills.append(Fill(
+            order.client_order_id, order.instrument, order.quantity, price,
+            datetime.now(timezone.utc).isoformat(), order.vehicle,
+        ))
         return order_ack
 
     def poll_fill(self, order: OrderIntent, broker_order_id: str) -> Fill | None:

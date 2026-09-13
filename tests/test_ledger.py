@@ -28,3 +28,15 @@ def test_ledger_restores_persisted_position_before_next_fill() -> None:
 
     assert position.quantity == 1
     assert ledger.cash == 920
+
+
+def test_ledger_keeps_vehicle_books_separate_for_same_logical_symbol() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    ledger = PositionLedger(1000)
+    timestamp = datetime.now(timezone.utc).isoformat()
+
+    ledger.apply_fill(Fill("fut", instrument, 2, 100, timestamp, "futures"), OrderSide.BUY)
+    ledger.apply_fill(Fill("syn", instrument, 1, 110, timestamp, "synthetic"), OrderSide.BUY)
+
+    positions = {(item.vehicle, item.symbol): item.quantity for item in ledger.positions()}
+    assert positions == {("futures", "NIFTYFUT"): 2, ("synthetic", "NIFTYFUT"): 1}

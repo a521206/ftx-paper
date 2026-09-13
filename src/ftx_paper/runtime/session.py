@@ -249,18 +249,26 @@ class RuntimeSession:
             if source == "replay":
                 self.store.append_event("ORDER_SUPPRESSED", {
                     "decision_id": order.client_order_id, "client_order_id": order.client_order_id,
+                    "vehicle": order.vehicle,
                     "decision_source": "replay", "session_date": bundle.trading_date,
                     "execution_allowed": False, "reason": "startup_recovery",
                 }, f"order_suppressed:{bundle.trading_date}:{order.client_order_id}", timestamp=timestamp)
             else:
                 option_bars = (getattr(bundle, "supporting_inputs", None) or {}).get("bars", {})
                 futures_bar = bundle.bars.get(MarketRole.FUTURES)
-                synthetic = self._uses_synthetic_vehicle(active_engine)
-                quote = (synthetic_future_quote(futures_bar, option_bars)
-                         if synthetic and isinstance(futures_bar, MarketBar) else None)
+                synthetic = order.vehicle == "synthetic"
+                quote = (
+                    synthetic_future_quote(
+                        futures_bar, option_bars,
+                        symbols=tuple(leg.symbol for leg in order.synthetic_legs)
+                        if order.synthetic_legs else None,
+                    )
+                    if synthetic and isinstance(futures_bar, MarketBar) else None
+                )
                 if synthetic and isinstance(futures_bar, MarketBar) and quote is None:
                     self.store.append_event("EXECUTION_ERROR", {
                         "decision_id": order.client_order_id, "decision_source": source,
+                        "vehicle": order.vehicle,
                         "session_date": bundle.trading_date, "execution_allowed": True,
                         "outcome": "execution_error", "reason": "missing_synthetic_future_quote",
                     }, f"execution_error:synthetic_quote:{order.client_order_id}", timestamp=timestamp)
@@ -281,6 +289,7 @@ class RuntimeSession:
             "session_date": session_date,
             "execution_allowed": True,
             "reason": order.reason,
+            "vehicle": order.vehicle,
         }
         if synthetic_quote is not None:
             context.update({"vehicle": "synthetic", "ce_symbol": synthetic_quote.ce.instrument.symbol,
@@ -310,6 +319,15 @@ class RuntimeSession:
                                                          "reason": "broker_unavailable"},
                                     f"execution_error:submit:{order.client_order_id}", timestamp=timestamp)
             return False
+        if order.vehicle == "synthetic" and not isinstance(self.broker, PaperBroker):
+            self.store.append_event(
+                "EXECUTION_ERROR",
+                {**context, "outcome": "execution_error", "phase": "submit",
+                 "reason": "synthetic_two_leg_execution_unsupported"},
+                f"execution_error:synthetic_execution:{order.client_order_id}",
+                timestamp=timestamp,
+            )
+            return False
         try:
             ack = self.broker.submit(order)
         except Exception as exc:
@@ -337,6 +355,17 @@ class RuntimeSession:
                                     f"execution_error:fill_poll:{order.client_order_id}", timestamp=timestamp)
             return False
         if fill:
+            if fill.vehicle != order.vehicle:
+                self.store.append_event(
+                    "EXECUTION_ERROR",
+                    {**context, "outcome": "execution_error",
+                     "phase": "fill_validation",
+                     "reason": "fill_vehicle_mismatch",
+                     "fill_vehicle": fill.vehicle},
+                    f"execution_error:fill_vehicle:{order.client_order_id}",
+                    timestamp=timestamp,
+                )
+                return False
             entry_cost = None
             if order.role is OrderRole.ENTRY:
                 if synthetic_quote is not None:
@@ -364,7 +393,11 @@ class RuntimeSession:
                     register_entry(order, fill_price=fill.price)
             position = None
             if self.ledger:
-                position = self.ledger.apply_fill(fill, order.side if order.side in (OrderSide.BUY, OrderSide.SELL) else OrderSide.BUY)
+                position = self.ledger.apply_fill(
+                    fill,
+                    order.side if order.side in (OrderSide.BUY, OrderSide.SELL) else OrderSide.BUY,
+                    vehicle=order.vehicle,
+                )
             self.store.append_event("FILL", {**context,
                                               "broker_order_id": ack.broker_order_id,
                                               "symbol": fill.instrument.symbol,
@@ -375,6 +408,7 @@ class RuntimeSession:
                                               "outcome": "filled",
                                               **({"position": {
                                                   "symbol": position.symbol,
+                                                  "vehicle": position.vehicle,
                                                   "quantity": position.quantity,
                                                   "average_price": position.average_price,
                                               }} if position else {})}, f"fill:{fill.client_order_id}", timestamp=timestamp)
@@ -392,10 +426,12 @@ class RuntimeSession:
                                      "max_net_directional_lots": self.capital_config.max_net_directional_lots,
                                      "capital": self.ledger.cash, "open_positions": [
                 p.__dict__ if hasattr(p, "__dict__") else {"symbol": p.symbol, "quantity": p.quantity,
-                "average_price": p.average_price} for p in self.ledger.positions()]})
+                "average_price": p.average_price, "vehicle": p.vehicle} for p in self.ledger.positions()]})
         return bool(fill)
 
     def _synthetic_symbols_for_exit(self, order) -> tuple[str, str] | None:
+        if order.synthetic_legs:
+            return tuple(leg.symbol for leg in order.synthetic_legs)
         entry_id = self._synthetic_entry_id(order)
         return self._synthetic_symbols_by_order.get(entry_id)
 
@@ -409,11 +445,6 @@ class RuntimeSession:
             symbols=self._synthetic_symbols_for_exit(order),
         )
         return quote or self._last_synthetic_quote_by_order.get(self._synthetic_entry_id(order))
-
-    @staticmethod
-    def _uses_synthetic_vehicle(engine: PaperEngine) -> bool:
-        strategy = getattr(engine, "strategy", None)
-        return str(getattr(strategy, "vehicle", "futures")).lower() == "synthetic"
 
     def _record_missing_synthetic_exit(self, order, timestamp: str) -> None:
         self.store.append_event("EXECUTION_ERROR", {
@@ -460,8 +491,8 @@ class RuntimeSession:
                 # new bundle, matching the deterministic replay ordering.
                 for action in self.engine.on_closed_bar(bar):
                     synthetic_quote = (self._synthetic_exit_quote(action.intent, bar)
-                                       if self._uses_synthetic_vehicle(self.engine) else None)
-                    if self._uses_synthetic_vehicle(self.engine) and synthetic_quote is None:
+                                       if action.intent.vehicle == "synthetic" else None)
+                    if action.intent.vehicle == "synthetic" and synthetic_quote is None:
                         self._record_missing_synthetic_exit(action.intent, bar.timestamp.isoformat())
                         continue
                     filled = self._execute_paper_order(
@@ -471,8 +502,20 @@ class RuntimeSession:
                         synthetic_quote=synthetic_quote,
                     )
                     self.engine.settle_exit(action.intent.client_order_id, filled=filled)
+                    if filled and action.cell is not None:
+                        self.engine.record_exit(
+                            cell=action.cell,
+                            reason=action.reason,
+                            entry_bar=action.intent.entry_bar or 0,
+                            exit_bar=self.engine.bars_seen,
+                            date=bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat(),
+                            vehicle=action.intent.vehicle,
+                            direction="long" if action.intent.side.value == "SELL" else "short",
+                            quantity=action.intent.quantity,
+                        )
                     self.store.append_event("EXITDECISION", {
                         "decision_id": action.intent.client_order_id,
+                        "vehicle": action.intent.vehicle,
                         "cell": action.cell,
                         "reason": action.reason,
                         "exit_price": action.price,
@@ -508,8 +551,8 @@ class RuntimeSession:
             result = self.engine.on_tick(bar)
             for action in result:
                 synthetic_quote = (self._synthetic_exit_quote(action.intent, bar)
-                                   if self._uses_synthetic_vehicle(self.engine) else None)
-                if self._uses_synthetic_vehicle(self.engine) and synthetic_quote is None:
+                                   if action.intent.vehicle == "synthetic" else None)
+                if action.intent.vehicle == "synthetic" and synthetic_quote is None:
                     self._record_missing_synthetic_exit(action.intent, bar.timestamp.isoformat())
                     continue
                 filled = self._execute_paper_order(
@@ -519,8 +562,20 @@ class RuntimeSession:
                     synthetic_quote=synthetic_quote,
                 )
                 self.engine.settle_exit(action.intent.client_order_id, filled=filled)
+                if filled and action.cell is not None:
+                    self.engine.record_exit(
+                        cell=action.cell,
+                        reason=action.reason,
+                        entry_bar=action.intent.entry_bar or 0,
+                        exit_bar=self.engine.bars_seen,
+                        date=bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat(),
+                        vehicle=action.intent.vehicle,
+                        direction="long" if action.intent.side.value == "SELL" else "short",
+                        quantity=action.intent.quantity,
+                    )
                 self.store.append_event("EXITDECISION", {
                     "decision_id": action.intent.client_order_id,
+                    "vehicle": action.intent.vehicle,
                     "cell": action.cell,
                     "reason": action.reason,
                     "exit_price": action.price,

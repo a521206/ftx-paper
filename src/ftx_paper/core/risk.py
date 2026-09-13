@@ -1,11 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from ftx_paper.contracts import MarketBar, SyntheticPremiumPair
 from .adaptive_stop import adaptive_stop_bp
 from ftx_paper.config import NIFTY_LOT_SIZE
+
+
+@dataclass(frozen=True, slots=True)
+class VehicleRiskLimits:
+    max_quantity: int = 10
+    margin_per_lot: float = 175_000.0
+
+    def __post_init__(self) -> None:
+        if self.max_quantity < 1 or self.margin_per_lot < 0:
+            raise ValueError("invalid vehicle risk limits")
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,7 +48,11 @@ class RiskDecision:
 class RiskSizer:
     """Pure capital, drawdown, and stop-distance guard for order sizing."""
 
-    def __init__(self, config: RiskConfig = RiskConfig()) -> None:
+    def __init__(
+        self,
+        config: RiskConfig = RiskConfig(),
+        vehicle_limits: Mapping[str, VehicleRiskLimits] | None = None,
+    ) -> None:
         if not 0 < config.risk_fraction <= 1 or not 0 < config.max_drawdown_fraction <= 1:
             raise ValueError("risk fractions must be between zero and one")
         if config.lot_size < 1 or config.max_quantity < config.lot_size:
@@ -48,6 +62,12 @@ class RiskSizer:
         if config.contract_lot_size < 1:
             raise ValueError("invalid contract lot size")
         self.config = config
+        default_limits = VehicleRiskLimits(config.max_quantity, config.margin_per_lot)
+        self.vehicle_limits = {
+            "futures": default_limits,
+            "synthetic": default_limits,
+            **{str(name).lower(): limits for name, limits in (vehicle_limits or {}).items()},
+        }
 
     def size(
         self, *, capital: float, equity: float, peak_equity: float,
@@ -65,6 +85,7 @@ class RiskSizer:
             return RiskDecision(False, 0, "unsupported_vehicle", vehicle=normalized_vehicle)
         if normalized_vehicle == "synthetic" and synthetic_premiums is None:
             return RiskDecision(False, 0, "missing_synthetic_premium", vehicle=normalized_vehicle)
+        limits = self.vehicle_limits[normalized_vehicle]
         stop_bp = None
         if bars_before is not None and vix is not None:
             stop_bp = adaptive_stop_bp(bars_before, vix, is_expiry_day=is_expiry_day)
@@ -81,8 +102,8 @@ class RiskSizer:
         vix_multiplier = self.config.low_vix_multiplier if vix is not None and vix < self.config.low_vix_threshold else 1.0
         multiplier = score_multiplier * vix_multiplier
         available = min(float(capital), float(equity))
-        margin_lots = int(available * self.config.margin_utilization_cap // self.config.margin_per_lot) if self.config.margin_per_lot else self.config.max_quantity
-        risk_ceiling = min(raw_quantity, self.config.max_quantity, margin_lots)
+        margin_lots = int(available * self.config.margin_utilization_cap // limits.margin_per_lot) if limits.margin_per_lot else limits.max_quantity
+        risk_ceiling = min(raw_quantity, limits.max_quantity, margin_lots)
         quantity = min(int(round(risk_ceiling * multiplier)), risk_ceiling)
         quantity -= quantity % self.config.lot_size
         if quantity < self.config.lot_size:

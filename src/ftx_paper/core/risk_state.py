@@ -40,6 +40,10 @@ class RiskGateState:
             self.cells.clear()
             self.trading_date = date
 
+    def new_day(self, date: str | None) -> None:
+        """Advance the gate to a trading date at an ownership boundary."""
+        self._new_day(date)
+
     @staticmethod
     def _signed(direction: str, quantity: int) -> float:
         return float(quantity if direction.lower() in {"long", "buy"} else -quantity)
@@ -85,8 +89,11 @@ class RiskGateState:
         self.net_directional_lots += self._signed(direction, quantity)
 
     def record_exit(self, *, cell: str, reason: str, exit_bar: int,
-                    entry_bar: int = 0, date: str | None = None) -> None:
+                    entry_bar: int = 0, date: str | None = None,
+                    direction: str | None = None, quantity: int = 0) -> None:
         self._new_day(date)
+        if direction is not None and quantity > 0:
+            self.net_directional_lots -= self._signed(direction, quantity)
         state = self.cells.setdefault(cell, CellGateState())
         state.cooldown_until_bar = exit_bar + self.cell_cooldown_bars + 1
         if reason in {"hard_stop", "stop", "thesis_failure"}:

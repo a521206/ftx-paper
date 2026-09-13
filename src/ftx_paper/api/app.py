@@ -67,6 +67,16 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
         payload = request.get_json(silent=True)
         if not isinstance(payload, dict):
             return jsonify(error_payload("invalid_request", "JSON object body required")), 400
+        if "vehicle" in payload:
+            return jsonify(error_payload("invalid_request", "use vehicles array; vehicle is no longer supported")), 400
+        vehicles = payload.get("vehicles")
+        if vehicles is not None and (
+            not isinstance(vehicles, list)
+            or not vehicles
+            or any(not isinstance(item, str) for item in vehicles)
+            or any(item not in {"futures", "synthetic"} for item in vehicles)
+        ):
+            return jsonify(error_payload("invalid_request", "vehicles must be a non-empty array of futures/synthetic")), 400
         requested_date = payload.get("session_date", payload.get("date"))
         if requested_date not in (None, ""):
             if not isinstance(requested_date, str):

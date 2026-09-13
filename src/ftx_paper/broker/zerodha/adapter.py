@@ -245,4 +245,4 @@ class ZerodhaBroker:
         timestamp = str(completed.get("exchange_timestamp") or completed.get("order_timestamp") or "")
         if quantity <= 0 or price <= 0 or not timestamp:
             raise RuntimeError("Zerodha returned an incomplete fill record")
-        return Fill(order.client_order_id, order.instrument, quantity, price, timestamp)
+        return Fill(order.client_order_id, order.instrument, quantity, price, timestamp, order.vehicle)

@@ -70,3 +70,15 @@ def test_snapshot_restore_preserves_gate_state_and_day_reset_clears_it() -> None
     assert restored.can_enter(cell="low", direction="long", bar=13, quantity=1, date="2026-09-10") is False
     assert restored.can_enter(cell="low", direction="long", bar=13, quantity=1, date="2026-09-11") is True
     assert restored.net_directional_lots == 0
+
+
+def test_exit_releases_directional_exposure_when_quantity_is_supplied() -> None:
+    gate = RiskGateState(max_net_directional_lots=4)
+    gate.record_entry(cell="high", direction="long", quantity=2, date="2026-09-11")
+
+    gate.record_exit(
+        cell="high", reason="target", entry_bar=10, exit_bar=12,
+        date="2026-09-11", direction="long", quantity=2,
+    )
+
+    assert gate.net_directional_lots == 0

@@ -21,6 +21,9 @@ class PositionState:
     # reference entry separate so the stop/trail never mixes price domains.
     exit_reference_price: float | None = None
     target_price: float | None = None
+    vehicle: str = "futures"
+    synthetic_legs: tuple[Instrument, Instrument] | None = None
+    entry_bar: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,5 +152,10 @@ class ExitStateMachine:
     @staticmethod
     def _action(position: PositionState, price: float, reason: str, client_order_id: str) -> ExitAction:
         side = OrderSide.SELL if position.side is OrderSide.BUY else OrderSide.BUY
-        intent = OrderIntent(client_order_id, position.instrument, side, position.quantity, reason=reason, role=OrderRole.EXIT)
+        intent = OrderIntent(
+            client_order_id, position.instrument, side, position.quantity,
+            reason=reason, role=OrderRole.EXIT, vehicle=position.vehicle,
+            synthetic_legs=position.synthetic_legs,
+            entry_bar=position.entry_bar,
+        )
         return ExitAction(reason, price, intent, position.cell)

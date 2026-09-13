@@ -24,6 +24,7 @@ class ReplayTrade:
     exit_reason: str | None = None
     realized_pnl: float | None = None
     status: Literal["open", "closed"] = "open"
+    vehicle: str = "futures"
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +63,7 @@ def replay(engine: PaperEngine, bars: Iterable[MarketBar]) -> ReplayResult:
             events.append({
                 "event_type": "EXITDECISION",
                 "decision_id": action.intent.client_order_id,
+                "vehicle": action.intent.vehicle,
                 "timestamp": bar.timestamp.isoformat(),
                 "reason": action.reason,
                 "price": action.price,
@@ -69,6 +71,7 @@ def replay(engine: PaperEngine, bars: Iterable[MarketBar]) -> ReplayResult:
             events.append({
                 "event_type": "FILL",
                 "decision_id": action.intent.client_order_id,
+                "vehicle": action.intent.vehicle,
                 "timestamp": bar.timestamp.isoformat(),
                 "symbol": action.intent.instrument.symbol,
                 "side": action.intent.side.value,
@@ -90,6 +93,7 @@ def replay(engine: PaperEngine, bars: Iterable[MarketBar]) -> ReplayResult:
                 events.append({
                     "event_type": "EXITDECISION",
                     "decision_id": order.client_order_id,
+                    "vehicle": order.vehicle,
                     "timestamp": bar.timestamp.isoformat(),
                     "reason": order.reason,
                     "price": fill_price,
@@ -117,6 +121,7 @@ def replay(engine: PaperEngine, bars: Iterable[MarketBar]) -> ReplayResult:
                     quantity=order.quantity,
                     entry_timestamp=bar.timestamp.isoformat(),
                     entry_price=fill_price,
+                    vehicle=order.vehicle,
                 ))
                 engine.register_entry(order, fill_price=fill_price)
 
@@ -139,7 +144,9 @@ def _settle_trade(
     """Close the matching FIFO position and retain unmatched exits as events."""
     match_index = next(
         (index for index, trade in enumerate(open_trades)
-         if trade.instrument == order.instrument.symbol and trade.side != order.side),
+         if trade.instrument == order.instrument.symbol
+         and trade.vehicle == order.vehicle
+         and trade.side != order.side),
         None,
     )
     if match_index is None:
