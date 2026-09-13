@@ -1,10 +1,10 @@
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from ftx_paper.broker import PaperBroker
+from ftx_paper.broker import Fill, PaperBroker
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderIntent, OrderRole, OrderSide
 from ftx_paper.runtime.store import _json_safe
-from ftx_paper.core import EngineResult, PaperEngine
+from ftx_paper.core import EngineResult, ExitAction, PaperEngine
 from ftx_paper.core import CompletedBarAggregator
 from ftx_paper.runtime import RuntimeSession, RuntimeStore
 from ftx_paper.execution import PositionLedger
@@ -155,6 +155,181 @@ def test_live_order_reaches_paper_broker_and_persists_fill(tmp_path):
     assert fill["created_at"] != "2026-01-01T10:20:00+05:30"
 
 
+def test_exit_without_entry_identity_is_rejected_before_broker_submission(tmp_path):
+    store = RuntimeStore(tmp_path)
+    session = RuntimeSession(store, None, [])
+    session.broker = PaperBroker({"NIFTYFUT": 101.5})
+    order = OrderIntent(
+        "exit-1", Instrument("NIFTYFUT", "NFO", "FUTURES"), OrderSide.SELL, 2,
+        role=OrderRole.EXIT,
+    )
+
+    assert not session._execute_paper_order(order, session_date="2026-01-01", timestamp="2026-01-01T10:20:00+05:30")
+    error = next(event for event in store.read_events() if event["event_type"] == "EXECUTION_ERROR")
+    assert error["payload"]["reason"] == "exit_without_entry_order_id"
+    assert not any(event["event_type"] == "ORDER_ACK" for event in store.read_events())
+
+
+def test_matched_exit_removes_live_entry_after_fill(tmp_path):
+    store = RuntimeStore(tmp_path)
+    session = RuntimeSession(store, None, [])
+    session.broker = PaperBroker({"NIFTYFUT": 101.5})
+    entry_id = "entry-1"
+    session._live_entry_trades[entry_id] = {
+        "instrument": "NIFTYFUT",
+        "entry_price": 100.0,
+        "quantity": 2,
+        "side": OrderSide.BUY,
+        "vehicle": "futures",
+        "ce_entry_price": None,
+        "pe_entry_price": None,
+    }
+    order = OrderIntent(
+        "exit-1", Instrument("NIFTYFUT", "NFO", "FUTURES"), OrderSide.SELL, 2,
+        role=OrderRole.EXIT, entry_order_id=entry_id,
+    )
+
+    assert session._execute_paper_order(order, session_date="2026-01-01", timestamp="2026-01-01T10:20:00+05:30")
+    assert entry_id not in session._live_entry_trades
+
+
+def test_exit_quantity_mismatch_is_rejected_without_removing_entry(tmp_path):
+    store = RuntimeStore(tmp_path)
+    session = RuntimeSession(store, None, [])
+    session.broker = PaperBroker({"NIFTYFUT": 101.5})
+    entry_id = "entry-1"
+    session._live_entry_trades[entry_id] = {
+        "instrument": "NIFTYFUT",
+        "entry_price": 100.0,
+        "quantity": 2,
+        "side": OrderSide.BUY,
+        "vehicle": "futures",
+        "ce_entry_price": None,
+        "pe_entry_price": None,
+    }
+    order = OrderIntent(
+        "exit-1", Instrument("NIFTYFUT", "NFO", "FUTURES"), OrderSide.SELL, 1,
+        role=OrderRole.EXIT, entry_order_id=entry_id,
+    )
+
+    assert not session._execute_paper_order(order, session_date="2026-01-01", timestamp="2026-01-01T10:20:00+05:30")
+    assert entry_id in session._live_entry_trades
+    error = next(event for event in store.read_events() if event["event_type"] == "EXECUTION_ERROR")
+    assert error["payload"]["reason"] == "exit_quantity_mismatch"
+
+
+def test_exit_rejects_broker_fill_for_a_different_instrument(tmp_path):
+    store = RuntimeStore(tmp_path)
+    session = RuntimeSession(store, None, [])
+    entry_instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    wrong_instrument = Instrument("OTHERFUT", "NFO", "FUTURES")
+    session._live_entry_trades["entry-1"] = {
+        "instrument": entry_instrument.symbol,
+        "entry_price": 100.0,
+        "quantity": 2,
+        "side": OrderSide.BUY,
+        "vehicle": "futures",
+        "ce_symbol": None,
+        "pe_symbol": None,
+        "ce_entry_price": None,
+        "pe_entry_price": None,
+    }
+
+    class WrongFillBroker:
+        def submit(self, order):
+            return type("Ack", (), {"client_order_id": order.client_order_id,
+                                     "broker_order_id": "broker-1", "status": "FILLED"})()
+
+        def poll_fills(self, order, _broker_order_id):
+            return (Fill(order.client_order_id, wrong_instrument, order.quantity, 101.0,
+                         "2026-01-01T10:20:00+00:00"),)
+
+    session.broker = WrongFillBroker()
+    order = OrderIntent("exit-1", entry_instrument, OrderSide.SELL, 2,
+                        role=OrderRole.EXIT, entry_order_id="entry-1")
+
+    assert not session._execute_paper_order(order)
+    assert store.read_status()["state"] == "ERROR"
+    assert session._live_entry_trades["entry-1"]["instrument"] == entry_instrument.symbol
+    assert any(event["payload"]["reason"] == "uncompensated_exit_fill:fill_instrument_mismatch"
+               for event in store.read_events() if event["event_type"] == "EXECUTION_ERROR")
+
+
+def test_synthetic_exit_rejects_broker_fills_for_different_legs(tmp_path):
+    store = RuntimeStore(tmp_path)
+    session = RuntimeSession(store, None, [])
+    futures = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    call = Instrument("NIFTY26SEP25000CE", "NFO", "CE", expiry="2026-09-24", strike=25000)
+    put = Instrument("NIFTY26SEP25000PE", "NFO", "PE", expiry="2026-09-24", strike=25000)
+    wrong_call = Instrument("NIFTY26SEP25100CE", "NFO", "CE", expiry="2026-09-24", strike=25100)
+    wrong_put = Instrument("NIFTY26SEP25100PE", "NFO", "PE", expiry="2026-09-24", strike=25100)
+    session._live_entry_trades["entry-1"] = {
+        "instrument": futures.symbol,
+        "entry_price": 100.0,
+        "quantity": 1,
+        "side": OrderSide.BUY,
+        "vehicle": "synthetic",
+        "ce_symbol": call.symbol,
+        "pe_symbol": put.symbol,
+        "ce_entry_price": 10.0,
+        "pe_entry_price": 10.0,
+    }
+
+    class WrongLegBroker:
+        def submit(self, order):
+            return type("Ack", (), {"client_order_id": order.client_order_id,
+                                     "broker_order_id": "broker-1", "status": "FILLED"})()
+
+        def poll_fills(self, order, _broker_order_id):
+            return (
+                Fill(order.client_order_id, wrong_call, order.quantity, 11.0, "2026-01-01T10:20:00+00:00", "synthetic"),
+                Fill(order.client_order_id, wrong_put, order.quantity, 11.0, "2026-01-01T10:20:00+00:00", "synthetic"),
+            )
+
+    session.broker = WrongLegBroker()
+    order = OrderIntent("exit-1", futures, OrderSide.SELL, 1,
+                        role=OrderRole.EXIT, vehicle="synthetic",
+                        synthetic_legs=(call, put), entry_order_id="entry-1")
+
+    assert not session._execute_paper_order(order)
+    assert session._live_entry_trades["entry-1"]["ce_symbol"] == call.symbol
+    assert any(event["payload"]["reason"] == "uncompensated_exit_fill:fill_synthetic_legs_mismatch"
+               for event in store.read_events() if event["event_type"] == "EXECUTION_ERROR")
+
+
+def test_missing_synthetic_quote_settles_exit_as_unfilled(tmp_path):
+    store = RuntimeStore(tmp_path)
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    call = Instrument("NIFTY26SEP25000CE", "NFO", "CE", expiry="2026-09-24", strike=25000)
+    put = Instrument("NIFTY26SEP25000PE", "NFO", "PE", expiry="2026-09-24", strike=25000)
+
+    class Engine:
+        bars_seen = 0
+        strategy_metadata = None
+
+        def on_tick(self, _bar):
+            return (ExitAction(
+                "hard_stop", 100.0,
+                OrderIntent(
+                    "exit-1", instrument, OrderSide.SELL, 1,
+                    role=OrderRole.EXIT, vehicle="synthetic",
+                    synthetic_legs=(call, put), entry_order_id="entry-1",
+                ),
+            ),)
+
+        def settle_exit(self, exit_order_id, *, filled):
+            self.settlement = (exit_order_id, filled)
+
+    engine = Engine()
+    session = RuntimeSession(store, None, [], engine=engine)
+    session.broker = PaperBroker({"NIFTYFUT": 100.0})
+    store.write_status({"state": "RUNNING"})
+    session.on_tick(MarketBar(instrument, datetime(2026, 1, 1, 10, 20, tzinfo=timezone.utc), 100, 100, 100, 100))
+
+    assert engine.settlement == ("exit-1", False)
+    assert any(event["event_type"] == "EXECUTION_ERROR" for event in store.read_events())
+
+
 def test_session_restores_ledger_from_runtime_status(tmp_path):
     store = RuntimeStore(tmp_path)
     store.write_status({
@@ -162,16 +337,23 @@ def test_session_restores_ledger_from_runtime_status(tmp_path):
         "capital": 800.0,
         "initial_capital": 1000.0,
         "open_positions": [{"symbol": "NIFTYFUT", "quantity": 2, "average_price": 100.0}],
+        "open_entry_trades": {"entry-1": {
+            "instrument": "NIFTYFUT", "entry_price": 100.0, "quantity": 2,
+            "side": "BUY", "vehicle": "futures",
+            "ce_symbol": None, "pe_symbol": None,
+            "ce_entry_price": None, "pe_entry_price": None,
+        }},
     })
 
     ledger = PositionLedger(1000.0)
-    RuntimeSession(
+    session = RuntimeSession(
         store, None, [], ledger=ledger,
         capital_config=FtxCapitalConfig(initial_capital=1000.0),
     )
 
     assert ledger.cash == 800.0
     assert ledger.positions()[0].quantity == 2
+    assert session._live_entry_trades["entry-1"]["quantity"] == 2
 
 
 def test_startup_discovers_options_before_backfill_and_feed_subscription(monkeypatch, tmp_path):

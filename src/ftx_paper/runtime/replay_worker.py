@@ -8,10 +8,11 @@ from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderRole, Role, SyntheticFutureQuote, synthetic_future_quote
+from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderRole, OrderSide, Role, SyntheticFutureQuote, synthetic_future_quote
 from ftx_paper.capital_config import FtxCapitalConfig
 from ftx_paper.core import AggregatorConfig, Cell, CompletedBarAggregator, InstrumentKey, PaperEngine
 from ftx_paper.core.cost import futures_cost, synthetic_futures_cost
+from ftx_paper.core.settlement import ExitValidationError, validate_exit_order
 from ftx_paper.runtime.store import RuntimeStore
 from ftx_paper.strategy import ConfiguredLiveStrategy
 from ftx_paper.strategy.config import (
@@ -183,9 +184,13 @@ class ReplayWorker:
                         last_quotes[trade["entry_order_id"]] = quote
                 exit_actions = engine.on_closed_bar(futures_bar)
                 for action in exit_actions:
-                    open_trade = next((trade for trade in open_trades
-                                       if trade["instrument"] == action.intent.instrument.symbol
-                                       and trade.get("vehicle") == action.intent.vehicle), None)
+                    try:
+                        open_trade = self._matching_trade(open_trades, action.intent)
+                    except ExitValidationError as exc:
+                        all_events.append({"event_type": "EXECUTION_ERROR", "decision_id": action.intent.client_order_id,
+                                           "reason": exc.reason, "source": "replay", "session_date": date})
+                        engine.settle_exit(action.intent.client_order_id, filled=False)
+                        continue
                     exit_quote = synthetic_future_quote(
                         quote_selection_bar, option_bars,
                         symbols=(open_trade["ce_symbol"], open_trade["pe_symbol"]),
@@ -193,6 +198,7 @@ class ReplayWorker:
                     if exit_quote is None and action.intent.vehicle == "synthetic":
                         all_events.append({"event_type": "EXECUTION_ERROR", "decision_id": action.intent.client_order_id,
                                            "reason": "missing_synthetic_future_quote", "source": "replay", "session_date": date})
+                        engine.settle_exit(action.intent.client_order_id, filled=False)
                         continue
                     # Futures exits fill at the canonical protective trigger
                     # (including gap handling), not at the bar close.  A
@@ -208,9 +214,10 @@ class ReplayWorker:
                         exit_event.update({"synthetic_future_price": exit_quote.price, "ce_strike": exit_quote.strike,
                                            "ce_exit_price": exit_quote.ce.close, "pe_exit_price": exit_quote.pe.close})
                     all_events.append(exit_event)
-                    engine.settle_exit(action.intent.client_order_id, filled=True)
                     realized = self._settle_trade(open_trades, diagnostic_trades, action.intent, futures_bar,
-                                                  exit_quote, action.reason, exit_price=exit_price)
+                                                  exit_quote, action.reason, exit_price=exit_price,
+                                                  trade=open_trade)
+                    engine.settle_exit(action.intent.client_order_id, filled=True)
                     if realized is not None:
                         engine.record_exit(cell=realized.cell.name, reason=action.reason,
                                            entry_bar=realized.entry_bar, exit_bar=engine.bars_seen,
@@ -272,9 +279,13 @@ class ReplayWorker:
                                                     "pe_entry_price": entry_quote.pe.close})
                             last_quotes[order.client_order_id] = entry_quote
                     elif order.role is OrderRole.EXIT:
-                        open_trade = next((trade for trade in open_trades
-                                           if trade["instrument"] == order.instrument.symbol
-                                           and trade.get("vehicle") == order.vehicle), None)
+                        try:
+                            open_trade = self._matching_trade(open_trades, order)
+                        except ExitValidationError as exc:
+                            all_events.append({"event_type": "EXECUTION_ERROR", "decision_id": order.client_order_id,
+                                               "reason": exc.reason, "source": "replay", "session_date": date})
+                            engine.settle_exit(order.client_order_id, filled=False)
+                            continue
                         exit_quote = synthetic_future_quote(
                             quote_selection_bar, option_bars,
                             symbols=(open_trade["ce_symbol"], open_trade["pe_symbol"]),
@@ -282,20 +293,21 @@ class ReplayWorker:
                         if exit_quote is None and order.vehicle == "synthetic":
                             all_events.append({"event_type": "EXECUTION_ERROR", "decision_id": order.client_order_id,
                                                "reason": "missing_synthetic_future_quote", "source": "replay", "session_date": date})
+                            engine.settle_exit(order.client_order_id, filled=False)
                             continue
                         realized = self._settle_trade(open_trades, diagnostic_trades, order, futures_bar,
                                                       exit_quote, order.reason,
-                                                      exit_price=exit_quote.price if exit_quote is not None else order.price)
-                        if realized is not None:
-                            engine.record_exit(cell=realized.cell.name, reason=order.reason,
-                                               entry_bar=realized.entry_bar, exit_bar=engine.bars_seen,
-                                               date=date, vehicle=order.vehicle,
-                                               direction="long" if order.side.value == "SELL" else "short",
-                                               quantity=order.quantity)
-                            current_equity += realized.realized_pnl
-                            peak_equity = max(peak_equity, current_equity)
-                            max_drawdown = min(max_drawdown, current_equity - peak_equity)
-                            strategy.update_portfolio_state(equity=current_equity, peak_equity=peak_equity)
+                                                      exit_price=exit_quote.price if exit_quote is not None else order.price,
+                                                      trade=open_trade)
+                        engine.record_exit(cell=realized.cell.name, reason=order.reason,
+                                           entry_bar=realized.entry_bar, exit_bar=engine.bars_seen,
+                                           date=date, vehicle=order.vehicle,
+                                           direction="long" if order.side.value == "SELL" else "short",
+                                           quantity=order.quantity)
+                        current_equity += realized.realized_pnl
+                        peak_equity = max(peak_equity, current_equity)
+                        max_drawdown = min(max_drawdown, current_equity - peak_equity)
+                        strategy.update_portfolio_state(equity=current_equity, peak_equity=peak_equity)
             # Preserve open positions as mark-to-market/open replay results.
             diagnostic_trades.extend({**trade, "status": "open"} for trade in open_trades)
         scores = [int(event["score"]) for event in all_events
@@ -369,17 +381,30 @@ class ReplayWorker:
         return "unknown"
 
     @staticmethod
+    def _matching_trade(open_trades: list[dict[str, Any]], order: Any) -> dict[str, Any]:
+        entry_order_id = order.entry_order_id
+        if entry_order_id is None:
+            raise ExitValidationError("exit_without_entry_order_id")
+        trade = next((item for item in open_trades
+                      if item["entry_order_id"] == entry_order_id), None)
+        if trade is None:
+            raise ExitValidationError("exit_without_matching_entry")
+        validate_exit_order(
+            order,
+            entry_instrument=trade["instrument"],
+            entry_vehicle=trade["vehicle"],
+            entry_side=OrderSide(trade["side"]),
+            entry_quantity=trade["quantity"],
+            entry_leg_symbols=(trade["ce_symbol"], trade["pe_symbol"])
+            if trade["vehicle"] == "synthetic" else None,
+        )
+        return trade
+
+    @staticmethod
     def _settle_trade(open_trades: list[dict[str, Any]], trades: list[dict[str, Any]],
                       order: Any, bar: MarketBar, quote: SyntheticFutureQuote | None,
-                      reason: str, *, exit_price: float) -> TradeSettlement | None:
-        opposite = "SELL" if order.side.value == "BUY" else "BUY"
-        index = next((i for i, trade in enumerate(open_trades)
-                      if trade["instrument"] == order.instrument.symbol
-                      and trade.get("vehicle") == order.vehicle
-                      and trade["side"] == opposite), None)
-        if index is None:
-            return None
-        trade = open_trades.pop(index)
+                      reason: str, *, exit_price: float, trade: dict[str, Any]) -> TradeSettlement:
+        open_trades.remove(trade)
         signed = 1.0 if trade["side"] == "BUY" else -1.0
         gross_pnl = (exit_price - trade["entry_price"]) * NIFTY_LOT_SIZE * trade["quantity"] * signed
         cost_rs = _execution_cost(trade)

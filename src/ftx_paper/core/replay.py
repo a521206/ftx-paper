@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from collections.abc import Iterable
 from typing import Literal
 from ftx_paper.contracts import MarketBar, OrderIntent, OrderRole, OrderSide
+from .settlement import ExitValidationError, validate_exit_order
 from .engine import PaperEngine
 from ftx_paper.config import NIFTY_LOT_SIZE
 
@@ -68,6 +69,19 @@ def replay(engine: PaperEngine, bars: Iterable[MarketBar]) -> ReplayResult:
                 "reason": action.reason,
                 "price": action.price,
             })
+            try:
+                _settle_trade(
+                    open_trades, trades, action.intent, bar,
+                    exit_price=action.price, exit_reason=action.reason,
+                )
+            except ExitValidationError as exc:
+                events.append({
+                    "event_type": "EXECUTION_ERROR",
+                    "decision_id": action.intent.client_order_id,
+                    "reason": exc.reason,
+                })
+                engine.settle_exit(action.intent.client_order_id, filled=False)
+                continue
             events.append({
                 "event_type": "FILL",
                 "decision_id": action.intent.client_order_id,
@@ -78,10 +92,6 @@ def replay(engine: PaperEngine, bars: Iterable[MarketBar]) -> ReplayResult:
                 "quantity": action.intent.quantity,
                 "price": action.price,
             })
-            _settle_trade(
-                open_trades, trades, action.intent, bar,
-                exit_price=action.price, exit_reason=action.reason,
-            )
             engine.settle_exit(action.intent.client_order_id, filled=True)
 
         result = engine.on_bar(bar)
@@ -98,22 +108,39 @@ def replay(engine: PaperEngine, bars: Iterable[MarketBar]) -> ReplayResult:
                     "reason": order.reason,
                     "price": fill_price,
                 })
-            events.append({
-                "event_type": "FILL",
-                "decision_id": order.client_order_id,
-                "timestamp": bar.timestamp.isoformat(),
-                "symbol": order.instrument.symbol,
-                "side": order.side.value,
-                "quantity": order.quantity,
-                "price": fill_price,
-            })
-            if _is_exit(order):
-                _settle_trade(
-                    open_trades, trades, order, bar,
-                    exit_price=fill_price, exit_reason=order.reason,
-                )
+                try:
+                    _settle_trade(
+                        open_trades, trades, order, bar,
+                        exit_price=fill_price, exit_reason=order.reason,
+                    )
+                except ExitValidationError as exc:
+                    events.append({
+                        "event_type": "EXECUTION_ERROR",
+                        "decision_id": order.client_order_id,
+                        "reason": exc.reason,
+                    })
+                    engine.settle_exit(order.client_order_id, filled=False)
+                    continue
+                events.append({
+                    "event_type": "FILL",
+                    "decision_id": order.client_order_id,
+                    "timestamp": bar.timestamp.isoformat(),
+                    "symbol": order.instrument.symbol,
+                    "side": order.side.value,
+                    "quantity": order.quantity,
+                    "price": fill_price,
+                })
                 engine.settle_exit(order.client_order_id, filled=True)
             else:
+                events.append({
+                    "event_type": "FILL",
+                    "decision_id": order.client_order_id,
+                    "timestamp": bar.timestamp.isoformat(),
+                    "symbol": order.instrument.symbol,
+                    "side": order.side.value,
+                    "quantity": order.quantity,
+                    "price": fill_price,
+                })
                 open_trades.append(ReplayTrade(
                     entry_order_id=order.client_order_id,
                     instrument=order.instrument.symbol,
@@ -141,16 +168,25 @@ def _settle_trade(
     exit_price: float,
     exit_reason: str,
 ) -> None:
-    """Close the matching FIFO position and retain unmatched exits as events."""
+    """Close the explicitly referenced position or reject the exit."""
+    entry_order_id = order.entry_order_id
+    if entry_order_id is None:
+        raise ExitValidationError("exit_without_entry_order_id")
     match_index = next(
         (index for index, trade in enumerate(open_trades)
-         if trade.instrument == order.instrument.symbol
-         and trade.vehicle == order.vehicle
-         and trade.side != order.side),
+         if trade.entry_order_id == entry_order_id),
         None,
     )
     if match_index is None:
-        return
+        raise ExitValidationError("exit_without_matching_entry")
+    trade = open_trades[match_index]
+    validate_exit_order(
+        order,
+        entry_instrument=trade.instrument,
+        entry_vehicle=trade.vehicle,
+        entry_side=trade.side,
+        entry_quantity=trade.quantity,
+    )
     trade = open_trades.pop(match_index)
     signed = 1.0 if trade.side is OrderSide.BUY else -1.0
     settled = ReplayTrade(

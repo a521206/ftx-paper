@@ -361,7 +361,8 @@ def test_replay_completes_entry_fill_exit_and_realized_trade() -> None:
 
         def on_closed_bar(self, bar):
             if bar.timestamp == second.timestamp:
-                intent = OrderIntent("exit-entry-1", instrument, OrderSide.SELL, 2, reason="target", role=OrderRole.EXIT)
+                intent = OrderIntent("exit-entry-1", instrument, OrderSide.SELL, 2, reason="target", role=OrderRole.EXIT,
+                                     entry_order_id="entry-1")
                 return (ExitAction("target", 108.0, intent),)
             return ()
 
@@ -378,6 +379,81 @@ def test_replay_completes_entry_fill_exit_and_realized_trade() -> None:
     trade = result.trades[0]
     assert (trade.entry_price, trade.exit_price, trade.exit_reason, trade.realized_pnl, trade.status) == (100, 108.0, "target", 1040.0, "closed")
     assert [event["event_type"] for event in result.events if "event_type" in event] == ["FILL", "EXITDECISION", "FILL"]
+
+
+def test_replay_closes_the_explicit_entry_when_positions_share_instrument() -> None:
+    instrument = Instrument("NIFTY", "NSE", "INDEX")
+    first = MarketBar(instrument, datetime(2026, 1, 1, 10, 15), 100, 101, 99, 100, 10)
+    second = MarketBar(instrument, datetime(2026, 1, 1, 10, 16), 110, 111, 109, 110, 10)
+
+    class TwoPositionStrategy:
+        metadata = None
+
+        def on_bar(self, bar):
+            if bar.timestamp == first.timestamp:
+                return (
+                    OrderIntent("entry-1", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY),
+                    OrderIntent("entry-2", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY),
+                )
+            return ()
+
+        def on_closed_bar(self, bar):
+            if bar.timestamp == second.timestamp:
+                intent = OrderIntent(
+                    "exit-entry-2", instrument, OrderSide.SELL, 1,
+                    reason="target", role=OrderRole.EXIT, entry_order_id="entry-2",
+                )
+                return (ExitAction("target", 108.0, intent),)
+            return ()
+
+        def settle_exit(self, order_id, *, filled):
+            return None
+
+        def register_entry(self, order, *, fill_price=None):
+            return None
+
+    result = replay(PaperEngine(TwoPositionStrategy()), (first, second))
+
+    closed = [trade for trade in result.trades if trade.status == "closed"]
+    open_trades = [trade for trade in result.trades if trade.status == "open"]
+    assert [trade.entry_order_id for trade in closed] == ["entry-2"]
+    assert [trade.entry_order_id for trade in open_trades] == ["entry-1"]
+
+
+def test_replay_rejects_an_exit_without_a_matching_entry() -> None:
+    instrument = Instrument("NIFTY", "NSE", "INDEX")
+    first = MarketBar(instrument, datetime(2026, 1, 1, 10, 15), 100, 101, 99, 100, 10)
+    second = MarketBar(instrument, datetime(2026, 1, 1, 10, 16), 110, 111, 109, 110, 10)
+
+    class UnmatchedExitStrategy:
+        metadata = None
+
+        def on_bar(self, bar):
+            if bar.timestamp == first.timestamp:
+                return (OrderIntent("entry-1", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY),)
+            return ()
+
+        def on_closed_bar(self, bar):
+            if bar.timestamp == second.timestamp:
+                intent = OrderIntent(
+                    "exit-missing", instrument, OrderSide.SELL, 1,
+                    reason="target", role=OrderRole.EXIT, entry_order_id="missing",
+                )
+                return (ExitAction("target", 108.0, intent),)
+            return ()
+
+        def settle_exit(self, order_id, *, filled):
+            return None
+
+        def register_entry(self, order, *, fill_price=None):
+            return None
+
+    result = replay(PaperEngine(UnmatchedExitStrategy()), (first, second))
+
+    assert any(event.get("reason") == "exit_without_matching_entry" for event in result.events)
+    assert not any(event.get("decision_id") == "exit-missing" and event["event_type"] == "FILL"
+                   for event in result.events)
+    assert result.trades[0].status == "open"
 
 
 def test_completed_bars_emit_one_bundle_only_after_required_roles_arrive() -> None:
