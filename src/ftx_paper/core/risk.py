@@ -26,6 +26,7 @@ class RiskConfig:
     contract_lot_size: int = NIFTY_LOT_SIZE
     max_quantity: int = 10
     margin_per_lot: float = 175_000.0
+    # The canonical FTX capital bridge reserves up to 80% of available
     margin_utilization_cap: float = 0.40
     low_vix_threshold: float = 13.0
     # Canonical capital sizing applies the score multiplier and policy

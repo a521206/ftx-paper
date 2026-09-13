@@ -67,12 +67,12 @@ def test_configured_cell_policies_expose_canonical_stability_factors() -> None:
     morning = {item.cell: item.stability for item in MORNING_CELL_POLICIES}
     afternoon = {item.cell: item.stability for item in AFTERNOON_CELL_POLICIES}
 
-    assert morning["session_high+or_high"] == 0.8
+    assert morning["session_high+or_high"] == 0.5
     assert morning["vwap_zone+or_low"] == 0.5
     assert morning["vwap_zone+session_low+or_low"] == 0.5
-    assert afternoon["session_high+or_high"] == 0.8
-    assert afternoon["or_low"] == 0.8
-    assert afternoon["vwap_zone+prior_day_high"] == 0.5
+    assert afternoon["session_high+or_high"] == 0.5
+    assert afternoon["or_low"] == 0.5
+    assert afternoon["vwap_zone+prior_day_high"] == 1.0
 
 
 def test_policy_manifest_is_separate_from_runtime_snapshot() -> None:

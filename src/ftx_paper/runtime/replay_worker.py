@@ -240,8 +240,8 @@ class ReplayWorker:
                     if order.role is OrderRole.ENTRY:
                         entry_quote = synthetic_future_quote(
                             quote_selection_bar, option_bars,
-                            symbols=tuple(leg.symbol for leg in order.synthetic_legs)
-                            if order.synthetic_legs else None,
+                            symbols=(order.synthetic_legs[0].symbol, order.synthetic_legs[1].symbol)
+                            if order.synthetic_legs is not None else None,
                         ) if order.vehicle == "synthetic" else None
                         if entry_quote is None and order.vehicle == "synthetic":
                             all_events.append({"event_type": "EXECUTION_ERROR", "decision_id": order.client_order_id,
@@ -297,7 +297,7 @@ class ReplayWorker:
                             continue
                         realized = self._settle_trade(open_trades, diagnostic_trades, order, futures_bar,
                                                       exit_quote, order.reason,
-                                                      exit_price=exit_quote.price if exit_quote is not None else order.price,
+                                                      exit_price=exit_quote.price if exit_quote is not None else futures_bar.close,
                                                       trade=open_trade)
                         engine.record_exit(cell=realized.cell.name, reason=order.reason,
                                            entry_bar=realized.entry_bar, exit_bar=engine.bars_seen,
@@ -369,6 +369,15 @@ class ReplayWorker:
             "exit_reason": {
                 "trailing_stop": "trail_stop",
             }.get(str(trade.get("exit_reason")), trade.get("exit_reason")),
+            # Keep the normalized replay record self-contained for API-only
+            # comparators investigating synthetic quote selection.
+            "ce_strike": trade.get("ce_strike"),
+            "ce_entry_price": trade.get("ce_entry_price"),
+            "pe_entry_price": trade.get("pe_entry_price"),
+            "ce_exit_price": trade.get("ce_exit_price"),
+            "pe_exit_price": trade.get("pe_exit_price"),
+            "synthetic_entry_price": trade.get("synthetic_entry_price"),
+            "synthetic_exit_price": trade.get("synthetic_exit_price"),
         }
 
     @staticmethod

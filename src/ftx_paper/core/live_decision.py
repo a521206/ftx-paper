@@ -9,7 +9,7 @@ from .bundles import DecisionBundle
 from ftx_paper.contracts import MarketBar, MarketRole, OptionRole, OrderIntent, OrderRole, Role, SyntheticPremiumPair, synthetic_future_quote, role_to_key
 from .features import option_pcr_at_event, vix_open_and_event
 from .location_engine import Cell, LocationDetector, TransitionPattern, transition_patterns_allow
-from .risk import RiskSizer, VehicleRiskLimits
+from .risk import RiskConfig, RiskSizer, VehicleRiskLimits
 from .risk_state import RiskGateState
 from .adaptive_stop import adaptive_stop_bp, stop_price
 from .scoring import calculate_setup_score, compute_selling_structure, score_to_setup_type
@@ -50,15 +50,14 @@ def _supporting_bar(bundle: DecisionBundle, role: Role):
     return bars.get(role) if isinstance(bars, dict) else None
 
 
-def _synthetic_premiums(bundle: DecisionBundle) -> SyntheticPremiumPair | None:
-    """Return the causal same-minute option pair for synthetic sizing."""
-    futures = bundle.bars.get(MarketRole.FUTURES)
+def _same_minute_option_bars(bundle: DecisionBundle) -> dict[Role, MarketBar]:
+    """Return typed, same-minute supporting option bars only."""
     supporting = bundle.supporting_inputs or {}
     bars = supporting.get("bars", {})
-    if futures is None or not isinstance(bars, Mapping):
-        return None
+    if not isinstance(bars, Mapping):
+        return {}
     sources = supporting.get("sources", {})
-    option_bars: dict[Role, MarketBar] = {
+    return {
         role: bar
         for role, bar in bars.items()
         if isinstance(role, (MarketRole, OptionRole))
@@ -67,7 +66,20 @@ def _synthetic_premiums(bundle: DecisionBundle) -> SyntheticPremiumPair | None:
             or sources.get(role_to_key(role), "same_minute") == "same_minute"
         )
     }
-    quote = synthetic_future_quote(futures, option_bars)
+
+
+def _synthetic_premiums(bundle: DecisionBundle) -> SyntheticPremiumPair | None:
+    """Return the causal same-minute option pair for synthetic sizing."""
+    futures = bundle.bars.get(MarketRole.FUTURES)
+    if futures is None:
+        return None
+    option_bars = _same_minute_option_bars(bundle)
+    supporting = bundle.supporting_inputs or {}
+    bars = supporting.get("bars", {})
+    selection_bar = bars.get(MarketRole.SPOT, futures) if isinstance(bars, Mapping) else futures
+    # The futures bar is the decision clock; canonical ATM selection uses the
+    # causal spot/index level.
+    quote = synthetic_future_quote(selection_bar, option_bars)
     if quote is None:
         return None
     return SyntheticPremiumPair(quote.ce.close, quote.pe.close)
@@ -150,7 +162,7 @@ class IndependentLiveDecisionEngine:
             for item in self.enabled_vehicles
         }
         self._vehicle_sizers = {
-            item: RiskSizer(vehicle_limits=vehicle_risk_limits)
+            item: RiskSizer(config=RiskConfig(margin_utilization_cap=0.80), vehicle_limits=vehicle_risk_limits)
             for item in self.enabled_vehicles
         }
 
@@ -313,6 +325,8 @@ class IndependentLiveDecisionEngine:
                      "decision_id": sha256(f"{candidate_id}:{reason}".encode()).hexdigest()[:24]},
                 ))
                 continue
+            if cell_policy is None:
+                continue
             side = cell_policy.direction
             stop = stop_price(current, side.value, stop_basis)
             for vehicle_index, vehicle in enumerate(self.enabled_vehicles):
@@ -324,6 +338,7 @@ class IndependentLiveDecisionEngine:
                     vehicle=vehicle, synthetic_premiums=synthetic_quote,
                 )
                 quantity = sizing.quantity
+                quantity_before_stability = quantity
                 # Allocate from actual remaining directional headroom, not
                 # entry count, before applying cell-policy stability.
                 quantity = min(quantity, int(self.risk_gate.remaining_directional_lots(direction)))
@@ -340,7 +355,9 @@ class IndependentLiveDecisionEngine:
                     quantity = max(1, int(quantity * cell_policy.stability))
                 vehicle_candidate = {**candidate, "vehicle": vehicle, "requested_quantity": quantity,
                                      "score_multiplier": sizing.score_multiplier,
-                                     "stability": cell_policy.stability, "risk_amount": sizing.risk_amount}
+                                     "stability": cell_policy.stability, "risk_amount": sizing.risk_amount,
+                                     "quantity_before_stability": quantity_before_stability,
+                                     "risk_budget": sizing.risk_budget, "stop_bp": sizing.stop_bp}
                 events.append(LiveDecision("ACCEPTEDDECISION", {**vehicle_candidate, "outcome": "accepted", "reason": "eligible"}))
                 if not sizing.approved:
                     events.append(LiveDecision("SIZING_REJECTED", {
@@ -368,7 +385,11 @@ class IndependentLiveDecisionEngine:
                 quote = None
                 if vehicle == "synthetic":
                     supporting = bundle.supporting_inputs or {}
-                    quote = synthetic_future_quote(futures, supporting.get("bars", {}), same_minute=True)
+                    supporting_bars = supporting.get("bars", {})
+                    selection_bar = supporting_bars.get(MarketRole.SPOT, futures) if isinstance(supporting_bars, Mapping) else futures
+                    quote = synthetic_future_quote(
+                        selection_bar, _same_minute_option_bars(bundle), same_minute=True,
+                    )
                     if quote is None:
                         events[-1] = LiveDecision("SIZING_REJECTED", {
                             **vehicle_candidate, "outcome": "sizing rejection",
