@@ -203,6 +203,29 @@ def test_trailing_exit_activates_on_next_bar_and_uses_basis_points() -> None:
     assert actions[-1].reason == "trailing_stop"
 
 
+def test_trailing_exit_uses_underlying_reference_for_synthetic_fill() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    position = PositionState(
+        instrument, 100.0, 130.0, 1, OrderSide.SELL,
+        exit_mode="trail", exit_reference_price=110.0,
+    )
+    machine = ExitStateMachine(trail_activation_bp=20.0, trail_distance_bp=20.0)
+    first = machine.evaluate(
+        position, timestamp=datetime(2026, 9, 11, 10, 1),
+        open=110.0, high=110.2, low=108.0, close=108.5,
+        client_order_id="exit-1",
+    )
+    second = machine.evaluate(
+        position, timestamp=datetime(2026, 9, 11, 10, 2),
+        open=108.1, high=108.3, low=107.9, close=108.2,
+        client_order_id="exit-2",
+    )
+    assert first is None
+    assert second is not None
+    assert second.reason == "trailing_stop"
+    assert second.price == 108.12
+
+
 def test_order_without_explicit_role_fails_fast() -> None:
     instrument = Instrument("NIFTY", "NSE", "INDEX")
     try:

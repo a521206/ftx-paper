@@ -182,13 +182,15 @@ class ReplayWorker:
                         quote_selection_bar, option_bars,
                         symbols=(open_trade["ce_symbol"], open_trade["pe_symbol"]),
                     ) if open_trade and vehicle == "synthetic" else None
-                    if exit_quote is None and open_trade and vehicle == "synthetic":
-                        exit_quote = last_quotes.get(open_trade["entry_order_id"])
                     if exit_quote is None and vehicle == "synthetic":
                         all_events.append({"event_type": "EXECUTION_ERROR", "decision_id": action.intent.client_order_id,
                                            "reason": "missing_synthetic_future_quote", "source": "replay", "session_date": date})
                         continue
-                    exit_price = exit_quote.price if exit_quote is not None else futures_bar.close
+                    # Futures exits fill at the canonical protective trigger
+                    # (including gap handling), not at the bar close.  A
+                    # synthetic position uses the same futures trigger time,
+                    # then settles at its same-minute synthetic quote.
+                    exit_price = exit_quote.price if exit_quote is not None else action.price
                     exit_event = {"event_type": "EXITDECISION", "decision_id": action.intent.client_order_id,
                                   "entry_decision_id": open_trade["entry_order_id"] if open_trade else None,
                                   "timestamp": futures_bar.timestamp.isoformat(), "reason": action.reason,
@@ -238,7 +240,8 @@ class ReplayWorker:
                                            "vehicle": vehicle, "source": "replay",
                                            "session_date": date})
                         engine.register_entry(order, fill_price=fill_price,
-                                              entry_fill_time=futures_bar.timestamp)
+                                              entry_fill_time=futures_bar.timestamp,
+                                              reference_price=futures_bar.close)
                         open_trades.append({"entry_order_id": order.client_order_id,
                                             "instrument": order.instrument.symbol,
                                             "side": order.side.value, "quantity": order.quantity,
@@ -258,15 +261,13 @@ class ReplayWorker:
                             quote_selection_bar, option_bars,
                             symbols=(open_trade["ce_symbol"], open_trade["pe_symbol"]),
                         ) if open_trade and vehicle == "synthetic" else None
-                        if exit_quote is None and open_trade and vehicle == "synthetic":
-                            exit_quote = last_quotes.get(open_trade["entry_order_id"])
                         if exit_quote is None and vehicle == "synthetic":
                             all_events.append({"event_type": "EXECUTION_ERROR", "decision_id": order.client_order_id,
                                                "reason": "missing_synthetic_future_quote", "source": "replay", "session_date": date})
                             continue
                         realized = self._settle_trade(open_trades, diagnostic_trades, order, futures_bar,
                                                       exit_quote, order.reason,
-                                                      exit_price=exit_quote.price if exit_quote is not None else futures_bar.close)
+                                                      exit_price=exit_quote.price if exit_quote is not None else order.price)
                         if realized is not None:
                             engine.record_exit(cell=realized.cell.name, reason=order.reason,
                                                entry_bar=realized.entry_bar, exit_bar=engine.bars_seen,

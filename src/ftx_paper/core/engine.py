@@ -64,15 +64,21 @@ class PaperEngine:
         return on_tick(bar) if callable(on_tick) else ()
 
     def register_entry(self, order: OrderIntent, *, fill_price: float | None = None,
-                       entry_fill_time=None) -> None:
+                       entry_fill_time=None, reference_price: float | None = None) -> None:
         register = getattr(self.strategy, "register_entry", None)
         if callable(register):
             try:
-                register(order, fill_price=fill_price, entry_fill_time=entry_fill_time)
+                register(order, fill_price=fill_price, entry_fill_time=entry_fill_time,
+                         reference_price=reference_price)
             except TypeError as exc:
-                if "entry_fill_time" not in str(exc):
+                if "entry_fill_time" not in str(exc) and "reference_price" not in str(exc):
                     raise
-                register(order, fill_price=fill_price)
+                try:
+                    register(order, fill_price=fill_price, entry_fill_time=entry_fill_time)
+                except TypeError as fallback_exc:
+                    if "entry_fill_time" not in str(fallback_exc):
+                        raise
+                    register(order, fill_price=fill_price)
 
     def on_closed_bar(self, bar: MarketBar):
         handler = getattr(self.strategy, "on_closed_bar", None)

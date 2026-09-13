@@ -177,12 +177,16 @@ class ConfiguredLiveStrategy:
         self._bars.append(bar)
         features = self._features.calculate(tuple(self._bars))
         if self._position is not None:
-            action = self._exits.evaluate(self._position, timestamp=bar.timestamp, high=bar.high, low=bar.low, close=bar.close, client_order_id=f"exit-{bar.timestamp.isoformat()}")
+            action = self._exits.evaluate(self._position, timestamp=bar.timestamp, high=bar.high,
+                                          low=bar.low, close=bar.close, open=bar.open,
+                                          client_order_id=f"exit-{bar.timestamp.isoformat()}")
             if action is not None:
                 self._position = None
                 return (action.intent,)
         decision = self._policy.evaluate(bar, features)
         if decision is None:
+            return ()
+        if features.vwap is None:
             return ()
         stop = bar.close - features.atr if decision.side is OrderSide.BUY and features.atr else bar.close + features.atr if features.atr else bar.close - 5 if decision.side is OrderSide.BUY else bar.close + 5
         prior = tuple(self._bars[:-1])
@@ -209,7 +213,8 @@ class ConfiguredLiveStrategy:
         return self._decision_engine.evaluate(bundle)
 
     def register_entry(self, order: OrderIntent, *, fill_price: float | None = None,
-                       entry_fill_time: datetime | str | None = None) -> None:
+                       entry_fill_time: datetime | str | None = None,
+                       reference_price: float | None = None) -> None:
         if order.stop_price is None or order.cell is None:
             return
         if isinstance(entry_fill_time, str):
@@ -219,6 +224,7 @@ class ConfiguredLiveStrategy:
             order.stop_price, order.quantity, order.side, cell=order.cell,
             exit_mode=order.exit_mode or "signal",
             entry_fill_time=entry_fill_time,
+            exit_reference_price=reference_price,
         )
         trail_kwargs = (
             {"trail_activation_bp": TRAIL_ACTIVATE_BP, "trail_distance_bp": TRAIL_DISTANCE_BP}
@@ -247,10 +253,11 @@ class ConfiguredLiveStrategy:
         for order_id, (position, exits) in tuple(self._decision_positions.items()):
             if bar.instrument != position.instrument or order_id in self._pending_exits.values():
                 continue
-            if position.entry_fill_time is not None and bar.timestamp < position.entry_fill_time:
+            if position.entry_fill_time is not None and bar.timestamp <= position.entry_fill_time:
                 continue
             action = exits.evaluate(position, timestamp=bar.timestamp, high=bar.high, low=bar.low,
-                                    close=bar.close, client_order_id=f"exit-{order_id}-{bar.timestamp.isoformat()}")
+                                    close=bar.close, open=bar.open,
+                                    client_order_id=f"exit-{order_id}-{bar.timestamp.isoformat()}")
             if action is not None:
                 actions.append(action)
                 self._pending_exits[action.intent.client_order_id] = order_id
@@ -261,6 +268,10 @@ class ConfiguredLiveStrategy:
         if filled and entry_order_id is not None:
             self._decision_positions.pop(entry_order_id, None)
 
-    def record_exit(self, **kwargs: object) -> None:
+    def record_exit(self, *, cell: str, reason: str, entry_bar: int,
+                    exit_bar: int, date: str) -> None:
         """Apply an execution-layer exit settlement to the decision gate."""
-        self._decision_engine.record_exit(**kwargs)
+        self._decision_engine.record_exit(
+            cell=cell, reason=reason, entry_bar=entry_bar, exit_bar=exit_bar,
+            date=date,
+        )
