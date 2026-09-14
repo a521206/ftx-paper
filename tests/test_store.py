@@ -81,6 +81,19 @@ def test_runtime_store_persists_exportable_market_bars(tmp_path):
     }]
 
 
+def test_runtime_store_normalizes_nifty_index_bars(tmp_path):
+    store = RuntimeStore(tmp_path)
+    bar = MarketBar(
+        Instrument("NIFTY 50", "NSE_INDEX", "UNKNOWN"),
+        datetime(2026, 1, 5, 4, 0, tzinfo=ZoneInfo("UTC")),
+        100, 101, 99, 100,
+    )
+
+    store.append_market_bars((bar,), source="historical_backfill")
+
+    assert store.read_market_bars("2026-01-05")[0]["instrument_type"] == "INDEX"
+
+
 def test_runtime_store_clears_only_replay_runs(tmp_path):
     store = RuntimeStore(tmp_path)
     store.create_replay_run("diagnostic-run", {"session_date": "2026-01-05"})

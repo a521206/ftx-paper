@@ -340,6 +340,18 @@ def test_zerodha_historical_rows_become_normalized_market_bars() -> None:
     assert bars[0].close == 1.5 and bars[0].instrument.symbol == "NIFTYFUT"
 
 
+def test_nifty_index_historical_rows_are_normalized_as_index() -> None:
+    class Client:
+        def historical_data(self, token, start, end, interval):
+            return [{"date": "2026-01-01T10:00:00+05:30", "open": 100, "high": 101, "low": 99, "close": 100.5}]
+
+    bars = load_startup_backfill(Client(), [{
+        "instrument_token": 1, "symbol": "NIFTY 50", "exchange": "NSE_INDEX",
+    }])
+
+    assert bars[0].instrument.instrument_type == "INDEX"
+
+
 def test_zerodha_historical_backfill_retries_rate_limits(monkeypatch) -> None:
     class Client:
         def __init__(self):

@@ -161,7 +161,7 @@ class RuntimeStore:
             )
             connection.execute(
                 "UPDATE market_bars SET instrument_type = 'INDEX' "
-                "WHERE upper(symbol) IN ('INDIA VIX', 'INDIAVIX')"
+                "WHERE upper(symbol) IN ('NIFTY', 'NIFTY 50', 'INDIA VIX', 'INDIAVIX')"
             )
             connection.execute(
                 "UPDATE market_bars SET expiry = NULL, strike = NULL, option_type = NULL "
@@ -232,7 +232,7 @@ class RuntimeStore:
                 (bar.open_interest if bar.open_interest is not None else 0.0
                  if str(bar.instrument.instrument_type).upper() in {"FUT", "FUTURES"} else None),
                 ("FUT" if str(bar.instrument.instrument_type).upper() == "FUTURES"
-                 else "INDEX" if bar.instrument.symbol.upper() in {"INDIA VIX", "INDIAVIX"}
+                else "INDEX" if bar.instrument.symbol.upper() in {"NIFTY", "NIFTY 50", "INDIA VIX", "INDIAVIX"}
                  else bar.instrument.instrument_type),
                 bar.instrument.expiry if str(bar.instrument.instrument_type).upper() in {"FUT", "FUTURES", "CE", "PE"} else None,
                 bar.instrument.strike if str(bar.instrument.instrument_type).upper() in {"CE", "PE"} else None,

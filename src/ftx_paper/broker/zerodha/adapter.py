@@ -22,6 +22,10 @@ _historical_rate_limit_lock = threading.Lock()
 _next_historical_request_at = 0.0
 
 
+def _is_index_symbol(symbol: object) -> bool:
+    return str(symbol).upper() in {"NIFTY", "NIFTY 50", "INDIA VIX", "INDIAVIX"}
+
+
 class ZerodhaInstrument(TypedDict):
     instrument_token: int
     exchange: str
@@ -198,7 +202,7 @@ def load_startup_backfill(client: Any, instruments: list[ZerodhaInstrument], *, 
             timestamp = row.get("date")
             parsed = normalize_exchange_timestamp(timestamp)
             instrument_type = str(item.get("instrument_type", "INDEX"))
-            if str(item["symbol"]).upper() in {"INDIA VIX", "INDIAVIX"}:
+            if _is_index_symbol(item["symbol"]):
                 instrument_type = "INDEX"
             expiry = instrument_expiry_iso(item.get("expiry")) if instrument_type in {"FUT", "CE", "PE"} else None
             raw_strike = item.get("strike")

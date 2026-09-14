@@ -241,7 +241,7 @@ class RuntimeSession:
             )
             price = float(payload["last_price"])
             instrument_type = str(item.get("instrument_type", "INDEX"))
-            if str(item["symbol"]).upper() in {"INDIA VIX", "INDIAVIX"}:
+            if str(item["symbol"]).upper() in {"NIFTY", "NIFTY 50", "INDIA VIX", "INDIAVIX"}:
                 instrument_type = "INDEX"
             expiry = instrument_expiry_iso(item.get("expiry")) if instrument_type in {"FUT", "CE", "PE"} else None
             raw_strike = item.get("strike")
