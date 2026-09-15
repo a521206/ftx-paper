@@ -104,6 +104,7 @@ class FuturesExecutionPlan:
     entry_order_id: str
     exit_mode: str
     exit_result: Mapping[str, Any] | None = None
+    contract: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.trade_plan.outcome not in {"accepted", "filled"}:
@@ -114,14 +115,14 @@ class FuturesExecutionPlan:
     def to_dict(self) -> dict[str, Any]:
         return _to_dict({"trade_plan": self.trade_plan.to_dict(), "instrument": self.instrument,
                          "entry_order_id": self.entry_order_id, "exit_mode": self.exit_mode,
-                         "exit_result": self.exit_result})
+                         "exit_result": self.exit_result, "contract": self.contract})
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> FuturesExecutionPlan:
         values = _from_dict(
             data,
-            ("trade_plan", "instrument", "entry_order_id", "exit_mode", "exit_result"),
-            nullable_fields=frozenset({"exit_result"}),
+            ("trade_plan", "instrument", "entry_order_id", "exit_mode", "exit_result", "contract"),
+            nullable_fields=frozenset({"exit_result", "contract"}),
         )
         values["trade_plan"] = TradePlan.from_dict(values["trade_plan"])
         return cls(**values)
@@ -138,6 +139,7 @@ class SyntheticSettlement:
     exit_premiums: Mapping[str, float] | None
     costs: float | None
     pnl: float | None
+    premium_provenance: Mapping[str, Any] | None = None
 
     STATUSES: ClassVar[frozenset[str]] = frozenset({"settled", "missing_entry_premium", "missing_exit_premium", "invalid_contract"})
 
@@ -153,13 +155,17 @@ class SyntheticSettlement:
         return _to_dict({"plan_id": self.plan_id, "status": self.status, "contract": self.contract,
                          "entry_at": self.entry_at, "exit_at": self.exit_at,
                          "entry_premiums": self.entry_premiums, "exit_premiums": self.exit_premiums,
-                         "costs": self.costs, "pnl": self.pnl}, datetime_fields=("entry_at", "exit_at"))
+                         "costs": self.costs, "pnl": self.pnl,
+                         "premium_provenance": self.premium_provenance},
+                        datetime_fields=("entry_at", "exit_at"))
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> SyntheticSettlement:
-        return cls(**_from_dict(data, ("plan_id", "status", "contract", "entry_at", "exit_at",
-                                       "entry_premiums", "exit_premiums", "costs", "pnl"),
-                                nullable_fields=frozenset({"contract", "entry_premiums", "exit_premiums", "costs", "pnl"}),
+        compatible = dict(data)
+        compatible.setdefault("premium_provenance", None)
+        return cls(**_from_dict(compatible, ("plan_id", "status", "contract", "entry_at", "exit_at",
+                                       "entry_premiums", "exit_premiums", "costs", "pnl", "premium_provenance"),
+                                nullable_fields=frozenset({"contract", "entry_premiums", "exit_premiums", "costs", "pnl", "premium_provenance"}),
                                 datetime_fields=("entry_at", "exit_at")))
 
 
