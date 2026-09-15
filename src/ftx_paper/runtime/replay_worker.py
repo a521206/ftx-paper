@@ -351,6 +351,8 @@ class ReplayWorker:
             "configuration": {"initial_capital": initial_capital,
                                "max_daily_loss": self.capital_config.max_daily_loss,
                                "max_net_directional_lots": self.capital_config.max_net_directional_lots,
+                               "risk_per_trade": self.capital_config.risk_per_trade,
+                               "max_lots": self.capital_config.max_lots,
                                "lot_size": NIFTY_LOT_SIZE},
             "bars_seen": bars_seen,
             "events": all_events,

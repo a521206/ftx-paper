@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from collections.abc import Mapping, Sequence
-import math
 
 from ftx_paper.contracts import MarketBar, SyntheticPremiumPair
 from .adaptive_stop import adaptive_stop_bp
@@ -130,9 +129,10 @@ class RiskSizer:
                 drawdown_multiplier = scale
                 break
         multiplier *= drawdown_multiplier
-        # Quantity ceilings are downward-only. Never promote a fractional lot
-        # result into an executable lot with round() or max(1, ...).
-        quantity = min(math.floor(risk_ceiling * multiplier), risk_ceiling)
+        # Match the canonical allocator's nearest-lot score scaling before
+        # policy stability is applied.  Stability is a separate downstream
+        # stage; its integer normalization remains downward-only.
+        quantity = min(int(round(risk_ceiling * multiplier)), risk_ceiling)
         quantity -= quantity % self.config.lot_size
         if quantity < self.config.lot_size:
             return RiskDecision(

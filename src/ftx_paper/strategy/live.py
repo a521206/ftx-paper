@@ -85,6 +85,8 @@ class ConfiguredLiveStrategy:
             portfolio=self.portfolio,
             max_daily_loss=capital_config.max_daily_loss,
             max_net_directional_lots=capital_config.max_net_directional_lots,
+            risk_per_trade=capital_config.risk_per_trade,
+            max_lots=capital_config.max_lots,
             morning_entry_minutes=config.morning_entry_minutes,
             afternoon_entry_minutes=config.afternoon_entry_minutes,
             expiry_dates=expiry_dates,
@@ -126,6 +128,8 @@ class ConfiguredLiveStrategy:
                 "initial_capital": self.capital_config.initial_capital,
                 "max_daily_loss": self.capital_config.max_daily_loss,
                 "max_net_directional_lots": self.capital_config.max_net_directional_lots,
+                "risk_per_trade": self.capital_config.risk_per_trade,
+                "max_lots": self.capital_config.max_lots,
             },
             "config": self.config.as_dict(),
             "risk_gate": self._decision_engine.risk_snapshot(),
@@ -158,6 +162,8 @@ class ConfiguredLiveStrategy:
             portfolio=self.portfolio,
             max_daily_loss=self.capital_config.max_daily_loss,
             max_net_directional_lots=self.capital_config.max_net_directional_lots,
+            risk_per_trade=self.capital_config.risk_per_trade,
+            max_lots=self.capital_config.max_lots,
             morning_entry_minutes=self.config.morning_entry_minutes,
             afternoon_entry_minutes=self.config.afternoon_entry_minutes,
             expiry_dates=self._decision_engine.expiry_dates,
@@ -183,6 +189,8 @@ class ConfiguredLiveStrategy:
             ("initial_capital", capital_config.initial_capital),
             ("max_daily_loss", capital_config.max_daily_loss),
             ("max_net_directional_lots", capital_config.max_net_directional_lots),
+            ("risk_per_trade", capital_config.risk_per_trade),
+            ("max_lots", capital_config.max_lots),
         ):
             persisted = raw_capital.get(name)
             if isinstance(persisted, bool) or not isinstance(persisted, (int, float)) or float(persisted) != configured:

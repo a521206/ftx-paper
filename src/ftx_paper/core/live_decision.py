@@ -135,7 +135,7 @@ class IndependentLiveDecisionEngine:
     direction, and cooldown logic.  It has no historical-pipeline imports.
     """
 
-    def __init__(self, *, version: str, config_hash: str, capital: float, portfolio: PaperPortfolio | None = None, max_daily_loss: float = 0.05, max_net_directional_lots: float = 8.0, cooldown_minutes: int = 30, prior_day_high: float | None = None, prior_day_low: float | None = None, morning_entry_minutes: tuple[int, int] = MORNING_ENTRY_MINUTES, afternoon_entry_minutes: tuple[int, int] = AFTERNOON_ENTRY_MINUTES, transition_patterns: tuple[TransitionPattern, ...] = (), expiry_dates: frozenset[str] = frozenset(), risk_gate: RiskGateState | None = None, enabled_vehicles: tuple[str, ...] = ("futures", "synthetic"), vehicle: str | None = None, vehicle_risk_limits: Mapping[str, VehicleRiskLimits] | None = None) -> None:
+    def __init__(self, *, version: str, config_hash: str, capital: float, portfolio: PaperPortfolio | None = None, max_daily_loss: float = 0.05, max_net_directional_lots: float = 8.0, risk_per_trade: float = 0.01, max_lots: int = 3, cooldown_minutes: int = 30, prior_day_high: float | None = None, prior_day_low: float | None = None, morning_entry_minutes: tuple[int, int] = MORNING_ENTRY_MINUTES, afternoon_entry_minutes: tuple[int, int] = AFTERNOON_ENTRY_MINUTES, transition_patterns: tuple[TransitionPattern, ...] = (), expiry_dates: frozenset[str] = frozenset(), risk_gate: RiskGateState | None = None, enabled_vehicles: tuple[str, ...] = ("futures", "synthetic"), vehicle: str | None = None, vehicle_risk_limits: Mapping[str, VehicleRiskLimits] | None = None) -> None:
         self.version, self.config_hash = version, config_hash
         self.cooldown_minutes = cooldown_minutes
         self.portfolio = portfolio or PaperPortfolio(capital)
@@ -175,7 +175,14 @@ class IndependentLiveDecisionEngine:
         # sizing path.
         self.risk_gate = risk_gate or RiskGateState(max_net_directional_lots=max_net_directional_lots)
         self._vehicle_sizers = {
-            "futures": RiskSizer(config=RiskConfig(margin_utilization_cap=0.80), vehicle_limits=vehicle_risk_limits)
+            "futures": RiskSizer(
+                config=RiskConfig(
+                    risk_fraction=risk_per_trade,
+                    max_quantity=max_lots,
+                    margin_utilization_cap=0.80,
+                ),
+                vehicle_limits=vehicle_risk_limits,
+            )
         }
         self._open_margin_used = 0.0
 

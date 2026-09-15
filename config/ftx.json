@@ -2,6 +2,8 @@
   "capital": {
     "initial_capital": 2500000,
     "max_daily_loss": 0.05,
-    "max_net_directional_lots": 8
+    "max_net_directional_lots": 8,
+    "risk_per_trade": 0.01,
+    "max_lots": 3
   }
 }

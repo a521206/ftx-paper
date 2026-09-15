@@ -1047,6 +1047,28 @@ def test_risk_sizer_reserves_open_margin_before_score_sizing() -> None:
     assert decision.quantity == 4
 
 
+def test_research_capital_config_drives_canonical_futures_sizing_limits() -> None:
+    capital = CAPITAL_CONFIG
+    engine = IndependentLiveDecisionEngine(
+        version="test", config_hash="hash", capital=capital.initial_capital,
+        max_net_directional_lots=capital.max_net_directional_lots,
+    )
+    sizer = engine._vehicle_sizers["futures"]
+    assert sizer.config.risk_fraction == pytest.approx(capital.risk_per_trade)
+    assert sizer.config.max_quantity == capital.max_lots
+    assert sizer.vehicle_limits["futures"].margin_per_lot == pytest.approx(175_000)
+
+
+def test_risk_sizer_rounds_score_ceiling_before_policy_stability() -> None:
+    sizer = RiskSizer(config=RiskConfig(risk_fraction=0.01, max_quantity=3))
+    decision = sizer.size(
+        capital=2_500_000, equity=2_500_000, peak_equity=2_500_000,
+        entry=23_450, stop=23_411.65, score=3,
+    )
+    assert decision.risk_ceiling == 3
+    assert decision.quantity == 2
+
+
 def test_decision_engine_tracks_margin_across_entry_and_exit() -> None:
     engine = IndependentLiveDecisionEngine(version="test", config_hash="hash", capital=2_500_000)
     engine.register_entry_margin(vehicle="futures", quantity=2)
