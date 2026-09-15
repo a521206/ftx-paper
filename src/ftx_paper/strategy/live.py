@@ -4,7 +4,8 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, time
 
 from ftx_paper.contracts import Instrument, MarketBar, OptionType, OrderIntent
-from ftx_paper.capital_config import FtxCapitalConfig
+from ftx_paper.capital_config import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
+from ftx_paper.capital_context import CapitalRuntimeContext
 
 from .config import (
     AFTERNOON_ENTRY_MINUTES,
@@ -18,9 +19,9 @@ from .config import (
     StrategyConfig,
 )
 from ftx_paper.core.strategy import StrategyMetadata
-from ftx_paper.core import ExitStateMachine, LiveFeatureCalculator, PositionState, RiskSizer, SetupPolicy, VehicleRiskLimits
+from ftx_paper.core import ExitStateMachine, LiveFeatureCalculator, PositionState, RiskEngine, SetupPolicy, VehicleRiskLimits
 from ftx_paper.contracts import OrderSide
-from ftx_paper.core import DecisionBundle, IndependentLiveDecisionEngine, PaperPortfolio
+from ftx_paper.core import DecisionBundle, IndependentLiveDecisionEngine, PortfolioState, SizingPipeline, SizingPipelineInput
 from ftx_paper.core.scoring import calculate_setup_score, compute_selling_structure
 
 
@@ -42,14 +43,14 @@ class ConfiguredLiveStrategy:
 
     def __init__(
         self,
-        capital_config: FtxCapitalConfig,
+        capital_profile: ResearchCapitalProfile = RESEARCH_CAPITAL_PROFILE,
         decide: Callable[[MarketBar], tuple[OrderIntent, ...]] | None = None,
         config: StrategyConfig = DEFAULT_CONFIG,
         expiry_dates: frozenset[str] = frozenset(),
         enabled_vehicles: Sequence[str] = ("futures", "synthetic"),
         vehicle: str | None = None,
         vehicle_risk_limits: Mapping[str, VehicleRiskLimits] | None = None,
-        portfolio: PaperPortfolio | None = None,
+        portfolio: PortfolioState | None = None,
     ) -> None:
         self._decide = decide
         self.config = config
@@ -57,21 +58,25 @@ class ConfiguredLiveStrategy:
         self._position: PositionState | None = None
         self._features = LiveFeatureCalculator()
         self._policy = SetupPolicy()
-        self._risk = RiskSizer()
         self._exits = ExitStateMachine(
             trail_activation_bp=TRAIL_ACTIVATE_BP,
             trail_distance_bp=TRAIL_DISTANCE_BP,
         )
         self._decision_positions: dict[str, tuple[PositionState, ExitStateMachine]] = {}
         self._pending_exits: dict[str, str] = {}
-        self.capital_config = capital_config
-        self.portfolio = portfolio or PaperPortfolio(capital_config.initial_capital)
+        self.capital_profile = capital_profile
+        self.portfolio = portfolio or PortfolioState(capital_profile.initial_capital)
         self._capital = self.portfolio.initial_capital
         self._daily_date: str | None = None
         self._daily_start_equity = self._capital
         if vehicle is not None:
             enabled_vehicles = (vehicle,)
         self.enabled_vehicles = tuple(dict.fromkeys(str(item).lower() for item in enabled_vehicles))
+        if "futures" not in self.enabled_vehicles:
+            raise ValueError("synthetic is reporting-only; futures must be enabled")
+        self.capital_context = CapitalRuntimeContext(self.capital_profile, environment="live")
+        self._risk = RiskEngine(context=self.capital_context)
+        self._sizing_pipeline = SizingPipeline(self.capital_context)
         self.vehicle_risk_limits = {str(k).lower(): v for k, v in (vehicle_risk_limits or {}).items()}
         if not self.enabled_vehicles or any(item not in {"futures", "synthetic"} for item in self.enabled_vehicles):
             raise ValueError("enabled_vehicles must contain 'futures' and/or 'synthetic'")
@@ -83,15 +88,16 @@ class ConfiguredLiveStrategy:
             version=self.version, config_hash=self.metadata.config_hash,
             cooldown_minutes=config.cooldown_minutes, capital=self._capital,
             portfolio=self.portfolio,
-            max_daily_loss=capital_config.max_daily_loss,
-            max_net_directional_lots=capital_config.max_net_directional_lots,
-            risk_per_trade=capital_config.risk_per_trade,
-            max_lots=capital_config.max_lots,
+            max_daily_loss=self.capital_context.profile.max_daily_loss,
+            max_net_directional_lots=self.capital_context.max_net_directional_lots,
+            risk_per_trade=self.capital_context.risk_per_trade,
+            max_lots=self.capital_context.max_lots,
             morning_entry_minutes=config.morning_entry_minutes,
             afternoon_entry_minutes=config.afternoon_entry_minutes,
             expiry_dates=expiry_dates,
             enabled_vehicles=self.enabled_vehicles,
             vehicle_risk_limits=self.vehicle_risk_limits,
+            capital_context=self.capital_context,
         )
 
     @property
@@ -123,13 +129,14 @@ class ConfiguredLiveStrategy:
         }
         return {
             "schema_version": 1,
+            "capital_profile": self.capital_profile.to_dict(),
             "enabled_vehicles": list(self.enabled_vehicles),
             "capital": {
-                "initial_capital": self.capital_config.initial_capital,
-                "max_daily_loss": self.capital_config.max_daily_loss,
-                "max_net_directional_lots": self.capital_config.max_net_directional_lots,
-                "risk_per_trade": self.capital_config.risk_per_trade,
-                "max_lots": self.capital_config.max_lots,
+                "initial_capital": self.capital_profile.initial_capital,
+                "max_daily_loss": self.capital_profile.max_daily_loss,
+                "max_net_directional_lots": self.capital_profile.max_net_directional_lots,
+                "risk_per_trade": self.capital_profile.risk_per_trade,
+                "max_lots": self.capital_profile.max_lots,
             },
             "config": self.config.as_dict(),
             "risk_gate": self._decision_engine.risk_snapshot(),
@@ -160,19 +167,20 @@ class ConfiguredLiveStrategy:
             version=self.version, config_hash=self.metadata.config_hash,
             cooldown_minutes=self.config.cooldown_minutes, capital=self._capital,
             portfolio=self.portfolio,
-            max_daily_loss=self.capital_config.max_daily_loss,
-            max_net_directional_lots=self.capital_config.max_net_directional_lots,
-            risk_per_trade=self.capital_config.risk_per_trade,
-            max_lots=self.capital_config.max_lots,
+            max_daily_loss=self.capital_context.profile.max_daily_loss,
+            max_net_directional_lots=self.capital_context.max_net_directional_lots,
+            risk_per_trade=self.capital_context.risk_per_trade,
+            max_lots=self.capital_context.max_lots,
             morning_entry_minutes=self.config.morning_entry_minutes,
             afternoon_entry_minutes=self.config.afternoon_entry_minutes,
             expiry_dates=self._decision_engine.expiry_dates,
             enabled_vehicles=self.enabled_vehicles,
             vehicle_risk_limits=self.vehicle_risk_limits,
+            capital_context=self.capital_context,
         )
 
     @classmethod
-    def from_snapshot(cls, snapshot: Mapping[str, object], *, capital_config: FtxCapitalConfig) -> "ConfiguredLiveStrategy":
+    def from_snapshot(cls, snapshot: Mapping[str, object], *, capital_profile: ResearchCapitalProfile) -> "ConfiguredLiveStrategy":
         schema_version = snapshot.get("schema_version", 0)
         if not isinstance(schema_version, int) or isinstance(schema_version, bool) or schema_version != 1:
             raise ValueError("unsupported strategy snapshot schema")
@@ -186,11 +194,11 @@ class ConfiguredLiveStrategy:
         if not isinstance(raw_capital, Mapping):
             raise ValueError("strategy snapshot capital must be an object")
         for name, configured in (
-            ("initial_capital", capital_config.initial_capital),
-            ("max_daily_loss", capital_config.max_daily_loss),
-            ("max_net_directional_lots", capital_config.max_net_directional_lots),
-            ("risk_per_trade", capital_config.risk_per_trade),
-            ("max_lots", capital_config.max_lots),
+            ("initial_capital", capital_profile.initial_capital),
+            ("max_daily_loss", capital_profile.max_daily_loss),
+            ("max_net_directional_lots", capital_profile.max_net_directional_lots),
+            ("risk_per_trade", capital_profile.risk_per_trade),
+            ("max_lots", capital_profile.max_lots),
         ):
             persisted = raw_capital.get(name)
             if isinstance(persisted, bool) or not isinstance(persisted, (int, float)) or float(persisted) != configured:
@@ -212,6 +220,22 @@ class ConfiguredLiveStrategy:
         version = raw_config.get("version", STRATEGY_VERSION)
         if not isinstance(version, str):
             raise ValueError("version must be a string")
+        profile = None
+        raw_profile = snapshot.get("capital_profile")
+        if isinstance(raw_profile, Mapping):
+            try:
+                profile = ResearchCapitalProfile.from_dict(raw_profile)
+            except (TypeError, ValueError, KeyError) as exc:
+                raise ValueError("invalid capital profile in strategy snapshot") from exc
+            for name, configured in (
+                ("initial_capital", capital_profile.initial_capital),
+                ("max_daily_loss", capital_profile.max_daily_loss),
+                ("max_net_directional_lots", capital_profile.max_net_directional_lots),
+                ("risk_per_trade", capital_profile.risk_per_trade),
+                ("max_lots", capital_profile.max_lots),
+            ):
+                if float(getattr(profile, name)) != float(configured):
+                    raise ValueError(f"capital profile does not match supplied config for {name}")
         morning_entry_minutes = MORNING_ENTRY_MINUTES
         if "morning_entry_minutes" in raw_config:
             morning_entry_minutes = cls._parse_minute_pair("morning_entry_minutes", raw_config["morning_entry_minutes"])
@@ -243,8 +267,8 @@ class ConfiguredLiveStrategy:
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"invalid vehicle risk limits for {key!r}") from exc
         raw_portfolio = snapshot.get("portfolio")
-        portfolio = PaperPortfolio.from_snapshot(raw_portfolio) if isinstance(raw_portfolio, Mapping) else None
-        strategy = cls(config=config, capital_config=capital_config, enabled_vehicles=enabled_vehicles,
+        portfolio = PortfolioState.from_snapshot(raw_portfolio) if isinstance(raw_portfolio, Mapping) else None
+        strategy = cls(config=config, capital_profile=profile or capital_profile, enabled_vehicles=enabled_vehicles,
                        vehicle_risk_limits=limits, portfolio=portfolio)
         strategy._equity = strategy.portfolio.equity
         strategy._peak_equity = strategy.portfolio.peak_equity
@@ -388,7 +412,7 @@ class ConfiguredLiveStrategy:
         if trading_date != self._daily_date:
             self._daily_date = trading_date
             self._daily_start_equity = self._equity
-        if self._equity < self._daily_start_equity * (1 - self.capital_config.max_daily_loss):
+        if self._equity < self._daily_start_equity * (1 - self.capital_context.profile.max_daily_loss):
             return ()
         stop = bar.close - features.atr if decision.side is OrderSide.BUY and features.atr else bar.close + features.atr if features.atr else bar.close - 5 if decision.side is OrderSide.BUY else bar.close + 5
         prior = tuple(self._bars[:-1])
@@ -402,10 +426,25 @@ class ConfiguredLiveStrategy:
             float(bar.close), float(bar.close), None,
             abs(bar.close - features.vwap) <= self._policy.proximity,
         )
-        sized = self._risk.size(capital=self._capital, equity=self._equity, peak_equity=self._peak_equity, entry=bar.close, stop=stop, score=score)
-        if not sized.approved:
+        sized = self._risk.size(
+            capital=self._capital, equity=self._equity, peak_equity=self._peak_equity,
+            entry=bar.close, stop=stop, score=score,
+        )
+        score_multiplier = 1.5 if score >= 8 else 1.0 if score >= 5 else 0.5
+        cell_name = str(getattr(decision, "cell", ""))
+        sizing = self._sizing_pipeline.decide(SizingPipelineInput(
+            risk=sized,
+            requested_quantity=sized.risk_ceiling,
+            score_multiplier=score_multiplier,
+            direction=decision.side.value,
+            net_directional_lots=self._decision_engine.risk_gate.net_directional_lots,
+            stability_multiplier=self.capital_context.profile.stability_for(cell_name),
+            vehicle_limit_lots=self.capital_context.max_lots,
+            candidate_id=f"manual:{bar.timestamp.isoformat()}",
+        ))
+        if sizing.final_quantity < 1:
             return ()
-        quantity = min(sized.quantity, int(self.capital_config.max_net_directional_lots))
+        quantity = sizing.final_quantity
         if quantity < 1:
             return ()
         self._exits.reset()
@@ -448,6 +487,7 @@ class ConfiguredLiveStrategy:
         )
         self.portfolio.fill_entry(
             order, price=position.entry_price,
+            margin_per_lot=self.capital_context.profile.vehicle_limit(order.vehicle).margin_per_lot,
             timestamp=entry_fill_time.isoformat() if isinstance(entry_fill_time, datetime) else None,
         )
 

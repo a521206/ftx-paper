@@ -14,9 +14,9 @@ import ftx_paper.broker.zerodha.adapter as zerodha_adapter
 from ftx_paper.contracts import OrderIntent, OrderRole, OrderSide
 from ftx_paper.contracts import Instrument, MarketBar
 from ftx_paper.runtime.events import DecisionTimestampError, decision_session_bucket
-from ftx_paper.core import PaperEngine, PaperPortfolio
+from ftx_paper.core import PaperEngine, PortfolioState
 from ftx_paper.strategy import ConfiguredLiveStrategy
-from ftx_paper.capital_config import FtxCapitalConfig
+from ftx_paper.capital_config import ResearchCapitalProfile
 
 
 def test_api_reads_runtime_store(tmp_path: Path) -> None:
@@ -38,11 +38,11 @@ def test_health_is_available_without_broker_or_niftyzoning(tmp_path: Path) -> No
 
 def test_capital_endpoint_reads_authoritative_portfolio(tmp_path: Path) -> None:
     store = RuntimeStore(tmp_path)
-    portfolio = PaperPortfolio(100_000)
+    portfolio = PortfolioState(100_000)
     portfolio.equity = 97_500
     portfolio.realized_pnl = -2_500
     strategy = ConfiguredLiveStrategy(
-        capital_config=FtxCapitalConfig(initial_capital=100_000), portfolio=portfolio,
+        capital_profile=ResearchCapitalProfile(initial_capital=100_000), portfolio=portfolio,
     )
     from ftx_paper.runtime import RuntimeSession
     session = RuntimeSession(store, None, [], engine=PaperEngine(strategy))

@@ -9,7 +9,10 @@ trading-date boundary.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Mapping
+from typing import TYPE_CHECKING, Mapping
+
+if TYPE_CHECKING:
+    from ftx_paper.capital_context import CapitalRuntimeContext
 
 
 @dataclass
@@ -33,6 +36,14 @@ class RiskGateState:
     net_directional_lots: float = 0.0
     trading_date: str | None = None
     cells: dict[str, CellGateState] = field(default_factory=dict)
+
+    @classmethod
+    def from_context(cls, context: "CapitalRuntimeContext", **overrides: object) -> "RiskGateState":
+        """Build mutable gate state from the immutable capital contract."""
+        return cls(
+            max_net_directional_lots=context.max_net_directional_lots,
+            **overrides,
+        )
 
     def _new_day(self, date: str | None) -> None:
         if date is not None and date != self.trading_date:

@@ -7,7 +7,7 @@ from typing import Any
 
 from ftx_paper.runtime import RuntimeController, RuntimeSession, RuntimeStore
 from ftx_paper.runtime.replay_worker import ReplayWorker
-from ftx_paper.capital_config import FtxCapitalConfig
+from ftx_paper.capital_config import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
 from ftx_paper.runtime.events import (
     EXECUTION_EVENT_TYPES, RISK_EVENT_TYPES, DecisionTimestampError,
 )
@@ -18,13 +18,13 @@ from .schemas import error_payload, openapi_document
 def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token: str | None = None,
                controller: RuntimeController | None = None, session: RuntimeSession | None = None,
                replay_worker: ReplayWorker | None = None,
-               capital_config: FtxCapitalConfig | None = None) -> Flask:
+               capital_profile: ResearchCapitalProfile | None = None) -> Flask:
     app = Flask(__name__)
     store.recover_interrupted()
     session = session or RuntimeSession(store, zerodha_auth, [])
     controller = controller or RuntimeController(store, session)
     replay_worker = replay_worker or ReplayWorker(
-        store, capital_config=capital_config or FtxCapitalConfig.from_file(),
+        store, capital_profile=capital_profile or RESEARCH_CAPITAL_PROFILE,
     )
 
     def json_safe(value: Any) -> Any:

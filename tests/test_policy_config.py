@@ -2,6 +2,10 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from ftx_paper.core.live_decision import IndependentLiveDecisionEngine
+from ftx_paper.core.risk_state import RiskGateState
+from ftx_paper.core.risk import RiskConfig, RiskEngine
+from ftx_paper.capital_config import ResearchCapitalProfile, VehicleLimits
+from ftx_paper.capital_context import CapitalRuntimeContext
 from ftx_paper.strategy.config import (
     AFTERNOON_CELL_POLICIES,
     AFTERNOON_ENTRY_MINUTES,
@@ -73,6 +77,59 @@ def test_configured_cell_policies_expose_canonical_stability_factors() -> None:
     assert afternoon["session_high+or_high"] == 0.8
     assert afternoon["or_low"] == 0.8
     assert afternoon["vwap_zone+prior_day_high"] == 1.0
+
+
+def test_code_defined_research_profile_is_the_paper_configuration() -> None:
+    profile = ResearchCapitalProfile(
+        initial_capital=100_000.0,
+        max_daily_loss=0.02,
+        max_net_directional_lots=3.0,
+        risk_per_trade=0.01,
+        max_lots=2,
+    )
+    assert profile.initial_capital == 100_000.0
+    assert profile.max_net_directional_lots == 3.0
+    assert profile.enabled_vehicles == ("futures", "synthetic")
+    assert profile.to_dict()["strategy_version"] == ""
+
+
+def test_capital_runtime_context_is_deterministic_and_profile_owned() -> None:
+    profile = ResearchCapitalProfile(candidate_id="candidate-a", stability_policy=(("cell", 0.5),))
+    first = CapitalRuntimeContext(profile, environment="replay")
+    second = CapitalRuntimeContext(profile, environment="replay")
+    assert first == second
+    assert first.max_net_directional_lots == 8.0
+    assert first.profile.stability_for("cell") == 0.5
+    assert first.to_dict() == second.to_dict()
+
+
+def test_risk_gate_is_initialized_from_runtime_context() -> None:
+    profile = ResearchCapitalProfile(max_net_directional_lots=3.0)
+    context = CapitalRuntimeContext(profile, environment="replay")
+    gate = RiskGateState.from_context(context)
+    assert gate.max_net_directional_lots == 3.0
+
+
+def test_selected_sessions_are_enforced_by_the_decision_engine() -> None:
+    profile = ResearchCapitalProfile(selected_sessions=("afternoon",))
+    engine = IndependentLiveDecisionEngine(
+        version="test", config_hash="test", capital=2_500_000.0,
+        capital_context=CapitalRuntimeContext(profile),
+    )
+    assert not engine._session_selected(Session.MORNING)
+    assert engine._session_selected(Session.AFTERNOON)
+
+
+def test_profile_vehicle_limits_drive_contextual_risk_engine() -> None:
+    profile = ResearchCapitalProfile(
+        vehicle_limits=(("futures", VehicleLimits(1, 10_000.0)), ("synthetic", VehicleLimits(1, 10_000.0))),
+    )
+    context = CapitalRuntimeContext(profile)
+    decision = RiskEngine(
+        config=RiskConfig(contract_lot_size=1), context=context,
+    ).size(capital=100_000, equity=100_000, peak_equity=100_000, entry=100, stop=99)
+    assert decision.risk_ceiling == 1
+    assert decision.margin_lots == 8
 
 
 def test_policy_manifest_is_separate_from_runtime_snapshot() -> None:

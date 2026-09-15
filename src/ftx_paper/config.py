@@ -19,7 +19,6 @@ class PaperConfig:
     runtime_dir: Path
     auth_db: Path
     zerodha_config: Path
-    capital_config: Path
     host: str = "127.0.0.1"
     port: int = 8501
 
@@ -37,7 +36,6 @@ class PaperConfig:
                 "FTX_PAPER_CONFIG_PATH",
                 PACKAGE_ROOT / "config" / "zerodha.json" if (PACKAGE_ROOT / "config" / "zerodha.json").exists() else home / "config" / "zerodha.json",
             ),
-            capital_config=_path("FTX_PAPER_CAPITAL_CONFIG", PACKAGE_ROOT / "config" / "ftx.json"),
             host=os.getenv("FTX_WEB_HOST", "127.0.0.1"),
             port=int(os.getenv("FTX_WEB_PORT", "8501")),
         )

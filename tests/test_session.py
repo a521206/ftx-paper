@@ -8,7 +8,7 @@ from ftx_paper.core import EngineResult, ExitAction, PaperEngine
 from ftx_paper.core import CompletedBarAggregator
 from ftx_paper.runtime import RuntimeSession, RuntimeStore
 from ftx_paper.execution import PositionLedger
-from ftx_paper.capital_config import FtxCapitalConfig
+from ftx_paper.capital_config import ResearchCapitalProfile
 from ftx_paper.strategy import ConfiguredLiveStrategy
 import ftx_paper.broker.zerodha as zerodha
 
@@ -349,7 +349,7 @@ def test_session_restores_ledger_from_runtime_status(tmp_path):
     ledger = PositionLedger(1000.0)
     session = RuntimeSession(
         store, None, [], ledger=ledger,
-        capital_config=FtxCapitalConfig(initial_capital=1000.0),
+        capital_profile=ResearchCapitalProfile(initial_capital=1000.0),
     )
 
     assert ledger.cash == 800.0
@@ -358,8 +358,8 @@ def test_session_restores_ledger_from_runtime_status(tmp_path):
 
 
 def test_session_restores_strategy_portfolio_and_risk_snapshot(tmp_path):
-    capital_config = FtxCapitalConfig(initial_capital=100_000.0)
-    original = ConfiguredLiveStrategy(capital_config=capital_config)
+    capital_config = ResearchCapitalProfile(initial_capital=100_000.0)
+    original = ConfiguredLiveStrategy(capital_profile=capital_config)
     instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
     order = OrderIntent(
         "restart-entry", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY,
@@ -373,9 +373,9 @@ def test_session_restores_strategy_portfolio_and_risk_snapshot(tmp_path):
     store = RuntimeStore(tmp_path)
     store.write_status({"strategy_snapshot": original.snapshot()})
 
-    replacement = ConfiguredLiveStrategy(capital_config=capital_config)
+    replacement = ConfiguredLiveStrategy(capital_profile=capital_config)
     session = RuntimeSession(store, None, [], engine=PaperEngine(replacement),
-                             capital_config=capital_config)
+                             capital_profile=capital_config)
 
     restored = session.engine.strategy
     assert restored is not replacement

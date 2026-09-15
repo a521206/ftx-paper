@@ -31,10 +31,9 @@ class PaperPosition:
 
 
 @dataclass
-class PaperPortfolio:
+class PortfolioState:
     """Authoritative capital, reservation, position and settlement aggregate."""
     initial_capital: float
-    margin_per_lot: Mapping[str, float] = field(default_factory=lambda: {"futures": 175000.0, "synthetic": 175000.0})
     schema_version: int = 1
     equity: float = field(init=False)
     peak_equity: float = field(init=False)
@@ -74,25 +73,28 @@ class PaperPortfolio:
         if order.client_order_id not in self.settled_orders:
             self.pending_orders.setdefault(order.client_order_id, "submitted")
 
-    def reserve_entry(self, order: OrderIntent) -> MarginReservation:
+    def reserve_entry(self, order: OrderIntent, *, margin_per_lot: float) -> MarginReservation:
         if order.role is not OrderRole.ENTRY:
             raise ValueError("only entry orders may reserve margin")
         existing = self.reservations.get(order.client_order_id)
         if existing is not None:
             return existing
         vehicle = str(order.vehicle).lower()
+        if margin_per_lot < 0:
+            raise ValueError("margin_per_lot must be non-negative")
         reservation = MarginReservation(order.client_order_id, vehicle, int(order.quantity),
-                                         max(0, int(order.quantity)) * float(self.margin_per_lot.get(vehicle, 0)))
+                                         max(0, int(order.quantity)) * float(margin_per_lot))
         self.reservations[order.client_order_id] = reservation
         self.pending_orders[order.client_order_id] = "reserved"
         return reservation
 
-    def fill_entry(self, order: OrderIntent, *, price: float, timestamp: str | None = None,
+    def fill_entry(self, order: OrderIntent, *, price: float, margin_per_lot: float,
+                   timestamp: str | None = None,
                    synthetic_entry_prices: tuple[float, float] | None = None) -> PaperPosition:
         existing = self.positions.get(order.client_order_id)
         if existing is not None:
             return existing
-        self.reserve_entry(order)
+        self.reserve_entry(order, margin_per_lot=margin_per_lot)
         position = PaperPosition(order.client_order_id, order.instrument.symbol, order.side, int(order.quantity),
                                  float(price), str(order.vehicle), order.cell, timestamp,
                                  tuple(leg.symbol for leg in order.synthetic_legs) if order.synthetic_legs else None,
@@ -146,21 +148,18 @@ class PaperPortfolio:
     def snapshot(self) -> dict[str, object]:
         return {"schema_version": 1, "capital": self.capital_snapshot(), "peak_equity": self.peak_equity,
                 "daily_baseline": self.daily_baseline, "total_costs": self.total_costs,
-                "margin_per_lot": dict(self.margin_per_lot),
                 "reservations": {k: asdict(v) for k, v in self.reservations.items()},
                 "positions": {k: {**asdict(v), "side": v.side.value} for k, v in self.positions.items()},
                 "pending_orders": dict(self.pending_orders), "settled_orders": sorted(self.settled_orders),
                 "gates": self.gate_snapshot, "quote_provenance": self.quote_provenance}
 
     @classmethod
-    def from_snapshot(cls, snapshot: Mapping[str, object]) -> "PaperPortfolio":
+    def from_snapshot(cls, snapshot: Mapping[str, object]) -> "PortfolioState":
         if snapshot.get("schema_version") != 1 or not isinstance(snapshot.get("capital"), Mapping):
             raise ValueError("unsupported portfolio snapshot schema")
         capital = snapshot["capital"]
         assert isinstance(capital, Mapping)
-        raw_margin = snapshot.get("margin_per_lot", {})
-        margin_per_lot = dict(raw_margin) if isinstance(raw_margin, Mapping) else None
-        portfolio = cls(float(capital["initial_capital"]), margin_per_lot or {"futures": 175000.0, "synthetic": 175000.0})
+        portfolio = cls(float(capital["initial_capital"]))
         portfolio.equity = float(capital.get("current_equity", portfolio.initial_capital))
         portfolio.peak_equity = float(snapshot.get("peak_equity", portfolio.equity))
         portfolio.daily_baseline = float(snapshot.get("daily_baseline", portfolio.equity))
@@ -184,5 +183,4 @@ class PaperPortfolio:
         portfolio.quote_provenance = dict(raw) if isinstance(raw, Mapping) else {}
         return portfolio
 
-
-__all__ = ["MarginReservation", "PaperPosition", "PaperPortfolio"]
+__all__ = ["MarginReservation", "PaperPosition", "PortfolioState"]

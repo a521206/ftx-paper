@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from collections.abc import Mapping, Sequence
 
 from ftx_paper.contracts import MarketBar, SyntheticPremiumPair
@@ -56,14 +56,28 @@ class RiskDecision:
     drawdown_multiplier: float = 1.0
 
 
-class RiskSizer:
+class RiskEngine:
     """Pure capital, drawdown, and stop-distance guard for order sizing."""
 
     def __init__(
         self,
         config: RiskConfig = RiskConfig(),
         vehicle_limits: Mapping[str, VehicleRiskLimits] | None = None,
+        context=None,
     ) -> None:
+        if context is not None:
+            profile = context.profile
+            config = replace(
+                config,
+                risk_fraction=profile.risk_per_trade,
+                max_quantity=profile.max_lots,
+                max_drawdown_fraction=profile.max_drawdown_fraction,
+            )
+            profile_limits = {
+                name: VehicleRiskLimits(limit.max_lots, limit.margin_per_lot)
+                for name, limit in profile.vehicle_limits
+            }
+            vehicle_limits = {**(vehicle_limits or {}), **profile_limits}
         if not 0 < config.risk_fraction <= 1 or not 0 < config.max_drawdown_fraction <= 1:
             raise ValueError("risk fractions must be between zero and one")
         if config.lot_size < 1 or config.max_quantity < config.lot_size:
@@ -73,6 +87,7 @@ class RiskSizer:
         if config.contract_lot_size < 1:
             raise ValueError("invalid contract lot size")
         self.config = config
+        self.context = context
         default_limits = VehicleRiskLimits(config.max_quantity, config.margin_per_lot)
         self.vehicle_limits = {
             "futures": default_limits,
@@ -117,18 +132,25 @@ class RiskSizer:
         raw_quantity = int(risk_budget // (distance * self.config.contract_lot_size))
         score_multiplier = 1.0 if score is None else (1.5 if score >= 8 else 1.0 if score >= 5 else 0.5)
         vix_multiplier = self.config.low_vix_multiplier if vix is not None and vix < self.config.low_vix_threshold else 1.0
-        multiplier = score_multiplier * vix_multiplier
+        # Legacy callers retain the historical score/drawdown scaling. When a
+        # runtime context is present, those are downstream SizingPipeline
+        # stages and RiskEngine returns only the permission ceiling.
+        multiplier = 1.0 if self.context is not None else score_multiplier * vix_multiplier
         margin_lots = int(available * self.config.margin_utilization_cap // limits.margin_per_lot) if limits.margin_per_lot else limits.max_quantity
         risk_ceiling = min(raw_quantity, limits.max_quantity, margin_lots)
         cumulative_pnl = float(equity) - float(capital)
         peak_pnl = float(peak_equity) - float(capital)
         drawdown = cumulative_pnl - peak_pnl
         drawdown_multiplier = 1.0
-        for threshold, scale in sorted(self.config.drawdown_tiers, reverse=True):
+        # More negative thresholds are more severe and must win first.
+        for threshold, scale in sorted(self.config.drawdown_tiers):
             if drawdown <= threshold:
                 drawdown_multiplier = scale
                 break
-        multiplier *= drawdown_multiplier
+        if self.context is None:
+            multiplier *= drawdown_multiplier
+        else:
+            drawdown_multiplier = 1.0
         # Match the canonical allocator's nearest-lot score scaling before
         # policy stability is applied.  Stability is a separate downstream
         # stage; its integer normalization remains downward-only.
@@ -145,3 +167,11 @@ class RiskSizer:
             normalized_vehicle, available, float(open_margin_used), raw_quantity,
             margin_lots, risk_ceiling, drawdown_multiplier,
         )
+
+
+RiskAssessment = RiskDecision
+
+__all__ = [
+    "RiskAssessment", "RiskConfig", "RiskDecision", "RiskEngine",
+    "VehicleRiskLimits",
+]

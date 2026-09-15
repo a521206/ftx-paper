@@ -9,7 +9,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderRole, OrderSide, Role, SyntheticFutureQuote, synthetic_future_quote
-from ftx_paper.capital_config import FtxCapitalConfig
+from ftx_paper.capital_config import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
 from ftx_paper.core import AggregatorConfig, Cell, CompletedBarAggregator, InstrumentKey, PaperEngine
 from ftx_paper.core.cost import futures_cost, synthetic_futures_cost
 from ftx_paper.execution import PaperExecutionCoordinator
@@ -50,9 +50,9 @@ def _execution_cost(trade: dict[str, Any]) -> float:
 class ReplayWorker:
     """Bounded in-process replay queue with a fresh engine per job."""
 
-    def __init__(self, store: RuntimeStore, *, capital_config: FtxCapitalConfig, max_queue_size: int = 8) -> None:
+    def __init__(self, store: RuntimeStore, *, capital_profile: ResearchCapitalProfile = RESEARCH_CAPITAL_PROFILE, max_queue_size: int = 8) -> None:
         self.store = store
-        self.capital_config = capital_config
+        self.capital_profile = capital_profile
         self._queue: Queue[tuple[str, dict[str, Any], Event]] = Queue(maxsize=max_queue_size)
         self._lock = Lock()
         self._cancel: dict[str, Event] = {}
@@ -142,7 +142,7 @@ class ReplayWorker:
         all_events: list[dict[str, Any]] = []
         diagnostic_trades: list[dict[str, Any]] = []
         bars_seen = 0
-        initial_capital = self.capital_config.initial_capital
+        initial_capital = self.capital_profile.initial_capital
         current_equity = initial_capital
         peak_equity = initial_capital
         max_drawdown = 0.0
@@ -153,8 +153,8 @@ class ReplayWorker:
                 break
             # A date is an independent simulation session. No positions,
             # cooldowns, or risk state may leak into the next date.
-            strategy = ConfiguredLiveStrategy(capital_config=self.capital_config, enabled_vehicles=vehicles)
-            coordinator = PaperExecutionCoordinator(strategy.portfolio)
+            strategy = ConfiguredLiveStrategy(capital_profile=self.capital_profile, enabled_vehicles=vehicles)
+            coordinator = PaperExecutionCoordinator(strategy.portfolio, strategy.capital_context)
             engine = PaperEngine(strategy)
             strategy.update_portfolio_state(equity=current_equity, peak_equity=peak_equity)
             bars = self._bars(date)
@@ -349,10 +349,10 @@ class ReplayWorker:
             "vehicle_semantics": "shared_portfolio_directional_and_margin",
             "strategy": {"name": ConfiguredLiveStrategy.name, "version": ConfiguredLiveStrategy.version},
             "configuration": {"initial_capital": initial_capital,
-                               "max_daily_loss": self.capital_config.max_daily_loss,
-                               "max_net_directional_lots": self.capital_config.max_net_directional_lots,
-                               "risk_per_trade": self.capital_config.risk_per_trade,
-                               "max_lots": self.capital_config.max_lots,
+                               "max_daily_loss": self.capital_profile.max_daily_loss,
+                               "max_net_directional_lots": self.capital_profile.max_net_directional_lots,
+                               "risk_per_trade": self.capital_profile.risk_per_trade,
+                               "max_lots": self.capital_profile.max_lots,
                                "lot_size": NIFTY_LOT_SIZE},
             "bars_seen": bars_seen,
             "events": all_events,

@@ -7,7 +7,6 @@ from ftx_paper.contracts import MarketBar, OrderIntent, OrderRole, OrderSide
 from .settlement import ExitValidationError, validate_exit_order
 from .engine import PaperEngine
 from ftx_paper.config import NIFTY_LOT_SIZE
-from ftx_paper.execution import PaperExecutionCoordinator
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +46,10 @@ def replay(engine: PaperEngine, bars: Iterable[MarketBar]) -> ReplayResult:
     lifecycle while keeping broker timestamps and network behavior out of
     parity comparisons.
     """
+    # Import lazily because execution's coordinator depends on the core
+    # portfolio module, while the core package exports replay.
+    from ftx_paper.execution import PaperExecutionCoordinator
+
     previous = None
     orders: list[OrderIntent] = []
     events: list[dict[str, object]] = []
@@ -67,6 +70,7 @@ def replay(engine: PaperEngine, bars: Iterable[MarketBar]) -> ReplayResult:
             events.append({
                 "event_type": "EXITDECISION",
                 "decision_id": action.intent.client_order_id,
+                "candidate_id": action.intent.entry_order_id or action.intent.client_order_id,
                 "vehicle": action.intent.vehicle,
                 "decision_at": bar.timestamp.isoformat(),
                 "reason": action.reason,
@@ -94,6 +98,7 @@ def replay(engine: PaperEngine, bars: Iterable[MarketBar]) -> ReplayResult:
             events.append({
                 "event_type": "FILL",
                 "decision_id": action.intent.client_order_id,
+                "candidate_id": action.intent.entry_order_id or action.intent.client_order_id,
                 "vehicle": action.intent.vehicle,
                 "timestamp": bar.timestamp.isoformat(),
                 "symbol": action.intent.instrument.symbol,
@@ -114,6 +119,7 @@ def replay(engine: PaperEngine, bars: Iterable[MarketBar]) -> ReplayResult:
                 events.append({
                     "event_type": "EXITDECISION",
                     "decision_id": order.client_order_id,
+                    "candidate_id": order.entry_order_id or order.client_order_id,
                     "vehicle": order.vehicle,
                     "timestamp": bar.timestamp.isoformat(),
                     "reason": order.reason,
@@ -135,6 +141,7 @@ def replay(engine: PaperEngine, bars: Iterable[MarketBar]) -> ReplayResult:
                 events.append({
                     "event_type": "FILL",
                     "decision_id": order.client_order_id,
+                    "candidate_id": order.entry_order_id or order.client_order_id,
                     "timestamp": bar.timestamp.isoformat(),
                     "symbol": order.instrument.symbol,
                     "side": order.side.value,

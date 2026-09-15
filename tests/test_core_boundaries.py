@@ -3,12 +3,13 @@ import math
 import json
 from pathlib import Path
 import time
+from dataclasses import replace
 from zoneinfo import ZoneInfo
 import pytest
 
 from ftx_paper.broker import PaperBroker
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderIntent, OrderRole, OrderSide, parse_role, role_to_key, select_synthetic_quote
-from ftx_paper.core import CompletedBarAggregator, DecisionBundle, ExitAction, ExitStateMachine, IndependentLiveDecisionEngine, LiveFeatureCalculator, PaperEngine, PaperPortfolio, PositionState, RiskConfig, RiskGateState, RiskSizer, SetupPolicy, adaptive_stop_bp, option_pcr_at_event, replay, vix_open_and_event
+from ftx_paper.core import CompletedBarAggregator, DecisionBundle, ExitAction, ExitStateMachine, IndependentLiveDecisionEngine, LiveFeatureCalculator, PaperEngine, PortfolioState, PositionState, RiskAssessment, RiskConfig, RiskDecision, RiskGateState, RiskEngine, SizingPipeline, SizingPipelineInput, SetupPolicy, adaptive_stop_bp, option_pcr_at_event, replay, vix_open_and_event
 from ftx_paper.execution import PaperExecutionCoordinator
 from ftx_paper.core import LiveSession
 from ftx_paper.core.location_engine import Cell, Location
@@ -16,7 +17,7 @@ from ftx_paper.core.live_decision import _configured_policies_for_cell
 from ftx_paper.strategy.config import Session
 from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.strategy import ConfiguredLiveStrategy
-from ftx_paper.capital_config import FtxCapitalConfig, RESEARCH_CAPITAL_CONFIG as CAPITAL_CONFIG
+from ftx_paper.capital_config import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE as CAPITAL_CONFIG
 
 
 def test_paper_portfolio_lifecycle_is_idempotent_and_restorable() -> None:
@@ -24,11 +25,18 @@ def test_paper_portfolio_lifecycle_is_idempotent_and_restorable() -> None:
     entry = OrderIntent("entry-portfolio", instrument, OrderSide.BUY, 2, role=OrderRole.ENTRY)
     exit_order = OrderIntent("exit-portfolio", instrument, OrderSide.SELL, 2, role=OrderRole.EXIT,
                              entry_order_id=entry.client_order_id)
-    portfolio = PaperPortfolio(2_500_000)
+    portfolio = PortfolioState(2_500_000)
     portfolio.gate_snapshot = {"revision": 4}
     portfolio.quote_provenance = {"entry": "same_minute"}
-    portfolio.margin_per_lot = {"futures": 120_000.0, "synthetic": 130_000.0}
-    coordinator = PaperExecutionCoordinator(portfolio)
+    from ftx_paper.capital_config import ResearchCapitalProfile, VehicleLimits
+    from ftx_paper.capital_context import CapitalRuntimeContext
+    custom_context = CapitalRuntimeContext(ResearchCapitalProfile(
+        vehicle_limits=(
+            ("futures", VehicleLimits(3, 120_000.0)),
+            ("synthetic", VehicleLimits(3, 130_000.0)),
+        ),
+    ))
+    coordinator = PaperExecutionCoordinator(portfolio, custom_context)
     coordinator.submit(entry)
     coordinator.submit(entry)
     assert portfolio.open_margin == pytest.approx(240_000)
@@ -39,9 +47,8 @@ def test_paper_portfolio_lifecycle_is_idempotent_and_restorable() -> None:
     coordinator.fill(exit_order, price=105, cost=10)
     assert portfolio.open_margin == 0
     assert portfolio.realized_pnl == pytest.approx(640)
-    restored = PaperPortfolio.from_snapshot(portfolio.snapshot())
+    restored = PortfolioState.from_snapshot(portfolio.snapshot())
     assert restored.capital_snapshot() == portfolio.capital_snapshot()
-    assert restored.margin_per_lot == portfolio.margin_per_lot
     assert restored.gate_snapshot == portfolio.gate_snapshot
     assert restored.quote_provenance == portfolio.quote_provenance
 
@@ -49,7 +56,7 @@ def test_paper_portfolio_lifecycle_is_idempotent_and_restorable() -> None:
 def test_paper_portfolio_failed_entry_releases_reservation_and_failed_exit_keeps_position() -> None:
     instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
     entry = OrderIntent("entry-failed", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY)
-    portfolio = PaperPortfolio(2_500_000)
+    portfolio = PortfolioState(2_500_000)
     coordinator = PaperExecutionCoordinator(portfolio)
     coordinator.submit(entry)
     assert coordinator.cancel(entry)
@@ -66,7 +73,7 @@ def test_paper_portfolio_failed_entry_releases_reservation_and_failed_exit_keeps
 def test_multiday_portfolio_and_risk_recovery_snapshots() -> None:
     instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
     capital = 2_500_000.0
-    portfolio = PaperPortfolio(capital)
+    portfolio = PortfolioState(capital)
     gate = RiskGateState(max_net_directional_lots=2, thesis_cooldown_bars=3, cell_cooldown_bars=2)
     entry = OrderIntent("day1-entry", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY)
     coordinator = PaperExecutionCoordinator(portfolio)
@@ -90,7 +97,7 @@ def test_multiday_portfolio_and_risk_recovery_snapshots() -> None:
 
     portfolio_snapshot = portfolio.snapshot()
     risk_snapshot = gate.snapshot()
-    restored_portfolio = PaperPortfolio.from_snapshot(portfolio_snapshot)
+    restored_portfolio = PortfolioState.from_snapshot(portfolio_snapshot)
     restored_gate = RiskGateState(max_net_directional_lots=2, thesis_cooldown_bars=3, cell_cooldown_bars=2)
     restored_gate.restore(risk_snapshot)
     assert restored_portfolio.snapshot() == portfolio_snapshot
@@ -135,7 +142,7 @@ def test_p6_stop_and_quantity_golden_fixture() -> None:
     assert adaptive_stop_bp(bars, fixture["stop"]["vix"]) == fixture["stop"]["normal_bp"]
     assert adaptive_stop_bp(bars, fixture["stop"]["vix"], is_expiry_day=True) == fixture["stop"]["expiry_bp"]
     expected = fixture["quantity"]
-    decision = RiskSizer().size(
+    decision = RiskEngine().size(
         capital=expected["capital"], equity=expected["equity"], peak_equity=expected["peak_equity"],
         entry=expected["entry"], stop=expected["entry"] * (1 - expected["stop_bp"] / 10000),
     )
@@ -149,14 +156,14 @@ def test_p0_behavioral_fixture_captures_capital_margin_and_downward_lots() -> No
     )
     instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
     entry = OrderIntent("p0-entry", instrument, OrderSide.BUY, 2, role=OrderRole.ENTRY)
-    portfolio = PaperPortfolio(fixture["capital"]["initial_capital"])
-    portfolio.reserve_entry(entry)
+    portfolio = PortfolioState(fixture["capital"]["initial_capital"])
+    portfolio.reserve_entry(entry, margin_per_lot=175_000.0)
 
     assert portfolio.open_margin == fixture["capital"]["open_margin"]
     assert portfolio.initial_capital - portfolio.open_margin == fixture["capital"]["available_capital"]
     assert portfolio.open_margin / portfolio.initial_capital == fixture["capital"]["margin_utilization"]
 
-    decision = RiskSizer(config=RiskConfig(
+    decision = RiskEngine(config=RiskConfig(
         contract_lot_size=200,
         margin_per_lot=1_000,
         margin_utilization_cap=1.0,
@@ -192,18 +199,19 @@ def test_live_session_owns_session_state() -> None:
 
 
 def test_production_strategy_is_versioned_and_injectable() -> None:
-    strategy = ConfiguredLiveStrategy(capital_config=CAPITAL_CONFIG, decide=lambda bar: ())
+    strategy = ConfiguredLiveStrategy(capital_profile=CAPITAL_CONFIG, decide=lambda bar: ())
 
     assert strategy.name.startswith("ftx-paper-")
     assert strategy.on_bar(None) == ()
     assert strategy.metadata.config_hash
     assert strategy.snapshot()["schema_version"] == 1
-    assert strategy.from_snapshot(strategy.snapshot(), capital_config=CAPITAL_CONFIG).metadata.version == strategy.version
+    assert strategy.snapshot()["capital_profile"]["candidate_id"] == "baseline"
+    assert strategy.from_snapshot(strategy.snapshot(), capital_profile=CAPITAL_CONFIG).metadata.version == strategy.version
 
 
 def test_strategy_snapshot_restores_open_position_and_risk_state() -> None:
     instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
-    strategy = ConfiguredLiveStrategy(capital_config=CAPITAL_CONFIG)
+    strategy = ConfiguredLiveStrategy(capital_profile=CAPITAL_CONFIG)
     order = OrderIntent(
         "restart-entry", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY,
         cell="VWAP", stop_price=98.0, exit_mode="signal", entry_bar=12,
@@ -215,7 +223,7 @@ def test_strategy_snapshot_restores_open_position_and_risk_state() -> None:
     )
     snapshot = strategy.snapshot()
 
-    restored = ConfiguredLiveStrategy.from_snapshot(snapshot, capital_config=CAPITAL_CONFIG)
+    restored = ConfiguredLiveStrategy.from_snapshot(snapshot, capital_profile=CAPITAL_CONFIG)
     assert list(restored.portfolio.positions) == ["restart-entry"]
     assert list(restored._decision_positions) == ["restart-entry"]
     assert restored._decision_engine.risk_gate.net_directional_lots == 1
@@ -224,32 +232,42 @@ def test_strategy_snapshot_restores_open_position_and_risk_state() -> None:
     assert list(restored._decision_positions) == ["restart-entry"]
 
 
+def test_strategy_snapshot_restores_research_profile_identity_and_policy() -> None:
+    profile = ResearchCapitalProfile(
+        candidate_id="candidate-paper-17",
+        selected_sessions=("afternoon",),
+        stability_policy=(("afternoon:session_high+or_high", 0.6),),
+    )
+    strategy = ConfiguredLiveStrategy(capital_profile=profile)
+    restored = ConfiguredLiveStrategy.from_snapshot(strategy.snapshot(), capital_profile=CAPITAL_CONFIG)
+    assert restored.capital_profile.candidate_id == "candidate-paper-17"
+    assert restored.capital_profile.selected_sessions == ("afternoon",)
+    assert restored.capital_profile.stability_for("afternoon:session_high+or_high") == 0.6
+
+
 def test_strategy_snapshot_restores_vehicle_for_synthetic_replay() -> None:
     with pytest.raises(ValueError, match="synthetic is reporting-only"):
-        ConfiguredLiveStrategy(capital_config=CAPITAL_CONFIG, vehicle="synthetic")
+        ConfiguredLiveStrategy(capital_profile=CAPITAL_CONFIG, vehicle="synthetic")
 
 
 def test_strategy_uses_explicit_capital_limits_and_rejects_mismatch() -> None:
-    capital_config = FtxCapitalConfig(
+    capital_config = ResearchCapitalProfile(
         initial_capital=100_000.0, max_daily_loss=0.02, max_net_directional_lots=3.0,
     )
-    strategy = ConfiguredLiveStrategy(capital_config=capital_config)
+    strategy = ConfiguredLiveStrategy(capital_profile=capital_config)
 
     assert strategy.portfolio_state["initial_capital"] == 100_000.0
     assert strategy._decision_engine.max_daily_loss == 0.02
     assert strategy._decision_engine.risk_gate.max_net_directional_lots == 3.0
 
-    mismatched = FtxCapitalConfig(initial_capital=200_000.0, max_daily_loss=0.02, max_net_directional_lots=3.0)
+    mismatched = ResearchCapitalProfile(initial_capital=200_000.0, max_daily_loss=0.02, max_net_directional_lots=3.0)
     with pytest.raises(ValueError, match="does not match strategy snapshot"):
-        ConfiguredLiveStrategy.from_snapshot(strategy.snapshot(), capital_config=mismatched)
+        ConfiguredLiveStrategy.from_snapshot(strategy.snapshot(), capital_profile=mismatched)
 
 
-def test_capital_config_rejects_non_object_json(tmp_path) -> None:
-    path = tmp_path / "ftx.json"
-    path.write_text('{"capital": []}', encoding="utf-8")
-
-    with pytest.raises(ValueError, match="Invalid FTX paper capital config"):
-        FtxCapitalConfig.from_file(path)
+def test_research_profile_rejects_malformed_snapshot_values() -> None:
+    with pytest.raises(ValueError, match="initial_capital must be numeric"):
+        ResearchCapitalProfile.from_dict({"initial_capital": "invalid"})
 
 
 def test_live_features_are_causal_and_deterministic() -> None:
@@ -334,7 +352,7 @@ def test_setup_policy_emits_one_explicit_order_intent() -> None:
 
 
 def test_risk_sizer_enforces_drawdown_and_lot_sizing() -> None:
-    sizer = RiskSizer()
+    sizer = RiskEngine()
     approved = sizer.size(capital=10000, equity=10000, peak_equity=10000, entry=100, stop=95)
     assert not approved.approved and approved.reason == "insufficient_risk_budget"
     blocked = sizer.size(capital=10000, equity=8000, peak_equity=10000, entry=100, stop=95)
@@ -494,7 +512,7 @@ def test_trailing_exit_uses_underlying_reference_for_synthetic_fill() -> None:
     assert first is None
     assert second is not None
     assert second.reason == "trail_stop"
-    assert math.isclose(second.price, 108.1158, rel_tol=0.0, abs_tol=1e-9)
+    assert math.isclose(second.price, 108.12, rel_tol=0.0, abs_tol=1e-9)
 
 
 def test_order_without_explicit_role_fails_fast() -> None:
@@ -523,7 +541,7 @@ def test_replay_is_deterministic_and_rejects_reordering() -> None:
 
 def test_production_strategy_composes_features_policy_risk_and_exit() -> None:
     instrument = Instrument("NIFTY", "NSE", "INDEX")
-    strategy = ConfiguredLiveStrategy(capital_config=CAPITAL_CONFIG)
+    strategy = ConfiguredLiveStrategy(capital_profile=CAPITAL_CONFIG)
     bars = tuple(MarketBar(instrument, datetime(2026, 1, 1, 10, 15 + i), 100 + i, 102 + i, 99 + i, 101 + i, 10) for i in range(2))
     orders = [order for bar in bars for order in strategy.on_bar(bar)]
     assert orders and orders[0].quantity > 0
@@ -533,12 +551,14 @@ def test_production_strategy_composes_features_policy_risk_and_exit() -> None:
 
 def test_on_bar_sizing_scales_with_setup_score() -> None:
     instrument = Instrument("NIFTY", "NSE", "INDEX")
-    weak_strategy = ConfiguredLiveStrategy(capital_config=CAPITAL_CONFIG)
+    sizing_profile = CAPITAL_CONFIG
+    sizing_profile = replace(sizing_profile, max_lots=10, max_net_directional_lots=10)
+    weak_strategy = ConfiguredLiveStrategy(capital_profile=sizing_profile)
     weak_orders = [order for order in weak_strategy.on_bar(MarketBar(instrument, datetime(2026, 1, 1, 10, 15), 100, 102, 99, 101, 10))]
 
     closes = (110, 108, 106, 104, 102, 100, 98, 96)
     volumes = (3, 3, 3, 20, 3, 3, 2, 2)
-    strong_strategy = ConfiguredLiveStrategy(capital_config=CAPITAL_CONFIG)
+    strong_strategy = ConfiguredLiveStrategy(capital_profile=sizing_profile)
     strong_orders = []
     for i, close in enumerate(closes):
         strong_orders.extend(strong_strategy.on_bar(
@@ -558,12 +578,12 @@ def test_replay_fixture_has_stable_production_transcript() -> None:
         MarketBar(instrument, datetime(2026, 1, 1, 10, 15 + i), 100 + i, 102 + i, 99 + i, 101 + i, 10)
         for i in range(3)
     )
-    result = replay(PaperEngine(ConfiguredLiveStrategy(capital_config=CAPITAL_CONFIG)), fixture)
+    result = replay(PaperEngine(ConfiguredLiveStrategy(capital_profile=CAPITAL_CONFIG)), fixture)
     assert result.bars_seen == 3
     assert [(order.client_order_id, order.quantity, order.side.value) for order in result.orders] == [
-        ("entry-2026-01-01T10:15:00", 5, "BUY"),
-        ("entry-2026-01-01T10:16:00", 5, "BUY"),
-        ("entry-2026-01-01T10:17:00", 5, "BUY"),
+            ("entry-2026-01-01T10:15:00", 2, "BUY"),
+            ("entry-2026-01-01T10:16:00", 2, "BUY"),
+            ("entry-2026-01-01T10:17:00", 2, "BUY"),
     ]
 
 
@@ -781,7 +801,7 @@ def test_late_vix_reaches_configured_strategy_without_repeated_missing_vix() -> 
         ("NFO", "NIFTYFUT"): "futures",
         ("NSE", "INDIA VIX"): "vix",
     }, required_roles=("futures",))
-    engine = PaperEngine(ConfiguredLiveStrategy(capital_config=CAPITAL_CONFIG))
+    engine = PaperEngine(ConfiguredLiveStrategy(capital_profile=CAPITAL_CONFIG))
     first_minute = datetime(2026, 1, 1, 10, 20, tzinfo=ZoneInfo("Asia/Kolkata"))
     bars = (
         MarketBar(future, first_minute, 100, 102, 99, 101),
@@ -1021,7 +1041,7 @@ def test_live_decision_engine_persists_score_and_quality_bucket() -> None:
 
 
 def test_risk_sizer_never_exceeds_risk_budget_when_budget_is_marginal() -> None:
-    sizer = RiskSizer()
+    sizer = RiskEngine()
     marginal = sizer.size(
         capital=10000, equity=10000, peak_equity=10000, entry=100, stop=995,
     )
@@ -1034,7 +1054,7 @@ def test_risk_sizer_never_exceeds_risk_budget_when_budget_is_marginal() -> None:
 
 
 def test_risk_sizer_reserves_open_margin_before_score_sizing() -> None:
-    sizer = RiskSizer(config=RiskConfig(margin_utilization_cap=0.80))
+    sizer = RiskEngine(config=RiskConfig(margin_utilization_cap=0.80))
     decision = sizer.size(
         capital=2_500_000, equity=2_500_000, peak_equity=2_500_000,
         entry=23_450, stop=23_411.65, score=3, open_margin_used=350_000,
@@ -1060,13 +1080,47 @@ def test_research_capital_config_drives_canonical_futures_sizing_limits() -> Non
 
 
 def test_risk_sizer_rounds_score_ceiling_before_policy_stability() -> None:
-    sizer = RiskSizer(config=RiskConfig(risk_fraction=0.01, max_quantity=3))
+    sizer = RiskEngine(config=RiskConfig(risk_fraction=0.01, max_quantity=3))
     decision = sizer.size(
         capital=2_500_000, equity=2_500_000, peak_equity=2_500_000,
         entry=23_450, stop=23_411.65, score=3,
     )
     assert decision.risk_ceiling == 3
     assert decision.quantity == 2
+
+
+def test_paper_sizing_pipeline_applies_ordered_policy_stages() -> None:
+    risk = RiskDecision(True, 4, "approved", risk_ceiling=4)
+    decision = SizingPipeline().decide(SizingPipelineInput(
+        risk=risk,
+        requested_quantity=1,
+        score_multiplier=0.5,
+        direction="long",
+        concurrency_limit_lots=3,
+        stability_multiplier=0.5,
+        drawdown_multiplier=0.5,
+        candidate_id="candidate-a",
+    ))
+    assert decision.final_quantity == 0
+    assert [name for name, _ in decision.stage_results] == [
+        "risk_ceiling", "score", "concurrency", "vehicle", "drawdown", "stability",
+    ]
+    assert decision.candidate_id == "candidate-a"
+
+
+def test_paper_sizing_pipeline_preserves_stage_rounding_after_caps() -> None:
+    risk = RiskAssessment(True, 3, "approved", risk_ceiling=3)
+    decision = SizingPipeline().decide(SizingPipelineInput(
+        risk=risk,
+        requested_quantity=1,
+        score_multiplier=1.0,
+        direction="short",
+        net_directional_lots=1,
+        concurrency_limit_lots=2,
+        stability_multiplier=0.34,
+    ))
+    assert decision.final_quantity == 1
+    assert decision.rationale == "approved"
 
 
 def test_decision_engine_tracks_margin_across_entry_and_exit() -> None:

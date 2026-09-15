@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Callable, NotRequired, TypedDict
 from zoneinfo import ZoneInfo
 
 from ftx_paper.broker import Broker, Fill, PaperBroker
-from ftx_paper.capital_config import FtxCapitalConfig
+from ftx_paper.capital_config import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
 from ftx_paper.contracts import (
     Instrument, MarketBar, MarketRole, OptionRole, OptionType, OrderRole, OrderSide, Role, SyntheticFutureQuote, normalize_exchange_timestamp, parse_role,
     synthetic_future_quote,
@@ -65,19 +65,22 @@ class RuntimeSession:
 
     def __init__(self, store: RuntimeStore, auth: Any, specifications: list[dict[str, object]],
                  *, engine: PaperEngine | None = None, ledger: PositionLedger | None = None,
-                 capital_config: FtxCapitalConfig | None = None,
+                 capital_profile: ResearchCapitalProfile = RESEARCH_CAPITAL_PROFILE,
                  feed_factory: Callable[..., Any] | None = None, broker_factory: Callable[[Any], Broker] | None = None,
                  client_factory: Callable[[], Any] | None = None, normalize_payload: Callable[..., Any] | None = None,
                  market_clock: Callable[[], datetime] | None = None) -> None:
-        if ledger is not None and capital_config is None:
-            raise ValueError("capital_config is required when a ledger is configured")
+        if ledger is not None and capital_profile is None:
+            raise ValueError("capital_profile is required when a ledger is configured")
         self.store, self.auth, self.specifications = store, auth, specifications
-        self.capital_config = capital_config
+        self.capital_profile = capital_profile
         self.engine, self.ledger = engine or PaperEngine(), ledger
         self._restore_strategy_state()
         strategy = getattr(self.engine, "strategy", None)
         portfolio = getattr(strategy, "portfolio", None)
-        self.coordinator = PaperExecutionCoordinator(portfolio) if portfolio is not None else None
+        self.coordinator = (
+            PaperExecutionCoordinator(portfolio, getattr(strategy, "capital_context", None))
+            if portfolio is not None else None
+        )
         self.feed_factory, self.broker_factory = feed_factory, broker_factory
         self.client_factory, self.normalize_payload = client_factory, normalize_payload
         self.market_clock = market_clock or (lambda: datetime.now(ZoneInfo("Asia/Kolkata")))
@@ -101,9 +104,9 @@ class RuntimeSession:
         strategy = getattr(self.engine, "strategy", None)
         restore = getattr(type(strategy), "from_snapshot", None) if strategy is not None else None
         raw_snapshot = self.store.read_status().get("strategy_snapshot")
-        if not callable(restore) or not isinstance(raw_snapshot, Mapping) or self.capital_config is None:
+        if not callable(restore) or not isinstance(raw_snapshot, Mapping) or self.capital_profile is None:
             return
-        restored = restore(raw_snapshot, capital_config=self.capital_config)
+        restored = restore(raw_snapshot, capital_profile=self.capital_profile)
         self.engine.strategy = restored
 
     def _restore_live_entry_trades_from_portfolio(self) -> None:
@@ -135,9 +138,9 @@ class RuntimeSession:
     def _restore_ledger_state(self) -> None:
         if self.ledger is None:
             return
-        capital_config = self.capital_config
-        if capital_config is None:
-            raise ValueError("capital_config is required when a ledger is configured")
+        capital_profile = self.capital_profile
+        if capital_profile is None:
+            raise ValueError("capital_profile is required when a ledger is configured")
         status = self.store.read_status()
         raw_cash = status.get("capital")
         if raw_cash is None:
@@ -153,10 +156,10 @@ class RuntimeSession:
             raise ValueError("runtime status has no persisted initial_capital")
         if isinstance(persisted_initial, bool) or not isinstance(persisted_initial, (int, float)):
             raise ValueError("runtime status has an invalid initial_capital")
-        if float(persisted_initial) != capital_config.initial_capital:
+        if float(persisted_initial) != capital_profile.initial_capital:
             raise ValueError(
                 "capital config does not match runtime status: "
-                f"configured={capital_config.initial_capital}, persisted={persisted_initial}"
+                f"configured={capital_profile.initial_capital}, persisted={persisted_initial}"
             )
         raw_positions = status.get("open_positions", ())
         if not isinstance(raw_positions, (list, tuple)):
@@ -190,9 +193,9 @@ class RuntimeSession:
             self._stopping = False
             self._started.clear()
             self.store.patch_status({"state": "STARTING", "error": None, "started_at": datetime.now(timezone.utc).isoformat(),
-                                     "initial_capital": self.capital_config.initial_capital if self.capital_config else None,
-                                     "max_daily_loss": self.capital_config.max_daily_loss if self.capital_config else None,
-                                     "max_net_directional_lots": self.capital_config.max_net_directional_lots if self.capital_config else None,
+                                     "initial_capital": self.capital_profile.initial_capital if self.capital_profile else None,
+                                     "max_daily_loss": self.capital_profile.max_daily_loss if self.capital_profile else None,
+                                     "max_net_directional_lots": self.capital_profile.max_net_directional_lots if self.capital_profile else None,
                                      "capital": self.ledger.cash if self.ledger else None,
                                      "pending_bundle_minutes": [], "pending_bundle_details": []})
             self._thread = threading.Thread(target=self._start_impl, daemon=True, name="ftx-paper-runtime")
@@ -628,7 +631,7 @@ class RuntimeSession:
                 "quantity": fill.quantity,
             }
             cost = 0.0
-            # When a PaperPortfolio is attached, it is the sole P&L/cost
+            # When a PortfolioState is attached, it is the sole P&L/cost
             # authority. Runtime computes legacy P&L only for the deprecated
             # ledger-only path.
             if order.role is OrderRole.EXIT and self.coordinator is None:
@@ -763,12 +766,12 @@ class RuntimeSession:
                 peak_equity = max(float(portfolio_state.get("peak_equity", current_equity)), current_equity)
                 update_portfolio_state(equity=current_equity, peak_equity=peak_equity)
         if fill and self.ledger and self.coordinator is None:
-            capital_config = self.capital_config
-            if capital_config is None:
-                raise RuntimeError("capital_config is required when a ledger is configured")
-            self.store.patch_status({"initial_capital": capital_config.initial_capital,
-                                     "max_daily_loss": capital_config.max_daily_loss,
-                                     "max_net_directional_lots": capital_config.max_net_directional_lots,
+            capital_profile = self.capital_profile
+            if capital_profile is None:
+                raise RuntimeError("capital_profile is required when a ledger is configured")
+            self.store.patch_status({"initial_capital": capital_profile.initial_capital,
+                                     "max_daily_loss": capital_profile.max_daily_loss,
+                                     "max_net_directional_lots": capital_profile.max_net_directional_lots,
                                       "capital": self.ledger.cash, "open_positions": [
                  p.__dict__ if hasattr(p, "__dict__") else {"symbol": p.symbol, "quantity": p.quantity,
                  "average_price": p.average_price, "vehicle": p.vehicle} for p in self.ledger.positions()],

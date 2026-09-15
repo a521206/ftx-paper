@@ -230,8 +230,12 @@ class ExitStateMachine:
                      distance: float, *, absolute: bool = False) -> float:
         if absolute:
             return favorable - distance if position.side is OrderSide.BUY else favorable + distance
-        return (max(favorable * (1 - distance), reference_entry)
-                if position.side is OrderSide.BUY else min(favorable * (1 + distance), reference_entry))
+        # Basis-point trails use a fixed distance measured from the entry
+        # price, matching the canonical trail contract. Scaling the distance
+        # from the favorable price creates a price-dependent drift.
+        fixed_distance = reference_entry * distance
+        return (max(favorable - fixed_distance, reference_entry)
+                if position.side is OrderSide.BUY else min(favorable + fixed_distance, reference_entry))
 
     def _action(self, position: PositionState, price: float, reason: str, client_order_id: str) -> ExitAction:
         side = OrderSide.SELL if position.side is OrderSide.BUY else OrderSide.BUY

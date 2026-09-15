@@ -1,21 +1,30 @@
 """One order lifecycle for live and replay."""
 from ftx_paper.contracts import OrderIntent, OrderRole
-from ftx_paper.core.portfolio import PaperPortfolio
+from ftx_paper.core.portfolio import PortfolioState
+from ftx_paper.capital_config import ResearchCapitalProfile
+from ftx_paper.capital_context import CapitalRuntimeContext
 
 
 class PaperExecutionCoordinator:
-    def __init__(self, portfolio: PaperPortfolio) -> None:
+    def __init__(self, portfolio: PortfolioState, capital_context: CapitalRuntimeContext | None = None) -> None:
         self.portfolio = portfolio
+        self.capital_context = capital_context or CapitalRuntimeContext(ResearchCapitalProfile())
 
     def submit(self, order: OrderIntent) -> None:
         self.portfolio.submit(order)
         if order.role is OrderRole.ENTRY:
-            self.portfolio.reserve_entry(order)
+            self.portfolio.reserve_entry(
+                order, margin_per_lot=self.capital_context.profile.vehicle_limit(order.vehicle).margin_per_lot,
+            )
 
     def fill(self, order: OrderIntent, *, price: float, timestamp: str | None = None,
              synthetic_entry_prices=None, cost: float = 0.0):
         if order.role is OrderRole.ENTRY:
-            return self.portfolio.fill_entry(order, price=price, timestamp=timestamp, synthetic_entry_prices=synthetic_entry_prices)
+            return self.portfolio.fill_entry(
+                order, price=price,
+                margin_per_lot=self.capital_context.profile.vehicle_limit(order.vehicle).margin_per_lot,
+                timestamp=timestamp, synthetic_entry_prices=synthetic_entry_prices,
+            )
         return self.portfolio.settle_exit(order, price=price, cost=cost)
 
     def cancel(self, order: OrderIntent) -> bool:

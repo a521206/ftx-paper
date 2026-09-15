@@ -9,11 +9,13 @@ from .bundles import DecisionBundle
 from ftx_paper.contracts import MarketBar, MarketRole, OptionRole, OrderIntent, OrderRole, Role, synthetic_future_quote, role_to_key
 from .features import option_pcr_at_event, vix_open_and_event
 from .location_engine import Cell, LocationDetector, TransitionPattern, transition_patterns_allow
-from .risk import RiskConfig, RiskSizer, VehicleRiskLimits
+from .risk import RiskConfig, RiskEngine, VehicleRiskLimits
+from .sizing import SizingPipeline, SizingPipelineInput
 from .risk_state import RiskGateState
-from .portfolio import MarginReservation, PaperPortfolio
+from .portfolio import MarginReservation, PortfolioState
 from .adaptive_stop import adaptive_stop_bp, stop_price
 from .scoring import calculate_setup_score, compute_selling_structure, score_to_setup_type
+from ftx_paper.capital_context import CapitalRuntimeContext
 from ftx_paper.strategy.config import (
     AFTERNOON_CELL_POLICIES,
     AFTERNOON_ENTRY_MINUTES,
@@ -135,11 +137,12 @@ class IndependentLiveDecisionEngine:
     direction, and cooldown logic.  It has no historical-pipeline imports.
     """
 
-    def __init__(self, *, version: str, config_hash: str, capital: float, portfolio: PaperPortfolio | None = None, max_daily_loss: float = 0.05, max_net_directional_lots: float = 8.0, risk_per_trade: float = 0.01, max_lots: int = 3, cooldown_minutes: int = 30, prior_day_high: float | None = None, prior_day_low: float | None = None, morning_entry_minutes: tuple[int, int] = MORNING_ENTRY_MINUTES, afternoon_entry_minutes: tuple[int, int] = AFTERNOON_ENTRY_MINUTES, transition_patterns: tuple[TransitionPattern, ...] = (), expiry_dates: frozenset[str] = frozenset(), risk_gate: RiskGateState | None = None, enabled_vehicles: tuple[str, ...] = ("futures", "synthetic"), vehicle: str | None = None, vehicle_risk_limits: Mapping[str, VehicleRiskLimits] | None = None) -> None:
+    def __init__(self, *, version: str, config_hash: str, capital: float, portfolio: PortfolioState | None = None, max_daily_loss: float = 0.05, max_net_directional_lots: float = 8.0, risk_per_trade: float = 0.01, max_lots: int = 3, cooldown_minutes: int = 30, prior_day_high: float | None = None, prior_day_low: float | None = None, morning_entry_minutes: tuple[int, int] = MORNING_ENTRY_MINUTES, afternoon_entry_minutes: tuple[int, int] = AFTERNOON_ENTRY_MINUTES, transition_patterns: tuple[TransitionPattern, ...] = (), expiry_dates: frozenset[str] = frozenset(), risk_gate: RiskGateState | None = None, enabled_vehicles: tuple[str, ...] = ("futures", "synthetic"), vehicle: str | None = None, vehicle_risk_limits: Mapping[str, VehicleRiskLimits] | None = None, capital_context: CapitalRuntimeContext | None = None) -> None:
         self.version, self.config_hash = version, config_hash
         self.cooldown_minutes = cooldown_minutes
-        self.portfolio = portfolio or PaperPortfolio(capital)
+        self.portfolio = portfolio or PortfolioState(capital)
         self.capital = self.portfolio.initial_capital
+        self.capital_context = capital_context
         if vehicle is not None:
             enabled_vehicles = (str(vehicle).lower(),)
         self.enabled_vehicles = tuple(dict.fromkeys(str(item).lower() for item in enabled_vehicles))
@@ -173,17 +176,29 @@ class IndependentLiveDecisionEngine:
         # Futures is the only decision and execution vehicle. Synthetic data is
         # retained as optional settlement metadata, never as a second gate or
         # sizing path.
-        self.risk_gate = risk_gate or RiskGateState(max_net_directional_lots=max_net_directional_lots)
+        self.risk_gate = risk_gate or (
+            RiskGateState.from_context(capital_context)
+            if capital_context is not None
+            else RiskGateState(max_net_directional_lots=max_net_directional_lots)
+        )
+        effective_vehicle_limits = dict(vehicle_risk_limits or {})
+        if capital_context is not None:
+            effective_vehicle_limits.update({
+                name: VehicleRiskLimits(limit.max_lots, limit.margin_per_lot)
+                for name, limit in capital_context.profile.vehicle_limits
+            })
         self._vehicle_sizers = {
-            "futures": RiskSizer(
+            "futures": RiskEngine(
                 config=RiskConfig(
                     risk_fraction=risk_per_trade,
                     max_quantity=max_lots,
                     margin_utilization_cap=0.80,
                 ),
-                vehicle_limits=vehicle_risk_limits,
+                vehicle_limits=effective_vehicle_limits,
+                context=capital_context,
             )
         }
+        self._sizing_pipeline = SizingPipeline(capital_context)
         self._open_margin_used = 0.0
 
     @property
@@ -217,6 +232,15 @@ class IndependentLiveDecisionEngine:
         if self.afternoon_entry_minutes[0] <= minutes_from_open < self.afternoon_entry_minutes[1]:
             return Session.AFTERNOON
         return Session.OUTSIDE
+
+    def _session_selected(self, session: Session) -> bool:
+        return (
+            session is not Session.OUTSIDE
+            and (
+                self.capital_context is None
+                or session.value in self.capital_context.selected_sessions
+            )
+        )
 
     def _session_segment(self, decision_at: datetime) -> tuple[Session, int] | None:
         """Return the canonical cooldown segment containing ``decision_at``."""
@@ -344,14 +368,19 @@ class IndependentLiveDecisionEngine:
         sequence = len(self._futures)
         events = []
         policies = configured or [(location_snapshot.cell, None)]
+        session_selected = self._session_selected(decision_session)
         for cell, cell_policy in policies:
             direction = cell_policy.direction.value.lower() if cell_policy is not None else "NONE"
-            candidate_id = sha256(f"{decision_at.isoformat()}:{sequence}:{cell.name}".encode()).hexdigest()[:24]
+            profile_id = self.capital_context.profile.candidate_id if self.capital_context is not None else "baseline"
+            candidate_id = sha256(f"{profile_id}:{decision_at.isoformat()}:{sequence}:{cell.name}".encode()).hexdigest()[:24]
             candidate = {**base, "decision_id": candidate_id, "cell": cell.name, "locations": [item.value for item in cell.ordered_locations], "direction": direction,
                          "setup_type": score_setup_type, "score": score, "score_factors": score_factors,
                          "score_multiplier": score_multiplier, "sequence": sequence,
                          "feature_values": feature_values, "entry_price": current, "outcome": "candidate",
-                         "exit_mode": cell_policy.exit_mode.value if cell_policy is not None else "signal"}
+                         "exit_mode": cell_policy.exit_mode.value if cell_policy is not None else "signal",
+                         "candidate_id": candidate_id,
+                         "research_candidate_id": profile_id,
+                         "capital_policy_version": self.capital_context.profile.schema_version if self.capital_context is not None else 1}
             candidate.update(_synthetic_settlement_metadata(bundle))
             candidate.update(vix_at_event=vix_bar.close, pcr_at_event=pcr, stop_basis=stop_basis,
                              transitions=[{"reference": item.reference.value, "kind": item.kind.value,
@@ -361,6 +390,8 @@ class IndependentLiveDecisionEngine:
             reason = None
             if decision_session is Session.OUTSIDE:
                 reason = "outside_session_window"
+            elif not session_selected:
+                reason = "session_not_selected"
             elif cell_policy is None:
                 reason = "cell_not_configured"
             elif score_setup_type == "Skip":
@@ -406,27 +437,54 @@ class IndependentLiveDecisionEngine:
                     vehicle=vehicle,
                     open_margin_used=self.portfolio.open_margin,
                 )
-                quantity = sizing.quantity
-                quantity_before_stability = quantity
-                # Allocate from actual remaining directional headroom, not
-                # entry count, before applying cell-policy stability.
-                quantity = min(quantity, int(self.risk_gate.remaining_directional_lots(direction)))
-                if sizing.approved and cell_policy.stability < 1.0:
-                    quantity = int(quantity * cell_policy.stability)
+                score_scale = 1.0 if score is None else (1.5 if score >= 8 else 1.0 if score >= 5 else 0.5)
+                stability = (
+                    self.capital_context.profile.stability_for(f"{decision_session.value}:{cell.name}")
+                    if self.capital_context is not None else cell_policy.stability
+                )
+                cumulative_pnl = self.portfolio.equity - self.portfolio.initial_capital
+                peak_pnl = self.portfolio.peak_equity - self.portfolio.initial_capital
+                drawdown_scale = 1.0
+                if self.capital_context is not None:
+                    drawdown = cumulative_pnl - peak_pnl
+                    for threshold, scale in sorted(self.capital_context.profile.drawdown_policy.tiers):
+                        if drawdown <= threshold:
+                            drawdown_scale = scale
+                            break
+                sizing_decision = self._sizing_pipeline.decide(SizingPipelineInput(
+                    risk=sizing,
+                    requested_quantity=sizing.quantity,
+                    # RiskEngine exposes the raw permission ceiling; downstream
+                    # score and policy factors are applied by SizingPipeline.
+                    score_multiplier=score_scale,
+                    direction=direction,
+                    net_directional_lots=self.risk_gate.net_directional_lots,
+                    concurrency_limit_lots=self.risk_gate.max_net_directional_lots,
+                    stability_multiplier=stability,
+                    drawdown_multiplier=drawdown_scale,
+                    vehicle_limit_lots=None,
+                    candidate_id=candidate_id,
+                ))
+                quantity_before_stability = next(
+                    (value for name, value in reversed(sizing_decision.stage_results) if name != "stability"),
+                    sizing.quantity,
+                )
+                quantity = sizing_decision.final_quantity
                 vehicle_candidate = {**candidate, "vehicle": vehicle,
                                      "requested_quantity": quantity_before_stability,
                                      "final_quantity": quantity,
-                                     "score_multiplier": sizing.score_multiplier,
-                                     "stability": cell_policy.stability, "risk_amount": sizing.risk_amount,
+                                     "score_multiplier": sizing_decision.score_multiplier,
+                                     "stability": stability, "risk_amount": sizing.risk_amount,
                                      "quantity_before_stability": quantity_before_stability,
-                                     "risk_budget": sizing.risk_budget, "stop_bp": sizing.stop_bp}
+                                     "risk_budget": sizing.risk_budget, "stop_bp": sizing.stop_bp,
+                                     "sizing_pipeline": sizing_decision.metadata}
                 vehicle_candidate.update({
                     "available_capital": sizing.available_capital,
                     "open_margin_used": sizing.open_margin_used,
                     "raw_risk_quantity": sizing.raw_quantity,
                     "margin_lots": sizing.margin_lots,
                     "risk_ceiling": sizing.risk_ceiling,
-                    "drawdown_multiplier": sizing.drawdown_multiplier,
+                    "drawdown_multiplier": drawdown_scale,
                     "risk_fraction": self._vehicle_sizers[vehicle].config.risk_fraction,
                     "margin_utilization_cap": self._vehicle_sizers[vehicle].config.margin_utilization_cap,
                     "margin_per_lot": self._vehicle_sizers[vehicle].vehicle_limits[vehicle].margin_per_lot,
