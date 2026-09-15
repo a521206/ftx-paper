@@ -4,6 +4,7 @@ from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, time
+from zoneinfo import ZoneInfo
 from ftx_paper.contracts import Instrument, OrderIntent, OrderRole, OrderSide
 
 
@@ -34,6 +35,9 @@ class ExitAction:
     price: float
     intent: OrderIntent
     cell: str | None = None
+    bars_held: int = 0
+    mae_bp: float = 0.0
+    mfe_bp: float = 0.0
 
 
 class ExitStateMachine:
@@ -42,7 +46,7 @@ class ExitStateMachine:
     def __init__(self, *, trail_distance: float | None = None,
                  trail_activation_bp: float | None = None,
                  trail_distance_bp: float | None = None,
-                 close_time: time = time(15, 30)) -> None:
+                 close_time: time = time(15, 10)) -> None:
         if trail_distance is not None and trail_distance <= 0:
             raise ValueError("trail distance must be positive")
         if trail_activation_bp is not None and trail_activation_bp <= 0:
@@ -61,12 +65,18 @@ class ExitStateMachine:
         self._closes: deque[float] = deque(maxlen=3)
         self._max_favorable_price: float | None = None
         self._trail_active = False
+        self._bars_held = 0
+        self._mae_bp = 0.0
+        self._mfe_bp = 0.0
 
     def reset(self) -> None:
         """Clear position-specific history before evaluating a new position."""
         self._closes.clear()
         self._max_favorable_price = None
         self._trail_active = False
+        self._bars_held = 0
+        self._mae_bp = 0.0
+        self._mfe_bp = 0.0
 
     def snapshot(self) -> dict[str, object]:
         return {
@@ -78,6 +88,9 @@ class ExitStateMachine:
             "closes": list(self._closes),
             "max_favorable_price": self._max_favorable_price,
             "trail_active": self._trail_active,
+            "bars_held": self._bars_held,
+            "mae_bp": self._mae_bp,
+            "mfe_bp": self._mfe_bp,
         }
 
     @classmethod
@@ -111,16 +124,31 @@ class ExitStateMachine:
         if not isinstance(trail_active, bool):
             raise ValueError("exit-state snapshot trail_active must be boolean")
         machine._trail_active = trail_active
+        for name in ("bars_held", "mae_bp", "mfe_bp"):
+            value = snapshot.get(name, 0)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+                raise ValueError(f"exit-state snapshot {name} is invalid")
+            setattr(machine, f"_{name}", int(value) if name == "bars_held" else float(value))
         return machine
 
     def evaluate(self, position: PositionState, *, timestamp: datetime, high: float, low: float,
                  close: float, client_order_id: str, include_signal: bool = True,
-                 open: float | None = None) -> ExitAction | None:
+                 open: float | None = None, count_bar: bool = True) -> ExitAction | None:
         reference_entry = (position.exit_reference_price
                            if position.exit_reference_price is not None
                            else position.entry_price)
         open_price = close if open is None else open
         self._closes.append(close)
+        if count_bar:
+            self._bars_held += 1
+        if position.side is OrderSide.BUY:
+            adverse = (position.entry_price - low) / position.entry_price * 10000
+            favorable_excursion = (high - position.entry_price) / position.entry_price * 10000
+        else:
+            adverse = (high - position.entry_price) / position.entry_price * 10000
+            favorable_excursion = (position.entry_price - low) / position.entry_price * 10000
+        self._mae_bp = max(self._mae_bp, adverse)
+        self._mfe_bp = max(self._mfe_bp, favorable_excursion)
         stop_hit = (low <= position.stop_price if position.side is OrderSide.BUY
                     else high >= position.stop_price)
         if stop_hit:
@@ -169,16 +197,25 @@ class ExitStateMachine:
                         else recent[0] < recent[1] < recent[2])
             if adverse:
                 return self._action(position, close, "counter_move", client_order_id)
-        if timestamp.timetz().replace(tzinfo=None) >= self.close_time:
+        local_time = timestamp.astimezone(ZoneInfo("Asia/Kolkata")).time()
+        if local_time >= self.close_time:
             return self._action(position, close, "eod", client_order_id)
         return None
 
     def evaluate_tick(self, position: PositionState, *, timestamp: datetime, price: float,
                       client_order_id: str) -> ExitAction | None:
         """Evaluate one live quote immediately; hard stops have no activation delay."""
-        return self.evaluate(position, timestamp=timestamp, high=price, low=price,
-                             close=price, open=price, client_order_id=client_order_id,
-                             include_signal=False)
+        state = (
+            deque(self._closes), self._max_favorable_price, self._trail_active,
+            self._bars_held, self._mae_bp, self._mfe_bp,
+        )
+        try:
+            return self.evaluate(position, timestamp=timestamp, high=price, low=price,
+                                 close=price, open=price, client_order_id=client_order_id,
+                                 include_signal=False, count_bar=False)
+        finally:
+            (self._closes, self._max_favorable_price, self._trail_active,
+             self._bars_held, self._mae_bp, self._mfe_bp) = state
 
     @staticmethod
     def _gap_fills(position: PositionState, open_price: float, level: float) -> bool:
@@ -196,14 +233,15 @@ class ExitStateMachine:
         return (max(favorable * (1 - distance), reference_entry)
                 if position.side is OrderSide.BUY else min(favorable * (1 + distance), reference_entry))
 
-    @staticmethod
-    def _action(position: PositionState, price: float, reason: str, client_order_id: str) -> ExitAction:
+    def _action(self, position: PositionState, price: float, reason: str, client_order_id: str) -> ExitAction:
         side = OrderSide.SELL if position.side is OrderSide.BUY else OrderSide.BUY
         intent = OrderIntent(
             client_order_id, position.instrument, side, position.quantity,
             reason=reason, role=OrderRole.EXIT, vehicle=position.vehicle,
+            exit_mode=position.exit_mode,
             synthetic_legs=position.synthetic_legs,
             entry_bar=position.entry_bar,
             entry_order_id=position.entry_order_id,
         )
-        return ExitAction(reason, price, intent, position.cell)
+        return ExitAction(reason, price, intent, position.cell,
+                          self._bars_held, self._mae_bp, self._mfe_bp)

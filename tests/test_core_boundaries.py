@@ -360,6 +360,69 @@ def test_exit_state_machine_emits_protective_exit() -> None:
     assert action.intent.role is OrderRole.EXIT
 
 
+def test_exit_state_machine_hard_stop_precedes_same_bar_target_and_records_excursions() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    position = PositionState(instrument, 100, 95, 1, OrderSide.BUY,
+                            exit_mode="target", target_price=105)
+    action = ExitStateMachine().evaluate(
+        position, timestamp=datetime(2026, 1, 1, 10, 1), open=100,
+        high=106, low=94, close=104, client_order_id="exit-collision",
+    )
+    assert action is not None
+    assert (action.reason, action.price, action.bars_held) == ("hard_stop", 95, 1)
+    assert action.mae_bp == 600
+    assert action.mfe_bp == 600
+
+
+def test_exit_state_machine_handles_opening_gaps_at_stop_and_target() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    stop_position = PositionState(instrument, 100, 95, 1, OrderSide.BUY)
+    stop = ExitStateMachine().evaluate(
+        stop_position, timestamp=datetime(2026, 1, 1, 10, 1), open=90,
+        high=92, low=88, close=89, client_order_id="gap-stop",
+    )
+    assert stop is not None and (stop.reason, stop.price) == ("hard_stop", 90)
+
+    target_position = PositionState(instrument, 100, 95, 1, OrderSide.BUY,
+                                    exit_mode="target", target_price=105)
+    target = ExitStateMachine().evaluate(
+        target_position, timestamp=datetime(2026, 1, 1, 10, 1), open=110,
+        high=112, low=109, close=111, client_order_id="gap-target",
+    )
+    assert target is not None and (target.reason, target.price) == ("target", 110)
+
+
+def test_exit_state_machine_forces_exit_at_canonical_1510_close() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    position = PositionState(instrument, 100, 95, 1, OrderSide.BUY)
+    action = ExitStateMachine().evaluate(
+        position, timestamp=datetime(2026, 1, 1, 15, 10),
+        open=103, high=104, low=102, close=103, client_order_id="eod",
+    )
+    assert action is not None
+    assert (action.reason, action.price, action.bars_held) == ("eod", 103, 1)
+
+
+def test_exit_state_machine_uses_ist_for_eod_timestamp() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    position = PositionState(instrument, 100, 95, 1, OrderSide.BUY)
+    action = ExitStateMachine().evaluate(
+        position, timestamp=datetime(2026, 1, 1, 9, 40, tzinfo=timezone.utc),
+        open=103, high=104, low=102, close=103, client_order_id="eod-utc",
+    )
+    assert action is not None and action.reason == "eod"
+
+
+def test_tick_exit_check_does_not_mutate_completed_bar_state() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    position = PositionState(instrument, 100, 95, 1, OrderSide.BUY)
+    machine = ExitStateMachine(trail_activation_bp=20.0, trail_distance_bp=20.0)
+    before = machine.snapshot()
+    assert machine.evaluate_tick(position, timestamp=datetime(2026, 1, 1, 10, 1),
+                                 price=103, client_order_id="tick") is None
+    assert machine.snapshot() == before
+
+
 def test_exit_state_machine_rejects_ambiguous_trailing_configuration() -> None:
     for kwargs in (
         {"trail_activation_bp": 20.0},

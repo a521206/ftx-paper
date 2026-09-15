@@ -436,7 +436,7 @@ class ConfiguredLiveStrategy:
             if order.exit_mode == "trail" else {}
         )
         self._decision_positions[order.client_order_id] = (
-            position, ExitStateMachine(**trail_kwargs, close_time=time(15, 30)),
+                position, ExitStateMachine(**trail_kwargs, close_time=time(15, 10)),
         )
         self.portfolio.fill_entry(
             order, price=position.entry_price,

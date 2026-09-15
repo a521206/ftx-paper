@@ -835,6 +835,10 @@ class RuntimeSession:
                     "vehicle": action.intent.vehicle,
                     "cell": action.cell,
                     "reason": action.reason,
+                    "exit_mode": action.intent.exit_mode,
+                    "bars_held": action.bars_held,
+                    "mae_bp": action.mae_bp,
+                    "mfe_bp": action.mfe_bp,
                     "exit_price": action.price,
                     "trigger_price": action.price,
                     "fill_price": (
@@ -895,6 +899,10 @@ class RuntimeSession:
                     "vehicle": action.intent.vehicle,
                     "cell": action.cell,
                     "reason": action.reason,
+                    "exit_mode": action.intent.exit_mode,
+                    "bars_held": action.bars_held,
+                    "mae_bp": action.mae_bp,
+                    "mfe_bp": action.mfe_bp,
                     "exit_price": action.price,
                     "trigger_price": action.price,
                     "fill_price": (
