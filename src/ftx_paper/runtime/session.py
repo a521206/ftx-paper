@@ -375,6 +375,14 @@ class RuntimeSession:
             "reason": order.reason,
             "vehicle": order.vehicle,
         }
+        if order.vehicle != "futures":
+            self.store.append_event(
+                "EXECUTION_ERROR",
+                {**context, "outcome": "execution_error", "phase": "order_validation",
+                 "reason": "synthetic_execution_disabled"},
+                f"execution_error:vehicle:{order.client_order_id}", timestamp=timestamp,
+            )
+            return False
         if self.coordinator is not None:
             self.coordinator.submit(order)
         entry: LiveEntryTrade | None = None
@@ -548,7 +556,11 @@ class RuntimeSession:
                 "symbol": fill.instrument.symbol,
                 "quantity": fill.quantity,
             }
-            if order.role is OrderRole.EXIT:
+            cost = 0.0
+            # When a PaperPortfolio is attached, it is the sole P&L/cost
+            # authority. Runtime computes legacy P&L only for the deprecated
+            # ledger-only path.
+            if order.role is OrderRole.EXIT and self.coordinator is None:
                 assert entry is not None
                 entry_side = entry["side"]
                 signed = 1.0 if entry_side is OrderSide.BUY else -1.0
@@ -606,7 +618,7 @@ class RuntimeSession:
                 if order.entry_order_id is not None:
                     self._last_synthetic_quote_by_order[order.entry_order_id] = synthetic_quote
             position = None
-            if self.ledger:
+            if self.ledger and self.coordinator is None:
                 try:
                     for item in fills:
                         leg_side = order.side
@@ -663,7 +675,9 @@ class RuntimeSession:
             cancel_reservation()
             return False
         if order.role is OrderRole.EXIT and self.coordinator is not None:
-            self.coordinator.fill(order, price=execution_price, timestamp=timestamp, cost=cost)
+            settlement = self.coordinator.fill(order, price=execution_price, timestamp=timestamp, cost=cost)
+            if settlement is not None:
+                self._last_execution_fill["realized_pnl"] = settlement["net_pnl"]
         realized_pnl = (
             self._last_execution_fill.get("realized_pnl")
             if self._last_execution_fill is not None else None
@@ -676,7 +690,7 @@ class RuntimeSession:
                 current_equity = float(portfolio_state.get("current_equity", 0.0)) + float(realized_pnl)
                 peak_equity = max(float(portfolio_state.get("peak_equity", current_equity)), current_equity)
                 update_portfolio_state(equity=current_equity, peak_equity=peak_equity)
-        if fill and self.ledger:
+        if fill and self.ledger and self.coordinator is None:
             capital_config = self.capital_config
             if capital_config is None:
                 raise RuntimeError("capital_config is required when a ledger is configured")

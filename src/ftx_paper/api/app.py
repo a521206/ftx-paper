@@ -75,8 +75,9 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             or not vehicles
             or any(not isinstance(item, str) for item in vehicles)
             or any(item not in {"futures", "synthetic"} for item in vehicles)
+            or "futures" not in vehicles
         ):
-            return jsonify(error_payload("invalid_request", "vehicles must be a non-empty array of futures/synthetic")), 400
+            return jsonify(error_payload("invalid_request", "vehicles must include futures; synthetic is reporting-only")), 400
         requested_date = payload.get("session_date", payload.get("date"))
         if requested_date not in (None, ""):
             if not isinstance(requested_date, str):

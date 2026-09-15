@@ -16,6 +16,6 @@
     "entry": 22000,
     "stop_bp": 50.0,
     "risk_budget": 50000.0,
-    "quantity": 5
+    "quantity": 6
   }
 }

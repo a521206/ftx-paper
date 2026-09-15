@@ -51,11 +51,19 @@ class RiskGateState:
     def rejection_reason(self, *, cell: str, direction: str, bar: int,
                          quantity: int, date: str | None = None) -> str | None:
         self._new_day(date)
-        if quantity < 1:
-            return "insufficient_directional_headroom"
+        thesis_reason = self.thesis_rejection_reason(
+            cell=cell, bar=bar, date=date,
+        )
+        if thesis_reason is not None:
+            return thesis_reason
+        return self.directional_rejection_reason(
+            direction=direction, quantity=quantity, date=date,
+        )
+
+    def thesis_rejection_reason(self, *, cell: str, bar: int,
+                                date: str | None = None) -> str | None:
+        self._new_day(date)
         state = self.cells.setdefault(cell, CellGateState())
-        if abs(self.net_directional_lots + self._signed(direction, quantity)) > self.max_net_directional_lots:
-            return "directional_exposure_limit"
         if state.failed_today or state.consecutive_stops >= self.max_consecutive_stops:
             return "thesis_failed"
         if bar < state.locked_until_bar:
@@ -64,6 +72,15 @@ class RiskGateState:
             return "cell_cooldown"
         if state.total_entries >= self.max_daily_entries:
             return "daily_cell_entry_limit"
+        return None
+
+    def directional_rejection_reason(self, *, direction: str, quantity: int,
+                                     date: str | None = None) -> str | None:
+        self._new_day(date)
+        if quantity < 1:
+            return "insufficient_directional_headroom"
+        if abs(self.net_directional_lots + self._signed(direction, quantity)) > self.max_net_directional_lots:
+            return "directional_exposure_limit"
         return None
 
     def can_enter(self, *, cell: str, direction: str, bar: int,

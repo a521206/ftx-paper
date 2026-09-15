@@ -100,6 +100,35 @@ def test_p6_stop_and_quantity_golden_fixture() -> None:
     assert decision.quantity == expected["quantity"]
 
 
+def test_p0_behavioral_fixture_captures_capital_margin_and_downward_lots() -> None:
+    fixture = json.loads(
+        (Path(__file__).parent / "fixtures" / "p0_behavioral_contract.json").read_text()
+    )
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    entry = OrderIntent("p0-entry", instrument, OrderSide.BUY, 2, role=OrderRole.ENTRY)
+    portfolio = PaperPortfolio(fixture["capital"]["initial_capital"])
+    portfolio.reserve_entry(entry)
+
+    assert portfolio.open_margin == fixture["capital"]["open_margin"]
+    assert portfolio.initial_capital - portfolio.open_margin == fixture["capital"]["available_capital"]
+    assert portfolio.open_margin / portfolio.initial_capital == fixture["capital"]["margin_utilization"]
+
+    decision = RiskSizer(config=RiskConfig(
+        contract_lot_size=200,
+        margin_per_lot=1_000,
+        margin_utilization_cap=1.0,
+    )).size(
+        capital=10_000,
+        equity=10_000,
+        peak_equity=10_000,
+        entry=100,
+        stop=99,
+        score=4,
+    )
+    assert decision.risk_ceiling == fixture["rounding"]["risk_ceiling"]
+    assert decision.quantity == fixture["rounding"]["final_quantity"]
+
+
 def test_paper_broker_returns_contract_fill() -> None:
     instrument = Instrument("NIFTY", "NSE", "INDEX")
     from ftx_paper.contracts import OrderIntent, OrderSide
@@ -130,9 +159,8 @@ def test_production_strategy_is_versioned_and_injectable() -> None:
 
 
 def test_strategy_snapshot_restores_vehicle_for_synthetic_replay() -> None:
-    strategy = ConfiguredLiveStrategy(capital_config=CAPITAL_CONFIG, vehicle="synthetic")
-    restored = ConfiguredLiveStrategy.from_snapshot(strategy.snapshot(), capital_config=CAPITAL_CONFIG)
-    assert restored.vehicle == "synthetic"
+    with pytest.raises(ValueError, match="synthetic is reporting-only"):
+        ConfiguredLiveStrategy(capital_config=CAPITAL_CONFIG, vehicle="synthetic")
 
 
 def test_strategy_uses_explicit_capital_limits_and_rejects_mismatch() -> None:
@@ -404,9 +432,9 @@ def test_replay_fixture_has_stable_production_transcript() -> None:
     result = replay(PaperEngine(ConfiguredLiveStrategy(capital_config=CAPITAL_CONFIG)), fixture)
     assert result.bars_seen == 3
     assert [(order.client_order_id, order.quantity, order.side.value) for order in result.orders] == [
-        ("entry-2026-01-01T10:15:00", 2, "BUY"),
-        ("entry-2026-01-01T10:16:00", 2, "BUY"),
-        ("entry-2026-01-01T10:17:00", 2, "BUY"),
+        ("entry-2026-01-01T10:15:00", 5, "BUY"),
+        ("entry-2026-01-01T10:16:00", 5, "BUY"),
+        ("entry-2026-01-01T10:17:00", 5, "BUY"),
     ]
 
 
@@ -870,10 +898,23 @@ def test_risk_sizer_reserves_open_margin_before_score_sizing() -> None:
 
 def test_decision_engine_tracks_margin_across_entry_and_exit() -> None:
     engine = IndependentLiveDecisionEngine(version="test", config_hash="hash", capital=2_500_000)
-    engine.register_entry_margin(vehicle="synthetic", quantity=2)
+    engine.register_entry_margin(vehicle="futures", quantity=2)
     assert engine.open_margin_used == pytest.approx(350_000)
-    engine.release_entry_margin(vehicle="synthetic", quantity=2)
+    engine.release_entry_margin(vehicle="futures", quantity=2)
     assert engine.open_margin_used == pytest.approx(0)
+
+
+def test_synthetic_reporting_has_no_independent_gate_or_margin_owner() -> None:
+    engine = IndependentLiveDecisionEngine(
+        version="test", config_hash="hash", capital=2_500_000,
+        enabled_vehicles=("futures", "synthetic"),
+    )
+
+    assert set(engine._vehicle_sizers) == {"futures"}
+    assert not hasattr(engine, "_vehicle_risk_gates")
+    with pytest.raises(ValueError, match="synthetic reporting"):
+        engine.register_entry_margin(vehicle="synthetic", quantity=2)
+    assert engine.open_margin_used == 0
 
 
 def test_paper_engine_preserves_live_decision_domain_values_at_boundary() -> None:

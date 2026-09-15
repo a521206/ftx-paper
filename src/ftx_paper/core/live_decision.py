@@ -6,7 +6,7 @@ from datetime import datetime
 from hashlib import sha256
 from zoneinfo import ZoneInfo
 from .bundles import DecisionBundle
-from ftx_paper.contracts import MarketBar, MarketRole, OptionRole, OrderIntent, OrderRole, Role, SyntheticPremiumPair, synthetic_future_quote, role_to_key
+from ftx_paper.contracts import MarketBar, MarketRole, OptionRole, OrderIntent, OrderRole, Role, synthetic_future_quote, role_to_key
 from .features import option_pcr_at_event, vix_open_and_event
 from .location_engine import Cell, LocationDetector, TransitionPattern, transition_patterns_allow
 from .risk import RiskConfig, RiskSizer, VehicleRiskLimits
@@ -69,21 +69,33 @@ def _same_minute_option_bars(bundle: DecisionBundle) -> dict[Role, MarketBar]:
     }
 
 
-def _synthetic_premiums(bundle: DecisionBundle) -> SyntheticPremiumPair | None:
-    """Return the causal same-minute option pair for synthetic sizing."""
+def _synthetic_settlement_metadata(bundle: DecisionBundle) -> dict[str, object]:
+    """Capture optional synthetic lookup data without affecting futures decisions."""
     futures = bundle.bars.get(MarketRole.FUTURES)
     if futures is None:
-        return None
-    option_bars = _same_minute_option_bars(bundle)
+        return {"synthetic_premium_status": "unavailable", "synthetic_contract": None}
     supporting = bundle.supporting_inputs or {}
     bars = supporting.get("bars", {})
     selection_bar = bars.get(MarketRole.SPOT, futures) if isinstance(bars, Mapping) else futures
-    # The futures bar is the decision clock; canonical ATM selection uses the
-    # causal spot/index level.
-    quote = synthetic_future_quote(selection_bar, option_bars)
+    quote = synthetic_future_quote(
+        selection_bar, _same_minute_option_bars(bundle), same_minute=True,
+    )
     if quote is None:
-        return None
-    return SyntheticPremiumPair(quote.ce.close, quote.pe.close)
+        return {"synthetic_premium_status": "unavailable", "synthetic_contract": None}
+    return {
+        "synthetic_premium_status": "available",
+        "synthetic_contract": {
+            "expiry": quote.ce.instrument.expiry,
+            "strike": quote.strike,
+            "ce_symbol": quote.ce.instrument.symbol,
+            "pe_symbol": quote.pe.instrument.symbol,
+            "entry_minute": quote.ce.timestamp.isoformat(),
+        },
+        "synthetic_premium_lookup": {
+            "ce": quote.ce.close,
+            "pe": quote.pe.close,
+        },
+    }
 
 
 def _decision_datetime(bundle: DecisionBundle) -> datetime:
@@ -133,6 +145,8 @@ class IndependentLiveDecisionEngine:
         self.enabled_vehicles = tuple(dict.fromkeys(str(item).lower() for item in enabled_vehicles))
         if not self.enabled_vehicles or any(item not in {"futures", "synthetic"} for item in self.enabled_vehicles):
             raise ValueError("enabled_vehicles must contain 'futures' and/or 'synthetic'")
+        if "futures" not in self.enabled_vehicles:
+            raise ValueError("synthetic is reporting-only; futures must be enabled")
         self._equity = self.portfolio.equity
         self._peak_equity = self.portfolio.peak_equity
         self._daily_start_equity = self.portfolio.daily_baseline
@@ -156,16 +170,12 @@ class IndependentLiveDecisionEngine:
         self._decision_session: Session | None = None
         self._decision_segment: tuple[Session, int] | None = None
         self._vix_open: float | None = None
-        # One gate is deliberately shared by both vehicles: directional
-        # exposure, daily loss, and thesis limits are portfolio concerns.
+        # Futures is the only decision and execution vehicle. Synthetic data is
+        # retained as optional settlement metadata, never as a second gate or
+        # sizing path.
         self.risk_gate = risk_gate or RiskGateState(max_net_directional_lots=max_net_directional_lots)
-        self._vehicle_risk_gates = {
-            item: RiskGateState(max_net_directional_lots=max_net_directional_lots)
-            for item in self.enabled_vehicles
-        }
         self._vehicle_sizers = {
-            item: RiskSizer(config=RiskConfig(margin_utilization_cap=0.80), vehicle_limits=vehicle_risk_limits)
-            for item in self.enabled_vehicles
+            "futures": RiskSizer(config=RiskConfig(margin_utilization_cap=0.80), vehicle_limits=vehicle_risk_limits)
         }
         self._open_margin_used = 0.0
 
@@ -177,12 +187,16 @@ class IndependentLiveDecisionEngine:
         # Legacy callback compatibility: the aggregate remains the owner;
         # real execution always uses the order-id keyed reservation path.
         normalized = str(vehicle).lower()
+        if normalized != "futures":
+            raise ValueError("synthetic reporting cannot reserve futures margin")
         key = f"legacy:{normalized}:{len(self.portfolio.reservations)}"
         amount = max(int(quantity), 0) * float(self._vehicle_sizers[normalized].vehicle_limits[normalized].margin_per_lot)
         self.portfolio.reservations[key] = MarginReservation(key, normalized, int(quantity), amount)
 
     def release_entry_margin(self, *, vehicle: str, quantity: int) -> None:
         normalized = str(vehicle).lower()
+        if normalized != "futures":
+            return
         for key, reservation in tuple(self.portfolio.reservations.items()):
             if key.startswith(f"legacy:{normalized}:") and reservation.quantity == int(quantity):
                 self.portfolio.reservations.pop(key, None)
@@ -226,8 +240,6 @@ class IndependentLiveDecisionEngine:
             self._vix_history.clear()
             self._vix_open = None
             self._location_detector.reset(prior_day_high=self.prior_day_high, prior_day_low=self.prior_day_low)
-            for gate in self._vehicle_risk_gates.values():
-                gate.new_day(bundle.trading_date)
             self._decision_session = None
             self._decision_segment = None
             self._trading_date = bundle.trading_date
@@ -238,8 +250,6 @@ class IndependentLiveDecisionEngine:
         if decision_segment != self._decision_segment:
             if self._decision_segment is not None:
                 self.risk_gate.reset_segment()
-                for gate in self._vehicle_risk_gates.values():
-                    gate.reset_segment()
             self._decision_segment = decision_segment
             self._decision_session = decision_session
         current_pcr = _option_pcr(bundle)
@@ -325,6 +335,7 @@ class IndependentLiveDecisionEngine:
                          "score_multiplier": score_multiplier, "sequence": sequence,
                          "feature_values": feature_values, "entry_price": current, "outcome": "candidate",
                          "exit_mode": cell_policy.exit_mode.value if cell_policy is not None else "signal"}
+            candidate.update(_synthetic_settlement_metadata(bundle))
             candidate.update(vix_at_event=vix_bar.close, pcr_at_event=pcr, stop_basis=stop_basis,
                              transitions=[{"reference": item.reference.value, "kind": item.kind.value,
                                            "from": item.from_side.value, "to": item.to_side.value}
@@ -351,13 +362,30 @@ class IndependentLiveDecisionEngine:
                 continue
             side = cell_policy.direction
             stop = stop_price(current, side.value, stop_basis)
-            for vehicle_index, vehicle in enumerate(self.enabled_vehicles):
-                synthetic_quote = _synthetic_premiums(bundle)
+            thesis_reason = self.risk_gate.thesis_rejection_reason(
+                cell=cell.name, bar=sequence, date=bundle.trading_date,
+            )
+            if thesis_reason is not None:
+                events.append(LiveDecision(
+                    "REJECTEDDECISION",
+                    {**candidate, "outcome": "thesis rejection", "reason": thesis_reason,
+                     "decision_id": sha256(f"{candidate_id}:{thesis_reason}".encode()).hexdigest()[:24]},
+                ))
+                continue
+            if self.risk_gate.remaining_directional_lots(direction) < 1:
+                reason = "directional_exposure_limit"
+                events.append(LiveDecision(
+                    "REJECTEDDECISION",
+                    {**candidate, "outcome": "concurrency rejection", "reason": reason,
+                     "decision_id": sha256(f"{candidate_id}:{reason}".encode()).hexdigest()[:24]},
+                ))
+                continue
+            for vehicle in ("futures",):
                 sizing = self._vehicle_sizers[vehicle].size(
                     capital=self.portfolio.initial_capital, equity=self.portfolio.equity, peak_equity=self.portfolio.peak_equity,
                     entry=current, stop=stop, score=score, vix=float(vix_bar.close),
                     is_expiry_day=bundle.trading_date in self.expiry_dates,
-                    vehicle=vehicle, synthetic_premiums=synthetic_quote,
+                    vehicle=vehicle,
                     open_margin_used=self.portfolio.open_margin,
                 )
                 quantity = sizing.quantity
@@ -365,17 +393,8 @@ class IndependentLiveDecisionEngine:
                 # Allocate from actual remaining directional headroom, not
                 # entry count, before applying cell-policy stability.
                 quantity = min(quantity, int(self.risk_gate.remaining_directional_lots(direction)))
-                # A bundle can produce one order per enabled vehicle. Share
-                # the common directional headroom deterministically so the
-                # first vehicle cannot consume the entire portfolio cap.
-                remaining_slots = len(self.enabled_vehicles) - vehicle_index
-                if remaining_slots > 1 and quantity > 0:
-                    quantity = min(
-                        quantity,
-                        max(1, int(self.risk_gate.remaining_directional_lots(direction) // remaining_slots)),
-                    )
                 if sizing.approved and cell_policy.stability < 1.0:
-                    quantity = max(1, int(quantity * cell_policy.stability))
+                    quantity = int(quantity * cell_policy.stability)
                 vehicle_candidate = {**candidate, "vehicle": vehicle, "requested_quantity": quantity,
                                      "score_multiplier": sizing.score_multiplier,
                                      "stability": cell_policy.stability, "risk_amount": sizing.risk_amount,
@@ -393,9 +412,8 @@ class IndependentLiveDecisionEngine:
                     "margin_per_lot": self._vehicle_sizers[vehicle].vehicle_limits[vehicle].margin_per_lot,
                     "max_quantity": self._vehicle_sizers[vehicle].vehicle_limits[vehicle].max_quantity,
                     "shared_directional_headroom": self.risk_gate.remaining_directional_lots(direction),
-                    "vehicle_directional_headroom": self._vehicle_risk_gates[vehicle].remaining_directional_lots(direction),
+                    "vehicle_directional_headroom": self.risk_gate.remaining_directional_lots(direction),
                 })
-                events.append(LiveDecision("ACCEPTEDDECISION", {**vehicle_candidate, "outcome": "accepted", "reason": "eligible"}))
                 if not sizing.approved:
                     events.append(LiveDecision("SIZING_REJECTED", {
                         **vehicle_candidate, "outcome": "sizing rejection", "reason": sizing.reason,
@@ -407,11 +425,12 @@ class IndependentLiveDecisionEngine:
                     cell=cell.name, direction=direction, bar=sequence,
                     quantity=quantity, date=bundle.trading_date,
                 )
-                vehicle_gate_reason = self._vehicle_risk_gates[vehicle].rejection_reason(
-                    cell=cell.name, direction=direction, bar=sequence,
-                    quantity=quantity, date=bundle.trading_date,
-                )
-                gate_reason = gate_reason or vehicle_gate_reason
+                if quantity < 1:
+                    events.append(LiveDecision("SIZING_REJECTED", {
+                        **vehicle_candidate, "outcome": "sizing rejection",
+                        "reason": "insufficient_risk_budget",
+                    }))
+                    continue
                 if gate_reason is not None:
                     events.append(LiveDecision(
                         "REJECTEDDECISION",
@@ -419,31 +438,14 @@ class IndependentLiveDecisionEngine:
                          "decision_id": sha256(f"{candidate_id}:{vehicle}:{gate_reason}".encode()).hexdigest()[:24]},
                     ))
                     continue
-                quote = None
-                if vehicle == "synthetic":
-                    supporting = bundle.supporting_inputs or {}
-                    supporting_bars = supporting.get("bars", {})
-                    selection_bar = supporting_bars.get(MarketRole.SPOT, futures) if isinstance(supporting_bars, Mapping) else futures
-                    quote = synthetic_future_quote(
-                        selection_bar, _same_minute_option_bars(bundle), same_minute=True,
-                    )
-                    if quote is None:
-                        events[-1] = LiveDecision("SIZING_REJECTED", {
-                            **vehicle_candidate, "outcome": "sizing rejection",
-                            "reason": "missing_synthetic_premium",
-                        })
-                        continue
-                legs = (quote.ce.instrument, quote.pe.instrument) if quote is not None else None
                 order = OrderIntent(candidate_id + f":{vehicle}", futures.instrument, side, quantity,
                                     reason="live_policy_accepted", cell=cell.name, stop_price=stop,
                                     exit_mode=cell_policy.exit_mode.value, entry_bar=sequence,
-                    role=OrderRole.ENTRY, vehicle=vehicle, synthetic_legs=legs)
+                    role=OrderRole.ENTRY, vehicle=vehicle)
+                events.append(LiveDecision("ACCEPTEDDECISION", {
+                    **vehicle_candidate, "outcome": "accepted", "reason": "eligible",
+                }, order=order))
                 self.risk_gate.record_entry(cell=cell.name, direction=direction, quantity=quantity, date=bundle.trading_date)
-                self._vehicle_risk_gates[vehicle].record_entry(
-                    cell=cell.name, direction=direction, quantity=quantity,
-                    date=bundle.trading_date,
-                )
-                events[-1] = LiveDecision("ACCEPTEDDECISION", {**vehicle_candidate, "outcome": "accepted", "reason": "eligible"}, order=order)
         return tuple(events)
 
     def record_exit(self, *, cell: str, reason: str, entry_bar: int,
@@ -454,19 +456,10 @@ class IndependentLiveDecisionEngine:
             cell=cell, reason=reason, entry_bar=entry_bar, exit_bar=exit_bar,
             date=date, direction=direction, quantity=quantity,
         )
-        gate = self._vehicle_risk_gates.get(str(vehicle).lower())
-        if gate is not None:
-            gate.record_exit(
-                cell=cell, reason=reason, entry_bar=entry_bar, exit_bar=exit_bar,
-                date=date, direction=direction, quantity=quantity,
-            )
 
     def cancel_entry(self, *, cell: str, direction: str, quantity: int,
                      date: str, vehicle: str = "futures") -> None:
         self.risk_gate.cancel_entry(cell=cell, direction=direction, quantity=quantity, date=date)
-        gate = self._vehicle_risk_gates.get(str(vehicle).lower())
-        if gate is not None:
-            gate.cancel_entry(cell=cell, direction=direction, quantity=quantity, date=date)
         self.release_entry_margin(vehicle=vehicle, quantity=quantity)
 
     def update_portfolio_state(self, *, equity: float, peak_equity: float | None = None) -> None:
@@ -480,19 +473,12 @@ class IndependentLiveDecisionEngine:
         """Return JSON-safe gate state for persistence across segments."""
         return {
             "shared": self.risk_gate.snapshot(),
-            "vehicles": {name: gate.snapshot() for name, gate in self._vehicle_risk_gates.items()},
         }
 
     def restore_risk_snapshot(self, snapshot: dict[str, object]) -> None:
         shared = snapshot.get("shared", snapshot)
         if isinstance(shared, Mapping):
             self.risk_gate.restore(shared)
-        raw_vehicles = snapshot.get("vehicles", {})
-        if isinstance(raw_vehicles, Mapping):
-            for name, raw_gate in raw_vehicles.items():
-                gate = self._vehicle_risk_gates.get(str(name).lower())
-                if gate is not None and isinstance(raw_gate, Mapping):
-                    gate.restore(raw_gate)
 
 
 __all__ = ["IndependentLiveDecisionEngine", "LiveDecision"]

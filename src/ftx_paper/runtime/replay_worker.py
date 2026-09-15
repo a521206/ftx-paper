@@ -136,6 +136,8 @@ class ReplayWorker:
             raise ValueError("replay vehicles must be an array containing 'futures' and/or 'synthetic'")
         if not vehicles or any(item not in {"futures", "synthetic"} for item in vehicles):
             raise ValueError(f"unsupported replay vehicles: {vehicles}")
+        if "futures" not in vehicles:
+            raise ValueError("synthetic replay is reporting-only; futures must be enabled")
         dates = [session_date] if session_date else self._dates()
         all_events: list[dict[str, Any]] = []
         diagnostic_trades: list[dict[str, Any]] = []

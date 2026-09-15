@@ -1,0 +1,26 @@
+{
+  "gate_order": [
+    "policy",
+    "thesis",
+    "shared_directional_concurrency",
+    "risk_permission",
+    "sizing",
+    "final_quantity_rounding",
+    "acceptance"
+  ],
+  "capital": {
+    "initial_capital": 2500000.0,
+    "open_margin": 350000.0,
+    "available_capital": 2150000.0,
+    "margin_utilization": 0.14
+  },
+  "rounding": {
+    "risk_ceiling": 1,
+    "multiplier": 0.6,
+    "final_quantity": 0
+  },
+  "synthetic": {
+    "futures_decisions_per_candidate": 1,
+    "synthetic_is_derived": true
+  }
+}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from collections.abc import Mapping, Sequence
+import math
 
 from ftx_paper.contracts import MarketBar, SyntheticPremiumPair
 from .adaptive_stop import adaptive_stop_bp
@@ -27,7 +28,7 @@ class RiskConfig:
     max_quantity: int = 10
     margin_per_lot: float = 175_000.0
     # The canonical FTX capital bridge reserves up to 80% of available
-    margin_utilization_cap: float = 0.40
+    margin_utilization_cap: float = 0.80
     low_vix_threshold: float = 13.0
     # Canonical capital sizing applies the score multiplier and policy
     # stability, but does not apply an additional VIX multiplier.
@@ -108,7 +109,9 @@ class RiskSizer:
             return RiskDecision(False, 0, "invalid_stop_distance", vehicle=normalized_vehicle)
         if distance <= 0:
             return RiskDecision(False, 0, "invalid_stop_distance", vehicle=normalized_vehicle)
-        available = max(0.0, min(float(capital), float(equity)) - float(open_margin_used))
+        # Canonical PortfolioState exposes capital less reserved margin. Equity
+        # is used for drawdown checks, not as a second available-capital cap.
+        available = max(0.0, float(capital) - float(open_margin_used))
         if available <= 0:
             return RiskDecision(False, 0, "capital_exhausted", vehicle=normalized_vehicle)
         risk_budget = available * self.config.risk_fraction
@@ -127,7 +130,9 @@ class RiskSizer:
                 drawdown_multiplier = scale
                 break
         multiplier *= drawdown_multiplier
-        quantity = min(int(round(risk_ceiling * multiplier)), risk_ceiling)
+        # Quantity ceilings are downward-only. Never promote a fractional lot
+        # result into an executable lot with round() or max(1, ...).
+        quantity = min(math.floor(risk_ceiling * multiplier), risk_ceiling)
         quantity -= quantity % self.config.lot_size
         if quantity < self.config.lot_size:
             return RiskDecision(

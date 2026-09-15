@@ -293,7 +293,7 @@ def test_synthetic_exit_rejects_broker_fills_for_different_legs(tmp_path):
 
     assert not session._execute_paper_order(order)
     assert session._live_entry_trades["entry-1"]["ce_symbol"] == call.symbol
-    assert any(event["payload"]["reason"] == "uncompensated_exit_fill:fill_synthetic_legs_mismatch"
+    assert any(event["payload"]["reason"] == "synthetic_execution_disabled"
                for event in store.read_events() if event["event_type"] == "EXECUTION_ERROR")
 
 
