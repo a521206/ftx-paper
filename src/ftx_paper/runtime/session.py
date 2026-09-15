@@ -73,6 +73,7 @@ class RuntimeSession:
         self.store, self.auth, self.specifications = store, auth, specifications
         self.capital_config = capital_config
         self.engine, self.ledger = engine or PaperEngine(), ledger
+        self._restore_strategy_state()
         strategy = getattr(self.engine, "strategy", None)
         portfolio = getattr(strategy, "portfolio", None)
         self.coordinator = PaperExecutionCoordinator(portfolio) if portfolio is not None else None
@@ -90,7 +91,44 @@ class RuntimeSession:
         self._synthetic_symbols_by_order: dict[str, tuple[str, str]] = {}
         self._last_synthetic_quote_by_order: dict[str, SyntheticFutureQuote] = {}
         self._live_entry_trades: dict[str, LiveEntryTrade] = {}
+        self._restore_live_entry_trades_from_portfolio()
         self._restore_ledger_state()
+
+    def _restore_strategy_state(self) -> None:
+        """Restore the strategy-owned portfolio and risk state before execution wiring."""
+        strategy = getattr(self.engine, "strategy", None)
+        restore = getattr(type(strategy), "from_snapshot", None) if strategy is not None else None
+        raw_snapshot = self.store.read_status().get("strategy_snapshot")
+        if not callable(restore) or not isinstance(raw_snapshot, Mapping) or self.capital_config is None:
+            return
+        restored = restore(raw_snapshot, capital_config=self.capital_config)
+        self.engine.strategy = restored
+
+    def _restore_live_entry_trades_from_portfolio(self) -> None:
+        strategy = getattr(self.engine, "strategy", None)
+        portfolio = getattr(strategy, "portfolio", None)
+        positions = getattr(portfolio, "positions", None)
+        if not isinstance(positions, Mapping):
+            return
+        for order_id, position in positions.items():
+            synthetic_prices = position.synthetic_entry_prices
+            self._live_entry_trades[order_id] = {
+                "instrument": position.instrument,
+                "entry_price": position.entry_price,
+                "quantity": position.quantity,
+                "side": position.side,
+                "vehicle": position.vehicle,
+                "ce_symbol": position.synthetic_legs[0] if position.synthetic_legs else None,
+                "pe_symbol": position.synthetic_legs[1] if position.synthetic_legs else None,
+                "ce_entry_price": synthetic_prices[0] if synthetic_prices else None,
+                "pe_entry_price": synthetic_prices[1] if synthetic_prices else None,
+            }
+
+    def _persist_strategy_state(self) -> None:
+        strategy = getattr(self.engine, "strategy", None)
+        snapshot = getattr(strategy, "snapshot", None)
+        if callable(snapshot):
+            self.store.patch_status({"strategy_snapshot": snapshot()})
 
     def _restore_ledger_state(self) -> None:
         if self.ledger is None:
@@ -193,9 +231,6 @@ class RuntimeSession:
             else:
                 from ftx_paper.broker.zerodha import ZerodhaBroker
                 self.broker = ZerodhaBroker(client)
-            reset = getattr(self.engine, "reset", None)
-            if callable(reset):
-                reset()
             backfill = load_startup_backfill(client, resolved)
             self.store.append_market_bars(backfill, source="historical_backfill")
             normalize = self.normalize_payload or self._make_normalizer(resolved)
@@ -385,6 +420,7 @@ class RuntimeSession:
             return False
         if self.coordinator is not None:
             self.coordinator.submit(order)
+            self._persist_strategy_state()
         entry: LiveEntryTrade | None = None
         entry_order_id = order.entry_order_id
         if order.role is OrderRole.EXIT:
@@ -678,6 +714,7 @@ class RuntimeSession:
             settlement = self.coordinator.fill(order, price=execution_price, timestamp=timestamp, cost=cost)
             if settlement is not None:
                 self._last_execution_fill["realized_pnl"] = settlement["net_pnl"]
+        self._persist_strategy_state()
         realized_pnl = (
             self._last_execution_fill.get("realized_pnl")
             if self._last_execution_fill is not None else None

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, time
 from ftx_paper.contracts import Instrument, OrderIntent, OrderRole, OrderSide
@@ -66,6 +67,51 @@ class ExitStateMachine:
         self._closes.clear()
         self._max_favorable_price = None
         self._trail_active = False
+
+    def snapshot(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "trail_distance": self.trail_distance,
+            "trail_activation_bp": self.trail_activation_bp,
+            "trail_distance_bp": self.trail_distance_bp,
+            "close_time": self.close_time.isoformat(),
+            "closes": list(self._closes),
+            "max_favorable_price": self._max_favorable_price,
+            "trail_active": self._trail_active,
+        }
+
+    @classmethod
+    def from_snapshot(cls, snapshot: Mapping[str, object]) -> "ExitStateMachine":
+        if snapshot.get("schema_version") != 1:
+            raise ValueError("unsupported exit-state snapshot schema")
+        close_time = snapshot.get("close_time")
+        if not isinstance(close_time, str):
+            raise ValueError("exit-state snapshot close_time must be a string")
+        try:
+            parsed_close_time = time.fromisoformat(close_time)
+        except ValueError as exc:
+            raise ValueError("exit-state snapshot close_time is invalid") from exc
+        machine = cls(
+            trail_distance=snapshot.get("trail_distance"),
+            trail_activation_bp=snapshot.get("trail_activation_bp"),
+            trail_distance_bp=snapshot.get("trail_distance_bp"),
+            close_time=parsed_close_time,
+        )
+        closes = snapshot.get("closes", ())
+        if not isinstance(closes, (list, tuple)) or len(closes) > 3:
+            raise ValueError("exit-state snapshot closes must contain at most three prices")
+        if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in closes):
+            raise ValueError("exit-state snapshot closes must be numeric")
+        machine._closes.extend(float(value) for value in closes)
+        maximum = snapshot.get("max_favorable_price")
+        if maximum is not None and (isinstance(maximum, bool) or not isinstance(maximum, (int, float))):
+            raise ValueError("exit-state snapshot max_favorable_price must be numeric")
+        machine._max_favorable_price = float(maximum) if maximum is not None else None
+        trail_active = snapshot.get("trail_active", False)
+        if not isinstance(trail_active, bool):
+            raise ValueError("exit-state snapshot trail_active must be boolean")
+        machine._trail_active = trail_active
+        return machine
 
     def evaluate(self, position: PositionState, *, timestamp: datetime, high: float, low: float,
                  close: float, client_order_id: str, include_signal: bool = True,

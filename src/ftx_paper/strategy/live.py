@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, time
 
-from ftx_paper.contracts import MarketBar, OrderIntent
+from ftx_paper.contracts import Instrument, MarketBar, OptionType, OrderIntent
 from ftx_paper.capital_config import FtxCapitalConfig
 
 from .config import (
@@ -115,6 +115,10 @@ class ConfiguredLiveStrategy:
         return StrategyMetadata(self.name, self.version, config_hash)
 
     def snapshot(self) -> Mapping[str, object]:
+        decision_positions = {
+            order_id: {"position": self._position_snapshot(position), "exit_state": exits.snapshot()}
+            for order_id, (position, exits) in self._decision_positions.items()
+        }
         return {
             "schema_version": 1,
             "enabled_vehicles": list(self.enabled_vehicles),
@@ -126,6 +130,10 @@ class ConfiguredLiveStrategy:
             "config": self.config.as_dict(),
             "risk_gate": self._decision_engine.risk_snapshot(),
             "portfolio": self.portfolio.snapshot(),
+            "daily_date": self._daily_date,
+            "daily_start_equity": self._daily_start_equity,
+            "decision_positions": decision_positions,
+            "pending_exits": dict(self._pending_exits),
             "vehicle_risk_limits": {k: {"max_quantity": v.max_quantity, "margin_per_lot": v.margin_per_lot}
                                     for k, v in self.vehicle_risk_limits.items()},
         }
@@ -228,8 +236,6 @@ class ConfiguredLiveStrategy:
                 raise ValueError(f"invalid vehicle risk limits for {key!r}") from exc
         raw_portfolio = snapshot.get("portfolio")
         portfolio = PaperPortfolio.from_snapshot(raw_portfolio) if isinstance(raw_portfolio, Mapping) else None
-        if portfolio is not None and portfolio.positions:
-            raise ValueError("strategy snapshots with open positions are unsupported")
         strategy = cls(config=config, capital_config=capital_config, enabled_vehicles=enabled_vehicles,
                        vehicle_risk_limits=limits, portfolio=portfolio)
         strategy._equity = strategy.portfolio.equity
@@ -238,7 +244,110 @@ class ConfiguredLiveStrategy:
         risk_snapshot = snapshot.get("risk_gate")
         if isinstance(risk_snapshot, Mapping):
             strategy._decision_engine.restore_risk_snapshot(dict(risk_snapshot))
+        raw_daily_date = snapshot.get("daily_date")
+        strategy._daily_date = str(raw_daily_date) if raw_daily_date is not None else None
+        raw_daily_start = snapshot.get("daily_start_equity", strategy.portfolio.daily_baseline)
+        if isinstance(raw_daily_start, bool) or not isinstance(raw_daily_start, (int, float)):
+            raise ValueError("strategy snapshot daily_start_equity must be numeric")
+        strategy._daily_start_equity = float(raw_daily_start)
+        raw_positions = snapshot.get("decision_positions", {})
+        if not isinstance(raw_positions, Mapping):
+            raise ValueError("strategy snapshot decision_positions must be an object")
+        portfolio_ids = set(strategy.portfolio.positions)
+        decision_ids = set(raw_positions)
+        if portfolio_ids != decision_ids:
+            raise ValueError("strategy snapshot portfolio and decision positions do not match")
+        for order_id, raw_position in raw_positions.items():
+            if not isinstance(order_id, str) or not isinstance(raw_position, Mapping):
+                raise ValueError("strategy snapshot has invalid decision position")
+            raw_position_data = raw_position.get("position")
+            raw_exit_state = raw_position.get("exit_state")
+            if not isinstance(raw_position_data, Mapping) or not isinstance(raw_exit_state, Mapping):
+                raise ValueError("strategy snapshot decision position is incomplete")
+            position = strategy._position_from_snapshot(raw_position_data)
+            strategy._decision_positions[order_id] = (
+                position, ExitStateMachine.from_snapshot(raw_exit_state),
+            )
+        raw_pending = snapshot.get("pending_exits", {})
+        if not isinstance(raw_pending, Mapping):
+            raise ValueError("strategy snapshot pending_exits must be an object")
+        strategy._pending_exits = {str(key): str(value) for key, value in raw_pending.items()}
         return strategy
+
+    @staticmethod
+    def _instrument_snapshot(instrument: Instrument) -> dict[str, object]:
+        return {
+            "symbol": instrument.symbol, "exchange": instrument.exchange,
+            "instrument_type": instrument.instrument_type, "expiry": instrument.expiry,
+            "strike": instrument.strike,
+            "option_type": instrument.option_type.value if instrument.option_type is not None else None,
+        }
+
+    @staticmethod
+    def _position_snapshot(position: PositionState) -> dict[str, object]:
+        return {
+            "instrument": ConfiguredLiveStrategy._instrument_snapshot(position.instrument),
+            "entry_price": position.entry_price, "stop_price": position.stop_price,
+            "quantity": position.quantity, "side": position.side.value, "cell": position.cell,
+            "exit_mode": position.exit_mode,
+            "entry_fill_time": position.entry_fill_time.isoformat() if position.entry_fill_time else None,
+            "exit_reference_price": position.exit_reference_price, "target_price": position.target_price,
+            "vehicle": position.vehicle, "entry_bar": position.entry_bar,
+            "entry_order_id": position.entry_order_id,
+            "synthetic_legs": [ConfiguredLiveStrategy._instrument_snapshot(item) for item in position.synthetic_legs]
+            if position.synthetic_legs else None,
+        }
+
+    @staticmethod
+    def _instrument_from_snapshot(raw: Mapping[str, object]) -> Instrument:
+        required = ("symbol", "exchange", "instrument_type")
+        if any(not isinstance(raw.get(name), str) or not raw[name] for name in required):
+            raise ValueError("strategy snapshot instrument identity is invalid")
+        option_type = raw.get("option_type")
+        if option_type is not None and not isinstance(option_type, str):
+            raise ValueError("strategy snapshot option_type is invalid")
+        return Instrument(
+            raw["symbol"], raw["exchange"], raw["instrument_type"],
+            raw.get("expiry"), raw.get("strike"), OptionType(option_type) if option_type is not None else None,
+        )
+
+    @classmethod
+    def _position_from_snapshot(cls, raw: Mapping[str, object]) -> PositionState:
+        instrument_raw = raw.get("instrument")
+        if not isinstance(instrument_raw, Mapping):
+            raise ValueError("strategy snapshot position instrument must be an object")
+        entry_fill_time = raw.get("entry_fill_time")
+        if isinstance(entry_fill_time, str):
+            entry_fill_time = datetime.fromisoformat(entry_fill_time)
+        elif entry_fill_time is not None:
+            raise ValueError("strategy snapshot entry_fill_time is invalid")
+        legs_raw = raw.get("synthetic_legs")
+        legs = None
+        if legs_raw is not None:
+            if not isinstance(legs_raw, Sequence) or len(legs_raw) != 2 or any(not isinstance(item, Mapping) for item in legs_raw):
+                raise ValueError("strategy snapshot synthetic_legs must contain two instruments")
+            legs = (cls._instrument_from_snapshot(legs_raw[0]), cls._instrument_from_snapshot(legs_raw[1]))
+        for name in ("entry_price", "stop_price", "quantity", "side"):
+            if name not in raw or raw[name] is None:
+                raise ValueError(f"strategy snapshot position missing {name}")
+        if not isinstance(raw["side"], str):
+            raise ValueError("strategy snapshot position side is invalid")
+        vehicle = raw.get("vehicle", "futures")
+        if not isinstance(vehicle, str) or vehicle not in {"futures", "synthetic"}:
+            raise ValueError("strategy snapshot position vehicle is invalid")
+        entry_order_id = raw.get("entry_order_id")
+        if entry_order_id is not None and not isinstance(entry_order_id, str):
+            raise ValueError("strategy snapshot entry_order_id is invalid")
+        return PositionState(
+            cls._instrument_from_snapshot(instrument_raw), float(raw["entry_price"]), float(raw["stop_price"]),
+            int(raw["quantity"]), OrderSide(raw["side"]), cell=raw.get("cell"),
+            exit_mode=str(raw.get("exit_mode", "signal")), entry_fill_time=entry_fill_time,
+            exit_reference_price=float(raw["exit_reference_price"]) if raw.get("exit_reference_price") is not None else None,
+            target_price=float(raw["target_price"]) if raw.get("target_price") is not None else None,
+            vehicle=vehicle, synthetic_legs=legs,
+            entry_bar=int(raw["entry_bar"]) if raw.get("entry_bar") is not None else None,
+            entry_order_id=entry_order_id,
+        )
 
     @staticmethod
     def _parse_minute_pair(key: str, value: object) -> tuple[int, int]:

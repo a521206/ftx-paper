@@ -9,6 +9,7 @@ from ftx_paper.core import CompletedBarAggregator
 from ftx_paper.runtime import RuntimeSession, RuntimeStore
 from ftx_paper.execution import PositionLedger
 from ftx_paper.capital_config import FtxCapitalConfig
+from ftx_paper.strategy import ConfiguredLiveStrategy
 import ftx_paper.broker.zerodha as zerodha
 
 
@@ -354,6 +355,33 @@ def test_session_restores_ledger_from_runtime_status(tmp_path):
     assert ledger.cash == 800.0
     assert ledger.positions()[0].quantity == 2
     assert session._live_entry_trades["entry-1"]["quantity"] == 2
+
+
+def test_session_restores_strategy_portfolio_and_risk_snapshot(tmp_path):
+    capital_config = FtxCapitalConfig(initial_capital=100_000.0)
+    original = ConfiguredLiveStrategy(capital_config=capital_config)
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    order = OrderIntent(
+        "restart-entry", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY,
+        cell="VWAP", stop_price=98.0, exit_mode="signal", entry_bar=12,
+    )
+    original.register_entry(order, fill_price=100.0,
+                            entry_fill_time="2026-01-05T10:00:00+05:30")
+    original._decision_engine.risk_gate.record_entry(
+        cell="VWAP", direction="long", quantity=1, date="2026-01-05",
+    )
+    store = RuntimeStore(tmp_path)
+    store.write_status({"strategy_snapshot": original.snapshot()})
+
+    replacement = ConfiguredLiveStrategy(capital_config=capital_config)
+    session = RuntimeSession(store, None, [], engine=PaperEngine(replacement),
+                             capital_config=capital_config)
+
+    restored = session.engine.strategy
+    assert restored is not replacement
+    assert list(restored.portfolio.positions) == ["restart-entry"]
+    assert restored._decision_engine.risk_gate.net_directional_lots == 1
+    assert session._live_entry_trades["restart-entry"]["quantity"] == 1
 
 
 def test_startup_discovers_options_before_backfill_and_feed_subscription(monkeypatch, tmp_path):

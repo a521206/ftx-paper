@@ -8,7 +8,7 @@ import pytest
 
 from ftx_paper.broker import PaperBroker
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderIntent, OrderRole, OrderSide, parse_role, role_to_key, select_synthetic_quote
-from ftx_paper.core import CompletedBarAggregator, DecisionBundle, ExitAction, ExitStateMachine, IndependentLiveDecisionEngine, LiveFeatureCalculator, PaperEngine, PaperPortfolio, PositionState, RiskConfig, RiskSizer, SetupPolicy, adaptive_stop_bp, option_pcr_at_event, replay, vix_open_and_event
+from ftx_paper.core import CompletedBarAggregator, DecisionBundle, ExitAction, ExitStateMachine, IndependentLiveDecisionEngine, LiveFeatureCalculator, PaperEngine, PaperPortfolio, PositionState, RiskConfig, RiskGateState, RiskSizer, SetupPolicy, adaptive_stop_bp, option_pcr_at_event, replay, vix_open_and_event
 from ftx_paper.execution import PaperExecutionCoordinator
 from ftx_paper.core import LiveSession
 from ftx_paper.core.location_engine import Cell, Location
@@ -61,6 +61,49 @@ def test_paper_portfolio_failed_entry_releases_reservation_and_failed_exit_keeps
     coordinator.failed_exit(exit_order)
     assert entry.client_order_id in portfolio.positions
     assert portfolio.open_margin > 0
+
+
+def test_multiday_portfolio_and_risk_recovery_snapshots() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    capital = 2_500_000.0
+    portfolio = PaperPortfolio(capital)
+    gate = RiskGateState(max_net_directional_lots=2, thesis_cooldown_bars=3, cell_cooldown_bars=2)
+    entry = OrderIntent("day1-entry", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY)
+    coordinator = PaperExecutionCoordinator(portfolio)
+
+    coordinator.submit(entry)
+    coordinator.fill(entry, price=100.0, timestamp="2026-01-05T10:00:00+05:30")
+    gate.record_entry(cell="VWAP", direction="long", quantity=1, date="2026-01-05")
+    assert list(portfolio.positions) == ["day1-entry"]
+    assert gate.net_directional_lots == 1
+
+    exit_order = OrderIntent("day1-exit", instrument, OrderSide.SELL, 1,
+                             role=OrderRole.EXIT, entry_order_id=entry.client_order_id)
+    coordinator.fill(exit_order, price=98.0, cost=10.0)
+    gate.record_exit(cell="VWAP", reason="hard_stop", entry_bar=10, exit_bar=12,
+                     date="2026-01-05", direction="long", quantity=1)
+    assert portfolio.positions == {}
+    assert portfolio.realized_pnl == pytest.approx(-140.0)
+    assert gate.net_directional_lots == 0
+    assert gate.rejection_reason(cell="VWAP", direction="long", bar=13, quantity=1,
+                                 date="2026-01-05") == "thesis_cooldown"
+
+    portfolio_snapshot = portfolio.snapshot()
+    risk_snapshot = gate.snapshot()
+    restored_portfolio = PaperPortfolio.from_snapshot(portfolio_snapshot)
+    restored_gate = RiskGateState(max_net_directional_lots=2, thesis_cooldown_bars=3, cell_cooldown_bars=2)
+    restored_gate.restore(risk_snapshot)
+    assert restored_portfolio.snapshot() == portfolio_snapshot
+    assert restored_gate.snapshot() == risk_snapshot
+
+    assert restored_gate.rejection_reason(cell="VWAP", direction="long", bar=13, quantity=1,
+                                          date="2026-01-06") is None
+    next_entry = OrderIntent("day2-entry", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY)
+    coordinator = PaperExecutionCoordinator(restored_portfolio)
+    coordinator.fill(next_entry, price=101.0, timestamp="2026-01-06T10:00:00+05:30")
+    restored_gate.record_entry(cell="VWAP", direction="long", quantity=1, date="2026-01-06")
+    assert list(restored_portfolio.positions) == ["day2-entry"]
+    assert restored_gate.net_directional_lots == 1
 
 
 def test_synthetic_quote_selection_requires_same_minute_unless_fallback_is_explicit() -> None:
@@ -156,6 +199,29 @@ def test_production_strategy_is_versioned_and_injectable() -> None:
     assert strategy.metadata.config_hash
     assert strategy.snapshot()["schema_version"] == 1
     assert strategy.from_snapshot(strategy.snapshot(), capital_config=CAPITAL_CONFIG).metadata.version == strategy.version
+
+
+def test_strategy_snapshot_restores_open_position_and_risk_state() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    strategy = ConfiguredLiveStrategy(capital_config=CAPITAL_CONFIG)
+    order = OrderIntent(
+        "restart-entry", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY,
+        cell="VWAP", stop_price=98.0, exit_mode="signal", entry_bar=12,
+    )
+    strategy.register_entry(order, fill_price=100.0,
+                            entry_fill_time="2026-01-05T10:00:00+05:30")
+    strategy._decision_engine.risk_gate.record_entry(
+        cell="VWAP", direction="long", quantity=1, date="2026-01-05",
+    )
+    snapshot = strategy.snapshot()
+
+    restored = ConfiguredLiveStrategy.from_snapshot(snapshot, capital_config=CAPITAL_CONFIG)
+    assert list(restored.portfolio.positions) == ["restart-entry"]
+    assert list(restored._decision_positions) == ["restart-entry"]
+    assert restored._decision_engine.risk_gate.net_directional_lots == 1
+
+    restored.settle_exit("exit-restart-entry-2026-01-05T10:01:00+05:30", filled=False)
+    assert list(restored._decision_positions) == ["restart-entry"]
 
 
 def test_strategy_snapshot_restores_vehicle_for_synthetic_replay() -> None:
