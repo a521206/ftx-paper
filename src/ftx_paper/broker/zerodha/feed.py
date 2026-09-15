@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, time as datetime_time, timezone
 from threading import Event, Thread, current_thread
 from threading import RLock
 from time import monotonic, sleep
 from typing import Any, Protocol
+from zoneinfo import ZoneInfo
 
 from ftx_paper.contracts import MarketBar
 
@@ -15,6 +16,22 @@ class TickerSocket(Protocol):
     def connect(self, on_message: Callable[[Mapping[str, Any]], None], on_close: Callable[..., None]) -> None: ...
     def subscribe(self, tokens: list[int]) -> None: ...
     def close(self) -> None: ...
+
+
+IST = ZoneInfo("Asia/Kolkata")
+
+
+def is_nse_market_open(now: datetime | None = None) -> bool:
+    """Return whether the regular NSE/NFO session is open in IST."""
+    current = now or datetime.now(IST)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=IST)
+    else:
+        current = current.astimezone(IST)
+    if current.weekday() >= 5:
+        return False
+    market_time = current.time()
+    return datetime_time(9, 15) <= market_time <= datetime_time(15, 30)
 
 
 def create_kite_socket(api_key: str, access_token: str) -> TickerSocket:
@@ -28,9 +45,11 @@ def create_kite_socket(api_key: str, access_token: str) -> TickerSocket:
             self._tokens: list[int] = []
             self._connected = False
             self._ticker = None
+            self._ready = Event()
 
         def connect(self, on_message, on_close):
             self._connected = False
+            self._ready.clear()
             # The wrapper owns reconnects. Running KiteTicker's reconnect loop
             # as well would create duplicate connection attempts during 429s.
             ticker = KiteTicker(api_key, access_token, reconnect=False)
@@ -56,6 +75,7 @@ def create_kite_socket(api_key: str, access_token: str) -> TickerSocket:
 
         def _on_connect(self):
             self._connected = True
+            self._ready.set()
             self._send_subscription()
 
         def _send_subscription(self):
@@ -67,8 +87,12 @@ def create_kite_socket(api_key: str, access_token: str) -> TickerSocket:
 
         def close(self):
             self._connected = False
+            self._ready.clear()
             if self._ticker is not None:
                 self._ticker.close()
+
+        def wait_until_connected(self, timeout: float = 15.0) -> bool:
+            return self._ready.wait(timeout)
 
         @property
         def is_connected(self) -> bool:
@@ -140,7 +164,11 @@ class ZerodhaFeed:
     def _connect(self) -> None:
         self.socket.connect(self._on_message, self._on_close)
         self.socket.subscribe(self.tokens)
-        self._connected = True
+        wait_until_connected = getattr(self.socket, "wait_until_connected", None)
+        if callable(wait_until_connected):
+            self._connected = bool(wait_until_connected(15.0))
+        else:
+            self._connected = True
 
     def _on_message(self, payload: Mapping[str, Any]) -> None:
         if self._running:

@@ -7,7 +7,7 @@ import pytest
 from ftx_paper.api import create_app
 from ftx_paper.runtime import RuntimeStore
 from ftx_paper.ui import create_ui_app
-from ftx_paper.broker.zerodha import ReconnectPolicy, ZerodhaFeed
+from ftx_paper.broker.zerodha import ReconnectPolicy, ZerodhaFeed, is_nse_market_open
 from ftx_paper.broker.zerodha import ZerodhaBroker, classify_runtime_roles, load_startup_backfill, resolve_instruments
 from ftx_paper.broker.zerodha import ZerodhaAuth
 import ftx_paper.broker.zerodha.adapter as zerodha_adapter
@@ -390,6 +390,15 @@ def test_zerodha_feed_emits_only_closed_minute_bars() -> None:
     assert emitted == [first]
     feed.flush()
     assert emitted == [first, second]
+
+
+def test_nse_market_window_uses_ist_and_excludes_weekends() -> None:
+    from zoneinfo import ZoneInfo
+
+    ist = ZoneInfo("Asia/Kolkata")
+    assert is_nse_market_open(datetime(2026, 1, 5, 9, 15, tzinfo=ist))
+    assert not is_nse_market_open(datetime(2026, 1, 5, 15, 31, tzinfo=ist))
+    assert not is_nse_market_open(datetime(2026, 1, 10, 10, tzinfo=ist))
 
 
 def test_zerodha_feed_tracks_per_instrument_health() -> None:

@@ -67,7 +67,8 @@ class RuntimeSession:
                  *, engine: PaperEngine | None = None, ledger: PositionLedger | None = None,
                  capital_config: FtxCapitalConfig | None = None,
                  feed_factory: Callable[..., Any] | None = None, broker_factory: Callable[[Any], Broker] | None = None,
-                 client_factory: Callable[[], Any] | None = None, normalize_payload: Callable[..., Any] | None = None) -> None:
+                 client_factory: Callable[[], Any] | None = None, normalize_payload: Callable[..., Any] | None = None,
+                 market_clock: Callable[[], datetime] | None = None) -> None:
         if ledger is not None and capital_config is None:
             raise ValueError("capital_config is required when a ledger is configured")
         self.store, self.auth, self.specifications = store, auth, specifications
@@ -79,6 +80,7 @@ class RuntimeSession:
         self.coordinator = PaperExecutionCoordinator(portfolio) if portfolio is not None else None
         self.feed_factory, self.broker_factory = feed_factory, broker_factory
         self.client_factory, self.normalize_payload = client_factory, normalize_payload
+        self.market_clock = market_clock or (lambda: datetime.now(ZoneInfo("Asia/Kolkata")))
         self.feed = None
         self.broker = None
         self._thread = None
@@ -200,7 +202,7 @@ class RuntimeSession:
         try:
             if self.auth is None or self.auth.access_token() is None:
                 raise ValueError("Zerodha authentication required")
-            from ftx_paper.broker.zerodha import ZerodhaFeed, classify_runtime_roles, create_kite_socket, discover_option_surface_contracts, load_startup_backfill, resolve_instruments
+            from ftx_paper.broker.zerodha import ZerodhaFeed, classify_runtime_roles, create_kite_socket, discover_option_surface_contracts, is_nse_market_open, load_startup_backfill, resolve_instruments
             client = self.client_factory() if self.client_factory else self.auth.authenticated_client()
             resolved: list[ZerodhaInstrument] = resolve_instruments(client, self.specifications)
             discovered_options = discover_option_surface_contracts(client, underlying="NIFTY")
@@ -233,6 +235,22 @@ class RuntimeSession:
                 self.broker = ZerodhaBroker(client)
             backfill = load_startup_backfill(client, resolved)
             self.store.append_market_bars(backfill, source="historical_backfill")
+            if not is_nse_market_open(self.market_clock()):
+                if self.broker is not None:
+                    self.broker.close()
+                self.store.patch_status({
+                    "state": "WAITING_FOR_MARKET",
+                    "phase": "BACKFILL",
+                    "execution_enabled": False,
+                    "feed_connected": False,
+                    "feed_health": {
+                        "connected": False,
+                        "market_open": False,
+                        "message": "NSE/NFO market closed; historical backfill completed",
+                    },
+                })
+                self._started.set()
+                return
             normalize = self.normalize_payload or self._make_normalizer(resolved)
             socket = create_kite_socket(self.auth.api_key, self.auth.access_token())
             feed_type = self.feed_factory or ZerodhaFeed

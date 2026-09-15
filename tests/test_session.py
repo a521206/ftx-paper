@@ -425,7 +425,10 @@ def test_startup_discovers_options_before_backfill_and_feed_subscription(monkeyp
     monkeypatch.setattr(zerodha, "load_startup_backfill", fake_backfill)
     monkeypatch.setattr(zerodha, "create_kite_socket", lambda *_args: object())
 
-    session = RuntimeSession(RuntimeStore(tmp_path), Auth(), configured, client_factory=lambda: Client(), feed_factory=Feed, engine=PaperEngine())
+    session = RuntimeSession(
+        RuntimeStore(tmp_path), Auth(), configured, client_factory=lambda: Client(), feed_factory=Feed,
+        engine=PaperEngine(), market_clock=lambda: datetime(2026, 9, 15, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata")),
+    )
     session._start_impl()
 
     assert any(item["symbol"] == option["symbol"] for item in captured["backfill"])
