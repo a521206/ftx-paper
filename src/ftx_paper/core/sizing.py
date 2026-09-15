@@ -46,7 +46,7 @@ class SizingPipeline:
 
     def decide(self, inputs: SizingPipelineInput) -> SizingPipelineDecision:
         requested = max(0, int(inputs.requested_quantity))
-        risk_ceiling = max(0, int(inputs.risk.max_quantity if hasattr(inputs.risk, "max_quantity") else inputs.risk.risk_ceiling))
+        risk_ceiling = max(0, int(inputs.risk.risk_ceiling))
         if not inputs.risk.approved or risk_ceiling <= 0:
             return self._blocked(inputs, requested, risk_ceiling, inputs.risk.reason)
 
