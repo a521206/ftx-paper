@@ -25,7 +25,7 @@ def test_trade_plan_round_trips_and_rejects_missing_or_obsolete_fields():
         TradePlan.from_dict({"decision_id": "d-1"})
     with pytest.raises(ValueError, match="missing required field"):
         TradePlan.from_dict(plan.to_dict() | {"cell": None})
-    with pytest.raises(ValueError, match="obsolete"):
+    with pytest.raises(ValueError, match="unexpected decision artifact fields"):
         TradePlan.from_dict(plan.to_dict() | {"time": "10:00"})
 
 

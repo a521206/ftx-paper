@@ -5,9 +5,6 @@ from datetime import datetime
 from typing import Any, ClassVar, Mapping
 
 
-_OBSOLETE_ALIASES = frozenset({"time", "timestamp", "qty", "quantity", "reason_code"})
-
-
 def _required(data: Mapping[str, Any], name: str, *, allow_none: bool = False) -> Any:
     if name not in data or (not allow_none and data[name] is None):
         raise ValueError(f"missing required field: {name}")
@@ -18,12 +15,6 @@ def _decision_at(value: Any) -> datetime:
     if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("decision_at must be a timezone-aware datetime")
     return value
-
-
-def _check_aliases(data: Mapping[str, Any]) -> None:
-    found = _OBSOLETE_ALIASES.intersection(data)
-    if found:
-        raise ValueError("obsolete decision aliases are not accepted: " + ", ".join(sorted(found)))
 
 
 def _to_dict(values: Mapping[str, Any], *, datetime_fields: tuple[str, ...] = ()) -> dict[str, Any]:
@@ -41,7 +32,9 @@ def _from_dict(
     nullable_fields: frozenset[str] = frozenset(),
     datetime_fields: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    _check_aliases(data)
+    unexpected = set(data).difference(fields)
+    if unexpected:
+        raise ValueError("unexpected decision artifact fields: " + ", ".join(sorted(unexpected)))
     values = {
         name: _required(data, name, allow_none=name in nullable_fields)
         for name in fields
