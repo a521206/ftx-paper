@@ -68,8 +68,14 @@ def replay(engine: PaperEngine, bars: Iterable[MarketBar]) -> ReplayResult:
                 "event_type": "EXITDECISION",
                 "decision_id": action.intent.client_order_id,
                 "vehicle": action.intent.vehicle,
-                "timestamp": bar.timestamp.isoformat(),
+                "decision_at": bar.timestamp.isoformat(),
                 "reason": action.reason,
+                "exit_mode": action.intent.exit_mode,
+                "bars_held": action.bars_held,
+                "mae_bp": action.mae_bp,
+                "mfe_bp": action.mfe_bp,
+                "exit_price": action.price,
+                "trigger_price": action.price,
                 "price": action.price,
             })
             try:

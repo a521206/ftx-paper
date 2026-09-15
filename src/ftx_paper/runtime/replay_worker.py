@@ -212,7 +212,10 @@ class ReplayWorker:
                     exit_event = {"event_type": "EXITDECISION", "decision_id": action.intent.client_order_id,
                                   "vehicle": action.intent.vehicle,
                                   "entry_decision_id": open_trade["entry_order_id"] if open_trade else None,
-                                  "timestamp": futures_bar.timestamp.isoformat(), "reason": action.reason,
+                                  "decision_at": futures_bar.timestamp.isoformat(), "reason": action.reason,
+                                  "exit_mode": action.intent.exit_mode,
+                                  "bars_held": action.bars_held, "mae_bp": action.mae_bp, "mfe_bp": action.mfe_bp,
+                                  "exit_price": action.price, "trigger_price": action.price,
                                   "price": exit_price, "source": "replay", "session_date": date}
                     if exit_quote is not None:
                         exit_event.update({"synthetic_future_price": exit_quote.price, "ce_strike": exit_quote.strike,
@@ -239,6 +242,16 @@ class ReplayWorker:
                 result_events = [{**event, "source": "replay", "session_date": date} for event in result.events]
                 all_events.extend(result_events)
                 for order in result.orders:
+                    all_events.append({"event_type": "ORDER_INTENT",
+                                       "decision_id": order.client_order_id.rsplit(":", 1)[0],
+                                       "client_order_id": order.client_order_id,
+                                       "instrument": order.instrument.symbol,
+                                       "direction": "long" if order.side is OrderSide.BUY else "short",
+                                       "quantity": order.quantity, "cell": order.cell,
+                                       "stop": order.stop_price, "exit_mode": order.exit_mode,
+                                       "entry_bar": order.entry_bar, "decision_at": futures_bar.timestamp.isoformat(),
+                                       "source": "replay",
+                                       "session_date": date})
                     all_events.append({"event_type": "ORDER_SUPPRESSED", "decision_id": order.client_order_id,
                                        "vehicle": order.vehicle,
                                        "timestamp": futures_bar.timestamp.isoformat(), "source": "replay",

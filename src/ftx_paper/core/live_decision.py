@@ -258,7 +258,17 @@ class IndependentLiveDecisionEngine:
                 "strategy_version": self.version, "config_hash": self.config_hash,
                 "required_input_availability": {r: r not in bundle.missing_roles for r in bundle.required_roles}}
         if not bundle.complete:
-            return ()
+            decision_id = sha256(f"{bundle.bundle_id}:incomplete_bundle".encode()).hexdigest()[:24]
+            return (LiveDecision("REJECTEDDECISION", {
+                **base,
+                "decision_id": decision_id,
+                "cell": "NONE",
+                "direction": "NONE",
+                "setup_type": "Skip",
+                "outcome": "input rejection",
+                "reason": "incomplete_bundle",
+                "feature_values": {},
+            }),)
         if self._equity < self._daily_start_equity * (1 - self.max_daily_loss):
             return (LiveDecision("REJECTEDDECISION", {**base, "reason": "daily_loss_limit"}),)
         current_vix = bundle.bars.get(MarketRole.VIX) or _supporting_bar(bundle, MarketRole.VIX)
@@ -340,6 +350,7 @@ class IndependentLiveDecisionEngine:
                              transitions=[{"reference": item.reference.value, "kind": item.kind.value,
                                            "from": item.from_side.value, "to": item.to_side.value}
                                           for item in location_snapshot.transitions])
+            events.append(LiveDecision("CANDIDATEDECISION", candidate))
             reason = None
             if decision_session is Session.OUTSIDE:
                 reason = "outside_session_window"
@@ -355,7 +366,7 @@ class IndependentLiveDecisionEngine:
                 events.append(LiveDecision(
                     "REJECTEDDECISION",
                     {**candidate, "outcome": "policy rejection", "reason": reason,
-                     "decision_id": sha256(f"{candidate_id}:{reason}".encode()).hexdigest()[:24]},
+                     "decision_id": candidate_id},
                 ))
                 continue
             if cell_policy is None:
@@ -369,7 +380,7 @@ class IndependentLiveDecisionEngine:
                 events.append(LiveDecision(
                     "REJECTEDDECISION",
                     {**candidate, "outcome": "thesis rejection", "reason": thesis_reason,
-                     "decision_id": sha256(f"{candidate_id}:{thesis_reason}".encode()).hexdigest()[:24]},
+                      "decision_id": candidate_id},
                 ))
                 continue
             if self.risk_gate.remaining_directional_lots(direction) < 1:
@@ -377,7 +388,7 @@ class IndependentLiveDecisionEngine:
                 events.append(LiveDecision(
                     "REJECTEDDECISION",
                     {**candidate, "outcome": "concurrency rejection", "reason": reason,
-                     "decision_id": sha256(f"{candidate_id}:{reason}".encode()).hexdigest()[:24]},
+                      "decision_id": candidate_id},
                 ))
                 continue
             for vehicle in ("futures",):
@@ -395,7 +406,9 @@ class IndependentLiveDecisionEngine:
                 quantity = min(quantity, int(self.risk_gate.remaining_directional_lots(direction)))
                 if sizing.approved and cell_policy.stability < 1.0:
                     quantity = int(quantity * cell_policy.stability)
-                vehicle_candidate = {**candidate, "vehicle": vehicle, "requested_quantity": quantity,
+                vehicle_candidate = {**candidate, "vehicle": vehicle,
+                                     "requested_quantity": quantity_before_stability,
+                                     "final_quantity": quantity,
                                      "score_multiplier": sizing.score_multiplier,
                                      "stability": cell_policy.stability, "risk_amount": sizing.risk_amount,
                                      "quantity_before_stability": quantity_before_stability,
@@ -435,7 +448,7 @@ class IndependentLiveDecisionEngine:
                     events.append(LiveDecision(
                         "REJECTEDDECISION",
                         {**vehicle_candidate, "outcome": "risk rejection", "reason": gate_reason,
-                         "decision_id": sha256(f"{candidate_id}:{vehicle}:{gate_reason}".encode()).hexdigest()[:24]},
+                          "decision_id": candidate_id},
                     ))
                     continue
                 order = OrderIntent(candidate_id + f":{vehicle}", futures.instrument, side, quantity,

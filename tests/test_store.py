@@ -123,3 +123,16 @@ def test_replay_submit_replaces_prior_run_for_same_date(tmp_path):
 
     assert [run["run_id"] for run in store.read_replay_runs()] == [second]
     assert store.read_replay_run(first) is None
+
+
+def test_runtime_store_preserves_warmup_in_ordered_runtime_stream(tmp_path):
+    store = RuntimeStore(tmp_path)
+    store.append_event("WARMUP", {
+        "decision_at": "2026-09-10T09:17:00+05:30",
+        "sequence": 2,
+        "reason": "insufficient_history",
+    })
+
+    event = store.read_events()[0]
+    assert event["category"] == "runtime"
+    assert event["payload"]["decision_at"] == "2026-09-10T09:17:00+05:30"

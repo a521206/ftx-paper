@@ -600,6 +600,9 @@ def test_replay_completes_entry_fill_exit_and_realized_trade() -> None:
     trade = result.trades[0]
     assert (trade.entry_price, trade.exit_price, trade.exit_reason, trade.realized_pnl, trade.status) == (100, 108.0, "target", 1040.0, "closed")
     assert [event["event_type"] for event in result.events if "event_type" in event] == ["FILL", "EXITDECISION", "FILL"]
+    exit_event = next(event for event in result.events if event.get("event_type") == "EXITDECISION")
+    assert "decision_at" in exit_event and "timestamp" not in exit_event
+    assert "exit_mode" in exit_event
 
 
 def test_replay_closes_the_explicit_entry_when_positions_share_instrument() -> None:
@@ -960,9 +963,28 @@ def test_live_decision_engine_reports_unconfigured_cells() -> None:
     engine.evaluate(bundle("10:21", {}))
     third = engine.evaluate(bundle("10:22", {}))
 
-    assert len(third) == 1
-    assert third[0].event_type == "REJECTEDDECISION"
-    assert third[0].payload["reason"] == "cell_not_configured"
+    assert [event.event_type for event in third] == ["CANDIDATEDECISION", "REJECTEDDECISION"]
+    assert third[0].payload["decision_id"] == third[1].payload["decision_id"]
+    assert third[0].payload["outcome"] == "candidate"
+    assert third[1].payload["reason"] == "cell_not_configured"
+
+
+def test_live_decision_engine_emits_input_rejection_for_incomplete_bundle() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    timestamp = datetime(2026, 1, 1, 10, 20, tzinfo=ZoneInfo("Asia/Kolkata"))
+    bundle = DecisionBundle(
+        "incomplete", "2026-01-01", "10:20",
+        {"futures": MarketBar(instrument, timestamp, 99, 102, 98, 100, 100)},
+        ("futures", "vix"), missing_roles=("vix",),
+    )
+    events = IndependentLiveDecisionEngine(
+        version="test", config_hash="hash", capital=CAPITAL_CONFIG.initial_capital,
+    ).evaluate(bundle)
+
+    assert len(events) == 1
+    assert events[0].event_type == "REJECTEDDECISION"
+    assert events[0].payload["outcome"] == "input rejection"
+    assert events[0].payload["reason"] == "incomplete_bundle"
 
 
 def test_configured_policy_requires_exact_location_composite() -> None:
@@ -993,9 +1015,9 @@ def test_live_decision_engine_persists_score_and_quality_bucket() -> None:
     engine.evaluate(bundle(1))
     engine.evaluate(bundle(2))
     events = engine.evaluate(bundle(3))
-    assert len(events) == 1
-    assert events[0].event_type == "REJECTEDDECISION"
-    assert events[0].payload["reason"] == "cell_not_configured"
+    assert [event.event_type for event in events] == ["CANDIDATEDECISION", "REJECTEDDECISION"]
+    assert events[0].payload["score"] == events[1].payload["score"]
+    assert events[1].payload["reason"] == "cell_not_configured"
 
 
 def test_risk_sizer_never_exceeds_risk_budget_when_budget_is_marginal() -> None:

@@ -69,6 +69,7 @@ def decision_session_bucket(value: datetime) -> str:
 RISK_EVENT_TYPES = frozenset({"SIZING_REJECTED"})
 
 EXECUTION_EVENT_TYPES = frozenset({
+    "ORDER_INTENT",
     "ORDER_SUPPRESSED",
     "ORDER_ACK",
     "FILL",

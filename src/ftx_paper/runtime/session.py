@@ -259,6 +259,7 @@ class RuntimeSession:
             self._replaying = False
             if self.broker is not None:
                 self.broker.close()
+            logger.exception("Runtime worker failed during startup")
             self.store.patch_status({"state": "ERROR", "error": str(exc)})
             self._started.set()
 
@@ -338,6 +339,22 @@ class RuntimeSession:
             "execution_allowed": source == "live",
         }, f"strategy_evaluation:{source}:{bundle.bundle_id}", timestamp=timestamp)
         for order in result.orders:
+            order_decision_id = order.client_order_id.rsplit(":", 1)[0]
+            self.store.append_event("ORDER_INTENT", {
+                "decision_id": order_decision_id,
+                "client_order_id": order.client_order_id,
+                "instrument": order.instrument.symbol,
+                "direction": "long" if order.side is OrderSide.BUY else "short",
+                "quantity": order.quantity,
+                "cell": order.cell,
+                "stop": order.stop_price,
+                "exit_mode": order.exit_mode,
+                "entry_bar": order.entry_bar,
+                "decision_at": timestamp,
+                "decision_source": source,
+                "session_date": bundle.trading_date,
+                "execution_allowed": source == "live",
+            }, f"order_intent:{source}:{bundle.bundle_id}:{order.client_order_id}", timestamp=timestamp)
             if source == "replay":
                 self.store.append_event("ORDER_SUPPRESSED", {
                     "decision_id": order.client_order_id, "client_order_id": order.client_order_id,
@@ -967,6 +984,7 @@ class RuntimeSession:
             try:
                 self.store.patch_status({"state": "STOPPED", "bars_seen": self.engine.bars_seen})
             except Exception as exc:
+                logger.exception("Runtime worker failed while stopping")
                 self.store.patch_status({"state": "ERROR", "error": str(exc)})
 
     def restart(self) -> None:
