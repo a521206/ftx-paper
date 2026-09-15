@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import logging
 import os
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+
 from ftx_paper.api import create_app
 from ftx_paper.config import PaperConfig
 from ftx_paper.capital_config import FtxCapitalConfig
@@ -12,8 +16,41 @@ from ftx_paper.ui import create_ui_app
 from ftx_paper.broker.zerodha import ZerodhaAuth
 
 
+def configure_logging(runtime_dir: Path) -> None:
+    """Send durable diagnostics to a rotating file; mirror only problems to stderr."""
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    log_path = runtime_dir / "runtime.log"
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    if not any(
+        isinstance(handler, RotatingFileHandler)
+        and Path(getattr(handler, "baseFilename", "")).resolve() == log_path.resolve()
+        for handler in root.handlers
+    ):
+        file_handler = RotatingFileHandler(
+            log_path, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+        )
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(formatter)
+        root.addHandler(file_handler)
+    if not any(
+        isinstance(handler, logging.StreamHandler)
+        and not isinstance(handler, RotatingFileHandler)
+        for handler in root.handlers
+    ):
+        stream_handler = logging.StreamHandler()
+        stream_handler.setLevel(logging.WARNING)
+        stream_handler.setFormatter(formatter)
+        root.addHandler(stream_handler)
+
+
 def api_main() -> None:
     config = PaperConfig.from_env()
+    configure_logging(config.runtime_dir)
     capital_config = FtxCapitalConfig.from_file(config.capital_config)
     store = RuntimeStore(config.runtime_dir)
     try:
