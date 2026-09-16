@@ -11,7 +11,6 @@ from ftx_paper.capital_config import RESEARCH_CAPITAL_PROFILE
 from ftx_paper.runtime import ProcessAlreadyRunningError, RuntimeSession, RuntimeStore
 from ftx_paper.strategy import ConfiguredLiveStrategy
 from ftx_paper.core import PaperEngine
-from ftx_paper.execution import PositionLedger
 from ftx_paper.ui import create_ui_app
 from ftx_paper.broker.zerodha import ZerodhaAuth
 
@@ -70,7 +69,6 @@ def api_main() -> None:
             list(raw.get("instruments", ())),
             capital_profile=capital_profile,
             engine=PaperEngine(ConfiguredLiveStrategy(capital_profile=capital_profile, expiry_dates=store.read_expiry_dates())),
-            ledger=PositionLedger(capital_profile.initial_capital),
         )
         create_app(store, zerodha_auth=auth, session=session, capital_profile=capital_profile).run(host=config.host, port=config.port, debug=False, use_reloader=False)
     finally:

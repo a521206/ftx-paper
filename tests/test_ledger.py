@@ -1,8 +1,10 @@
+"""Compatibility coverage for the quarantined pre-PortfolioState ledger."""
+
 from datetime import datetime, timezone
 
 from ftx_paper.broker import Fill
 from ftx_paper.contracts import Instrument, OrderSide
-from ftx_paper.execution import PositionLedger
+from ftx_paper.execution.ledger import PositionLedger
 
 
 def test_ledger_reconciles_buy_and_sell_fills() -> None:

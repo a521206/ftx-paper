@@ -227,11 +227,14 @@ class PortfolioState:
         portfolio.gate_snapshot = dict(raw) if isinstance(raw, Mapping) else {}
         raw = snapshot.get("quote_provenance", {})
         portfolio.quote_provenance = dict(raw) if isinstance(raw, Mapping) else {}
+        valid_in_flight_states = {"submitted", "reserved"}
         if not all(
-            order_id in portfolio.positions or order_id.startswith("legacy:")
+            order_id in portfolio.positions
+            or order_id.startswith("legacy:")
+            or portfolio.pending_orders.get(order_id) in valid_in_flight_states
             for order_id in portfolio.reservations
         ):
-            raise ValueError("portfolio snapshot contains a reservation without a position")
+            raise ValueError("portfolio snapshot contains an invalid reservation lifecycle")
         if not all(order_id in portfolio.reservations for order_id in portfolio.positions):
             raise ValueError("portfolio snapshot contains a position without a reservation")
         expected_margin = sum(item.amount for item in portfolio.reservations.values())

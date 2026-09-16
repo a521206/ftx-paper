@@ -1,3 +1,5 @@
+"""Quarantined legacy fill reconciler; paper runtime uses PortfolioState."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -16,7 +18,7 @@ class PositionSnapshot:
 
 
 class PositionLedger:
-    """Pure fill reconciliation; persistence is deliberately handled by runtime."""
+    """Compatibility-only ledger retained for pre-PortfolioState consumers."""
 
     def __init__(self, starting_capital: float) -> None:
         self.cash = starting_capital

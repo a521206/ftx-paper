@@ -16,10 +16,8 @@ from ftx_paper.contracts import (
     role_to_key,
 )
 from ftx_paper.core import AggregatorConfig, CompletedBarAggregator, InstrumentKey, PaperEngine
-from ftx_paper.core.cost import futures_cost, synthetic_futures_cost
+from ftx_paper.core.cost import futures_cost
 from ftx_paper.core.settlement import ExitValidationError, validate_exit_order
-from ftx_paper.config import NIFTY_LOT_SIZE
-from ftx_paper.execution import PositionLedger
 from ftx_paper.execution import PaperExecutionCoordinator
 from .events import is_decision_event, serialize_datetime
 from .store import RuntimeStore
@@ -64,16 +62,14 @@ class RuntimeSession:
     """Single in-process owner of live market, execution, and runtime state."""
 
     def __init__(self, store: RuntimeStore, auth: Any, specifications: list[dict[str, object]],
-                 *, engine: PaperEngine | None = None, ledger: PositionLedger | None = None,
+                 *, engine: PaperEngine | None = None,
                  capital_profile: ResearchCapitalProfile = RESEARCH_CAPITAL_PROFILE,
                  feed_factory: Callable[..., Any] | None = None, broker_factory: Callable[[Any], Broker] | None = None,
                  client_factory: Callable[[], Any] | None = None, normalize_payload: Callable[..., Any] | None = None,
                  market_clock: Callable[[], datetime] | None = None) -> None:
-        if ledger is not None and capital_profile is None:
-            raise ValueError("capital_profile is required when a ledger is configured")
         self.store, self.auth, self.specifications = store, auth, specifications
         self.capital_profile = capital_profile
-        self.engine, self.ledger = engine or PaperEngine(), ledger
+        self.engine = engine or PaperEngine()
         self._restore_strategy_state()
         strategy = getattr(self.engine, "strategy", None)
         portfolio = getattr(strategy, "portfolio", None)
@@ -98,7 +94,6 @@ class RuntimeSession:
         self._last_synthetic_quote_by_order: dict[str, SyntheticFutureQuote] = {}
         self._live_entry_trades: dict[str, LiveEntryTrade] = {}
         self._restore_live_entry_trades_from_portfolio()
-        self._restore_ledger_state()
 
     def _restore_strategy_state(self) -> None:
         """Restore the strategy-owned portfolio and risk state before execution wiring."""
@@ -136,59 +131,6 @@ class RuntimeSession:
         if callable(snapshot):
             self.store.patch_status({"strategy_snapshot": snapshot()})
 
-    def _restore_ledger_state(self) -> None:
-        # A strategy portfolio is the phase-1 owner.  The PositionLedger is
-        # retained only for sessions that predate the strategy portfolio.
-        if self.ledger is None or self.coordinator is not None:
-            return
-        capital_profile = self.capital_profile
-        if capital_profile is None:
-            raise ValueError("capital_profile is required when a ledger is configured")
-        status = self.store.read_status()
-        raw_cash = status.get("capital")
-        if raw_cash is None:
-            if status:
-                raise ValueError("runtime status has no persisted capital")
-            return
-        if isinstance(raw_cash, dict):
-            raw_cash = raw_cash.get("capital")
-        if raw_cash is None:
-            raise ValueError("runtime status has no persisted capital")
-        persisted_initial = status.get("initial_capital")
-        if persisted_initial is None:
-            raise ValueError("runtime status has no persisted initial_capital")
-        if isinstance(persisted_initial, bool) or not isinstance(persisted_initial, (int, float)):
-            raise ValueError("runtime status has an invalid initial_capital")
-        if float(persisted_initial) != capital_profile.initial_capital:
-            raise ValueError(
-                "capital config does not match runtime status: "
-                f"configured={capital_profile.initial_capital}, persisted={persisted_initial}"
-            )
-        raw_positions = status.get("open_positions", ())
-        if not isinstance(raw_positions, (list, tuple)):
-            raw_positions = ()
-        self.ledger.restore_state(cash=float(raw_cash), positions=raw_positions)
-        raw_entries = status.get("open_entry_trades", {})
-        if not isinstance(raw_entries, dict):
-            raise ValueError("runtime status has invalid open_entry_trades")
-        for entry_order_id, raw_entry in raw_entries.items():
-            if not isinstance(entry_order_id, str) or not isinstance(raw_entry, dict):
-                raise ValueError("runtime status has invalid open entry trade")
-            side = raw_entry.get("side")
-            if side not in {OrderSide.BUY.value, OrderSide.SELL.value}:
-                raise ValueError("runtime status has an invalid entry side")
-            self._live_entry_trades[entry_order_id] = {
-                "instrument": str(raw_entry["instrument"]),
-                "entry_price": float(raw_entry["entry_price"]),
-                "quantity": int(raw_entry["quantity"]),
-                "side": OrderSide(side),
-                "vehicle": str(raw_entry["vehicle"]),
-                "ce_symbol": raw_entry.get("ce_symbol"),
-                "pe_symbol": raw_entry.get("pe_symbol"),
-                "ce_entry_price": raw_entry.get("ce_entry_price"),
-                "pe_entry_price": raw_entry.get("pe_entry_price"),
-            }
-
     def start(self) -> None:
         with self._lock:
             if self.store.read_status().get("state") in {"STARTING", "RUNNING"}:
@@ -202,7 +144,7 @@ class RuntimeSession:
                                      "capital": (
                                          self.portfolio.equity
                                          if self.portfolio is not None
-                                         else self.ledger.cash if self.ledger else None
+                                         else None
                                      ),
                                      "pending_bundle_minutes": [], "pending_bundle_details": []})
             self._thread = threading.Thread(target=self._start_impl, daemon=True, name="ftx-paper-runtime")
@@ -421,8 +363,12 @@ class RuntimeSession:
                              reference_price: float | None = None) -> bool:
         self._last_execution_fill = None
         def cancel_reservation() -> None:
-            if self.coordinator is not None and order.role is OrderRole.ENTRY:
-                self.coordinator.cancel(order)
+            if self.coordinator is not None:
+                if order.role is OrderRole.ENTRY:
+                    self.coordinator.cancel(order)
+                else:
+                    self.coordinator.failed_exit(order)
+                self._persist_strategy_state()
             if order.role is OrderRole.ENTRY and order.cell and session_date:
                 self.engine.cancel_entry(cell=order.cell,
                                          direction="long" if order.side is OrderSide.BUY else "short",
@@ -476,6 +422,8 @@ class RuntimeSession:
                      "reason": "exit_without_entry_order_id"},
                     f"execution_error:exit_identity:{order.client_order_id}", timestamp=timestamp,
                 )
+                if self.coordinator is not None:
+                    self.coordinator.failed_exit(order)
                 return False
             entry = self._live_entry_trades.get(entry_order_id)
             if entry is None:
@@ -485,6 +433,8 @@ class RuntimeSession:
                      "reason": "exit_without_matching_entry", "entry_order_id": entry_order_id},
                     f"execution_error:exit_entry:{order.client_order_id}", timestamp=timestamp,
                 )
+                if self.coordinator is not None:
+                    self.coordinator.failed_exit(order)
                 return False
             try:
                 validate_exit_order(
@@ -503,6 +453,8 @@ class RuntimeSession:
                      "reason": exc.reason, "entry_order_id": entry_order_id},
                     f"execution_error:exit_contract:{order.client_order_id}", timestamp=timestamp,
                 )
+                if self.coordinator is not None:
+                    self.coordinator.failed_exit(order)
                 return False
         if synthetic_quote is not None:
             context.update({"vehicle": "synthetic", "ce_symbol": synthetic_quote.ce.instrument.symbol,
@@ -622,14 +574,7 @@ class RuntimeSession:
                     return False
             entry_cost = None
             if order.role is OrderRole.ENTRY:
-                if synthetic_quote is not None:
-                    entry_cost = synthetic_futures_cost(
-                        synthetic_quote.ce.close, synthetic_quote.pe.close,
-                        fill.quantity,
-                        is_short=order.side is OrderSide.SELL,
-                    )
-                else:
-                    entry_cost = futures_cost(fill.quantity)
+                entry_cost = futures_cost(fill.quantity)
             execution_price = synthetic_quote.price if synthetic_quote is not None else fill.price
             self._last_execution_fill = {
                 "price": execution_price,
@@ -638,31 +583,9 @@ class RuntimeSession:
                 "quantity": fill.quantity,
             }
             cost = 0.0
-            # When a PortfolioState is attached, it is the sole P&L/cost
-            # authority. Runtime computes legacy P&L only for the deprecated
-            # ledger-only path.
-            if order.role is OrderRole.EXIT and self.coordinator is None:
-                assert entry is not None
-                entry_side = entry["side"]
-                signed = 1.0 if entry_side is OrderSide.BUY else -1.0
-                gross_pnl = (
-                    (execution_price - entry["entry_price"])
-                    * NIFTY_LOT_SIZE * entry["quantity"] * signed
-                )
-                if entry["vehicle"] == "synthetic":
-                    ce_entry_price = entry["ce_entry_price"]
-                    pe_entry_price = entry["pe_entry_price"]
-                    if ce_entry_price is None or pe_entry_price is None:
-                        raise ValueError("synthetic entry is missing leg prices")
-                    cost = synthetic_futures_cost(
-                        ce_entry_price,
-                        pe_entry_price,
-                        entry["quantity"],
-                        is_short=entry_side is OrderSide.SELL,
-                    )
-                else:
-                    cost = futures_cost(entry["quantity"])
-                self._last_execution_fill["realized_pnl"] = gross_pnl - cost
+            position = None
+            if order.role is OrderRole.EXIT:
+                cost = futures_cost(fill.quantity)
             register_entry = getattr(self.engine, "register_entry", None)
             if callable(register_entry) and order.role is OrderRole.ENTRY:
                 try:
@@ -679,8 +602,8 @@ class RuntimeSession:
                         if compensated:
                             cancel_reservation()
                         self.store.append_event("EXECUTION_ERROR", {**context, "outcome": "execution_error",
-                            "phase": "ledger", "error_type": type(exc).__name__, "reason": str(exc)},
-                            f"execution_error:register_entry:{order.client_order_id}", timestamp=timestamp)
+                            "phase": "register_entry", "error_type": type(exc).__name__, "reason": str(exc)},
+                        f"execution_error:register_entry:{order.client_order_id}", timestamp=timestamp)
                         return False
                 except Exception as exc:
                     compensated = compensate_fills(fills, ack.broker_order_id)
@@ -690,6 +613,25 @@ class RuntimeSession:
                         "phase": "register_entry", "error_type": type(exc).__name__, "reason": str(exc)},
                         f"execution_error:register_entry:{order.client_order_id}", timestamp=timestamp)
                     return False
+            if order.role is OrderRole.ENTRY and self.coordinator is not None:
+                try:
+                    position = self.coordinator.fill(
+                        order, price=execution_price, timestamp=timestamp,
+                        synthetic_entry_prices=None,
+                    )
+                except Exception as exc:
+                    compensated = compensate_fills(fills, ack.broker_order_id)
+                    if compensated:
+                        cancel_reservation()
+                    else:
+                        fail_closed(f"uncompensated_entry_fill:{type(exc).__name__}")
+                    self.store.append_event(
+                        "EXECUTION_ERROR", {**context, "outcome": "execution_error",
+                                             "phase": "portfolio_fill",
+                                             "error_type": type(exc).__name__, "reason": str(exc)},
+                        f"execution_error:portfolio_fill:{order.client_order_id}", timestamp=timestamp,
+                    )
+                    return False
             if synthetic_quote is not None and order.role is OrderRole.ENTRY:
                 self._synthetic_symbols_by_order[order.client_order_id] = (
                     synthetic_quote.ce.instrument.symbol, synthetic_quote.pe.instrument.symbol,
@@ -698,22 +640,6 @@ class RuntimeSession:
             elif synthetic_quote is not None:
                 if order.entry_order_id is not None:
                     self._last_synthetic_quote_by_order[order.entry_order_id] = synthetic_quote
-            position = None
-            if self.ledger and self.coordinator is None:
-                try:
-                    for item in fills:
-                        leg_side = order.side
-                        if order.vehicle == "synthetic" and item.instrument.instrument_type.upper() == "PE":
-                            leg_side = OrderSide.SELL if order.side is OrderSide.BUY else OrderSide.BUY
-                        position = self.ledger.apply_fill(item, leg_side, vehicle=order.vehicle)
-                except Exception as exc:
-                    compensated = compensate_fills(fills, ack.broker_order_id)
-                    if compensated:
-                        cancel_reservation()
-                    self.store.append_event("EXECUTION_ERROR", {**context, "outcome": "execution_error",
-                        "phase": "ledger", "error_type": type(exc).__name__, "reason": str(exc)},
-                        f"execution_error:ledger:{order.client_order_id}", timestamp=timestamp)
-                    return False
             if order.role is OrderRole.EXIT:
                 assert entry_order_id is not None
                 self._live_entry_trades.pop(entry_order_id, None)
@@ -760,32 +686,6 @@ class RuntimeSession:
             if settlement is not None:
                 self._last_execution_fill["realized_pnl"] = settlement["net_pnl"]
         self._persist_strategy_state()
-        realized_pnl = (
-            self._last_execution_fill.get("realized_pnl")
-            if self._last_execution_fill is not None else None
-        )
-        if self.coordinator is None and isinstance(realized_pnl, (int, float)):
-            strategy = getattr(self.engine, "strategy", None)
-            update_portfolio_state = getattr(strategy, "update_portfolio_state", None)
-            portfolio_state = getattr(strategy, "portfolio_state", {})
-            if callable(update_portfolio_state) and isinstance(portfolio_state, dict):
-                current_equity = float(portfolio_state.get("current_equity", 0.0)) + float(realized_pnl)
-                peak_equity = max(float(portfolio_state.get("peak_equity", current_equity)), current_equity)
-                update_portfolio_state(equity=current_equity, peak_equity=peak_equity)
-        if fill and self.ledger and self.coordinator is None:
-            capital_profile = self.capital_profile
-            if capital_profile is None:
-                raise RuntimeError("capital_profile is required when a ledger is configured")
-            self.store.patch_status({"initial_capital": capital_profile.initial_capital,
-                                     "max_daily_loss": capital_profile.max_daily_loss,
-                                     "max_net_directional_lots": capital_profile.max_net_directional_lots,
-                                      "capital": self.ledger.cash, "open_positions": [
-                 p.__dict__ if hasattr(p, "__dict__") else {"symbol": p.symbol, "quantity": p.quantity,
-                 "average_price": p.average_price, "vehicle": p.vehicle} for p in self.ledger.positions()],
-                                      "open_entry_trades": {
-                                          entry_id: {**entry, "side": entry["side"].value}
-                                          for entry_id, entry in self._live_entry_trades.items()
-                                      }})
         return bool(fill)
 
     def _synthetic_symbols_for_exit(self, order) -> tuple[str, str] | None:

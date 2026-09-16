@@ -68,6 +68,26 @@ def test_paper_portfolio_failed_entry_releases_reservation_and_failed_exit_keeps
     assert portfolio.open_margin > 0
 
 
+def test_paper_portfolio_restores_in_flight_entry_reservation() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    entry = OrderIntent("entry-in-flight", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY)
+    portfolio = PortfolioState(2_500_000)
+    coordinator = PaperExecutionCoordinator(portfolio)
+
+    coordinator.submit(entry)
+    snapshot = portfolio.snapshot()
+    restored = PortfolioState.from_snapshot(snapshot)
+
+    assert restored.positions == {}
+    assert restored.open_margin == pytest.approx(portfolio.open_margin)
+    assert restored.pending_orders[entry.client_order_id] == "reserved"
+
+    restored_coordinator = PaperExecutionCoordinator(restored)
+    restored_coordinator.fill(entry, price=100.0, timestamp="2026-01-01T10:20:00+05:30")
+    assert entry.client_order_id in restored.positions
+    assert restored.open_margin == pytest.approx(portfolio.open_margin)
+
+
 def test_execution_coordinator_rejects_derived_synthetic_orders() -> None:
     futures = Instrument("NIFTYFUT", "NFO", "FUTURES")
     call = Instrument("NIFTYCE", "NFO", "CE", expiry="2026-09-24", strike=25000)
@@ -218,6 +238,9 @@ def test_strategy_snapshot_restores_open_position_and_risk_state() -> None:
         "restart-entry", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY,
         cell="VWAP", stop_price=98.0, exit_mode="signal", entry_bar=12,
     )
+    coordinator = PaperExecutionCoordinator(strategy.portfolio, strategy.capital_context)
+    coordinator.submit(order)
+    coordinator.fill(order, price=100.0, timestamp="2026-01-05T10:00:00+05:30")
     strategy.register_entry(order, fill_price=100.0,
                             entry_fill_time="2026-01-05T10:00:00+05:30")
     strategy._decision_engine.risk_gate.record_entry(

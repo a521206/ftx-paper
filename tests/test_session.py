@@ -9,7 +9,6 @@ from ftx_paper.core import DecisionBundle, EngineResult, ExitAction, PaperEngine
 from ftx_paper.core import CompletedBarAggregator
 from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.runtime import RuntimeSession, RuntimeStore
-from ftx_paper.execution import PositionLedger
 from ftx_paper.capital_config import ResearchCapitalProfile
 from ftx_paper.strategy import ConfiguredLiveStrategy
 import ftx_paper.broker.zerodha as zerodha
@@ -366,33 +365,7 @@ def test_missing_synthetic_quote_settles_exit_as_unfilled(tmp_path):
     assert any(event["event_type"] == "EXECUTION_ERROR" for event in store.read_events())
 
 
-def test_session_restores_ledger_from_runtime_status(tmp_path):
-    store = RuntimeStore(tmp_path)
-    store.write_status({
-        "state": "STOPPED",
-        "capital": 800.0,
-        "initial_capital": 1000.0,
-        "open_positions": [{"symbol": "NIFTYFUT", "quantity": 2, "average_price": 100.0}],
-        "open_entry_trades": {"entry-1": {
-            "instrument": "NIFTYFUT", "entry_price": 100.0, "quantity": 2,
-            "side": "BUY", "vehicle": "futures",
-            "ce_symbol": None, "pe_symbol": None,
-            "ce_entry_price": None, "pe_entry_price": None,
-        }},
-    })
-
-    ledger = PositionLedger(1000.0)
-    session = RuntimeSession(
-        store, None, [], ledger=ledger,
-        capital_profile=ResearchCapitalProfile(initial_capital=1000.0),
-    )
-
-    assert ledger.cash == 800.0
-    assert ledger.positions()[0].quantity == 2
-    assert session._live_entry_trades["entry-1"]["quantity"] == 2
-
-
-def test_strategy_portfolio_is_authoritative_over_legacy_ledger(tmp_path):
+def test_session_uses_strategy_portfolio_as_execution_owner(tmp_path):
     store = RuntimeStore(tmp_path)
     store.write_status({
         "state": "STOPPED",
@@ -402,44 +375,12 @@ def test_strategy_portfolio_is_authoritative_over_legacy_ledger(tmp_path):
     })
     capital_profile = ResearchCapitalProfile(initial_capital=1000.0)
     strategy = ConfiguredLiveStrategy(capital_profile=capital_profile)
-    ledger = PositionLedger(1000.0)
-
-    session = RuntimeSession(
-        store, None, [], engine=PaperEngine(strategy), ledger=ledger,
-        capital_profile=capital_profile,
-    )
+    session = RuntimeSession(store, None, [], engine=PaperEngine(strategy), capital_profile=capital_profile)
 
     assert session.coordinator is not None
     assert session.portfolio is strategy.portfolio
-    assert ledger.cash == 1000.0
     assert session.portfolio.equity == 1000.0
-
-
-def test_session_restores_strategy_portfolio_and_risk_snapshot(tmp_path):
-    capital_config = ResearchCapitalProfile(initial_capital=100_000.0)
-    original = ConfiguredLiveStrategy(capital_profile=capital_config)
-    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
-    order = OrderIntent(
-        "restart-entry", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY,
-        cell="VWAP", stop_price=98.0, exit_mode="signal", entry_bar=12,
-    )
-    original.register_entry(order, fill_price=100.0,
-                            entry_fill_time="2026-01-05T10:00:00+05:30")
-    original._decision_engine.risk_gate.record_entry(
-        cell="VWAP", direction="long", quantity=1, date="2026-01-05",
-    )
-    store = RuntimeStore(tmp_path)
-    store.write_status({"strategy_snapshot": original.snapshot()})
-
-    replacement = ConfiguredLiveStrategy(capital_profile=capital_config)
-    session = RuntimeSession(store, None, [], engine=PaperEngine(replacement),
-                             capital_profile=capital_config)
-
-    restored = session.engine.strategy
-    assert restored is not replacement
-    assert list(restored.portfolio.positions) == ["restart-entry"]
-    assert restored._decision_engine.risk_gate.net_directional_lots == 1
-    assert session._live_entry_trades["restart-entry"]["quantity"] == 1
+    assert not hasattr(session, "ledger")
 
 
 def test_startup_discovers_options_before_backfill_and_feed_subscription(monkeypatch, tmp_path):
