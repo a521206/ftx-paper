@@ -392,6 +392,29 @@ def test_session_restores_ledger_from_runtime_status(tmp_path):
     assert session._live_entry_trades["entry-1"]["quantity"] == 2
 
 
+def test_strategy_portfolio_is_authoritative_over_legacy_ledger(tmp_path):
+    store = RuntimeStore(tmp_path)
+    store.write_status({
+        "state": "STOPPED",
+        "capital": 800.0,
+        "initial_capital": 1000.0,
+        "open_positions": [],
+    })
+    capital_profile = ResearchCapitalProfile(initial_capital=1000.0)
+    strategy = ConfiguredLiveStrategy(capital_profile=capital_profile)
+    ledger = PositionLedger(1000.0)
+
+    session = RuntimeSession(
+        store, None, [], engine=PaperEngine(strategy), ledger=ledger,
+        capital_profile=capital_profile,
+    )
+
+    assert session.coordinator is not None
+    assert session.portfolio is strategy.portfolio
+    assert ledger.cash == 1000.0
+    assert session.portfolio.equity == 1000.0
+
+
 def test_session_restores_strategy_portfolio_and_risk_snapshot(tmp_path):
     capital_config = ResearchCapitalProfile(initial_capital=100_000.0)
     original = ConfiguredLiveStrategy(capital_profile=capital_config)

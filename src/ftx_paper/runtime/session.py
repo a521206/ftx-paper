@@ -77,6 +77,7 @@ class RuntimeSession:
         self._restore_strategy_state()
         strategy = getattr(self.engine, "strategy", None)
         portfolio = getattr(strategy, "portfolio", None)
+        self.portfolio = portfolio
         self.coordinator = (
             PaperExecutionCoordinator(portfolio, getattr(strategy, "capital_context", None))
             if portfolio is not None else None
@@ -136,7 +137,9 @@ class RuntimeSession:
             self.store.patch_status({"strategy_snapshot": snapshot()})
 
     def _restore_ledger_state(self) -> None:
-        if self.ledger is None:
+        # A strategy portfolio is the phase-1 owner.  The PositionLedger is
+        # retained only for sessions that predate the strategy portfolio.
+        if self.ledger is None or self.coordinator is not None:
             return
         capital_profile = self.capital_profile
         if capital_profile is None:
@@ -196,7 +199,11 @@ class RuntimeSession:
                                      "initial_capital": self.capital_profile.initial_capital if self.capital_profile else None,
                                      "max_daily_loss": self.capital_profile.max_daily_loss if self.capital_profile else None,
                                      "max_net_directional_lots": self.capital_profile.max_net_directional_lots if self.capital_profile else None,
-                                     "capital": self.ledger.cash if self.ledger else None,
+                                     "capital": (
+                                         self.portfolio.equity
+                                         if self.portfolio is not None
+                                         else self.ledger.cash if self.ledger else None
+                                     ),
                                      "pending_bundle_minutes": [], "pending_bundle_details": []})
             self._thread = threading.Thread(target=self._start_impl, daemon=True, name="ftx-paper-runtime")
             self._thread.start()

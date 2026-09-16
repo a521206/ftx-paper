@@ -11,6 +11,7 @@ class PaperExecutionCoordinator:
         self.capital_context = capital_context or CapitalRuntimeContext(ResearchCapitalProfile())
 
     def submit(self, order: OrderIntent) -> None:
+        self._require_futures(order)
         self.portfolio.submit(order)
         if order.role is OrderRole.ENTRY:
             self.portfolio.reserve_entry(
@@ -19,6 +20,7 @@ class PaperExecutionCoordinator:
 
     def fill(self, order: OrderIntent, *, price: float, timestamp: str | None = None,
              synthetic_entry_prices=None, cost: float = 0.0):
+        self._require_futures(order)
         if order.role is OrderRole.ENTRY:
             return self.portfolio.fill_entry(
                 order, price=price,
@@ -31,7 +33,13 @@ class PaperExecutionCoordinator:
         return self.portfolio.cancel_entry(order.client_order_id)
 
     def failed_exit(self, order: OrderIntent) -> None:
+        self._require_futures(order)
         self.portfolio.pending_orders[order.client_order_id] = "exit_failed"
+
+    @staticmethod
+    def _require_futures(order: OrderIntent) -> None:
+        if order.vehicle != "futures":
+            raise ValueError("synthetic orders are derived settlement only")
 
 
 __all__ = ["PaperExecutionCoordinator"]

@@ -224,8 +224,10 @@ class ReplayWorker:
                     realized = self._settle_trade(open_trades, diagnostic_trades, action.intent, futures_bar,
                                                   exit_quote, action.reason, exit_price=exit_price,
                                                   trade=open_trade)
-                    coordinator.fill(action.intent, price=exit_price, timestamp=futures_bar.timestamp.isoformat(),
-                                     cost=_execution_cost(open_trade))
+                    if action.intent.vehicle == "futures":
+                        coordinator.fill(action.intent, price=exit_price,
+                                         timestamp=futures_bar.timestamp.isoformat(),
+                                         cost=_execution_cost(open_trade))
                     engine.settle_exit(action.intent.client_order_id, filled=True)
                     if realized is not None:
                         engine.record_exit(cell=realized.cell.name, reason=action.reason,
@@ -285,9 +287,9 @@ class ReplayWorker:
                         engine.register_entry(order, fill_price=fill_price,
                                               entry_fill_time=futures_bar.timestamp,
                                               reference_price=futures_bar.close)
-                        coordinator.fill(order, price=fill_price, timestamp=futures_bar.timestamp.isoformat(),
-                                         synthetic_entry_prices=(entry_quote.ce.close, entry_quote.pe.close)
-                                         if entry_quote is not None else None)
+                        if order.vehicle == "futures":
+                            coordinator.fill(order, price=fill_price,
+                                             timestamp=futures_bar.timestamp.isoformat())
                         open_trades.append({"entry_order_id": order.client_order_id,
                                             "instrument": order.instrument.symbol,
                                             "side": order.side.value, "quantity": order.quantity,
@@ -326,8 +328,13 @@ class ReplayWorker:
                                                       exit_quote, order.reason,
                                                       exit_price=exit_quote.price if exit_quote is not None else futures_bar.close,
                                                       trade=open_trade)
-                        coordinator.fill(order, price=exit_quote.price if exit_quote is not None else futures_bar.close,
-                                         timestamp=futures_bar.timestamp.isoformat(), cost=_execution_cost(open_trade))
+                        if order.vehicle == "futures":
+                            coordinator.fill(
+                                order,
+                                price=exit_quote.price if exit_quote is not None else futures_bar.close,
+                                timestamp=futures_bar.timestamp.isoformat(),
+                                cost=_execution_cost(open_trade),
+                            )
                         engine.record_exit(cell=realized.cell.name, reason=order.reason,
                                            entry_bar=realized.entry_bar, exit_bar=engine.bars_seen,
                                            date=date, vehicle=order.vehicle,

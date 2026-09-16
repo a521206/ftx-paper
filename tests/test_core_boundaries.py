@@ -68,6 +68,20 @@ def test_paper_portfolio_failed_entry_releases_reservation_and_failed_exit_keeps
     assert portfolio.open_margin > 0
 
 
+def test_execution_coordinator_rejects_derived_synthetic_orders() -> None:
+    futures = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    call = Instrument("NIFTYCE", "NFO", "CE", expiry="2026-09-24", strike=25000)
+    put = Instrument("NIFTYPE", "NFO", "PE", expiry="2026-09-24", strike=25000)
+    order = OrderIntent(
+        "synthetic-entry", futures, OrderSide.BUY, 1,
+        role=OrderRole.ENTRY, vehicle="synthetic", synthetic_legs=(call, put),
+    )
+    coordinator = PaperExecutionCoordinator(PortfolioState(2_500_000))
+
+    with pytest.raises(ValueError, match="derived settlement only"):
+        coordinator.submit(order)
+
+
 def test_multiday_portfolio_and_risk_recovery_snapshots() -> None:
     instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
     capital = 2_500_000.0

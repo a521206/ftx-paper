@@ -1,6 +1,7 @@
 """The durable, single-owner Paper portfolio state."""
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from typing import Mapping
 
@@ -46,6 +47,7 @@ class PortfolioState:
     settled_orders: set[str] = field(default_factory=set, init=False)
     gate_snapshot: dict[str, object] = field(default_factory=dict, init=False)
     quote_provenance: dict[str, object] = field(default_factory=dict, init=False)
+    state_revision: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
         if self.initial_capital <= 0:
@@ -55,6 +57,11 @@ class PortfolioState:
     @property
     def open_margin(self) -> float:
         return sum(r.amount for r in self.reservations.values())
+
+    @property
+    def available_capital(self) -> float:
+        """Equity available after all authoritative margin reservations."""
+        return max(0.0, self.equity - self.open_margin)
 
     @property
     def drawdown(self) -> float:
@@ -82,10 +89,30 @@ class PortfolioState:
         vehicle = str(order.vehicle).lower()
         if margin_per_lot < 0:
             raise ValueError("margin_per_lot must be non-negative")
+        quantity = int(order.quantity)
+        if quantity <= 0:
+            raise ValueError("entry quantity must be positive")
+        amount = quantity * float(margin_per_lot)
         reservation = MarginReservation(order.client_order_id, vehicle, int(order.quantity),
-                                         max(0, int(order.quantity)) * float(margin_per_lot))
+                                         amount)
         self.reservations[order.client_order_id] = reservation
         self.pending_orders[order.client_order_id] = "reserved"
+        self.state_revision += 1
+        return reservation
+
+    def reserve_legacy(self, *, reservation_id: str, vehicle: str,
+                       quantity: int, amount: float) -> MarginReservation:
+        """Reserve pre-order margin for the legacy decision adapter."""
+        if reservation_id in self.reservations:
+            return self.reservations[reservation_id]
+        quantity = int(quantity)
+        amount = float(amount)
+        if quantity <= 0 or amount < 0:
+            raise ValueError("legacy entry has invalid quantity or amount")
+        reservation = MarginReservation(reservation_id, str(vehicle).lower(), quantity, amount)
+        self.reservations[reservation_id] = reservation
+        self.pending_orders[reservation_id] = "reserved"
+        self.state_revision += 1
         return reservation
 
     def fill_entry(self, order: OrderIntent, *, price: float, margin_per_lot: float,
@@ -101,6 +128,7 @@ class PortfolioState:
                                  synthetic_entry_prices)
         self.positions[order.client_order_id] = position
         self.pending_orders[order.client_order_id] = "filled"
+        self.state_revision += 1
         return position
 
     def cancel_entry(self, order_id: str) -> bool:
@@ -110,11 +138,25 @@ class PortfolioState:
         self.reservations.pop(order_id, None)
         self.pending_orders[order_id] = "cancelled"
         self.settled_orders.add(order_id)
+        if changed:
+            self.state_revision += 1
         return changed
 
     def release_reservation(self, order_id: str) -> bool:
         """Release margin after a legacy/externally settled terminal fill."""
-        return self.reservations.pop(order_id, None) is not None
+        released = self.reservations.pop(order_id, None) is not None
+        if released:
+            self.state_revision += 1
+        return released
+
+    def update_equity(self, equity: float, *, peak_equity: float | None = None) -> None:
+        """Update externally marked equity through the portfolio owner."""
+        self.equity = float(equity)
+        self.peak_equity = max(
+            float(peak_equity) if peak_equity is not None else self.peak_equity,
+            self.equity,
+        )
+        self.state_revision += 1
 
     def settle_exit(self, order: OrderIntent, *, price: float, cost: float = 0.0) -> dict[str, float] | None:
         if order.client_order_id in self.settled_orders:
@@ -133,6 +175,7 @@ class PortfolioState:
         self.reservations.pop(entry_id, None)
         self.pending_orders[order.client_order_id] = "settled"
         self.settled_orders.add(order.client_order_id)
+        self.state_revision += 1
         return {"entry_order_id": entry_id, "gross_pnl": gross, "costs": float(cost), "net_pnl": net}
 
     def reset(self) -> None:
@@ -144,6 +187,7 @@ class PortfolioState:
         self.settled_orders.clear()
         self.gate_snapshot.clear()
         self.quote_provenance.clear()
+        self.state_revision += 1
 
     def snapshot(self) -> dict[str, object]:
         return {"schema_version": 1, "capital": self.capital_snapshot(), "peak_equity": self.peak_equity,
@@ -151,7 +195,8 @@ class PortfolioState:
                 "reservations": {k: asdict(v) for k, v in self.reservations.items()},
                 "positions": {k: {**asdict(v), "side": v.side.value} for k, v in self.positions.items()},
                 "pending_orders": dict(self.pending_orders), "settled_orders": sorted(self.settled_orders),
-                "gates": self.gate_snapshot, "quote_provenance": self.quote_provenance}
+                "gates": deepcopy(self.gate_snapshot), "quote_provenance": deepcopy(self.quote_provenance),
+                "state_revision": self.state_revision}
 
     @classmethod
     def from_snapshot(cls, snapshot: Mapping[str, object]) -> "PortfolioState":
@@ -177,10 +222,21 @@ class PortfolioState:
         raw = snapshot.get("pending_orders", {})
         portfolio.pending_orders = dict(raw) if isinstance(raw, Mapping) else {}
         portfolio.settled_orders = {str(v) for v in snapshot.get("settled_orders", [])}
+        portfolio.state_revision = int(snapshot.get("state_revision", 0))
         raw = snapshot.get("gates", {})
         portfolio.gate_snapshot = dict(raw) if isinstance(raw, Mapping) else {}
         raw = snapshot.get("quote_provenance", {})
         portfolio.quote_provenance = dict(raw) if isinstance(raw, Mapping) else {}
+        if not all(
+            order_id in portfolio.positions or order_id.startswith("legacy:")
+            for order_id in portfolio.reservations
+        ):
+            raise ValueError("portfolio snapshot contains a reservation without a position")
+        if not all(order_id in portfolio.reservations for order_id in portfolio.positions):
+            raise ValueError("portfolio snapshot contains a position without a reservation")
+        expected_margin = sum(item.amount for item in portfolio.reservations.values())
+        if abs(expected_margin - portfolio.open_margin) > 1e-6:
+            raise ValueError("portfolio snapshot margin is inconsistent")
         return portfolio
 
 __all__ = ["MarginReservation", "PaperPosition", "PortfolioState"]

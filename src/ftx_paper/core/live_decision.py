@@ -12,7 +12,7 @@ from .location_engine import Cell, LocationDetector, TransitionPattern, transiti
 from .risk import RiskConfig, RiskEngine, VehicleRiskLimits
 from .sizing import SizingPipeline, SizingPipelineInput
 from .risk_state import RiskGateState
-from .portfolio import MarginReservation, PortfolioState
+from .portfolio import PortfolioState
 from .adaptive_stop import adaptive_stop_bp, stop_price
 from .scoring import calculate_setup_score, compute_selling_structure, score_to_setup_type
 from ftx_paper.capital_context import CapitalRuntimeContext
@@ -213,7 +213,9 @@ class IndependentLiveDecisionEngine:
             raise ValueError("synthetic reporting cannot reserve futures margin")
         key = f"legacy:{normalized}:{len(self.portfolio.reservations)}"
         amount = max(int(quantity), 0) * float(self._vehicle_sizers[normalized].vehicle_limits[normalized].margin_per_lot)
-        self.portfolio.reservations[key] = MarginReservation(key, normalized, int(quantity), amount)
+        self.portfolio.reserve_legacy(
+            reservation_id=key, vehicle=normalized, quantity=quantity, amount=amount,
+        )
 
     def release_entry_margin(self, *, vehicle: str, quantity: int) -> None:
         normalized = str(vehicle).lower()
@@ -221,7 +223,7 @@ class IndependentLiveDecisionEngine:
             return
         for key, reservation in tuple(self.portfolio.reservations.items()):
             if key.startswith(f"legacy:{normalized}:") and reservation.quantity == int(quantity):
-                self.portfolio.reservations.pop(key, None)
+                self.portfolio.release_reservation(key)
                 break
 
     def _session_for_time(self, decision_at: datetime) -> Session:
@@ -544,8 +546,7 @@ class IndependentLiveDecisionEngine:
         """Update the capital inputs used for subsequent replay decisions."""
         self._equity = float(equity)
         self._peak_equity = max(float(peak_equity if peak_equity is not None else self._peak_equity), self._equity)
-        self.portfolio.equity = self._equity
-        self.portfolio.peak_equity = self._peak_equity
+        self.portfolio.update_equity(self._equity, peak_equity=self._peak_equity)
 
     def risk_snapshot(self) -> dict[str, object]:
         """Return JSON-safe gate state for persistence across segments."""

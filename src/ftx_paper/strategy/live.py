@@ -94,11 +94,16 @@ class ConfiguredLiveStrategy:
 
     def update_portfolio_state(self, *, equity: float, peak_equity: float | None = None) -> None:
         """Update replay/live sizing inputs after a settled portfolio event."""
-        self._equity = float(equity)
-        self._peak_equity = max(float(peak_equity if peak_equity is not None else self._peak_equity), self._equity)
-        self.portfolio.equity = self._equity
-        self.portfolio.peak_equity = self._peak_equity
-        self._decision_engine.update_portfolio_state(equity=self._equity, peak_equity=self._peak_equity)
+        next_equity = float(equity)
+        next_peak = max(
+            float(peak_equity) if peak_equity is not None else self._peak_equity,
+            next_equity,
+        )
+        self._decision_engine.update_portfolio_state(
+            equity=next_equity, peak_equity=next_peak,
+        )
+        self._equity = self.portfolio.equity
+        self._peak_equity = self.portfolio.peak_equity
 
     @property
     def metadata(self) -> StrategyMetadata:

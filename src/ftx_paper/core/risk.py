@@ -125,7 +125,9 @@ class RiskEngine:
             return RiskDecision(False, 0, "invalid_stop_distance", vehicle=normalized_vehicle)
         # Canonical PortfolioState exposes capital less reserved margin. Equity
         # is used for drawdown checks, not as a second available-capital cap.
-        available = max(0.0, float(capital) - float(open_margin_used))
+        # PortfolioState is the equity and reservation owner. Use the same
+        # available-capital definition after realized PnL changes equity.
+        available = max(0.0, float(equity) - float(open_margin_used))
         if available <= 0:
             return RiskDecision(False, 0, "capital_exhausted", vehicle=normalized_vehicle)
         risk_budget = available * self.config.risk_fraction
