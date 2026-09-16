@@ -30,7 +30,7 @@ layer. `OrderAck` and `Fill` are deliberately separate types.
 Paper intentionally uses one shared portfolio across all enabled vehicles.
 Directional exposure, margin reservations, equity, drawdown, positions, and
 settlement are portfolio-level state; vehicle sizing remains a vehicle gate.
-Replay and live execution use the same `PaperPortfolio` and execution
+Replay and live execution use the same `PortfolioState` (`ftx_paper.core.portfolio`) and execution
 coordinator lifecycle. This differs from the canonical runner when it creates
 one portfolio per vehicle, so parity comparisons must explicitly configure the
 canonical side to the shared semantics above.

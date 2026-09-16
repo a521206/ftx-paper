@@ -1,8 +1,8 @@
 # Canonical FTX Decision Parity Contract
 
 Status: P0 specification. The current `ftx-paper` implementation does not
-yet satisfy this contract; Tracks P1-P11 are the implementation work required
-to do so.
+yet satisfy this contract; the open implementation work is tracked as
+P0, P5, P8, P9, P10, P11 in `TASKS.md`.
 
 ## P9 phased verification
 
@@ -70,8 +70,10 @@ and other persistence timestamps must never influence a decision.
 - Numeric values are serialized using the same field names and normalized
   scalar types. Parity comparison uses exact equality after normalization;
   no tolerance is permitted for score, stop, quantity, or decision fields.
-- Decision IDs may differ only if the contract explicitly defines an equivalent
-  deterministic ID formula; otherwise IDs must also compare exactly.
+- Decision IDs may be derived from an equivalent deterministic identity
+  formula (decision minute, sequence, event kind, cell) rather than compared
+  as raw strings. The equivalence mapping must be defined before Phase 2 and
+  the underlying identity fields must compare exactly.
 
 ## Decision output contract
 
@@ -157,10 +159,13 @@ the underlying futures decision.
 ## Capital and execution ownership
 
 `ftx-paper` has one authoritative futures capital and position state.
-`PaperPortfolio` owns reservations, positions, equity, realized P&L, costs,
+`PortfolioState` (`ftx_paper.core.portfolio`) owns reservations, positions, equity, realized P&L, costs,
 drawdown, and terminal settlement state. The runtime owns broker interaction, fill
 reconciliation, persistence, and audit events. Transient broker metadata may
-support reconciliation but is not a second position or P&L authority.
+support reconciliation but is not a second position or P&L authority. `PortfolioState`
+is the single equity/reservation owner; the decision engine reads
+`equity` and `daily_baseline` from it and advances the baseline via
+`start_day()` at date boundaries.
 
 There is one mutation path for entry reservation, fill, cancellation, exit
 settlement, equity update, and directional exposure release. A separate
@@ -200,7 +205,10 @@ vestigial, oracle-only, or silently invented values.
 `ftx-paper` is not live and must not retain obsolete execution behavior in the
 name of backward compatibility. No legacy `on_bar` strategy path,
 compatibility dispatch, fallback sizing, price-relative direction inference,
-or independent synthetic execution may remain in the parity path.
+independent synthetic execution, or second equity/reservation owner may remain
+in the parity path. The removed `execution/ledger.py` reconciler and the
+removed engine-level equity-mirror helpers must not be reintroduced; all
+capital mutation flows through `PortfolioState` via the execution coordinator.
 
 Compatibility handling is limited to read-only migration of already-persisted
 data when strictly necessary; it must not create an alternate decision or
@@ -216,19 +224,20 @@ canonical contract as follows:
 |---|---|---|
 | Completed-bar decision clock | `ftx_paper.core.bundles` and runtime feed | Same causal prefix, ordering, warmup, and missing-input semantics |
 | Market features | `ftx_paper.core.features` and bundle feature path | Same VWAP, session levels, ATR, opening range, VIX, PCR, and prior-day values |
-| Location/cell detection | `ftx_paper.core.policy` / new independent detector | Same simultaneous locations and composite cell names |
+| Location/cell detection | `ftx_paper.core.location_engine` (independent `LocationDetector`) | Same simultaneous locations and composite cell names |
 | Selling structure and setup score | `ftx_paper.core.scoring` | Same factor booleans, score, and setup tier |
-| Session policy | `ftx_paper.strategy.config` and decision engine | Same half-open windows, cell eligibility, fixed directions, and transition rules |
-| Stops and futures sizing | `ftx_paper.core.risk` | Same stop distance, expiry/VIX adjustments, gate ordering, quantity, and rejection behavior |
-| Futures risk gates | paper core risk state | Same drawdown, shared concurrency, thesis, cooldown, and reset behavior |
+| Session policy | `ftx_paper.strategy.config` and decision engine; policy gating via `ftx_paper.core.policy` | Same half-open windows, cell eligibility, fixed directions, and transition rules |
+| Stops and futures sizing | `ftx_paper.core.risk` (stop/risk inputs), `ftx_paper.core.adaptive_stop`, and `ftx_paper.core.sizing` (ordered sizing pipeline) | Same stop distance, expiry/VIX adjustments, gate ordering, quantity, and rejection behavior |
+| Futures risk gates | `ftx_paper.core.risk_state` (`RiskGateState`) over authoritative `PortfolioState` | Same drawdown, shared concurrency, thesis, cooldown, and reset behavior |
 | Exits | `ftx_paper.core.exits` | Same per-cell exit mode, intrabar ordering, trail, hard stop, and EOD result |
-| Futures execution | `ftx_paper.execution` and runtime | One authoritative futures reservation, fill, exit, portfolio, and exposure lifecycle |
+| Futures execution | `ftx_paper.execution` (`PaperExecutionCoordinator`) and runtime, mutating only `PortfolioState` | One authoritative futures reservation, fill, exit, portfolio, and exposure lifecycle |
 | Accepted decisions and order intent | `ftx_paper` core engine | Same ordered typed decision and order-intent events |
 | Fill/order reconciliation | execution coordinator and runtime session | Same reconciliation semantics; fill prices and broker timing may differ |
 | Broker mapping/auth/feed | `broker/zerodha` only | No alternate decision or execution path |
 | Persistence, recovery, audit | `runtime` only | Storage metadata may differ; normalized decision fields and ordering match |
 | HTTP/UI | `api` and `ui` | No business logic or direct DB access |
-| Synthetic settlement | `ftx_paper` settlement boundary | Derived only from immutable futures plans and premium lookups |
+| Synthetic settlement | `ftx_paper.core.settlement` at the settlement boundary | Derived only from immutable futures plans and premium lookups |
+| Costs | `ftx_paper.core.cost` | Single cost source; no local redefinition |
 | Audit output | `ftx_paper` decision/order events | Same normalized typed decision fields and ordered lifecycle; storage metadata may differ |
 
 This mapping is a responsibility map, not permission to share code. The
