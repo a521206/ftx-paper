@@ -34,11 +34,4 @@ class CapitalRuntimeContext:
     def enabled_vehicles(self) -> tuple[str, ...]:
         return self.profile.enabled_vehicles
 
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "environment": self.environment,
-            "profile": self.profile.to_dict(),
-        }
-
-
 __all__ = ["CapitalRuntimeContext"]

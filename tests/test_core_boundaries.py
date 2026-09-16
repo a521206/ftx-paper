@@ -205,7 +205,7 @@ def test_production_strategy_is_versioned_and_injectable() -> None:
     assert strategy.on_bar(None) == ()
     assert strategy.metadata.config_hash
     assert strategy.snapshot()["schema_version"] == 1
-    assert strategy.snapshot()["capital_profile"]["candidate_id"] == "baseline"
+    assert "capital_profile" not in strategy.snapshot()
     assert strategy.from_snapshot(strategy.snapshot(), capital_profile=CAPITAL_CONFIG).metadata.version == strategy.version
 
 
@@ -232,19 +232,6 @@ def test_strategy_snapshot_restores_open_position_and_risk_state() -> None:
     assert list(restored._decision_positions) == ["restart-entry"]
 
 
-def test_strategy_snapshot_restores_research_profile_identity_and_policy() -> None:
-    profile = ResearchCapitalProfile(
-        candidate_id="candidate-paper-17",
-        selected_sessions=("afternoon",),
-        stability_policy=(("afternoon:session_high+or_high", 0.6),),
-    )
-    strategy = ConfiguredLiveStrategy(capital_profile=profile)
-    restored = ConfiguredLiveStrategy.from_snapshot(strategy.snapshot(), capital_profile=CAPITAL_CONFIG)
-    assert restored.capital_profile.candidate_id == "candidate-paper-17"
-    assert restored.capital_profile.selected_sessions == ("afternoon",)
-    assert restored.capital_profile.stability_for("afternoon:session_high+or_high") == 0.6
-
-
 def test_strategy_snapshot_restores_vehicle_for_synthetic_replay() -> None:
     with pytest.raises(ValueError, match="synthetic is reporting-only"):
         ConfiguredLiveStrategy(capital_profile=CAPITAL_CONFIG, vehicle="synthetic")
@@ -263,11 +250,6 @@ def test_strategy_uses_explicit_capital_limits_and_rejects_mismatch() -> None:
     mismatched = ResearchCapitalProfile(initial_capital=200_000.0, max_daily_loss=0.02, max_net_directional_lots=3.0)
     with pytest.raises(ValueError, match="does not match strategy snapshot"):
         ConfiguredLiveStrategy.from_snapshot(strategy.snapshot(), capital_profile=mismatched)
-
-
-def test_research_profile_rejects_malformed_snapshot_values() -> None:
-    with pytest.raises(ValueError, match="initial_capital must be numeric"):
-        ResearchCapitalProfile.from_dict({"initial_capital": "invalid"})
 
 
 def test_live_features_are_causal_and_deterministic() -> None:

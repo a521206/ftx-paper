@@ -129,7 +129,6 @@ class ConfiguredLiveStrategy:
         }
         return {
             "schema_version": 1,
-            "capital_profile": self.capital_profile.to_dict(),
             "enabled_vehicles": list(self.enabled_vehicles),
             "capital": {
                 "initial_capital": self.capital_profile.initial_capital,
@@ -220,22 +219,6 @@ class ConfiguredLiveStrategy:
         version = raw_config.get("version", STRATEGY_VERSION)
         if not isinstance(version, str):
             raise ValueError("version must be a string")
-        profile = None
-        raw_profile = snapshot.get("capital_profile")
-        if isinstance(raw_profile, Mapping):
-            try:
-                profile = ResearchCapitalProfile.from_dict(raw_profile)
-            except (TypeError, ValueError, KeyError) as exc:
-                raise ValueError("invalid capital profile in strategy snapshot") from exc
-            for name, configured in (
-                ("initial_capital", capital_profile.initial_capital),
-                ("max_daily_loss", capital_profile.max_daily_loss),
-                ("max_net_directional_lots", capital_profile.max_net_directional_lots),
-                ("risk_per_trade", capital_profile.risk_per_trade),
-                ("max_lots", capital_profile.max_lots),
-            ):
-                if float(getattr(profile, name)) != float(configured):
-                    raise ValueError(f"capital profile does not match supplied config for {name}")
         morning_entry_minutes = MORNING_ENTRY_MINUTES
         if "morning_entry_minutes" in raw_config:
             morning_entry_minutes = cls._parse_minute_pair("morning_entry_minutes", raw_config["morning_entry_minutes"])
@@ -268,7 +251,7 @@ class ConfiguredLiveStrategy:
                 raise ValueError(f"invalid vehicle risk limits for {key!r}") from exc
         raw_portfolio = snapshot.get("portfolio")
         portfolio = PortfolioState.from_snapshot(raw_portfolio) if isinstance(raw_portfolio, Mapping) else None
-        strategy = cls(config=config, capital_profile=profile or capital_profile, enabled_vehicles=enabled_vehicles,
+        strategy = cls(config=config, capital_profile=capital_profile, enabled_vehicles=enabled_vehicles,
                        vehicle_risk_limits=limits, portfolio=portfolio)
         strategy._equity = strategy.portfolio.equity
         strategy._peak_equity = strategy.portfolio.peak_equity

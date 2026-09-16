@@ -90,7 +90,7 @@ def test_code_defined_research_profile_is_the_paper_configuration() -> None:
     assert profile.initial_capital == 100_000.0
     assert profile.max_net_directional_lots == 3.0
     assert profile.enabled_vehicles == ("futures", "synthetic")
-    assert profile.to_dict()["strategy_version"] == ""
+    assert profile.strategy_version == ""
 
 
 def test_capital_runtime_context_is_deterministic_and_profile_owned() -> None:
@@ -100,7 +100,7 @@ def test_capital_runtime_context_is_deterministic_and_profile_owned() -> None:
     assert first == second
     assert first.max_net_directional_lots == 8.0
     assert first.profile.stability_for("cell") == 0.5
-    assert first.to_dict() == second.to_dict()
+    assert first.profile == second.profile
 
 
 def test_risk_gate_is_initialized_from_runtime_context() -> None:
