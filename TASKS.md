@@ -36,14 +36,21 @@ canonical-batch lookahead differences; the decision is documented in
 ### Track P9 — Decision-replay comparator
 
 - [ ] Compare event identity, cell, direction, score, factors, stop, quantity, reason, and timing
-- [ ] Connect the ordered replay comparator to both independent implementations
+- [x] Connect the ordered replay comparator to both independent implementations
 - [x] Add regression tests for every discovered decision-stream mismatch
 
-The comparator now uses semantic candidate identity when available and ignores
-implementation-local order IDs, and reports the first missing, extra, reordered,
-or changed field deterministically. Full two-sided replay wiring remains open
-until the canonical side emits a comparable ordered decision artifact; the
-event-field comparison checkbox remains open until that wiring is complete.
+The comparator is now wired to the canonical run decision artifact and Paper's
+replay events through `--canonical-decisions`. It normalizes terminal decisions
+onto a shared semantic stream, converts Paper's one-based sequence to the
+canonical zero-based bar, scopes Paper events to canonical candidate identity,
+and preserves out-of-scope event counts in `decision_replay.json`.
+
+The event-field comparison remains open. Fresh runs for 2026-09-07,
+2026-09-08, and 2026-09-15 are still mismatched; the streams now compare
+`score_factors` with no unavailable-field warning. The first differences remain
+quantity/candidate-scope differences (for example, canonical requested quantity
+1 versus Paper 3 on 2026-09-07). P9 remains open until factor parity and
+candidate-scope alignment are both evidenced by fresh comparator results.
 
 ### Track P10 — Ledger and vehicle comparator
 

@@ -133,6 +133,10 @@ and other persistence timestamps must never influence a decision.
 
 For every candidate minute and cell, the comparator must be able to compare:
 
+- the complete `score_factors` mapping from the decision bar, with identical
+  keys and identical boolean/numeric values; unavailable or inapplicable
+  factors must be represented explicitly as `null` on both sides;
+
 ```text
 decision_at
 bundle/event identity

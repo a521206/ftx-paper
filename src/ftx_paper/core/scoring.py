@@ -160,7 +160,7 @@ def calculate_setup_score(
     pcr: float | None,
     structural_proximity: bool,
     score_time_window: tuple[int, int] | None = None,
-) -> tuple[int, dict[str, bool]]:
+) -> tuple[int, dict[str, bool | None]]:
     """Calculate the canonical 0-9 setup score from local paper inputs."""
     factors = {
         "climactic_selling": selling.consec_down >= CONSEC_DOWN_THRESH,
@@ -170,7 +170,7 @@ def calculate_setup_score(
         "rejection_wick": selling.wick_rejection >= WICK_RATIO_THRESH,
         "delta_divergence": selling.delta_divergence < DELTA_DIVERGENCE_THRESH,
         "structural_level": structural_proximity,
-        "pcr_extreme": pcr is not None and pcr > PCR_EXTREME,
+        "pcr_extreme": None if pcr is None else pcr > PCR_EXTREME,
     }
     vix_intraday_change = (vix_at_event - vix_open) / vix_open * 100 if vix_open > 0 else 0.0
     factors["vix_spike"] = vix_intraday_change > VIX_INTRADAY_SPIKE
@@ -181,7 +181,7 @@ def calculate_setup_score(
     if selling.selling_type == "grinding":
         for key in ("climactic_selling", "panic_descent", "volume_climax", "volume_drying"):
             factors[key] = False
-    return sum(factors.values()), factors
+    return sum(value is True for value in factors.values()), factors
 
 
 def score_to_setup_type(score: int) -> tuple[str, float]:
