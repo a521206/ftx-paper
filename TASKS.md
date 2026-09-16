@@ -35,14 +35,15 @@ canonical-batch lookahead differences; the decision is documented in
 
 ### Track P9 — Decision-replay comparator
 
-- [x] Compare event identity, cell, direction, score, factors, stop, quantity, reason, and timing
+- [ ] Compare event identity, cell, direction, score, factors, stop, quantity, reason, and timing
 - [ ] Connect the ordered replay comparator to both independent implementations
 - [x] Add regression tests for every discovered decision-stream mismatch
 
-The comparator now uses semantic candidate identity when available, ignores
+The comparator now uses semantic candidate identity when available and ignores
 implementation-local order IDs, and reports the first missing, extra, reordered,
 or changed field deterministically. Full two-sided replay wiring remains open
-until the canonical side emits a comparable ordered decision artifact.
+until the canonical side emits a comparable ordered decision artifact; the
+event-field comparison checkbox remains open until that wiring is complete.
 
 ### Track P10 — Ledger and vehicle comparator
 
