@@ -23,9 +23,15 @@ is still open and later exits it as `counter_move`.
 
 ### Track P8 — Exit parity
 
-- [ ] Resolve the remaining exit-state divergences (counter-move versus canonical hard-stop)
-- [ ] Confirm exit timestamps, held bars, and exit reasons across all configured modes
-- [ ] Add deterministic regression fixtures for each discovered exit mismatch
+- [x] Resolve the remaining exit-state divergences (counter-move versus canonical hard-stop)
+- [x] Confirm exit timestamps, held bars, and exit reasons across the configured signal/trail modes
+- [x] Add deterministic regression fixtures for each discovered exit mismatch
+
+Fresh causal replays now match the known 2026-09-15 10:30 and 13:45 exits,
+including hard-stop timestamps, held bars, reasons, and fills. Remaining
+2026-09-07 and 2026-09-15 Paper-only acceptances are downstream
+canonical-batch lookahead differences; the decision is documented in
+[`PARITY_CONTRACT.md`](PARITY_CONTRACT.md) and remains open under P9.
 
 ### Track P9 — Decision-replay comparator
 

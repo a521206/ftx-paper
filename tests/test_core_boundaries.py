@@ -399,6 +399,45 @@ def test_exit_state_machine_hard_stop_precedes_same_bar_target_and_records_excur
     assert action.mfe_bp == 600
 
 
+def test_signal_counter_move_waits_for_canonical_favorable_excursion() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    position = PositionState(instrument, 100.0, 99.0, 1, OrderSide.BUY, exit_mode="signal")
+    machine = ExitStateMachine()
+    bars = (
+        (100.0, 100.04, 99.99, 100.00),
+        (100.0, 100.01, 99.98, 99.99),
+        (99.99, 99.99, 99.95, 99.97),
+        (99.97, 99.98, 98.90, 99.92),
+    )
+    actions = [
+        machine.evaluate(
+            position, timestamp=datetime(2026, 1, 1, 10, index),
+            open=open_price, high=high, low=low, close=close,
+            client_order_id=f"signal-{index}",
+        )
+        for index, (open_price, high, low, close) in enumerate(bars)
+    ]
+    assert actions[:3] == [None, None, None]
+    assert actions[3] is not None and actions[3].reason == "hard_stop"
+
+
+def test_signal_volume_climax_uses_causal_prior_volume_after_mfe_activation() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    position = PositionState(instrument, 100.0, 90.0, 1, OrderSide.BUY, exit_mode="signal")
+    machine = ExitStateMachine()
+    assert machine.evaluate(
+        position, timestamp=datetime(2026, 1, 1, 10), open=100.0,
+        high=100.1, low=100.0, close=100.05, volume=100.0,
+        client_order_id="volume-1",
+    ) is None
+    action = machine.evaluate(
+        position, timestamp=datetime(2026, 1, 1, 10, 1), open=100.05,
+        high=100.1, low=100.0, close=100.04, volume=251.0,
+        client_order_id="volume-2",
+    )
+    assert action is not None and action.reason == "vol_climax"
+
+
 def test_exit_state_machine_handles_opening_gaps_at_stop_and_target() -> None:
     instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
     stop_position = PositionState(instrument, 100, 95, 1, OrderSide.BUY)

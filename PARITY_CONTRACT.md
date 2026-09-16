@@ -222,6 +222,24 @@ vocabulary should require a configuration change and replay validation, not a
 Paper implementation rewrite. A genuinely new algorithm requires an explicit
 contract and capability update before it can enter the parity path.
 
+### Replay causality and thesis updates
+
+The canonical batch engine currently resolves an accepted candidate's complete
+future exit path before it evaluates the next candidate. It therefore applies a
+future hard-stop result to the thesis gate before later decision minutes (for
+example, the 2026-09-15 13:45 candidate can affect the 13:51 decision). That
+ordering is a canonical replay artifact, not a causal live-trading rule.
+
+Paper replay preserves causal semantics: it evaluates exits only on completed
+bars observed so far, settles them before the next decision bundle, and never
+uses a future exit result to gate an earlier decision. Paper must not emulate
+the canonical batch lookahead merely to make a later decision stream match.
+The canonical replay flow requires correction or an explicit causal replay
+variant before those downstream acceptance differences can be considered exit
+parity failures. Until then, comparator reports must classify them as
+canonical-replay ordering differences, while exit trigger, timestamp, held-bar,
+reason, fill, and settlement comparisons remain required and causal.
+
 ## Futures and synthetic vehicle semantics
 
 Futures are the only decision and stateful execution vehicle:

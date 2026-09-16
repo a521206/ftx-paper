@@ -63,6 +63,11 @@ class ExitStateMachine:
         self.trail_distance_bp = trail_distance_bp
         self.close_time = close_time
         self._closes: deque[float] = deque(maxlen=3)
+        # Signal exits use the completed bars before the current bar for the
+        # canonical volume-climax average.  Keep this causal history separate
+        # from close history so replay and live evaluation share the same
+        # event-time rule.
+        self._volumes: deque[float] = deque(maxlen=10)
         self._max_favorable_price: float | None = None
         self._trail_active = False
         self._bars_held = 0
@@ -72,6 +77,7 @@ class ExitStateMachine:
     def reset(self) -> None:
         """Clear position-specific history before evaluating a new position."""
         self._closes.clear()
+        self._volumes.clear()
         self._max_favorable_price = None
         self._trail_active = False
         self._bars_held = 0
@@ -86,6 +92,7 @@ class ExitStateMachine:
             "trail_distance_bp": self.trail_distance_bp,
             "close_time": self.close_time.isoformat(),
             "closes": list(self._closes),
+            "volumes": list(self._volumes),
             "max_favorable_price": self._max_favorable_price,
             "trail_active": self._trail_active,
             "bars_held": self._bars_held,
@@ -116,6 +123,12 @@ class ExitStateMachine:
         if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in closes):
             raise ValueError("exit-state snapshot closes must be numeric")
         machine._closes.extend(float(value) for value in closes)
+        volumes = snapshot.get("volumes", ())
+        if not isinstance(volumes, (list, tuple)) or len(volumes) > 10:
+            raise ValueError("exit-state snapshot volumes must contain at most ten values")
+        if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in volumes):
+            raise ValueError("exit-state snapshot volumes must be numeric")
+        machine._volumes.extend(float(value) for value in volumes)
         maximum = snapshot.get("max_favorable_price")
         if maximum is not None and (isinstance(maximum, bool) or not isinstance(maximum, (int, float))):
             raise ValueError("exit-state snapshot max_favorable_price must be numeric")
@@ -133,20 +146,24 @@ class ExitStateMachine:
 
     def evaluate(self, position: PositionState, *, timestamp: datetime, high: float, low: float,
                  close: float, client_order_id: str, include_signal: bool = True,
-                 open: float | None = None, count_bar: bool = True) -> ExitAction | None:
+                 open: float | None = None, volume: float | None = None,
+                 count_bar: bool = True) -> ExitAction | None:
         reference_entry = (position.exit_reference_price
                            if position.exit_reference_price is not None
                            else position.entry_price)
         open_price = close if open is None else open
+        prior_volumes = tuple(self._volumes)
         self._closes.append(close)
         if count_bar:
             self._bars_held += 1
+            if volume is not None:
+                self._volumes.append(float(volume))
         if position.side is OrderSide.BUY:
-            adverse = (position.entry_price - low) / position.entry_price * 10000
-            favorable_excursion = (high - position.entry_price) / position.entry_price * 10000
+            adverse = (reference_entry - low) / reference_entry * 10000
+            favorable_excursion = (high - reference_entry) / reference_entry * 10000
         else:
-            adverse = (high - position.entry_price) / position.entry_price * 10000
-            favorable_excursion = (position.entry_price - low) / position.entry_price * 10000
+            adverse = (high - reference_entry) / reference_entry * 10000
+            favorable_excursion = (reference_entry - low) / reference_entry * 10000
         self._mae_bp = max(self._mae_bp, adverse)
         self._mfe_bp = max(self._mfe_bp, favorable_excursion)
         stop_hit = (low <= position.stop_price if position.side is OrderSide.BUY
@@ -191,12 +208,20 @@ class ExitStateMachine:
                          or (position.side is OrderSide.SELL and favorable < reference_entry))):
                 fill = self._fill_at_or_beyond_level(position, open_price, trail)
                 return self._action(position, fill, "trail_stop", client_order_id)
-        if include_signal and position.exit_mode == "signal" and len(self._closes) >= 3:
-            recent = tuple(self._closes)
-            adverse = (recent[0] > recent[1] > recent[2] if position.side is OrderSide.BUY
-                        else recent[0] < recent[1] < recent[2])
-            if adverse:
-                return self._action(position, close, "counter_move", client_order_id)
+        # Canonical signal management is armed only after a meaningful
+        # favorable excursion.  Without this guard, Paper exits on an early
+        # three-close reversal that canonical keeps open until a hard stop.
+        if include_signal and position.exit_mode == "signal" and self._mfe_bp > 5:
+            if prior_volumes:
+                average_volume = sum(prior_volumes) / len(prior_volumes)
+                if average_volume > 0 and volume is not None and volume > 2.5 * average_volume:
+                    return self._action(position, close, "vol_climax", client_order_id)
+            if len(self._closes) >= 3:
+                recent = tuple(self._closes)
+                adverse = (recent[0] > recent[1] > recent[2] if position.side is OrderSide.BUY
+                            else recent[0] < recent[1] < recent[2])
+                if adverse:
+                    return self._action(position, close, "counter_move", client_order_id)
         local_time = timestamp.astimezone(ZoneInfo("Asia/Kolkata")).time()
         if local_time >= self.close_time:
             return self._action(position, close, "eod", client_order_id)

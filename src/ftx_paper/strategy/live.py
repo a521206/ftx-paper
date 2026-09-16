@@ -358,7 +358,7 @@ class ConfiguredLiveStrategy:
             if position.entry_fill_time is not None and bar.timestamp < position.entry_fill_time:
                 continue
             action = exits.evaluate(position, timestamp=bar.timestamp, high=bar.high, low=bar.low,
-                                    close=bar.close, open=bar.open,
+                                    close=bar.close, open=bar.open, volume=bar.volume,
                                     client_order_id=f"exit-{order_id}-{bar.timestamp.isoformat()}")
             if action is not None:
                 actions.append(action)
