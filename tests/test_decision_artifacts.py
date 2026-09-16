@@ -4,6 +4,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from ftx_paper.contracts.decision_artifacts import DecisionTrace, FuturesExecutionPlan, SyntheticSettlement, TradePlan
+from ftx_paper.runtime.artifacts import build_authoritative_payload
 
 
 AT = datetime(2026, 1, 5, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
@@ -65,3 +66,27 @@ def test_synthetic_unavailable_is_explicit_and_never_zero_pnl():
 def test_decision_trace_restores_typed_plan():
     trace = DecisionTrace(make_plan(), "accepted", {"policy": "eligible"})
     assert DecisionTrace.from_dict(trace.to_dict()) == trace
+
+
+def test_paper_authoritative_payload_is_scoped_and_deterministic():
+    events = [
+        {"event_type": "CANDIDATEDECISION", "payload": {
+            "candidate_id": "c2", "session_date": "2026-01-02", "sequence": 2,
+            "session": "morning", "cell": "session_high", "direction": "long",
+            "outcome": "candidate",
+        }},
+        {"event_type": "CANDIDATEDECISION", "payload": {
+            "candidate_id": "outside", "session_date": "2026-01-03", "sequence": 1,
+            "session": "morning", "outcome": "candidate",
+        }},
+    ]
+    payload = build_authoritative_payload(
+        events, date_from="2026-01-01", date_to="2026-01-02",
+        sessions=("morning",), vehicles=("futures",), configuration={"v": 1},
+    )
+    assert [item["candidate_id"] for item in payload["candidate_trace"]] == ["c2"]
+    assert payload["manifest"]["artifact_schema_version"] == 2
+    assert payload == build_authoritative_payload(
+        events, date_from="2026-01-01", date_to="2026-01-02",
+        sessions=("morning",), vehicles=("futures",), configuration={"v": 1},
+    )
