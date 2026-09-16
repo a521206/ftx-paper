@@ -1,11 +1,13 @@
 from datetime import datetime, timezone
+from threading import Event
 from zoneinfo import ZoneInfo
 
 from ftx_paper.broker import Fill, PaperBroker
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderIntent, OrderRole, OrderSide
 from ftx_paper.runtime.store import _json_safe
-from ftx_paper.core import EngineResult, ExitAction, PaperEngine
+from ftx_paper.core import DecisionBundle, EngineResult, ExitAction, PaperEngine
 from ftx_paper.core import CompletedBarAggregator
+from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.runtime import RuntimeSession, RuntimeStore
 from ftx_paper.execution import PositionLedger
 from ftx_paper.capital_config import ResearchCapitalProfile
@@ -28,6 +30,39 @@ class Feed:
 
     def flush(self):
         self.flushed = True
+
+
+def test_replay_and_runtime_share_paper_engine_bundle_path(monkeypatch, tmp_path):
+    calls = []
+
+    def record_bundle(self, bundle):
+        assert isinstance(bundle, DecisionBundle)
+        calls.append(bundle.bundle_id)
+        self.bars_seen += len(bundle.bars)
+        return EngineResult(events=({"event_type": "BUNDLE_PATH_CHECK", "bundle_id": bundle.bundle_id},))
+
+    monkeypatch.setattr(PaperEngine, "on_bundle", record_bundle)
+    bar = MarketBar(
+        Instrument("NIFTYFUT", "NFO", "FUTURES"),
+        datetime(2026, 1, 1, 4, 50, tzinfo=timezone.utc),
+        100, 102, 99, 101,
+    )
+    aggregator = CompletedBarAggregator(
+        {("NFO", "NIFTYFUT"): MarketRole.FUTURES},
+        required_roles=(MarketRole.FUTURES,), deadline_seconds=0,
+    )
+    bundle = aggregator.ingest(bar)
+    assert bundle is not None
+
+    runtime_store = RuntimeStore(tmp_path / "runtime")
+    RuntimeSession(runtime_store, None, [], engine=PaperEngine())._process_bundle(bundle, source="live")
+
+    replay = ReplayWorker(RuntimeStore(tmp_path / "replay"))
+    replay._bars = lambda _date: (bar,)
+    result = replay._execute({"session_date": "2026-01-01"}, Event())
+
+    assert calls == [bundle.bundle_id, bundle.bundle_id]
+    assert any(event["event_type"] == "BUNDLE_PATH_CHECK" for event in result["events"])
 
 
 def test_closed_bar_is_processed_under_session_lifecycle(tmp_path):
