@@ -24,16 +24,6 @@ class PaperEngine:
     def strategy_metadata(self) -> StrategyMetadata | None:
         return self.strategy.metadata if self.strategy is not None else None
 
-    def on_bar(self, bar: MarketBar) -> EngineResult:
-        self.bars_seen += 1
-        orders = self.strategy.on_bar(bar) if self.strategy is not None else ()
-        return EngineResult(orders=orders, events=({
-            "symbol": bar.instrument.symbol,
-            "timestamp": bar.timestamp.isoformat(),
-            "close": bar.close,
-            "bars_seen": self.bars_seen,
-        },))
-
     def reset(self) -> None:
         """Reset deterministic strategy state before a fresh replay."""
         self.bars_seen = 0

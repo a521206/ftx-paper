@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime, time
 
 from ftx_paper.contracts import Instrument, MarketBar, OptionType, OrderIntent
@@ -19,10 +19,9 @@ from .config import (
     StrategyConfig,
 )
 from ftx_paper.core.strategy import StrategyMetadata
-from ftx_paper.core import ExitStateMachine, LiveFeatureCalculator, PositionState, RiskEngine, SetupPolicy, VehicleRiskLimits
+from ftx_paper.core import ExitStateMachine, PositionState, VehicleRiskLimits
 from ftx_paper.contracts import OrderSide
-from ftx_paper.core import DecisionBundle, IndependentLiveDecisionEngine, PortfolioState, SizingPipeline, SizingPipelineInput
-from ftx_paper.core.scoring import calculate_setup_score, compute_selling_structure
+from ftx_paper.core import DecisionBundle, IndependentLiveDecisionEngine, PortfolioState
 
 
 class ConfiguredLiveStrategy:
@@ -44,7 +43,6 @@ class ConfiguredLiveStrategy:
     def __init__(
         self,
         capital_profile: ResearchCapitalProfile = RESEARCH_CAPITAL_PROFILE,
-        decide: Callable[[MarketBar], tuple[OrderIntent, ...]] | None = None,
         config: StrategyConfig = DEFAULT_CONFIG,
         expiry_dates: frozenset[str] = frozenset(),
         enabled_vehicles: Sequence[str] = ("futures", "synthetic"),
@@ -52,38 +50,23 @@ class ConfiguredLiveStrategy:
         vehicle_risk_limits: Mapping[str, VehicleRiskLimits] | None = None,
         portfolio: PortfolioState | None = None,
     ) -> None:
-        self._decide = decide
         self.config = config
-        self._bars: list[MarketBar] = []
-        self._position: PositionState | None = None
-        self._features = LiveFeatureCalculator()
-        self._policy = SetupPolicy()
-        self._exits = ExitStateMachine(
-            trail_activation_bp=TRAIL_ACTIVATE_BP,
-            trail_distance_bp=TRAIL_DISTANCE_BP,
-        )
         self._decision_positions: dict[str, tuple[PositionState, ExitStateMachine]] = {}
         self._pending_exits: dict[str, str] = {}
         self.capital_profile = capital_profile
         self.portfolio = portfolio or PortfolioState(capital_profile.initial_capital)
         self._capital = self.portfolio.initial_capital
-        self._daily_date: str | None = None
-        self._daily_start_equity = self._capital
         if vehicle is not None:
             enabled_vehicles = (vehicle,)
         self.enabled_vehicles = tuple(dict.fromkeys(str(item).lower() for item in enabled_vehicles))
         if "futures" not in self.enabled_vehicles:
             raise ValueError("synthetic is reporting-only; futures must be enabled")
         self.capital_context = CapitalRuntimeContext(self.capital_profile, environment="live")
-        self._risk = RiskEngine(context=self.capital_context)
-        self._sizing_pipeline = SizingPipeline(self.capital_context)
         self.vehicle_risk_limits = {str(k).lower(): v for k, v in (vehicle_risk_limits or {}).items()}
         if not self.enabled_vehicles or any(item not in {"futures", "synthetic"} for item in self.enabled_vehicles):
             raise ValueError("enabled_vehicles must contain 'futures' and/or 'synthetic'")
         self._equity = self._capital
         self._peak_equity = self._capital
-        self._daily_date = None
-        self._daily_start_equity = self._capital
         self._decision_engine = IndependentLiveDecisionEngine(
             version=self.version, config_hash=self.metadata.config_hash,
             cooldown_minutes=config.cooldown_minutes, capital=self._capital,
@@ -140,43 +123,11 @@ class ConfiguredLiveStrategy:
             "config": self.config.as_dict(),
             "risk_gate": self._decision_engine.risk_snapshot(),
             "portfolio": self.portfolio.snapshot(),
-            "daily_date": self._daily_date,
-            "daily_start_equity": self._daily_start_equity,
             "decision_positions": decision_positions,
             "pending_exits": dict(self._pending_exits),
             "vehicle_risk_limits": {k: {"max_quantity": v.max_quantity, "margin_per_lot": v.margin_per_lot}
                                     for k, v in self.vehicle_risk_limits.items()},
         }
-
-    def reset(self) -> None:
-        """Clear all bar, position, feature, and decision-gate state."""
-        self._bars.clear()
-        self._position = None
-        self._features = LiveFeatureCalculator()
-        self._exits = ExitStateMachine(
-            trail_activation_bp=TRAIL_ACTIVATE_BP,
-            trail_distance_bp=TRAIL_DISTANCE_BP,
-        )
-        self._decision_positions.clear()
-        self._pending_exits.clear()
-        self._equity = self._capital
-        self._peak_equity = self._capital
-        self.portfolio.reset()
-        self._decision_engine = IndependentLiveDecisionEngine(
-            version=self.version, config_hash=self.metadata.config_hash,
-            cooldown_minutes=self.config.cooldown_minutes, capital=self._capital,
-            portfolio=self.portfolio,
-            max_daily_loss=self.capital_context.profile.max_daily_loss,
-            max_net_directional_lots=self.capital_context.max_net_directional_lots,
-            risk_per_trade=self.capital_context.risk_per_trade,
-            max_lots=self.capital_context.max_lots,
-            morning_entry_minutes=self.config.morning_entry_minutes,
-            afternoon_entry_minutes=self.config.afternoon_entry_minutes,
-            expiry_dates=self._decision_engine.expiry_dates,
-            enabled_vehicles=self.enabled_vehicles,
-            vehicle_risk_limits=self.vehicle_risk_limits,
-            capital_context=self.capital_context,
-        )
 
     @classmethod
     def from_snapshot(cls, snapshot: Mapping[str, object], *, capital_profile: ResearchCapitalProfile) -> "ConfiguredLiveStrategy":
@@ -259,12 +210,6 @@ class ConfiguredLiveStrategy:
         risk_snapshot = snapshot.get("risk_gate")
         if isinstance(risk_snapshot, Mapping):
             strategy._decision_engine.restore_risk_snapshot(dict(risk_snapshot))
-        raw_daily_date = snapshot.get("daily_date")
-        strategy._daily_date = str(raw_daily_date) if raw_daily_date is not None else None
-        raw_daily_start = snapshot.get("daily_start_equity", strategy.portfolio.daily_baseline)
-        if isinstance(raw_daily_start, bool) or not isinstance(raw_daily_start, (int, float)):
-            raise ValueError("strategy snapshot daily_start_equity must be numeric")
-        strategy._daily_start_equity = float(raw_daily_start)
         raw_positions = snapshot.get("decision_positions", {})
         if not isinstance(raw_positions, Mapping):
             raise ValueError("strategy snapshot decision_positions must be an object")
@@ -374,72 +319,7 @@ class ConfiguredLiveStrategy:
             raise ValueError(f"{key} must contain exactly two integers")
         return (int(value[0]), int(value[1]))
 
-    def on_bar(self, bar: MarketBar) -> tuple[OrderIntent, ...]:
-        if self._decide is not None:
-            return self._decide(bar)
-        self._bars.append(bar)
-        features = self._features.calculate(tuple(self._bars))
-        if self._position is not None:
-            action = self._exits.evaluate(self._position, timestamp=bar.timestamp, high=bar.high,
-                                          low=bar.low, close=bar.close, open=bar.open,
-                                          client_order_id=f"exit-{bar.timestamp.isoformat()}")
-            if action is not None:
-                self._position = None
-                return (action.intent,)
-        decision = self._policy.evaluate(bar, features)
-        if decision is None:
-            return ()
-        if features.vwap is None:
-            return ()
-        trading_date = bar.timestamp.date().isoformat()
-        if trading_date != self._daily_date:
-            self._daily_date = trading_date
-            self._daily_start_equity = self._equity
-        if self._equity < self._daily_start_equity * (1 - self.capital_context.profile.max_daily_loss):
-            return ()
-        stop = bar.close - features.atr if decision.side is OrderSide.BUY and features.atr else bar.close + features.atr if features.atr else bar.close - 5 if decision.side is OrderSide.BUY else bar.close + 5
-        prior = tuple(self._bars[:-1])
-        selling = compute_selling_structure(
-            prior, bar,
-            vix_open=float(bar.close), vix_at_event=float(bar.close),
-        )
-        score, _ = calculate_setup_score(
-            selling,
-            {"minutes_from_open": float(bar.timestamp.hour * 60 + bar.timestamp.minute - (9 * 60 + 15))},
-            float(bar.close), float(bar.close), None,
-            abs(bar.close - features.vwap) <= self._policy.proximity,
-        )
-        sized = self._risk.size(
-            capital=self._capital, equity=self._equity, peak_equity=self._peak_equity,
-            entry=bar.close, stop=stop, score=score,
-        )
-        score_multiplier = 1.5 if score >= 8 else 1.0 if score >= 5 else 0.5
-        cell_name = str(getattr(decision, "cell", ""))
-        sizing = self._sizing_pipeline.decide(SizingPipelineInput(
-            risk=sized,
-            requested_quantity=sized.risk_ceiling,
-            score_multiplier=score_multiplier,
-            direction=decision.side.value,
-            net_directional_lots=self._decision_engine.risk_gate.net_directional_lots,
-            stability_multiplier=self.capital_context.profile.stability_for(cell_name),
-            vehicle_limit_lots=self.capital_context.max_lots,
-            candidate_id=f"manual:{bar.timestamp.isoformat()}",
-        ))
-        if sizing.final_quantity < 1:
-            return ()
-        quantity = sizing.final_quantity
-        if quantity < 1:
-            return ()
-        self._exits.reset()
-        entry_order_id = f"entry-{bar.timestamp.isoformat()}"
-        self._position = PositionState(bar.instrument, bar.close, stop, quantity, decision.side,
-                                       exit_mode="trail", entry_fill_time=bar.timestamp,
-                                       entry_order_id=entry_order_id)
-        return (self._policy.to_order(decision, bar, quantity, entry_order_id),)
-
     def on_bundle(self, bundle: DecisionBundle):
-        if self._decide is not None:
-            return ()
         return self._decision_engine.evaluate(bundle)
 
     def register_entry(self, order: OrderIntent, *, fill_price: float | None = None,

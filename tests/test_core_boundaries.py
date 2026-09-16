@@ -3,15 +3,13 @@ import math
 import json
 from pathlib import Path
 import time
-from dataclasses import replace
 from zoneinfo import ZoneInfo
 import pytest
 
 from ftx_paper.broker import PaperBroker
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderIntent, OrderRole, OrderSide, parse_role, role_to_key, select_synthetic_quote
-from ftx_paper.core import CompletedBarAggregator, DecisionBundle, ExitAction, ExitStateMachine, IndependentLiveDecisionEngine, LiveFeatureCalculator, PaperEngine, PortfolioState, PositionState, RiskAssessment, RiskConfig, RiskDecision, RiskGateState, RiskEngine, SizingPipeline, SizingPipelineInput, SetupPolicy, adaptive_stop_bp, option_pcr_at_event, replay, vix_open_and_event
+from ftx_paper.core import CompletedBarAggregator, DecisionBundle, ExitStateMachine, IndependentLiveDecisionEngine, LiveFeatureCalculator, PaperEngine, PortfolioState, PositionState, RiskAssessment, RiskConfig, RiskDecision, RiskGateState, RiskEngine, SizingPipeline, SizingPipelineInput, SetupPolicy, adaptive_stop_bp, option_pcr_at_event, vix_open_and_event
 from ftx_paper.execution import PaperExecutionCoordinator
-from ftx_paper.core import LiveSession
 from ftx_paper.core.location_engine import Cell, Location
 from ftx_paper.core.live_decision import _configured_policies_for_cell
 from ftx_paper.strategy.config import Session
@@ -189,20 +187,10 @@ def test_paper_broker_returns_contract_fill() -> None:
     assert fill.client_order_id == "order-1"
 
 
-def test_live_session_owns_session_state() -> None:
-    bar = MarketBar(Instrument("NIFTY", "NSE", "INDEX"), datetime.now(timezone.utc), 1, 2, 0, 1)
-    session = LiveSession(PaperEngine())
-
-    session.on_bar(bar)
-
-    assert session.state.bars_seen == 1
-
-
 def test_production_strategy_is_versioned_and_injectable() -> None:
-    strategy = ConfiguredLiveStrategy(capital_profile=CAPITAL_CONFIG, decide=lambda bar: ())
+    strategy = ConfiguredLiveStrategy(capital_profile=CAPITAL_CONFIG)
 
     assert strategy.name.startswith("ftx-paper-")
-    assert strategy.on_bar(None) == ()
     assert strategy.metadata.config_hash
     assert strategy.snapshot()["schema_version"] == 1
     assert "capital_profile" not in strategy.snapshot()
@@ -505,181 +493,6 @@ def test_order_without_explicit_role_fails_fast() -> None:
         assert "role" in str(exc)
     else:
         raise AssertionError("exit-shaped order without an explicit role was accepted")
-
-
-def test_replay_is_deterministic_and_rejects_reordering() -> None:
-    instrument = Instrument("NIFTY", "NSE", "INDEX")
-    bars = tuple(MarketBar(instrument, datetime(2026, 1, 1, 9, 15 + i), 100, 101, 99, 100 + i, 10) for i in range(2))
-    first = replay(PaperEngine(), bars)
-    second = replay(PaperEngine(), bars)
-    assert first == second
-    try:
-        replay(PaperEngine(), (bars[1], bars[0]))
-    except ValueError as exc:
-        assert "strictly increasing" in str(exc)
-    else:
-        raise AssertionError("out-of-order replay was accepted")
-
-
-def test_production_strategy_composes_features_policy_risk_and_exit() -> None:
-    instrument = Instrument("NIFTY", "NSE", "INDEX")
-    strategy = ConfiguredLiveStrategy(capital_profile=CAPITAL_CONFIG)
-    bars = tuple(MarketBar(instrument, datetime(2026, 1, 1, 10, 15 + i), 100 + i, 102 + i, 99 + i, 101 + i, 10) for i in range(2))
-    orders = [order for bar in bars for order in strategy.on_bar(bar)]
-    assert orders and orders[0].quantity > 0
-    exit_orders = strategy.on_bar(MarketBar(instrument, datetime(2026, 1, 1, 15, 20), 90, 91, 89, 90, 10))
-    assert exit_orders and exit_orders[0].reason in {"hard_stop", "trail_stop", "eod"}
-
-
-def test_on_bar_sizing_scales_with_setup_score() -> None:
-    instrument = Instrument("NIFTY", "NSE", "INDEX")
-    sizing_profile = CAPITAL_CONFIG
-    sizing_profile = replace(sizing_profile, max_lots=10, max_net_directional_lots=10)
-    weak_strategy = ConfiguredLiveStrategy(capital_profile=sizing_profile)
-    weak_orders = [order for order in weak_strategy.on_bar(MarketBar(instrument, datetime(2026, 1, 1, 10, 15), 100, 102, 99, 101, 10))]
-
-    closes = (110, 108, 106, 104, 102, 100, 98, 96)
-    volumes = (3, 3, 3, 20, 3, 3, 2, 2)
-    strong_strategy = ConfiguredLiveStrategy(capital_profile=sizing_profile)
-    strong_orders = []
-    for i, close in enumerate(closes):
-        strong_orders.extend(strong_strategy.on_bar(
-            MarketBar(instrument, datetime(2026, 1, 1, 10, 15 + i), close + 1, close + 1, close - 1, close, volumes[i])
-        ))
-    strong_orders.extend(strong_strategy.on_bar(
-        MarketBar(instrument, datetime(2026, 1, 1, 10, 23), 95, 96, 88, 95.5, 30)
-    ))
-
-    assert weak_orders and strong_orders
-    assert strong_orders[-1].quantity > weak_orders[-1].quantity
-
-
-def test_replay_fixture_has_stable_production_transcript() -> None:
-    instrument = Instrument("NIFTY", "NSE", "INDEX")
-    fixture = tuple(
-        MarketBar(instrument, datetime(2026, 1, 1, 10, 15 + i), 100 + i, 102 + i, 99 + i, 101 + i, 10)
-        for i in range(3)
-    )
-    result = replay(PaperEngine(ConfiguredLiveStrategy(capital_profile=CAPITAL_CONFIG)), fixture)
-    assert result.bars_seen == 3
-    assert [(order.client_order_id, order.quantity, order.side.value) for order in result.orders] == [
-            ("entry-2026-01-01T10:15:00", 2, "BUY"),
-            ("entry-2026-01-01T10:16:00", 2, "BUY"),
-            ("entry-2026-01-01T10:17:00", 2, "BUY"),
-    ]
-
-
-def test_replay_completes_entry_fill_exit_and_realized_trade() -> None:
-    instrument = Instrument("NIFTY", "NSE", "INDEX")
-    first = MarketBar(instrument, datetime(2026, 1, 1, 10, 15), 100, 101, 99, 100, 10)
-    second = MarketBar(instrument, datetime(2026, 1, 1, 10, 16), 110, 111, 109, 110, 10)
-
-    class LifecycleStrategy:
-        metadata = None
-
-        def on_bar(self, bar):
-            if bar.timestamp == first.timestamp:
-                return (OrderIntent("entry-1", instrument, OrderSide.BUY, 2, role=OrderRole.ENTRY),)
-            return ()
-
-        def on_closed_bar(self, bar):
-            if bar.timestamp == second.timestamp:
-                intent = OrderIntent("exit-entry-1", instrument, OrderSide.SELL, 2, reason="target", role=OrderRole.EXIT,
-                                     entry_order_id="entry-1")
-                return (ExitAction("target", 108.0, intent),)
-            return ()
-
-        def settle_exit(self, order_id, *, filled):
-            return None
-
-        def register_entry(self, order, *, fill_price=None):
-            return None
-
-    result = replay(PaperEngine(LifecycleStrategy()), (first, second))
-
-    assert [order.client_order_id for order in result.orders] == ["entry-1", "exit-entry-1"]
-    assert len(result.trades) == 1
-    trade = result.trades[0]
-    assert (trade.entry_price, trade.exit_price, trade.exit_reason, trade.realized_pnl, trade.status) == (100, 108.0, "target", 1040.0, "closed")
-    assert [event["event_type"] for event in result.events if "event_type" in event] == ["FILL", "EXITDECISION", "FILL"]
-    exit_event = next(event for event in result.events if event.get("event_type") == "EXITDECISION")
-    assert "decision_at" in exit_event and "timestamp" not in exit_event
-    assert "exit_mode" in exit_event
-
-
-def test_replay_closes_the_explicit_entry_when_positions_share_instrument() -> None:
-    instrument = Instrument("NIFTY", "NSE", "INDEX")
-    first = MarketBar(instrument, datetime(2026, 1, 1, 10, 15), 100, 101, 99, 100, 10)
-    second = MarketBar(instrument, datetime(2026, 1, 1, 10, 16), 110, 111, 109, 110, 10)
-
-    class TwoPositionStrategy:
-        metadata = None
-
-        def on_bar(self, bar):
-            if bar.timestamp == first.timestamp:
-                return (
-                    OrderIntent("entry-1", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY),
-                    OrderIntent("entry-2", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY),
-                )
-            return ()
-
-        def on_closed_bar(self, bar):
-            if bar.timestamp == second.timestamp:
-                intent = OrderIntent(
-                    "exit-entry-2", instrument, OrderSide.SELL, 1,
-                    reason="target", role=OrderRole.EXIT, entry_order_id="entry-2",
-                )
-                return (ExitAction("target", 108.0, intent),)
-            return ()
-
-        def settle_exit(self, order_id, *, filled):
-            return None
-
-        def register_entry(self, order, *, fill_price=None):
-            return None
-
-    result = replay(PaperEngine(TwoPositionStrategy()), (first, second))
-
-    closed = [trade for trade in result.trades if trade.status == "closed"]
-    open_trades = [trade for trade in result.trades if trade.status == "open"]
-    assert [trade.entry_order_id for trade in closed] == ["entry-2"]
-    assert [trade.entry_order_id for trade in open_trades] == ["entry-1"]
-
-
-def test_replay_rejects_an_exit_without_a_matching_entry() -> None:
-    instrument = Instrument("NIFTY", "NSE", "INDEX")
-    first = MarketBar(instrument, datetime(2026, 1, 1, 10, 15), 100, 101, 99, 100, 10)
-    second = MarketBar(instrument, datetime(2026, 1, 1, 10, 16), 110, 111, 109, 110, 10)
-
-    class UnmatchedExitStrategy:
-        metadata = None
-
-        def on_bar(self, bar):
-            if bar.timestamp == first.timestamp:
-                return (OrderIntent("entry-1", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY),)
-            return ()
-
-        def on_closed_bar(self, bar):
-            if bar.timestamp == second.timestamp:
-                intent = OrderIntent(
-                    "exit-missing", instrument, OrderSide.SELL, 1,
-                    reason="target", role=OrderRole.EXIT, entry_order_id="missing",
-                )
-                return (ExitAction("target", 108.0, intent),)
-            return ()
-
-        def settle_exit(self, order_id, *, filled):
-            return None
-
-        def register_entry(self, order, *, fill_price=None):
-            return None
-
-    result = replay(PaperEngine(UnmatchedExitStrategy()), (first, second))
-
-    assert any(event.get("reason") == "exit_without_matching_entry" for event in result.events)
-    assert not any(event.get("decision_id") == "exit-missing" and event["event_type"] == "FILL"
-                   for event in result.events)
-    assert result.trades[0].status == "open"
 
 
 def test_completed_bars_emit_one_bundle_only_after_required_roles_arrive() -> None:
