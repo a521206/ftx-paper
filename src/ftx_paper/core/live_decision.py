@@ -150,9 +150,6 @@ class IndependentLiveDecisionEngine:
             raise ValueError("enabled_vehicles must contain 'futures' and/or 'synthetic'")
         if "futures" not in self.enabled_vehicles:
             raise ValueError("synthetic is reporting-only; futures must be enabled")
-        self._equity = self.portfolio.equity
-        self._peak_equity = self.portfolio.peak_equity
-        self._daily_start_equity = self.portfolio.daily_baseline
         self.max_daily_loss = max_daily_loss
         self.prior_day_high, self.prior_day_low = prior_day_high, prior_day_low
         self.morning_entry_minutes = morning_entry_minutes
@@ -243,7 +240,7 @@ class IndependentLiveDecisionEngine:
 
     def evaluate(self, bundle: DecisionBundle) -> tuple[LiveDecision, ...]:
         if self._trading_date != bundle.trading_date:
-            self._daily_start_equity = self._equity
+            self.portfolio.start_day()
             if self._futures:
                 self._location_detector.close_day()
                 self.prior_day_high, self.prior_day_low = self._location_detector.prior_day_levels
@@ -281,7 +278,7 @@ class IndependentLiveDecisionEngine:
                 "reason": "incomplete_bundle",
                 "feature_values": {},
             }),)
-        if self._equity < self._daily_start_equity * (1 - self.max_daily_loss):
+        if self.portfolio.equity < self.portfolio.daily_baseline * (1 - self.max_daily_loss):
             return (LiveDecision("REJECTEDDECISION", {**base, "reason": "daily_loss_limit"}),)
         current_vix = bundle.bars.get(MarketRole.VIX) or _supporting_bar(bundle, MarketRole.VIX)
         if current_vix is not None:
@@ -519,12 +516,6 @@ class IndependentLiveDecisionEngine:
     def cancel_entry(self, *, cell: str, direction: str, quantity: int,
                      date: str, vehicle: str = "futures") -> None:
         self.risk_gate.cancel_entry(cell=cell, direction=direction, quantity=quantity, date=date)
-
-    def update_portfolio_state(self, *, equity: float, peak_equity: float | None = None) -> None:
-        """Update the capital inputs used for subsequent replay decisions."""
-        self._equity = float(equity)
-        self._peak_equity = max(float(peak_equity if peak_equity is not None else self._peak_equity), self._equity)
-        self.portfolio.update_equity(self._equity, peak_equity=self._peak_equity)
 
     def risk_snapshot(self) -> dict[str, object]:
         """Return JSON-safe gate state for persistence across segments."""

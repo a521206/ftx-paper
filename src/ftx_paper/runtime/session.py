@@ -11,8 +11,7 @@ from zoneinfo import ZoneInfo
 from ftx_paper.broker import Broker, Fill, PaperBroker
 from ftx_paper.capital_config import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
 from ftx_paper.contracts import (
-    Instrument, MarketBar, MarketRole, OptionRole, OptionType, OrderRole, OrderSide, Role, SyntheticFutureQuote, normalize_exchange_timestamp, parse_role,
-    synthetic_future_quote,
+    Instrument, MarketBar, MarketRole, OptionRole, OptionType, OrderRole, OrderSide, normalize_exchange_timestamp, parse_role,
     role_to_key,
 )
 from ftx_paper.core import AggregatorConfig, CompletedBarAggregator, InstrumentKey, PaperEngine
@@ -24,18 +23,6 @@ from .store import RuntimeStore
 
 
 logger = logging.getLogger("ftx-paper")
-
-
-class LiveEntryTrade(TypedDict):
-    instrument: str
-    entry_price: float
-    quantity: int
-    side: OrderSide
-    vehicle: str
-    ce_symbol: str | None
-    pe_symbol: str | None
-    ce_entry_price: float | None
-    pe_entry_price: float | None
 
 
 class LastExecutionFill(TypedDict):
@@ -89,11 +76,6 @@ class RuntimeSession:
         self._started = threading.Event()
         self._aggregator: CompletedBarAggregator | None = None
         self._last_execution_fill: LastExecutionFill | None = None
-        self._latest_option_bars: dict[Role, MarketBar] = {}
-        self._synthetic_symbols_by_order: dict[str, tuple[str, str]] = {}
-        self._last_synthetic_quote_by_order: dict[str, SyntheticFutureQuote] = {}
-        self._live_entry_trades: dict[str, LiveEntryTrade] = {}
-        self._restore_live_entry_trades_from_portfolio()
 
     def _restore_strategy_state(self) -> None:
         """Restore the strategy-owned portfolio and risk state before execution wiring."""
@@ -104,26 +86,6 @@ class RuntimeSession:
             return
         restored = restore(raw_snapshot, capital_profile=self.capital_profile)
         self.engine.strategy = restored
-
-    def _restore_live_entry_trades_from_portfolio(self) -> None:
-        strategy = getattr(self.engine, "strategy", None)
-        portfolio = getattr(strategy, "portfolio", None)
-        positions = getattr(portfolio, "positions", None)
-        if not isinstance(positions, Mapping):
-            return
-        for order_id, position in positions.items():
-            synthetic_prices = position.synthetic_entry_prices
-            self._live_entry_trades[order_id] = {
-                "instrument": position.instrument,
-                "entry_price": position.entry_price,
-                "quantity": position.quantity,
-                "side": position.side,
-                "vehicle": position.vehicle,
-                "ce_symbol": position.synthetic_legs[0] if position.synthetic_legs else None,
-                "pe_symbol": position.synthetic_legs[1] if position.synthetic_legs else None,
-                "ce_entry_price": synthetic_prices[0] if synthetic_prices else None,
-                "pe_entry_price": synthetic_prices[1] if synthetic_prices else None,
-            }
 
     def _persist_strategy_state(self) -> None:
         strategy = getattr(self.engine, "strategy", None)
@@ -333,33 +295,12 @@ class RuntimeSession:
                     "execution_allowed": False, "reason": "startup_recovery",
                 }, f"order_suppressed:{bundle.trading_date}:{order.client_order_id}", timestamp=timestamp)
             else:
-                option_bars = (getattr(bundle, "supporting_inputs", None) or {}).get("bars", {})
                 futures_bar = bundle.bars.get(MarketRole.FUTURES)
-                synthetic = order.vehicle == "synthetic"
-                quote = (
-                    synthetic_future_quote(
-                        futures_bar, option_bars,
-                        symbols=(order.synthetic_legs[0].symbol, order.synthetic_legs[1].symbol)
-                        if order.synthetic_legs else None,
-                        same_minute=True,
-                    )
-                    if synthetic and isinstance(futures_bar, MarketBar) else None
-                )
-                if synthetic and isinstance(futures_bar, MarketBar) and quote is None:
-                    self.store.append_event("EXECUTION_ERROR", {
-                        "decision_id": order.client_order_id, "decision_source": source,
-                        "vehicle": order.vehicle,
-                        "session_date": bundle.trading_date, "execution_allowed": True,
-                        "outcome": "execution_error", "reason": "missing_synthetic_future_quote",
-                    }, f"execution_error:synthetic_quote:{order.client_order_id}", timestamp=timestamp)
-                    continue
                 self._execute_paper_order(order, session_date=bundle.trading_date, timestamp=timestamp,
-                                           synthetic_quote=quote,
                                            reference_price=futures_bar.close if isinstance(futures_bar, MarketBar) else None)
 
     def _execute_paper_order(self, order, *, session_date: str | None = None,
                              timestamp: str | None = None,
-                             synthetic_quote: SyntheticFutureQuote | None = None,
                              reference_price: float | None = None) -> bool:
         self._last_execution_fill = None
         def cancel_reservation() -> None:
@@ -412,7 +353,6 @@ class RuntimeSession:
         if self.coordinator is not None:
             self.coordinator.submit(order)
             self._persist_strategy_state()
-        entry: LiveEntryTrade | None = None
         entry_order_id = order.entry_order_id
         if order.role is OrderRole.EXIT:
             if entry_order_id is None:
@@ -425,8 +365,8 @@ class RuntimeSession:
                 if self.coordinator is not None:
                     self.coordinator.failed_exit(order)
                 return False
-            entry = self._live_entry_trades.get(entry_order_id)
-            if entry is None:
+            position = self.portfolio.positions.get(entry_order_id) if self.portfolio is not None else None
+            if position is None:
                 self.store.append_event(
                     "EXECUTION_ERROR",
                     {**context, "outcome": "execution_error", "phase": "order_validation",
@@ -439,12 +379,11 @@ class RuntimeSession:
             try:
                 validate_exit_order(
                     order,
-                    entry_instrument=entry["instrument"],
-                    entry_vehicle=entry["vehicle"],
-                    entry_side=entry["side"],
-                    entry_quantity=entry["quantity"],
-                    entry_leg_symbols=(entry["ce_symbol"], entry["pe_symbol"])
-                    if entry["vehicle"] == "synthetic" and entry["ce_symbol"] and entry["pe_symbol"] else None,
+                    entry_instrument=position.instrument,
+                    entry_vehicle=position.vehicle,
+                    entry_side=position.side,
+                    entry_quantity=position.quantity,
+                    entry_leg_symbols=position.synthetic_legs,
                 )
             except ExitValidationError as exc:
                 self.store.append_event(
@@ -456,16 +395,6 @@ class RuntimeSession:
                 if self.coordinator is not None:
                     self.coordinator.failed_exit(order)
                 return False
-        if synthetic_quote is not None:
-            context.update({"vehicle": "synthetic", "ce_symbol": synthetic_quote.ce.instrument.symbol,
-                            "pe_symbol": synthetic_quote.pe.instrument.symbol, "ce_strike": synthetic_quote.strike,
-                            "ce_price": synthetic_quote.ce.close, "pe_price": synthetic_quote.pe.close,
-                            "synthetic_price": synthetic_quote.price})
-            context.update({
-                ("ce_entry_price" if order.role is OrderRole.ENTRY else "ce_exit_price"): synthetic_quote.ce.close,
-                ("pe_entry_price" if order.role is OrderRole.ENTRY else "pe_exit_price"): synthetic_quote.pe.close,
-                ("synthetic_entry_price" if order.role is OrderRole.ENTRY else "synthetic_exit_price"): synthetic_quote.price,
-            })
         if self.broker is None:
             self.store.append_event("EXECUTION_ERROR", {**context,
                                                          "outcome": "execution_error",
@@ -546,16 +475,15 @@ class RuntimeSession:
                     f"execution_error:synthetic_quantity:{order.client_order_id}", timestamp=timestamp)
                 return False
             if order.role is OrderRole.EXIT:
-                assert entry is not None
+                assert position is not None
                 try:
                     validate_exit_order(
                         order,
-                        entry_instrument=entry["instrument"],
-                        entry_vehicle=entry["vehicle"],
-                        entry_side=entry["side"],
-                        entry_quantity=entry["quantity"],
-                        entry_leg_symbols=(entry["ce_symbol"], entry["pe_symbol"])
-                        if entry["vehicle"] == "synthetic" and entry["ce_symbol"] and entry["pe_symbol"] else None,
+                        entry_instrument=position.instrument,
+                        entry_vehicle=position.vehicle,
+                        entry_side=position.side,
+                        entry_quantity=position.quantity,
+                        entry_leg_symbols=position.synthetic_legs,
                         filled_quantity=fill.quantity,
                         filled_instruments=tuple(item.instrument.symbol for item in fills),
                     )
@@ -575,7 +503,7 @@ class RuntimeSession:
             entry_cost = None
             if order.role is OrderRole.ENTRY:
                 entry_cost = futures_cost(fill.quantity)
-            execution_price = synthetic_quote.price if synthetic_quote is not None else fill.price
+            execution_price = fill.price
             self._last_execution_fill = {
                 "price": execution_price,
                 "fill_timestamp": fill.timestamp,
@@ -632,29 +560,8 @@ class RuntimeSession:
                         f"execution_error:portfolio_fill:{order.client_order_id}", timestamp=timestamp,
                     )
                     return False
-            if synthetic_quote is not None and order.role is OrderRole.ENTRY:
-                self._synthetic_symbols_by_order[order.client_order_id] = (
-                    synthetic_quote.ce.instrument.symbol, synthetic_quote.pe.instrument.symbol,
-                )
-                self._last_synthetic_quote_by_order[order.client_order_id] = synthetic_quote
-            elif synthetic_quote is not None:
-                if order.entry_order_id is not None:
-                    self._last_synthetic_quote_by_order[order.entry_order_id] = synthetic_quote
             if order.role is OrderRole.EXIT:
                 assert entry_order_id is not None
-                self._live_entry_trades.pop(entry_order_id, None)
-            if order.role is OrderRole.ENTRY:
-                self._live_entry_trades[order.client_order_id] = {
-                    "instrument": order.instrument.symbol,
-                    "entry_price": execution_price,
-                    "quantity": fill.quantity,
-                    "side": order.side,
-                    "vehicle": order.vehicle,
-                    "ce_symbol": synthetic_quote.ce.instrument.symbol if synthetic_quote is not None else None,
-                    "pe_symbol": synthetic_quote.pe.instrument.symbol if synthetic_quote is not None else None,
-                    "ce_entry_price": synthetic_quote.ce.close if synthetic_quote is not None else None,
-                    "pe_entry_price": synthetic_quote.pe.close if synthetic_quote is not None else None,
-                }
             self.store.append_event("FILL", {**context,
                                               "broker_order_id": ack.broker_order_id,
                                               "symbol": fill.instrument.symbol,
@@ -688,34 +595,10 @@ class RuntimeSession:
         self._persist_strategy_state()
         return bool(fill)
 
-    def _synthetic_symbols_for_exit(self, order) -> tuple[str, str] | None:
-        if order.synthetic_legs:
-            return tuple(leg.symbol for leg in order.synthetic_legs)
-        return self._synthetic_symbols_by_order.get(order.entry_order_id)
-
-    def _synthetic_exit_quote(self, order, bar: MarketBar,
-                              option_bars: Mapping[Role, MarketBar] | None = None) -> SyntheticFutureQuote | None:
-        quote = synthetic_future_quote(
-            bar, self._latest_option_bars if option_bars is None else option_bars,
-            symbols=self._synthetic_symbols_for_exit(order),
-        )
-        if quote is not None or option_bars is not None:
-            return quote
-        return self._last_synthetic_quote_by_order.get(order.entry_order_id)
-
-    def _record_missing_synthetic_exit(self, order, timestamp: str) -> None:
-        self.store.append_event("EXECUTION_ERROR", {
-            "decision_id": order.client_order_id, "decision_source": "live",
-            "execution_allowed": True, "outcome": "execution_error",
-            "reason": "missing_synthetic_future_quote",
-        }, f"execution_error:synthetic_quote:{order.client_order_id}", timestamp=timestamp)
-
     def on_closed_bar(self, bar) -> None:
         with self._lock:
             if self._stopping or self.store.read_status().get("state") != "RUNNING":
                 return
-            if bar.instrument.instrument_type.upper() in {"CE", "PE"}:
-                self._latest_option_bars[OptionRole(bar.instrument.symbol)] = bar
             if isinstance(self.broker, PaperBroker):
                 self.broker.update_price(bar.instrument.symbol, bar.close)
             now = datetime.now(timezone.utc).isoformat()
@@ -736,32 +619,13 @@ class RuntimeSession:
             for incomplete in expired:
                 self._record_incomplete(incomplete)
             bundle = self._aggregator.ingest(bar)
-            option_snapshot: dict[Role, MarketBar] | None = None
-            if bundle is not None:
-                supporting = getattr(bundle, "supporting_inputs", None) or {}
-                raw_bars = supporting.get("bars", {})
-                if isinstance(raw_bars, dict):
-                    option_snapshot = {
-                        role: value for role, value in raw_bars.items()
-                        if isinstance(role, OptionRole) and isinstance(value, MarketBar)
-                    }
-
             # Settle positions carried into this bar before evaluating a new
             # bundle, matching the deterministic replay ordering.
             for action in self.engine.on_closed_bar(bar):
-                synthetic_quote = (
-                    self._synthetic_exit_quote(action.intent, bar, option_snapshot)
-                    if action.intent.vehicle == "synthetic" else None
-                )
-                if action.intent.vehicle == "synthetic" and synthetic_quote is None:
-                    self._record_missing_synthetic_exit(action.intent, bar.timestamp.isoformat())
-                    self.engine.settle_exit(action.intent.client_order_id, filled=False)
-                    continue
                 filled = self._execute_paper_order(
                     action.intent,
                     session_date=bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat(),
                     timestamp=bar.timestamp.isoformat(),
-                    synthetic_quote=synthetic_quote,
                 )
                 self.engine.settle_exit(action.intent.client_order_id, filled=filled)
                 if filled and action.cell is not None:
@@ -809,23 +673,14 @@ class RuntimeSession:
         with self._lock:
             if self._stopping or self.store.read_status().get("state") != "RUNNING":
                 return
-            if bar.instrument.instrument_type.upper() in {"CE", "PE"}:
-                self._latest_option_bars[OptionRole(bar.instrument.symbol)] = bar
             if isinstance(self.broker, PaperBroker):
                 self.broker.update_price(bar.instrument.symbol, bar.close)
             result = self.engine.on_tick(bar)
             for action in result:
-                synthetic_quote = (self._synthetic_exit_quote(action.intent, bar)
-                                   if action.intent.vehicle == "synthetic" else None)
-                if action.intent.vehicle == "synthetic" and synthetic_quote is None:
-                    self._record_missing_synthetic_exit(action.intent, bar.timestamp.isoformat())
-                    self.engine.settle_exit(action.intent.client_order_id, filled=False)
-                    continue
                 filled = self._execute_paper_order(
                     action.intent,
                     session_date=bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat(),
                     timestamp=bar.timestamp.isoformat(),
-                    synthetic_quote=synthetic_quote,
                 )
                 self.engine.settle_exit(action.intent.client_order_id, filled=filled)
                 if filled and action.cell is not None:

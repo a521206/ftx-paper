@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderRole, OrderSide, Role, SyntheticFutureQuote, synthetic_future_quote
 from ftx_paper.capital_config import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
-from ftx_paper.core import AggregatorConfig, Cell, CompletedBarAggregator, InstrumentKey, PaperEngine
+from ftx_paper.core import AggregatorConfig, Cell, CompletedBarAggregator, InstrumentKey, PaperEngine, PortfolioState
 from ftx_paper.core.cost import futures_cost, synthetic_futures_cost
 from ftx_paper.execution import PaperExecutionCoordinator
 from ftx_paper.core.settlement import ExitValidationError, validate_exit_order
@@ -153,10 +153,29 @@ class ReplayWorker:
                 break
             # A date is an independent simulation session. No positions,
             # cooldowns, or risk state may leak into the next date.
-            strategy = ConfiguredLiveStrategy(capital_profile=self.capital_profile, enabled_vehicles=vehicles)
+            portfolio = PortfolioState.from_snapshot({
+                "schema_version": 1,
+                "capital": {
+                    "initial_capital": initial_capital,
+                    "current_equity": current_equity,
+                    "realized_pnl": current_equity - initial_capital,
+                },
+                "peak_equity": peak_equity,
+                "daily_baseline": current_equity,
+                "reservations": {},
+                "positions": {},
+                "pending_orders": {},
+                "settled_orders": [],
+            })
+            strategy = ConfiguredLiveStrategy(
+                capital_profile=self.capital_profile,
+                enabled_vehicles=vehicles,
+                portfolio=portfolio,
+            )
             coordinator = PaperExecutionCoordinator(strategy.portfolio, strategy.capital_context)
             engine = PaperEngine(strategy)
-            strategy.update_portfolio_state(equity=current_equity, peak_equity=peak_equity)
+            # Each date gets a fresh position/risk session while cumulative
+            # capital is carried by the authoritative PortfolioState.
             bars = self._bars(date)
             aggregator = self._aggregator(bars)
             open_trades: list[dict[str, Any]] = []
@@ -238,7 +257,6 @@ class ReplayWorker:
                         current_equity = strategy.portfolio.equity
                         peak_equity = strategy.portfolio.peak_equity
                         max_drawdown = min(max_drawdown, current_equity - peak_equity)
-                        strategy.update_portfolio_state(equity=current_equity, peak_equity=peak_equity)
                 result = engine.on_bundle(bundle)
                 bars_seen += 1
                 result_events = [{**event, "source": "replay", "session_date": date} for event in result.events]
@@ -343,7 +361,6 @@ class ReplayWorker:
                         current_equity = strategy.portfolio.equity
                         peak_equity = strategy.portfolio.peak_equity
                         max_drawdown = min(max_drawdown, current_equity - peak_equity)
-                        strategy.update_portfolio_state(equity=current_equity, peak_equity=peak_equity)
             # Preserve open positions as mark-to-market/open replay results.
             diagnostic_trades.extend({**trade, "status": "open"} for trade in open_trades)
         scores = [int(event["score"]) for event in all_events

@@ -134,13 +134,9 @@ class PortfolioState:
             self.state_revision += 1
         return released
 
-    def update_equity(self, equity: float, *, peak_equity: float | None = None) -> None:
-        """Update externally marked equity through the portfolio owner."""
-        self.equity = float(equity)
-        self.peak_equity = max(
-            float(peak_equity) if peak_equity is not None else self.peak_equity,
-            self.equity,
-        )
+    def start_day(self) -> None:
+        """Capture the current authoritative equity as the daily baseline."""
+        self.daily_baseline = self.equity
         self.state_revision += 1
 
     def settle_exit(self, order: OrderIntent, *, price: float, cost: float = 0.0) -> dict[str, float] | None:

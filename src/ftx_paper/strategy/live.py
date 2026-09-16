@@ -65,8 +65,6 @@ class ConfiguredLiveStrategy:
         self.vehicle_risk_limits = {str(k).lower(): v for k, v in (vehicle_risk_limits or {}).items()}
         if not self.enabled_vehicles or any(item not in {"futures", "synthetic"} for item in self.enabled_vehicles):
             raise ValueError("enabled_vehicles must contain 'futures' and/or 'synthetic'")
-        self._equity = self._capital
-        self._peak_equity = self._capital
         self._decision_engine = IndependentLiveDecisionEngine(
             version=self.version, config_hash=self.metadata.config_hash,
             cooldown_minutes=config.cooldown_minutes, capital=self._capital,
@@ -91,19 +89,6 @@ class ConfiguredLiveStrategy:
             "current_equity": float(self.portfolio.equity),
             "peak_equity": float(self.portfolio.peak_equity),
         }
-
-    def update_portfolio_state(self, *, equity: float, peak_equity: float | None = None) -> None:
-        """Update replay/live sizing inputs after a settled portfolio event."""
-        next_equity = float(equity)
-        next_peak = max(
-            float(peak_equity) if peak_equity is not None else self._peak_equity,
-            next_equity,
-        )
-        self._decision_engine.update_portfolio_state(
-            equity=next_equity, peak_equity=next_peak,
-        )
-        self._equity = self.portfolio.equity
-        self._peak_equity = self.portfolio.peak_equity
 
     @property
     def metadata(self) -> StrategyMetadata:
@@ -209,9 +194,6 @@ class ConfiguredLiveStrategy:
         portfolio = PortfolioState.from_snapshot(raw_portfolio) if isinstance(raw_portfolio, Mapping) else None
         strategy = cls(config=config, capital_profile=capital_profile, enabled_vehicles=enabled_vehicles,
                        vehicle_risk_limits=limits, portfolio=portfolio)
-        strategy._equity = strategy.portfolio.equity
-        strategy._peak_equity = strategy.portfolio.peak_equity
-        strategy._daily_start_equity = strategy.portfolio.daily_baseline
         risk_snapshot = snapshot.get("risk_gate")
         if isinstance(risk_snapshot, Mapping):
             strategy._decision_engine.restore_risk_snapshot(dict(risk_snapshot))

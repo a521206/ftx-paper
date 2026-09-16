@@ -53,11 +53,6 @@ class PaperEngine:
         if callable(handler):
             handler(**kwargs)
 
-    def update_portfolio_state(self, *, equity: float, peak_equity: float | None = None) -> None:
-        handler = getattr(self.strategy, "update_portfolio_state", None)
-        if callable(handler):
-            handler(equity=equity, peak_equity=peak_equity)
-
     def on_tick(self, bar: MarketBar):
         """Forward a live tick to the strategy's protective exit state."""
         on_tick = getattr(self.strategy, "on_tick", None)
