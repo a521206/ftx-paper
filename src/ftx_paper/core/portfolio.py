@@ -100,21 +100,6 @@ class PortfolioState:
         self.state_revision += 1
         return reservation
 
-    def reserve_legacy(self, *, reservation_id: str, vehicle: str,
-                       quantity: int, amount: float) -> MarginReservation:
-        """Reserve pre-order margin for the legacy decision adapter."""
-        if reservation_id in self.reservations:
-            return self.reservations[reservation_id]
-        quantity = int(quantity)
-        amount = float(amount)
-        if quantity <= 0 or amount < 0:
-            raise ValueError("legacy entry has invalid quantity or amount")
-        reservation = MarginReservation(reservation_id, str(vehicle).lower(), quantity, amount)
-        self.reservations[reservation_id] = reservation
-        self.pending_orders[reservation_id] = "reserved"
-        self.state_revision += 1
-        return reservation
-
     def fill_entry(self, order: OrderIntent, *, price: float, margin_per_lot: float,
                    timestamp: str | None = None,
                    synthetic_entry_prices: tuple[float, float] | None = None) -> PaperPosition:
@@ -230,7 +215,6 @@ class PortfolioState:
         valid_in_flight_states = {"submitted", "reserved"}
         if not all(
             order_id in portfolio.positions
-            or order_id.startswith("legacy:")
             or portfolio.pending_orders.get(order_id) in valid_in_flight_states
             for order_id in portfolio.reservations
         ):

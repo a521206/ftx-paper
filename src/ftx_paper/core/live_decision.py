@@ -205,27 +205,6 @@ class IndependentLiveDecisionEngine:
     def open_margin_used(self) -> float:
         return self.portfolio.open_margin
 
-    def register_entry_margin(self, *, vehicle: str, quantity: int) -> None:
-        # Legacy callback compatibility: the aggregate remains the owner;
-        # real execution always uses the order-id keyed reservation path.
-        normalized = str(vehicle).lower()
-        if normalized != "futures":
-            raise ValueError("synthetic reporting cannot reserve futures margin")
-        key = f"legacy:{normalized}:{len(self.portfolio.reservations)}"
-        amount = max(int(quantity), 0) * float(self._vehicle_sizers[normalized].vehicle_limits[normalized].margin_per_lot)
-        self.portfolio.reserve_legacy(
-            reservation_id=key, vehicle=normalized, quantity=quantity, amount=amount,
-        )
-
-    def release_entry_margin(self, *, vehicle: str, quantity: int) -> None:
-        normalized = str(vehicle).lower()
-        if normalized != "futures":
-            return
-        for key, reservation in tuple(self.portfolio.reservations.items()):
-            if key.startswith(f"legacy:{normalized}:") and reservation.quantity == int(quantity):
-                self.portfolio.release_reservation(key)
-                break
-
     def _session_for_time(self, decision_at: datetime) -> Session:
         ist_time = decision_at.astimezone(ZoneInfo("Asia/Kolkata"))
         minutes_from_open = ist_time.hour * 60 + ist_time.minute - (9 * 60 + 15)
@@ -540,7 +519,6 @@ class IndependentLiveDecisionEngine:
     def cancel_entry(self, *, cell: str, direction: str, quantity: int,
                      date: str, vehicle: str = "futures") -> None:
         self.risk_gate.cancel_entry(cell=cell, direction=direction, quantity=quantity, date=date)
-        self.release_entry_margin(vehicle=vehicle, quantity=quantity)
 
     def update_portfolio_state(self, *, equity: float, peak_equity: float | None = None) -> None:
         """Update the capital inputs used for subsequent replay decisions."""

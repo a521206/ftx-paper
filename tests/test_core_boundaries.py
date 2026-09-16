@@ -955,14 +955,6 @@ def test_paper_sizing_pipeline_preserves_stage_rounding_after_caps() -> None:
     assert decision.rationale == "approved"
 
 
-def test_decision_engine_tracks_margin_across_entry_and_exit() -> None:
-    engine = IndependentLiveDecisionEngine(version="test", config_hash="hash", capital=2_500_000)
-    engine.register_entry_margin(vehicle="futures", quantity=2)
-    assert engine.open_margin_used == pytest.approx(350_000)
-    engine.release_entry_margin(vehicle="futures", quantity=2)
-    assert engine.open_margin_used == pytest.approx(0)
-
-
 def test_synthetic_reporting_has_no_independent_gate_or_margin_owner() -> None:
     engine = IndependentLiveDecisionEngine(
         version="test", config_hash="hash", capital=2_500_000,
@@ -971,8 +963,6 @@ def test_synthetic_reporting_has_no_independent_gate_or_margin_owner() -> None:
 
     assert set(engine._vehicle_sizers) == {"futures"}
     assert not hasattr(engine, "_vehicle_risk_gates")
-    with pytest.raises(ValueError, match="synthetic reporting"):
-        engine.register_entry_margin(vehicle="synthetic", quantity=2)
     assert engine.open_margin_used == 0
 
 
