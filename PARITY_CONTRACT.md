@@ -1,8 +1,8 @@
 # Canonical FTX Decision Parity Contract
 
-Status: P0 specification. The current `ftx-paper` implementation does not
-yet satisfy this contract; the open implementation work is tracked as
-P0, P5, P8, P9, P10, P11 in `TASKS.md`.
+Status: P0 approved working specification. The current `ftx-paper`
+implementation does not yet satisfy this contract; the open implementation
+work is tracked as P5, P8, P9, P10, and P11 in `TASKS.md`.
 
 ## P9 phased verification
 
@@ -17,6 +17,12 @@ P9 verifies this contract in two phases:
 2. **Phase 2 — detailed decision replay comparison.** Run both independent
    implementations against the same deterministic input replay and compare
    the complete ordered decision, execution, exit, and ledger streams.
+
+Phase 2 is required because trade-level agreement alone does not prove causal
+parity. Two implementations can produce similar completed trades while
+disagreeing about candidates, transition eligibility, rejection reasons,
+sizing gates, event ordering, or state mutations. Phase 2 is the final
+decision-parity gate before runtime cutover.
 
 Phase 1 is not a claim that this full contract has passed. The complete
 decision-parity and production-cutover gate remains Phase 2. The detailed
@@ -39,6 +45,39 @@ order intent, stop, quantity, and exit decisions. Broker acknowledgements,
 fill prices, network timing, and persistence timestamps are outside decision
 parity and are covered by the ledger/runtime tracks.
 
+### Candidate-policy boundary
+
+Candidate-policy parity is configuration-dependent. The standard FTX Paper
+parity configuration uses a no-op candidate policy. Research-only policies,
+including `LogisticPolicy`, are supported by the canonical research pipeline
+through the optional candidate-policy boundary. They are not required for
+Paper parity unless explicitly promoted into the Paper strategy configuration.
+See [`docs/FTX_EXPERIMENT_INDEX.md`](../docs/FTX_EXPERIMENT_INDEX.md) for the
+workflow, artifact, and paired-run contract.
+
+When a candidate policy is enabled in a compared configuration, it must be
+identified by a reproducible policy artifact. Given the same event-time
+feature vector and policy artifact, both implementations must produce the same
+eligibility result and rejection reason. The policy branch must not own
+direction, setup scoring, risk, sizing, exits, costs, or portfolio state.
+
+Candidate-policy artifacts must record, at minimum:
+
+- policy ID and artifact hash;
+- feature names and feature version;
+- training and evaluation date ranges;
+- thresholds and model parameters;
+- feature-coverage and missing-value behavior.
+
+Compared candidate-policy events must include the policy ID, eligibility
+outcome, rejection reason, and any policy outputs required by that policy
+(for example probability and logit for `LogisticPolicy`). Policy metadata may
+be stored once in the run manifest rather than repeated in every event.
+
+The no-op baseline and the enabled-policy branch are compared as separate
+canonical research configurations. A research-only policy becomes part of
+Paper parity only after an explicit configuration change and approval.
+
 ## Input contract
 
 Each decision minute is evaluated from exactly one completed futures bar and a
@@ -48,12 +87,12 @@ are:
 | Input | Contract |
 |---|---|
 | Futures | Completed OHLCV bar, ordered by canonical IST minute; current bar is the entry bar. |
-| VIX | Opening value from the first available 09:15 bar; event value is the latest completed value at or before the decision minute. Missing VIX follows the canonical rejection path. |
+| VIX | Opening value from the first available 09:15 bar; event value is the latest completed value at or before the decision minute. If either required VIX value is unavailable, the candidate follows the explicit `missing_vix` rejection path described below. |
 | Option PCR | Value associated with the decision minute, or `None` when unavailable according to the canonical lookup cutoff. |
 | Prior-day levels | Previous trading day high/low, reset at each trading-date boundary; `None` when unavailable. |
 | Opening range | Causal range levels once the opening-range window is complete. |
 | Expiry calendar | Canonical weekly-expiry membership used for stop adjustment. |
-| Configuration | Strategy version, session windows, cells, directions, exit modes, stability, cooldown, sizing, and risk settings. |
+| Configuration | Strategy version, session windows, cells, directions, exit modes, stability, cooldown, sizing, risk settings, and candidate-policy mode/artifact when enabled. |
 
 All timestamps used for decisions are timezone-aware instants. Session and
 minutes-from-open calculations are performed in Asia/Kolkata. `created_at`
@@ -67,13 +106,28 @@ and other persistence timestamps must never influence a decision.
 - Features and eligibility use no future bars or future supporting values.
 - Missing values use canonical defaults or canonical rejection reasons; paper
   must not invent a substitute value silently.
+- When VIX is unavailable, `vix_open`, `vix_at_event`, and all VIX-dependent
+  derived fields are serialized as `null`/unavailable. The candidate is
+  rejected with `missing_vix`; only candidate identity, timing, availability,
+  event ordering, and rejection reason are compared for that candidate. Any
+  internal numeric fallback used to avoid calculation errors is diagnostic-only,
+  is not a market input, and is excluded from parity comparison.
 - Numeric values are serialized using the same field names and normalized
   scalar types. Parity comparison uses exact equality after normalization;
   no tolerance is permitted for score, stop, quantity, or decision fields.
-- Decision IDs may be derived from an equivalent deterministic identity
-  formula (decision minute, sequence, event kind, cell) rather than compared
-  as raw strings. The equivalence mapping must be defined before Phase 2 and
-  the underlying identity fields must compare exactly.
+- Raw implementation-specific decision IDs are retained for diagnostics but
+  are not compared directly. Phase 2 compares this normalized identity:
+
+  ```text
+  candidate identity = (session_date, decision_minute, sequence, cell)
+  event identity = (candidate identity, event_kind, rejection_reason)
+  ```
+
+  Candidate and accepted events share the same candidate identity. Rejected
+  events add their exact rejection reason. Orders, fills, exits, and
+  settlements link back to the candidate/decision identity. The underlying
+  date, minute, sequence, cell, event kind, and rejection reason must compare
+  exactly; only the raw ID encoding may differ.
 
 ## Decision output contract
 
@@ -92,6 +146,8 @@ score factors
 VIX at event and VIX open
 PCR at event
 structural proximity
+candidate-policy ID and eligibility outcome, when enabled
+candidate-policy rejection reason and outputs, when enabled
 stop basis / hard stop
 sizing inputs and results
 requested quantity
@@ -135,6 +191,37 @@ Acceptance leads directly into futures entry and exit simulation/settlement
 within the same stateful lifecycle; the ordered decision stream must also
 include the downstream typed trade and exit artifacts.
 
+## Exit capability and active configuration
+
+`ftx-paper` must support the complete canonical exit-mode vocabulary, even
+when a particular live or holdout run uses only a subset of the modes. The
+supported modes are:
+
+- `signal`
+- `target`
+- `risk_reward`
+- `trail`
+- `adaptive`
+- `hard_stop`
+- `eod`
+
+Parity is evaluated against the mode and parameters selected by the canonical
+strategy configuration for the run. The active configuration is authoritative
+for each cell and must include the exit mode, stop/target/trail parameters,
+counter-move settings, and session-close behavior. Supporting a mode does not
+activate it for a run unless the canonical configuration activates it.
+
+The behavior of every supported mode must remain aligned with the canonical
+pipeline, including trigger precedence when multiple conditions occur in one
+bar, counter-move and volatility-climax rules, trail activation and
+breakeven-lock behavior, gap versus level fills, trigger versus fill
+timestamps, and the `bars_held` convention. The canonical references are
+`src/ftx/exit_sim.py`, `src/ftx/live_strategy_config.py`, and the canonical
+trail implementation. A newly approved mode that is already in this
+vocabulary should require a configuration change and replay validation, not a
+Paper implementation rewrite. A genuinely new algorithm requires an explicit
+contract and capability update before it can enter the parity path.
+
 ## Futures and synthetic vehicle semantics
 
 Futures are the only decision and stateful execution vehicle:
@@ -171,6 +258,27 @@ There is one mutation path for entry reservation, fill, cancellation, exit
 settlement, equity update, and directional exposure release. A separate
 ledger or runtime-side P&L calculation must not disagree with the authoritative
 portfolio.
+
+Capital parity is compared semantically, not by internal class shape. For each
+decision and mutation, normalize and compare:
+
+```text
+initial_capital
+effective_equity / peak_equity
+daily_baseline / daily_pnl
+realized_pnl / total_costs
+open_margin_used / available_capital
+drawdown_amount / drawdown_pct
+net_directional_lots
+active_positions / reservations
+```
+
+The canonical values come from `src.capital.ledger.PortfolioState`; Paper
+values come from `ftx_paper.core.portfolio.PortfolioState` plus its
+`RiskGateState` for directional exposure. The comparison must document the
+available-capital floor, drawdown denominator, cost timing, and terminal
+closeout policy. Compare entry reservation, fill, cancellation, exit
+settlement, exposure release, daily reset, and terminal closeout in order.
 
 ## State lifetimes
 
@@ -229,7 +337,7 @@ canonical contract as follows:
 | Session policy | `ftx_paper.strategy.config` and decision engine; policy gating via `ftx_paper.core.policy` | Same half-open windows, cell eligibility, fixed directions, and transition rules |
 | Stops and futures sizing | `ftx_paper.core.risk` (stop/risk inputs), `ftx_paper.core.adaptive_stop`, and `ftx_paper.core.sizing` (ordered sizing pipeline) | Same stop distance, expiry/VIX adjustments, gate ordering, quantity, and rejection behavior |
 | Futures risk gates | `ftx_paper.core.risk_state` (`RiskGateState`) over authoritative `PortfolioState` | Same drawdown, shared concurrency, thesis, cooldown, and reset behavior |
-| Exits | `ftx_paper.core.exits` | Same per-cell exit mode, intrabar ordering, trail, hard stop, and EOD result |
+| Exits | `ftx_paper.core.exits` | Full canonical exit-mode vocabulary; active per-cell mode and parameters must match the run configuration, including intrabar ordering, trail, hard stop, and EOD result |
 | Futures execution | `ftx_paper.execution` (`PaperExecutionCoordinator`) and runtime, mutating only `PortfolioState` | One authoritative futures reservation, fill, exit, portfolio, and exposure lifecycle |
 | Accepted decisions and order intent | `ftx_paper` core engine | Same ordered typed decision and order-intent events |
 | Fill/order reconciliation | execution coordinator and runtime session | Same reconciliation semantics; fill prices and broker timing may differ |

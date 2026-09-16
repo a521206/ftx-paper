@@ -113,6 +113,10 @@ class RiskGateState:
     def record_entry(self, *, cell: str, direction: str, quantity: int,
                      date: str | None = None) -> None:
         self._new_day(date)
+        # The canonical decision loop resolves the candidate's exit before
+        # evaluating the next candidate. Its thesis counter therefore
+        # behaves as an entry-time gate during replay, even though the
+        # canonical tracker is updated through its result callback.
         self.cells.setdefault(cell, CellGateState()).total_entries += 1
         self.net_directional_lots += self._signed(direction, quantity)
 
@@ -151,9 +155,10 @@ class RiskGateState:
         self.cells.clear()
 
     def reset_segment(self) -> None:
-        """Reset cooldown/thesis state while preserving daily entry counts."""
+        """Reset the per-segment thesis tracker while preserving exposure."""
         for state in self.cells.values():
             state.consecutive_stops = 0
+            state.total_entries = 0
             state.locked_until_bar = 0
             state.cooldown_until_bar = 0
             state.failed_today = False

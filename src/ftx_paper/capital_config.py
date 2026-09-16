@@ -96,11 +96,10 @@ RESEARCH_CAPITAL_PROFILE = ResearchCapitalProfile(
     strategy_version="ftx-paper-v1",
     stability_policy=(
         ("morning:session_low+or_low", 1.0),
-        ("morning:vwap_zone+session_low+or_low", 0.5),
         ("morning:vwap_zone+or_low", 0.5),
-        ("morning:session_high+or_high", 0.8),
-        ("afternoon:session_high+or_high", 0.8),
-        ("afternoon:or_low", 0.8),
+        ("morning:session_high+or_high", 0.5),
+        ("afternoon:session_high+or_high", 0.5),
+        ("afternoon:or_low", 0.5),
         ("afternoon:vwap_zone+prior_day_high", 1.0),
     ),
 )

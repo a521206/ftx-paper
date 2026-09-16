@@ -30,6 +30,16 @@ def test_zero_directional_headroom_rejects_without_consuming_entry() -> None:
     assert gate.cells["low"].total_entries == 1
 
 
+def test_daily_entry_cap_counts_entries_within_a_reset_segment() -> None:
+    gate = RiskGateState(max_daily_entries=2, max_net_directional_lots=8, cell_cooldown_bars=0)
+    gate.record_entry(cell="low", direction="long", quantity=1, date="2026-09-10")
+    gate.record_entry(cell="low", direction="long", quantity=1, date="2026-09-10")
+    assert gate.can_enter(cell="low", direction="long", bar=20, quantity=1, date="2026-09-10") is False
+
+    gate.reset_segment()
+    assert gate.can_enter(cell="low", direction="long", bar=20, quantity=1, date="2026-09-10") is True
+
+
 def test_segment_reset_clears_cell_cooldown_but_preserves_exposure() -> None:
     gate = RiskGateState(max_net_directional_lots=8)
     gate.record_entry(cell="high", direction="long", quantity=2, date="2026-09-11")
@@ -37,6 +47,7 @@ def test_segment_reset_clears_cell_cooldown_but_preserves_exposure() -> None:
     assert gate.can_enter(cell="high", direction="long", bar=286, quantity=2, date="2026-09-11") is False
     gate.reset_segment()
     assert gate.net_directional_lots == 2
+    assert gate.cells["high"].total_entries == 0
     assert gate.can_enter(cell="high", direction="long", bar=286, quantity=2, date="2026-09-11") is True
 
 

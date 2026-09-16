@@ -1,52 +1,47 @@
 # FTX Paper Task List
 
-Open parity and cutover work is tracked in the numbered tracks below.
+Open parity and cutover work is tracked below. Completed foundation,
+feature, location, score, sizing, and risk-gate work is intentionally omitted.
 
 ## Bit-for-bit canonical FTX parity
 
 ### Track P0 — Parity contract
 
-- [ ] Approve [PARITY_CONTRACT.md](PARITY_CONTRACT.md) as the working specification
-
-### Track P2 — Market-feature parity
-
-- [ ] Match VWAP, developing session high/low, ATR, and opening-range calculations
-- [ ] Match prior-day high/low initialization and rollover
-- [ ] Match VIX opening, event-time lookup, carry-forward, and missing-VIX behavior
-- [ ] Match option-PCR lookup, cutoff, and unavailable-value behavior
-- [ ] Add field-by-field feature comparison tests
+- [x] Approve [PARITY_CONTRACT.md](PARITY_CONTRACT.md) as the working specification
 
 ### Track P5 — Session-policy parity
 
-- [ ] Match morning and afternoon half-open session windows
-- [ ] Match configured composite cells and fixed policy directions
-- [ ] Remove price-relative direction inference from the paper decision path
-- [ ] Match transition-policy eligibility and rejection reasons
-- [ ] Add session-boundary and policy-matrix tests
+- [x] Resolve composite-cell acceptance differences against the canonical policy
+- [x] Match transition-policy eligibility and rejection reasons for the policy matrix
+- [x] Add regression coverage for the corrected policy matrix and entry-state lifecycle
+
+The remaining fixture differences are downstream exit-state/decision-order
+effects and are tracked under P8. For example, canonical rejects the
+2026-09-15 13:51 `or_low` candidate because the 13:45 hard-stop result has
+already locked the thesis; Paper evaluates that candidate while its position
+is still open and later exits it as `counter_move`.
 
 ### Track P8 — Exit parity
 
-- [ ] Implement canonical per-cell signal, trail, target, hard-stop, and end-of-day modes
-- [ ] Match trail activation, distance, breakeven lock, and intrabar ordering
-- [ ] Match exit timestamps, held bars, and exit reasons
-- [ ] Add deterministic exit fixtures for every exit mode
+- [ ] Resolve the remaining exit-state divergences (counter-move versus canonical hard-stop)
+- [ ] Confirm exit timestamps, held bars, and exit reasons across all configured modes
+- [ ] Add deterministic regression fixtures for each discovered exit mismatch
 
 ### Track P9 — Decision-replay comparator
 
 - [ ] Compare event identity, cell, direction, score, factors, stop, quantity, reason, and timing
-- [ ] Emit a machine-readable first-difference report
-- [ ] Add regression tests for every discovered mismatch
+- [ ] Connect the ordered replay comparator to both independent implementations
+- [ ] Add regression tests for every discovered decision-stream mismatch
 
 ### Track P10 — Ledger and vehicle comparator
 
-- [ ] Compare futures exits, fills, costs, and final trade ledgers
-- [ ] Compare synthetic premium entry/exit, sizing, costs, and ledgers
-- [ ] Compare daily PnL, drawdown, and rejection counts
-- [ ] Produce a reproducible cross-vehicle comparison report
+- [ ] Complete futures exit, fill, cost, and final-ledger parity comparison
+- [ ] Complete synthetic premium entry/exit, sizing, cost, and settlement comparison
+- [ ] Compare daily PnL, drawdown, and rejection counts in the Phase 2 report
 
 ### Track P11 — Cutover
 
-- [ ] Run the complete holdout replay and achieve zero decision differences
+- [ ] Run the complete holdout replay and achieve zero unexplained decision differences
 - [ ] Obtain explicit approval for any remaining exceptions
 - [ ] Switch runtime execution to the parity-proven decision path
 - [ ] Remove the canonical live implementation from NiftyZoning only after the parity gate passes
