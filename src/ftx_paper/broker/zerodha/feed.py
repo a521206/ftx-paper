@@ -46,27 +46,38 @@ def create_kite_socket(api_key: str, access_token: str) -> TickerSocket:
             self._connected = False
             self._ticker = None
             self._ready = Event()
+            self._last_activity = 0.0
+            self._close_notified = False
 
         def connect(self, on_message, on_close):
             self._connected = False
             self._ready.clear()
+            self._close_notified = False
             # The wrapper owns reconnects. Running KiteTicker's reconnect loop
             # as well would create duplicate connection attempts during 429s.
-            ticker = KiteTicker(api_key, access_token, reconnect=False)
-            self._ticker = ticker
-            ticker.on_ticks = lambda _ws, payload: [on_message(item) for item in payload]
-
             def handle_close(*args):
                 if self._ticker is not ticker:
                     return
+                if self._close_notified:
+                    return
+                self._close_notified = True
                 code = args[1] if len(args) > 1 else None
                 reason = args[2] if len(args) > 2 else ""
                 on_close(code, reason)
 
+            # Keep the wrapper's timeout aligned with the feed's readiness
+            # contract. The outer feed owns reconnects.
+            ticker = KiteTicker(api_key, access_token, reconnect=False, connect_timeout=10)
+            self._ticker = ticker
+            ticker.on_message = lambda _ws, _payload, _is_binary: self._mark_activity()
+            ticker.on_ticks = lambda _ws, payload: [on_message(item) for item in payload]
             ticker.on_close = handle_close
             ticker.on_error = handle_close
             ticker.on_connect = lambda *_args: self._on_connect()
             ticker.connect(threaded=True)
+
+        def _mark_activity(self):
+            self._last_activity = monotonic()
 
         def subscribe(self, tokens):
             self._tokens = [int(token) for token in tokens]
@@ -75,6 +86,7 @@ def create_kite_socket(api_key: str, access_token: str) -> TickerSocket:
 
         def _on_connect(self):
             self._connected = True
+            self._mark_activity()
             self._ready.set()
             self._send_subscription()
 
@@ -97,6 +109,12 @@ def create_kite_socket(api_key: str, access_token: str) -> TickerSocket:
         @property
         def is_connected(self) -> bool:
             return self._connected
+
+        @property
+        def activity_age_seconds(self) -> float | None:
+            if not self._last_activity:
+                return None
+            return max(0.0, monotonic() - self._last_activity)
 
     return Socket()
 
@@ -129,14 +147,19 @@ class ZerodhaFeed:
         self._current: dict[str, MarketBar] = {}
         self._health: dict[str, dict[str, Any]] = {}
         self._watchdog_stop = Event()
+        self._stop_event = Event()
+        self._reconnect_requested = Event()
         self._watchdog: Thread | None = None
-        self._next_watchdog_reconnect = 0.0
+        self._reconnect_worker: Thread | None = None
         self._started_at = 0.0
         self._connected = False
         self._last_error: str | None = None
         self._rate_limited_until: float | None = None
         self._reconnect_lock = RLock()
         self._reconnecting = False
+        self._connection_generation = 0
+        self._close_handled_generation: int | None = None
+        self._failed = False
         self._health = {
             key: {"symbol": symbol, "exchange": exchange, "tick_count": 0, "bar_count": 0}
             for key, (exchange, symbol) in (expected_instruments or {}).items()
@@ -147,26 +170,44 @@ class ZerodhaFeed:
         self._attempts = 0
         self._last_error = None
         self._rate_limited_until = None
+        self._failed = False
         self._started_at = self.clock()
-        self._connect()
+        self._stop_event.clear()
         self._watchdog_stop.clear()
+        self._reconnect_requested.clear()
+        self._reconnect_worker = Thread(
+            target=self._reconnect_loop, daemon=True, name="ftx-paper-feed-reconnector"
+        )
+        self._reconnect_worker.start()
+        self._connect()
         self._watchdog = Thread(target=self._watchdog_loop, daemon=True, name="ftx-paper-feed-watchdog")
         self._watchdog.start()
 
     def stop(self) -> None:
         self._running = False
+        self._stop_event.set()
         self._watchdog_stop.set()
+        self._reconnect_requested.set()
         self._connected = False
         self.socket.close()
         if self._watchdog and self._watchdog is not current_thread():
             self._watchdog.join(timeout=1)
+        if self._reconnect_worker and self._reconnect_worker is not current_thread():
+            self._reconnect_worker.join(timeout=1)
 
     def _connect(self) -> None:
-        self.socket.connect(self._on_message, self._on_close)
+        self._connection_generation += 1
+        generation = self._connection_generation
+        self._close_handled_generation = None
+
+        def on_close(code: int | None = None, reason: str = "") -> None:
+            self._on_close(code, reason, generation=generation)
+
+        self.socket.connect(self._on_message, on_close)
         self.socket.subscribe(self.tokens)
         wait_until_connected = getattr(self.socket, "wait_until_connected", None)
         if callable(wait_until_connected):
-            self._connected = bool(wait_until_connected(15.0))
+            self._connected = bool(wait_until_connected(12.0))
         else:
             self._connected = True
 
@@ -223,10 +264,16 @@ class ZerodhaFeed:
             instruments[key] = snapshot
         socket_connected = getattr(self.socket, "is_connected", None)
         connected = bool(socket_connected) if socket_connected is not None else self._connected
+        activity_age = getattr(self.socket, "activity_age_seconds", None)
+        transport_stale = bool(
+            connected and activity_age is not None and activity_age > self.stale_after_seconds
+        )
         return {
             "connected": connected,
+            "state": "FAILED" if self._failed else ("CONNECTED" if connected else "DISCONNECTED"),
             "reconnect_attempts": self._attempts,
             "last_error": self._last_error,
+            "transport_stale": transport_stale,
             "rate_limited": self._rate_limited_until is not None and now < self._rate_limited_until,
             "rate_limited_until_monotonic": self._rate_limited_until,
             "stale_instruments": stale,
@@ -242,7 +289,19 @@ class ZerodhaFeed:
             snapshot = self.health_snapshot()
             if self.on_health:
                 self.on_health(snapshot)
-            if snapshot["stale_instruments"] and self._running and self.clock() >= self._next_watchdog_reconnect:
+            if self._should_reconnect(snapshot) and self._running:
+                self._reconnect_requested.set()
+
+    @staticmethod
+    def _should_reconnect(snapshot: Mapping[str, Any]) -> bool:
+        """Reconnect for transport failure, never merely for a quiet symbol."""
+        return not bool(snapshot.get("connected")) or bool(snapshot.get("transport_stale"))
+
+    def _reconnect_loop(self) -> None:
+        while self._running:
+            self._reconnect_requested.wait()
+            self._reconnect_requested.clear()
+            if self._running:
                 self._reconnect()
 
     def _reconnect(self) -> None:
@@ -255,40 +314,52 @@ class ZerodhaFeed:
                 self._current.clear()
                 self._attempts += 1
                 if self._attempts > self.policy.max_attempts:
+                    self._failed = True
+                    self._connected = False
                     return
                 self._connected = False
-                self._next_watchdog_reconnect = self.clock() + self.policy.max_delay_seconds
-                self.pause(self.policy.delay(self._attempts))
+                delay = self.policy.delay(self._attempts)
+                if self._rate_limited_until is not None:
+                    delay = max(delay, self._rate_limited_until - self.clock())
+                if self.pause is sleep:
+                    if self._stop_event.wait(delay):
+                        return
+                else:
+                    self.pause(delay)
+                if not self._running:
+                    return
                 self.socket.close()
                 self._connect()
             finally:
                 self._reconnecting = False
 
-    def _on_close(self, code: int | None = None, reason: str = "") -> None:
+    def _on_close(self, code: int | None = None, reason: str = "", *, generation: int | None = None) -> None:
         with self._reconnect_lock:
-            if not self._running or self._reconnecting or self._attempts >= self.policy.max_attempts:
+            if generation is not None and generation != self._connection_generation:
+                return
+            if generation is not None and generation == self._close_handled_generation:
+                return
+            self._close_handled_generation = generation
+            if not self._running or self._attempts >= self.policy.max_attempts:
                 self._connected = False
+                if self._attempts >= self.policy.max_attempts:
+                    self._failed = True
                 self._last_error = f"{code}: {reason}" if code is not None else reason or None
                 self._emit_health()
                 return
-            self._reconnecting = True
-            try:
+            if self._reconnecting:
                 self._connected = False
-                self._attempts += 1
-                self._current.clear()
-                error_text = f"{code}: {reason}" if code is not None else reason
-                self._last_error = error_text or None
-                rate_limited = (
-                    "429" in error_text
-                    or "too many requests" in error_text.lower()
-                    or "toomanyrequests" in error_text.lower()
-                )
-                delay = self.policy.delay(self._attempts)
-                if rate_limited:
-                    delay = max(delay, self.policy.rate_limit_delay_seconds)
-                    self._rate_limited_until = self.clock() + delay
-                self.pause(delay)
-                self._connect()
-            finally:
-                self._reconnecting = False
+                self._last_error = f"{code}: {reason}" if code is not None else reason or None
+                self._reconnect_requested.set()
+                return
+            self._connected = False
+            self._last_error = f"{code}: {reason}" if code is not None else reason or None
+            error_text = f"{code}: {reason}" if code is not None else reason
+            if (
+                "429" in error_text
+                or "too many requests" in error_text.lower()
+                or "toomanyrequests" in error_text.lower()
+            ):
+                self._rate_limited_until = self.clock() + self.policy.rate_limit_delay_seconds
+            self._reconnect_requested.set()
         self._emit_health()

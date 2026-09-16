@@ -1,6 +1,7 @@
 from pathlib import Path
 import sqlite3
 from datetime import date, datetime, timezone
+from threading import Event
 
 import pytest
 
@@ -419,6 +420,88 @@ def test_zerodha_feed_tracks_per_instrument_health() -> None:
     assert health["instruments"]["NSE:NIFTY"]["last_closed_bar_at"].startswith("2026-01-01T10:00")
 
 
+def test_zerodha_feed_does_not_reconnect_for_quiet_instrument() -> None:
+    class Socket:
+        is_connected = True
+
+        def __init__(self): self.connections = 0
+
+        def connect(self, on_message, on_close):
+            self.connections += 1
+            self.on_message = on_message
+        def subscribe(self, tokens): pass
+        def close(self): pass
+
+    now = [0.0]
+    observed = Event()
+    socket = Socket()
+    feed = ZerodhaFeed(
+        socket, [1], lambda payload: payload, lambda bar: None,
+        stale_after_seconds=30, watchdog_interval_seconds=0.01, clock=lambda: now[0],
+        expected_instruments={"NSE:NIFTY": ("NSE", "NIFTY")},
+        on_health=lambda _health: observed.set(),
+    )
+    feed.start()
+    now[0] = 31.0
+    assert observed.wait(1)
+    snapshot = feed.health_snapshot()
+    feed.stop()
+
+    assert snapshot["stale_instruments"] == ["NSE:NIFTY"]
+    assert socket.connections == 1
+
+
+def test_zerodha_feed_coalesces_error_and_close_for_one_connection() -> None:
+    class Socket:
+        def __init__(self):
+            self.connections = 0
+
+        def connect(self, on_message, on_close):
+            self.connections += 1
+            self.close_callback = on_close
+
+        def subscribe(self, tokens): pass
+        def close(self): pass
+
+    socket = Socket()
+    reconnect_started = Event()
+    feed = ZerodhaFeed(
+        socket, [1], lambda payload: payload, lambda bar: None,
+        ReconnectPolicy(2, 1, 2), lambda delay: reconnect_started.set(),
+    )
+    feed.start()
+    first_close = socket.close_callback
+    first_close(1006, "handshake timeout")
+    first_close(1006, "handshake timeout")
+    assert reconnect_started.wait(1)
+
+    assert socket.connections == 2
+    feed.stop()
+
+
+def test_zerodha_feed_stop_cancels_default_reconnect_backoff() -> None:
+    class Socket:
+        def __init__(self):
+            self.connections = 0
+
+        def connect(self, on_message, on_close):
+            self.connections += 1
+            self.close_callback = on_close
+
+        def subscribe(self, tokens): pass
+        def close(self): pass
+
+    socket = Socket()
+    feed = ZerodhaFeed(socket, [1], lambda payload: payload, lambda bar: None, ReconnectPolicy(2, 60, 60))
+    feed.start()
+    socket.close_callback(1006, "handshake timeout")
+    feed.stop()
+
+    assert socket.connections == 1
+    assert feed._reconnect_worker is not None
+    assert not feed._reconnect_worker.is_alive()
+
+
 def test_api_requires_bearer_token_except_health(tmp_path: Path) -> None:
     app = create_app(RuntimeStore(tmp_path), auth_token="secret")
     client = app.test_client()
@@ -475,12 +558,17 @@ def test_zerodha_feed_reconnects_with_bounded_backoff() -> None:
     socket = Socket()
     bars = []
     bar = MarketBar(Instrument("NIFTY", "NSE", "INDEX"), datetime(2026, 1, 1, 10), 1, 1, 1, 1)
-    feed = ZerodhaFeed(socket, [1], lambda _: bar, bars.append, ReconnectPolicy(2, 1, 2), lambda delay: None)
+    reconnects = Event()
+    feed = ZerodhaFeed(socket, [1], lambda _: bar, bars.append, ReconnectPolicy(2, 1, 2), lambda delay: reconnects.set())
     feed.start()
     socket.close_callback()
+    assert reconnects.wait(1)
     assert socket.connections == 2
+    reconnects.clear()
     socket.close_callback()
+    assert reconnects.wait(1)
     assert socket.connections == 3
+    feed.stop()
 
 
 def test_zerodha_feed_uses_long_cooldown_for_rate_limited_close() -> None:
@@ -500,21 +588,31 @@ def test_zerodha_feed_uses_long_cooldown_for_rate_limited_close() -> None:
 
     socket = Socket()
     pauses = []
+    reconnects = Event()
+
+    def pause(delay):
+        pauses.append(delay)
+        reconnects.set()
+
     feed = ZerodhaFeed(
         socket,
         [1],
         lambda payload: payload,
         lambda bar: None,
         ReconnectPolicy(2, 1, 2, 10),
-        pauses.append,
+        pause,
     )
     feed.start()
     socket.close_callback(1006, "WebSocket connection upgrade failed (429 - TooManyRequests)")
+    assert reconnects.wait(1)
 
-    assert pauses == [10]
+    assert pauses == [pytest.approx(10, rel=1e-4)]
     assert socket.connections == 2
+    reconnects.clear()
     socket.close_callback()
+    assert reconnects.wait(1)
     assert socket.connections == 3
+    feed.stop()
 
 
 def test_zerodha_order_submission_returns_live_ack() -> None:
