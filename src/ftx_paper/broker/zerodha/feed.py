@@ -122,7 +122,7 @@ def create_kite_socket(api_key: str, access_token: str) -> TickerSocket:
 @dataclass(frozen=True, slots=True)
 class ReconnectPolicy:
     max_attempts: int = 5
-    initial_delay_seconds: float = 2.0
+    initial_delay_seconds: float = 5.0
     max_delay_seconds: float = 60.0
     rate_limit_delay_seconds: float = 60.0
 
@@ -316,6 +316,7 @@ class ZerodhaFeed:
                 if self._attempts > self.policy.max_attempts:
                     self._failed = True
                     self._connected = False
+                    self.socket.close()
                     return
                 self._connected = False
                 delay = self.policy.delay(self._attempts)
