@@ -104,7 +104,7 @@ class RuntimeSession:
                 return
             # Claim this before launching the worker. This closes the race where
             # two processes both observe a stale STARTING/RUNNING status and
-            # create KiteTicker connections concurrently.
+            # create live WebSocket connections concurrently.
             if self._feed_lease_id is None:
                 self._feed_lease_id = self.store.acquire_process_lease(self.LIVE_FEED_LEASE)
             self._stopping = False
@@ -777,20 +777,35 @@ class RuntimeSession:
     def stop(self) -> None:
         with self._lock:
             startup = self._thread
+            feed = self.feed
+            broker = self.broker
             self._stopping = True
             self.store.patch_status({"state": "STOPPING", "feed_connected": False})
-            if self.feed:
-                self.feed.stop()
-            if self.broker:
-                self.broker.close()
-            self._release_feed_lease()
-            self.store.patch_status({"state": "STOPPED", "bars_seen": self.engine.bars_seen,
-                                     "pending_bundle_minutes": [], "pending_bundle_details": []})
+        feed_stopped = True
+        try:
+            if feed:
+                feed_result = feed.stop()
+                feed_stopped = feed_result is not False
+        except Exception:
+            feed_stopped = False
+            logger.exception("Runtime feed failed while stopping")
+        finally:
+            try:
+                if broker:
+                    broker.close()
+            except Exception:
+                feed_stopped = False
+                logger.exception("Runtime broker failed while stopping")
+            finally:
+                with self._lock:
+                    self._release_feed_lease()
+                    self.store.patch_status({"state": "STOPPED" if feed_stopped else "ERROR", "bars_seen": self.engine.bars_seen,
+                                             "pending_bundle_minutes": [], "pending_bundle_details": []})
         if startup and startup is not threading.current_thread():
             startup.join()
         with self._lock:
             try:
-                self.store.patch_status({"state": "STOPPED", "bars_seen": self.engine.bars_seen})
+                self.store.patch_status({"state": "STOPPED" if feed_stopped else "ERROR", "bars_seen": self.engine.bars_seen})
             except Exception as exc:
                 logger.exception("Runtime worker failed while stopping")
                 self.store.patch_status({"state": "ERROR", "error": str(exc)})

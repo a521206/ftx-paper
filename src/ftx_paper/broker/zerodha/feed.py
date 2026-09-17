@@ -10,12 +10,13 @@ from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from ftx_paper.contracts import MarketBar
+from ftx_paper.broker.zerodha.socket import ShutdownResult
 
 
 class TickerSocket(Protocol):
     def connect(self, on_message: Callable[[Mapping[str, Any]], None], on_close: Callable[..., None]) -> None: ...
     def subscribe(self, tokens: list[int]) -> None: ...
-    def close(self) -> None: ...
+    def close(self) -> ShutdownResult: ...
 
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -35,89 +36,10 @@ def is_nse_market_open(now: datetime | None = None) -> bool:
 
 
 def create_kite_socket(api_key: str, access_token: str) -> TickerSocket:
-    try:
-        from kiteconnect import KiteTicker
-    except ImportError as exc:
-        raise RuntimeError("Install ftx-paper[zerodha] to use the live feed") from exc
+    """Return the standalone async transport behind the legacy factory name."""
+    from ftx_paper.broker.zerodha.socket import AsyncZerodhaSocket
 
-    class Socket:
-        def __init__(self):
-            self._tokens: list[int] = []
-            self._connected = False
-            self._ticker = None
-            self._ready = Event()
-            self._last_activity = 0.0
-            self._close_notified = False
-
-        def connect(self, on_message, on_close):
-            self._connected = False
-            self._ready.clear()
-            self._close_notified = False
-            # The wrapper owns reconnects. Running KiteTicker's reconnect loop
-            # as well would create duplicate connection attempts during 429s.
-            def handle_close(*args):
-                if self._ticker is not ticker:
-                    return
-                if self._close_notified:
-                    return
-                self._close_notified = True
-                code = args[1] if len(args) > 1 else None
-                reason = args[2] if len(args) > 2 else ""
-                on_close(code, reason)
-
-            # Keep the wrapper's timeout aligned with the feed's readiness
-            # contract. The outer feed owns reconnects.
-            ticker = KiteTicker(api_key, access_token, reconnect=False, connect_timeout=10)
-            self._ticker = ticker
-            ticker.on_message = lambda _ws, _payload, _is_binary: self._mark_activity()
-            ticker.on_ticks = lambda _ws, payload: [on_message(item) for item in payload]
-            ticker.on_close = handle_close
-            ticker.on_error = handle_close
-            ticker.on_connect = lambda *_args: self._on_connect()
-            ticker.connect(threaded=True)
-
-        def _mark_activity(self):
-            self._last_activity = monotonic()
-
-        def subscribe(self, tokens):
-            self._tokens = [int(token) for token in tokens]
-            if self._connected:
-                self._send_subscription()
-
-        def _on_connect(self):
-            self._connected = True
-            self._mark_activity()
-            self._ready.set()
-            self._send_subscription()
-
-        def _send_subscription(self):
-            if self._tokens and self._ticker is not None:
-                self._ticker.subscribe(self._tokens)
-                # QUOTE is the established payload contract for the normalizer
-                # and bar builder; keep it explicit across reconnects.
-                self._ticker.set_mode(self._ticker.MODE_QUOTE, self._tokens)
-
-        def close(self):
-            self._connected = False
-            self._ready.clear()
-            if self._ticker is not None:
-                self._ticker.close()
-
-        def wait_until_connected(self, timeout: float = 15.0) -> bool:
-            return self._ready.wait(timeout)
-
-        @property
-        def is_connected(self) -> bool:
-            return self._connected
-
-        @property
-        def activity_age_seconds(self) -> float | None:
-            if not self._last_activity:
-                return None
-            return max(0.0, monotonic() - self._last_activity)
-
-    return Socket()
-
+    return AsyncZerodhaSocket(api_key, access_token)
 
 @dataclass(frozen=True, slots=True)
 class ReconnectPolicy:
@@ -166,6 +88,8 @@ class ZerodhaFeed:
         }
 
     def start(self) -> None:
+        if self._running:
+            return
         self._running = True
         self._attempts = 0
         self._last_error = None
@@ -183,17 +107,22 @@ class ZerodhaFeed:
         self._watchdog = Thread(target=self._watchdog_loop, daemon=True, name="ftx-paper-feed-watchdog")
         self._watchdog.start()
 
-    def stop(self) -> None:
+    def stop(self) -> bool:
         self._running = False
         self._stop_event.set()
         self._watchdog_stop.set()
         self._reconnect_requested.set()
         self._connected = False
-        self.socket.close()
+        shutdown = self.socket.close()
+        shutdown_ok = getattr(shutdown, "stopped", True) is not False
+        if not shutdown_ok:
+            self._failed = True
+            self._last_error = "WebSocket worker did not stop cleanly"
         if self._watchdog and self._watchdog is not current_thread():
             self._watchdog.join(timeout=1)
         if self._reconnect_worker and self._reconnect_worker is not current_thread():
             self._reconnect_worker.join(timeout=1)
+        return shutdown_ok
 
     def _connect(self) -> None:
         self._connection_generation += 1

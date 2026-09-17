@@ -56,6 +56,7 @@ def api_main() -> None:
         instance_id = store.acquire_process_lease("api")
     except ProcessAlreadyRunningError as exc:
         raise SystemExit(str(exc)) from exc
+    session = None
     try:
         try:
             auth = ZerodhaAuth.from_config_path(config.zerodha_config)
@@ -72,7 +73,11 @@ def api_main() -> None:
         )
         create_app(store, zerodha_auth=auth, session=session, capital_profile=capital_profile).run(host=config.host, port=config.port, debug=False, use_reloader=False)
     finally:
-        store.release_process_lease("api", instance_id)
+        try:
+            if session is not None:
+                session.stop()
+        finally:
+            store.release_process_lease("api", instance_id)
 
 
 def ui_main() -> None:
