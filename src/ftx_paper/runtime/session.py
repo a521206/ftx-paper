@@ -5,7 +5,7 @@ import time
 import logging
 from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Callable, NotRequired, TypedDict
+from typing import TYPE_CHECKING, Any, Callable, NotRequired, TypedDict, cast
 from zoneinfo import ZoneInfo
 
 from ftx_paper.broker import Broker, Fill, PaperBroker
@@ -15,6 +15,7 @@ from ftx_paper.contracts import (
     role_to_key,
 )
 from ftx_paper.core import AggregatorConfig, CompletedBarAggregator, InstrumentKey, PaperEngine
+from ftx_paper.core.strategy import Strategy
 from ftx_paper.core.cost import futures_cost
 from ftx_paper.core.settlement import ExitValidationError, validate_exit_order
 from ftx_paper.execution import PaperExecutionCoordinator
@@ -48,6 +49,8 @@ def _bundle_timestamp(session_date: str, minute: str) -> datetime:
 class RuntimeSession:
     """Single in-process owner of live market, execution, and runtime state."""
 
+    LIVE_FEED_LEASE = "zerodha-live-feed"
+
     def __init__(self, store: RuntimeStore, auth: Any, specifications: list[dict[str, object]],
                  *, engine: PaperEngine | None = None,
                  capital_profile: ResearchCapitalProfile = RESEARCH_CAPITAL_PROFILE,
@@ -76,6 +79,7 @@ class RuntimeSession:
         self._started = threading.Event()
         self._aggregator: CompletedBarAggregator | None = None
         self._last_execution_fill: LastExecutionFill | None = None
+        self._feed_lease_id: str | None = None
 
     def _restore_strategy_state(self) -> None:
         """Restore the strategy-owned portfolio and risk state before execution wiring."""
@@ -85,7 +89,7 @@ class RuntimeSession:
         if not callable(restore) or not isinstance(raw_snapshot, Mapping) or self.capital_profile is None:
             return
         restored = restore(raw_snapshot, capital_profile=self.capital_profile)
-        self.engine.strategy = restored
+        self.engine.strategy = cast(Strategy, restored)
 
     def _persist_strategy_state(self) -> None:
         strategy = getattr(self.engine, "strategy", None)
@@ -95,8 +99,14 @@ class RuntimeSession:
 
     def start(self) -> None:
         with self._lock:
-            if self.store.read_status().get("state") in {"STARTING", "RUNNING"}:
+            state = self.store.read_status().get("state")
+            if state in {"STARTING", "RUNNING"} and self._feed_lease_id is not None:
                 return
+            # Claim this before launching the worker. This closes the race where
+            # two processes both observe a stale STARTING/RUNNING status and
+            # create KiteTicker connections concurrently.
+            if self._feed_lease_id is None:
+                self._feed_lease_id = self.store.acquire_process_lease(self.LIVE_FEED_LEASE)
             self._stopping = False
             self._started.clear()
             self.store.patch_status({"state": "STARTING", "error": None, "started_at": datetime.now(timezone.utc).isoformat(),
@@ -163,6 +173,7 @@ class RuntimeSession:
                         "message": "NSE/NFO market closed; historical backfill completed",
                     },
                 })
+                self._release_feed_lease()
                 self._started.set()
                 return
             normalize = self.normalize_payload or self._make_normalizer(resolved)
@@ -182,6 +193,7 @@ class RuntimeSession:
                 if self._stopping:
                     self.feed.stop()
                     self.broker.close()
+                    self._release_feed_lease()
                     return
                 self.feed.start()
                 self.store.patch_status({"state": "RUNNING", "phase": "LIVE", "execution_enabled": True,
@@ -193,7 +205,15 @@ class RuntimeSession:
                 self.broker.close()
             logger.exception("Runtime worker failed during startup")
             self.store.patch_status({"state": "ERROR", "error": str(exc)})
+            self._release_feed_lease()
             self._started.set()
+
+    def _release_feed_lease(self) -> None:
+        lease_id = self._feed_lease_id
+        if lease_id is None:
+            return
+        self._feed_lease_id = None
+        self.store.release_process_lease(self.LIVE_FEED_LEASE, lease_id)
 
     @staticmethod
     def _make_normalizer(resolved: list[ZerodhaInstrument]):
@@ -573,12 +593,16 @@ class RuntimeSession:
                                               "fill_timestamp": fill.timestamp,
                                               **({"cost_rs": entry_cost} if entry_cost is not None else {}),
                                               "outcome": "filled",
-                                              **({"position": {
-                                                  "symbol": position.symbol,
-                                                  "vehicle": position.vehicle,
-                                                  "quantity": position.quantity,
-                                                  "average_price": position.average_price,
-                                              }} if position else {})}, f"fill:{fill.client_order_id}", timestamp=timestamp)
+                                               **((
+                                                   {"position": {
+                                                       "symbol": position.instrument,
+                                                       "vehicle": position.vehicle,
+                                                       "quantity": position.quantity,
+                                                       "average_price": position.entry_price,
+                                                   }}
+                                                   if order.role is OrderRole.ENTRY and position is not None
+                                                   else {}
+                                               ))}, f"fill:{fill.client_order_id}", timestamp=timestamp)
         else:
             self.store.append_event("ORDER_UNFILLED", {**context,
                                                         "broker_order_id": ack.broker_order_id,
@@ -759,6 +783,7 @@ class RuntimeSession:
                 self.feed.stop()
             if self.broker:
                 self.broker.close()
+            self._release_feed_lease()
             self.store.patch_status({"state": "STOPPED", "bars_seen": self.engine.bars_seen,
                                      "pending_bundle_minutes": [], "pending_bundle_details": []})
         if startup and startup is not threading.current_thread():

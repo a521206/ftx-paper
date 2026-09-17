@@ -5,7 +5,7 @@ from datetime import datetime
 from flask import Flask, jsonify, request
 from typing import Any
 
-from ftx_paper.runtime import RuntimeController, RuntimeSession, RuntimeStore
+from ftx_paper.runtime import ProcessAlreadyRunningError, RuntimeController, RuntimeSession, RuntimeStore
 from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.capital_config import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
 from ftx_paper.runtime.events import (
@@ -176,7 +176,10 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             return jsonify({"error": {"code": "unknown_command", "message": command}}), 404
         if command in {"start", "restart"} and zerodha_auth is not None and zerodha_auth.access_token() is None:
             return jsonify({"error": {"code": "auth_required", "message": "Connect Zerodha before starting the runtime session", "login_url": zerodha_auth.login_url()}}), 409
-        action()
+        try:
+            action()
+        except ProcessAlreadyRunningError as exc:
+            return jsonify(error_payload("runtime_already_running", str(exc))), 409
         return jsonify(store.read_status()), 202
 
     @app.get("/api/v1/events")

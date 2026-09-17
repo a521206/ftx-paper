@@ -3,8 +3,10 @@ import sqlite3
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from ftx_paper.contracts import Instrument, MarketBar, OptionType
-from ftx_paper.runtime import RuntimeStore
+from ftx_paper.runtime import ProcessAlreadyRunningError, RuntimeStore
 from ftx_paper.runtime.replay_worker import ReplayWorker
 
 
@@ -42,6 +44,14 @@ def test_runtime_store_replaces_dead_lease(tmp_path):
             "SELECT pid, instance_id FROM process_leases WHERE service = ?", ("api",)
         ).fetchone()
     assert row == (os.getpid(), instance_id)
+
+
+def test_runtime_store_rejects_second_live_process_lease(tmp_path):
+    store = RuntimeStore(tmp_path)
+    store.acquire_process_lease("zerodha-live-feed")
+
+    with pytest.raises(ProcessAlreadyRunningError, match="zerodha-live-feed process already running"):
+        store.acquire_process_lease("zerodha-live-feed")
 
 
 def test_runtime_store_release_cannot_remove_newer_lease(tmp_path):
