@@ -38,7 +38,7 @@ canonical reference is:
 - Historical extraction: `src/ftx/signal_extraction.py`
 - Canonical event features: `src/ftx/event_features.py`
 - Canonical live session: `src/ftx/live_session.py`
-- Session policies: `src/ftx/live_strategy_config.py`
+- Session policies: `src/ftx/frozen_research_config.py`
 
 The contract covers candidate detection, eligibility, rejection, acceptance,
 order intent, stop, quantity, and exit decisions. Broker acknowledgements,
@@ -220,7 +220,7 @@ pipeline, including trigger precedence when multiple conditions occur in one
 bar, counter-move and volatility-climax rules, trail activation and
 breakeven-lock behavior, gap versus level fills, trigger versus fill
 timestamps, and the `bars_held` convention. The canonical references are
-`src/ftx/exit_sim.py`, `src/ftx/live_strategy_config.py`, and the canonical
+`src/ftx/exit_sim.py`, `src/ftx/frozen_research_config.py`, and the canonical
 trail implementation. A newly approved mode that is already in this
 vocabulary should require a configuration change and replay validation, not a
 Paper implementation rewrite. A genuinely new algorithm requires an explicit
