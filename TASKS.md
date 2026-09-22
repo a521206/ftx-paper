@@ -52,16 +52,18 @@ downstream execution and settlement fields are complete.
 
 - [x] Implement separate execution, exit, synthetic, and ledger normalization/comparison
 - [x] Compare published futures fill/exit fields and synthetic settlement fields
-- [ ] Resolve remaining Paper-only execution artifacts and unavailable ledger fields
-- [ ] Close futures exit, fill, cost, final-ledger, daily PnL, drawdown, and rejection-counter parity
+- [x] Resolve remaining Paper-only execution artifacts and unavailable ledger fields
+- [x] Close the minimal futures exit, fill, cost, final-ledger, daily PnL, drawdown, and rejection-counter parity contract
+
+Optional raw implementation IDs, broker-style order/fill statuses, synthetic
+quote provenance, equity, and directional exposure remain diagnostic fields;
+they are not required by the minimal P10 gate.
 
 The verified Sep 3 replay used the canonical Sep 2–Sep 3 fixture and the
 consolidated runtime at `data/runtime/ftx-paper`; rejected decisions were not
-emitted. The P10 report currently shows 4 matched rows, 0 modified rows, 0
-canonical-only rows, 0 Paper-only rows, 21 unavailable fields, 0
-synthetic-only differences, and 0 ledger-only differences. The two Paper-only
-rows are synthetic execution records not published by the canonical trade
-artifact; the synthetic settlement comparison matches the available fields.
+emitted. The minimal P10 report currently shows 4 matched rows, 0 modified
+rows, 0 canonical-only rows, 0 Paper-only rows, 0 unavailable fields, 0
+synthetic-only differences, and 0 ledger-only differences.
 
 ### Track P11 — Coexistence validation
 

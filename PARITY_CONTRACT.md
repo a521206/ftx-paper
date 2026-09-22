@@ -1,12 +1,12 @@
 # Canonical FTX Decision Parity Contract
 
 Status: P0 baseline complete for its defined behavioral-contract scope. P9 is
-complete for its intended accepted-decision comparison scope. P10's separate
-execution/settlement comparator is implemented, but the full coexistence-
-symmetry contract remains open because published Paper-only artifacts and
-unavailable ledger fields still require resolution. This contract governs two
-independent implementations that coexist; it does not require replacing or
-removing the canonical implementation.
+complete for its intended accepted-decision comparison scope. The minimal P10
+execution/settlement contract is complete with zero required unavailable or
+divergent fields. Broader optional observability remains diagnostic, and the
+full coexistence-symmetry contract remains open under P11. This contract
+governs two independent implementations that coexist; it does not require
+replacing or removing the canonical implementation.
 
 ## P9 phased verification
 
@@ -62,10 +62,10 @@ for explicit diagnostic runs.
 
 The Sep 3 verification, using Sep 2 prior-day context from the consolidated
 `data/runtime/ftx-paper` runtime, reported 4 matched P10 rows, 0 modified, 0
-canonical-only, 0 Paper-only, 21 unavailable fields, 0 synthetic-only
-differences, and 0 ledger-only differences. The available ledger fields
-matched; canonical still does not publish equity or directional exposure.
-This is implementation evidence, not completion of the P10 parity gate.
+canonical-only, 0 Paper-only, 0 unavailable fields, 0 synthetic-only
+differences, and 0 ledger-only differences. Raw IDs, broker-style statuses,
+quote provenance, equity, and directional exposure remain optional diagnostic
+fields outside this minimal gate.
 
 ## Scope
 
