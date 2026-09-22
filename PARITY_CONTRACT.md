@@ -1,12 +1,12 @@
 # Canonical FTX Decision Parity Contract
 
 Status: P0 baseline complete for its defined behavioral-contract scope. P9 is
-complete for its intended accepted-decision comparison scope. The minimal P10
-execution/settlement contract is complete with zero required unavailable or
-divergent fields. Broader optional observability remains diagnostic, and the
-full coexistence-symmetry contract remains open under P11. This contract
-governs two independent implementations that coexist; it does not require
-replacing or removing the canonical implementation.
+complete for its intended accepted-decision comparison scope. Minimal P10 is
+complete for the Sep 2–Sep 3 fixture with zero required unavailable or
+divergent fields. Broader optional observability and the full holdout
+coexistence-symmetry gate remain open under P11. This contract governs two
+independent implementations that coexist; it does not require replacing or
+removing the canonical implementation.
 
 ## P9 phased verification
 
@@ -41,18 +41,23 @@ P10 is a separate comparison contract and must not change or widen the P9
 decision contract. It compares only locally published execution and settlement
 artifacts; broker integrations and network acknowledgements are out of scope.
 
-The normalized P10 contract covers:
+The minimal normalized P10 contract covers:
 
 - order intent identity and decision/order linkage;
-- vehicle, instrument, side, requested/effective executable quantity, fill
-  quantity, fill price and timestamp, order/fill status, and suppression or
-  execution rejection reason;
-- exit identity/linkage, timestamp, price, exact reason, and bars held;
-- synthetic entry/exit prices, CE/PE symbols and strikes, option premiums,
-  expiry, quote source/timestamps, premium status, and settlement result;
-- gross P&L, execution costs, net P&L, daily realized P&L, equity, drawdown,
-  open margin, reservations, directional exposure, and rejection counters when
-  both sides publish them.
+- vehicle, instrument, side, effective executable quantity, fill quantity, fill
+  price, and fill timestamp;
+- exit identity/linkage, timestamp, price, and exact reason;
+- synthetic settlement fields only: entry/exit prices, CE/PE symbols and
+  strikes, option premiums, expiry, premium status, and settlement result;
+- gross P&L, execution costs, net P&L, daily realized P&L, drawdown, open
+  margin, reservations, and rejection counters when both sides publish them.
+
+Synthetic order/fill records are intentionally out of scope for the P10
+execution stream. Synthetic parity is checked through the settlement artifact.
+Requested quantity, raw implementation IDs, broker-style statuses, quote
+provenance, quote timestamps, equity, directional exposure, and bars held are
+diagnostic or unavailable fields outside the minimal gate unless both sides
+publish a stable comparable value.
 
 Missing published values are reported as `unavailable`; they are never treated
 as zero. Matching uses the shared date/session/vehicle/cell/direction/entry
@@ -61,11 +66,10 @@ replay does not emit rejected decisions; `--emit-rejected-decisions` is only
 for explicit diagnostic runs.
 
 The Sep 3 verification, using Sep 2 prior-day context from the consolidated
-`data/runtime/ftx-paper` runtime, reported 4 matched P10 rows, 0 modified, 0
-canonical-only, 0 Paper-only, 0 unavailable fields, 0 synthetic-only
-differences, and 0 ledger-only differences. Raw IDs, broker-style statuses,
-quote provenance, equity, and directional exposure remain optional diagnostic
-fields outside this minimal gate.
+`data/runtime/ftx-paper` runtime and default rejected-decision suppression,
+reported 4 matched P10 rows, 0 modified, 0 canonical-only, 0 Paper-only, 0
+unavailable fields, 0 synthetic-only differences, and 0 ledger-only
+differences. `--emit-rejected-decisions` is reserved for explicit diagnostics.
 
 ## Scope
 
