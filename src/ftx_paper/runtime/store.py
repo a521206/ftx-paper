@@ -144,6 +144,9 @@ class RuntimeStore:
                     ingested_at TEXT NOT NULL,
                     PRIMARY KEY (symbol, exchange, minute)
                 );
+                CREATE TABLE IF NOT EXISTS market_dates (
+                    date TEXT PRIMARY KEY
+                );
                 CREATE INDEX IF NOT EXISTS ix_runtime_events_event_type
                     ON runtime_events(event_type);
                 CREATE INDEX IF NOT EXISTS ix_runtime_events_decision_id
@@ -277,6 +280,10 @@ class RuntimeStore:
                 """,
                 rows,
             )
+            connection.executemany(
+                "INSERT OR IGNORE INTO market_dates(date) VALUES (?)",
+                ((session_date,) for session_date in {row[2][:10] for row in rows}),
+            )
 
     def read_market_bars(self, session_date: str) -> list[dict[str, Any]]:
         """Read one IST trading session of normalized bars for export."""
@@ -297,9 +304,7 @@ class RuntimeStore:
 
     def read_market_dates(self) -> list[str]:
         with sqlite3.connect(self.database) as connection:
-            rows = connection.execute(
-                "SELECT DISTINCT substr(minute, 1, 10) FROM market_bars ORDER BY 1"
-            ).fetchall()
+            rows = connection.execute("SELECT date FROM market_dates ORDER BY date").fetchall()
         return [str(row[0]) for row in rows]
 
     @staticmethod

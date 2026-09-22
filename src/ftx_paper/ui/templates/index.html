@@ -1832,21 +1832,47 @@
       if (refreshInFlight) return;
       refreshInFlight = true;
       try {
-        const [health, runtime, capital, positions, trades, decisionsData, events, broker, replays, replayDates] =
-          await Promise.all(
-            [
-              '/api/v1/health',
-              '/api/v1/runtime',
-              '/api/v1/capital',
-              '/api/v1/positions',
-              '/api/v1/trades',
-              page === 'decisions' ? `/api/v1/decisions?date=${encodeURIComponent(decisionDate)}` : '/api/v1/decisions',
-              '/api/v1/events?limit=100',
-              '/api/v1/broker/zerodha/status',
-              '/api/v1/replay',
-              '/api/v1/replay/dates',
-            ].map(get)
-          );
+        // Keep the shell status live, but only load the data rendered by the
+        // active page. Some of these endpoints read large event/replay stores;
+        // fetching them for every tab made navigation feel needlessly slow.
+        const requests = {
+          health: '/api/v1/health',
+          runtime: '/api/v1/runtime',
+          broker: '/api/v1/broker/zerodha/status',
+        };
+        const pageRequests = {
+          dashboard: {
+            capital: '/api/v1/capital',
+            positions: '/api/v1/positions',
+            decisions: '/api/v1/decisions',
+          },
+          decisions: {
+            decisions: `/api/v1/decisions?date=${encodeURIComponent(decisionDate)}`,
+          },
+          positions: { positions: '/api/v1/positions' },
+          trades: { trades: '/api/v1/trades' },
+          capital: { capital: '/api/v1/capital' },
+          replay: {
+            replays: '/api/v1/replay',
+            replayDates: '/api/v1/replay/dates',
+          },
+          activity: { events: '/api/v1/events?limit=100' },
+        }[page] || {};
+
+        const responseEntries = await Promise.all(
+          Object.entries({ ...requests, ...pageRequests }).map(async ([key, path]) => [key, await get(path)])
+        );
+        const responseData = Object.fromEntries(responseEntries);
+        const health = responseData.health;
+        const runtime = responseData.runtime;
+        const broker = responseData.broker;
+        const capital = responseData.capital || {};
+        const positions = responseData.positions || { positions: [] };
+        const trades = responseData.trades || { trades: [] };
+        const decisionsData = responseData.decisions || { decisions: [] };
+        const events = responseData.events || { events: [] };
+        const replays = responseData.replays || { runs: [] };
+        const replayDates = responseData.replayDates || { dates: [] };
 
         document.getElementById('health').innerHTML = '<span class="dot good"></span>Healthy';
         render({
