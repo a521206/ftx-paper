@@ -1,8 +1,10 @@
 # Canonical FTX Decision Parity Contract
 
 Status: P0 approved working specification. The current `ftx-paper`
-implementation does not yet satisfy this contract; the open implementation
-work is tracked as P5, P8, P9, P10, and P11 in `TASKS.md`.
+implementation does not yet satisfy the full coexistence-symmetry contract;
+the remaining work is tracked in `TASKS.md`. This contract governs two
+independent implementations that coexist; it does not require replacing or
+removing the canonical implementation.
 
 ## P9 phased verification
 
@@ -16,17 +18,18 @@ P9 verifies this contract in two phases:
    Paper does not persist a reliable linked value.
 2. **Phase 2 — detailed decision replay comparison.** Run both independent
    implementations against the same deterministic input replay and compare
-   the complete ordered decision, execution, exit, and ledger streams.
+   the causal decision stream, with execution and ledger comparisons reported
+   separately where their semantics are intended to be shared.
 
 Phase 2 is required because trade-level agreement alone does not prove causal
-parity. Two implementations can produce similar completed trades while
+symmetry. Two implementations can produce similar completed trades while
 disagreeing about candidates, transition eligibility, rejection reasons,
-sizing gates, event ordering, or state mutations. Phase 2 is the final
-decision-parity gate before runtime cutover.
+sizing gates, event ordering, or state mutations. Phase 2 is the decision-
+symmetry gate for coexistence, not a runtime-cutover gate.
 
 Phase 1 is not a claim that this full contract has passed. The complete
-decision-parity and production-cutover gate remains Phase 2. The detailed
-scope, reports, and completion criteria are defined in
+decision-symmetry gate remains Phase 2. The detailed scope, reports, and
+completion criteria are defined in
 `P9_DECISION_REPLAY_COMPARATOR.md`.
 
 ## Scope
@@ -408,21 +411,23 @@ implementations remain duplicated and isolated by design. A strategy/config
 version and configuration hash must be recorded so that a paper run can be
 traced to the canonical policy it was aligned against.
 
-## Acceptance gate
+## Coexistence symmetry gate
 
 P0 is complete when this contract is approved as the working specification.
-The implementation cutover gate is stricter:
+The coexistence symmetry gate is satisfied when:
 
 1. Run both implementations against the same deterministic fixture set.
 2. Run both implementations against the same holdout replay.
-3. Compare the complete ordered decision stream field-by-field, including gate
+3. Compare the causal ordered decision stream field-by-field, including gate
    ordering and intermediate sizing fields.
-4. Compare futures exits, reservations, fills, costs, and ledgers separately
-   from synthetic settlement.
+4. Compare execution, exits, reservations, fills, costs, and ledgers in
+   separate streams where the two implementations intentionally share those
+   semantics.
 5. Confirm synthetic processing does not change futures decisions or state.
-6. Require zero unexplained differences.
-7. Record any intentional exception with the exact field, reason, expected
-   value on each side, and explicit approval before cutover.
+6. Require zero unexplained differences in required shared fields.
+7. Record every intentional implementation difference with the exact field,
+   reason, expected value on each side, and explicit approval.
 
-No production switch or removal of the canonical implementation is allowed
-until the acceptance gate passes.
+Passing this gate establishes documented symmetry while both implementations
+remain available. It does not authorize a production switch, code removal,
+or replacement of the canonical implementation.

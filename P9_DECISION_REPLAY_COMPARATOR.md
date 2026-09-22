@@ -10,11 +10,14 @@ P9 is intentionally delivered in two phases:
    and fill events. The current `scripts/ftx/compare_pipeline_to_paper.py`
    implementation is the Phase 1 comparator.
 2. **Phase 2 — detailed decision replay comparison.** Run both implementations
-   against the same deterministic market-input replay and compare the complete
-   ordered decision, execution, exit, and ledger streams field by field.
+   against the same deterministic market-input replay and compare the causal
+   ordered decision stream field by field. Report execution, exit, and ledger
+   comparisons as separate streams where their semantics are intentionally
+   shared.
 
 Phase 1 is the practical first-pass diagnostic and does not claim complete
-decision parity. Phase 2 is the implementation-cutover gate.
+decision symmetry. Phase 2 is the coexistence-symmetry gate; it does not
+authorize replacing or removing the canonical implementation.
 
 ## Simplified objective
 
@@ -67,11 +70,12 @@ pipeline. It must:
    holdout replay.
 2. Normalize candidate, warmup, rejection, sizing-rejection, acceptance,
    order, fill, exit, and close events into a versioned comparison schema.
-3. Compare the complete ordered event stream, including event identity,
-   sequence, timestamps, cell, direction, feature values, score factors, stop,
-   quantity, outcome, rejection reason, exit mode, and exit result.
-4. Compare futures and synthetic vehicles separately, then compare ledgers,
-   costs, daily P&L, and drawdown as a downstream economic reconciliation.
+3. Compare the complete causal ordered decision stream, including event
+   identity, sequence, timestamps, cell, direction, feature values, score
+   factors, stop, quantity, outcome, and rejection reason.
+4. Compare futures and synthetic vehicles separately. Compare exits, ledgers,
+   costs, daily P&L, and drawdown as downstream reconciliations rather than
+   mixing operational events into the decision stream.
 5. Classify every difference and record intentional exceptions explicitly.
 
 Phase 2 must not silently downgrade missing fields to `unavailable` when the
@@ -96,6 +100,10 @@ data/output/ftx_trades_<vehicle>_<session>.csv
 data/output/ftx_audit/<date-range>_sessions/
 data/output/canonical/<run-id>/manifest.json
 ```
+
+Decision-trace artifacts are opt-in because they can be large. Add
+`--emit-decision-trace` when producing a parity fixture or holdout artifact;
+ordinary research replays keep only the compact trade and ledger artifacts.
 
 The comparator must capture the actual effective date range from the canonical
 run manifest or its generated artifacts. If the requested end date is beyond
@@ -277,10 +285,10 @@ Add tests to the established audit/comparison test file where possible. Cover:
 
 Phase 1 owns canonical-run trade eligibility and entry-execution comparison.
 It does not rerun Paper strategy logic, compare the complete decision stream, or
-claim portfolio-level parity. Phase 2 owns detailed decision replay, exits, and
-ledger/economic reconciliation. P10 may consume the Phase 1 matched-trade
-report for ledger, cost, daily P&L, drawdown, and cross-vehicle analysis, but
-Phase 2 remains the production cutover gate.
+claim portfolio-level symmetry. Phase 2 owns detailed causal decision replay;
+P10 owns the separate exits, ledger, and economic reconciliation. P10 may
+consume the Phase 1 matched-trade report for ledger, cost, daily P&L, drawdown,
+and cross-vehicle analysis. Neither track is a production replacement gate.
 
 ## Completion gates
 
@@ -297,10 +305,12 @@ The Phase 1 report must include the canonical run ID, requested and effective
 date ranges, sessions, vehicles, source paths, trade counts, and deterministic
 JSON/CSV detail files.
 
-### Phase 2 completion gate
+### Phase 2 coexistence-symmetry gate
 
-Mark Phase 2 complete only when both implementations have been run against the
-same deterministic fixture set and holdout replay, and the report shows zero
-unexplained differences in the required decision, exit, and ledger fields.
+Mark Phase 2 complete when both implementations have been run against the same
+deterministic fixture set and holdout replay, and the report shows zero
+unexplained differences in required shared decision fields. Execution, exit,
+and ledger fields are completed in their separate reconciliation reports.
 Every intentional exception must include the exact field, reason, expected
-value on each side, and explicit approval before cutover.
+value on each side, and explicit approval. Completion records coexistence
+symmetry; it does not trigger a runtime switch or canonical-code removal.
