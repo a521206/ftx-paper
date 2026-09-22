@@ -239,28 +239,29 @@ class ZerodhaFeed:
             if self._reconnecting or not self._running:
                 return
             self._reconnecting = True
-            try:
-                self._current.clear()
-                self._attempts += 1
-                if self._attempts > self.policy.max_attempts:
-                    self._failed = True
-                    self._connected = False
-                    self.socket.close()
-                    return
+        try:
+            self._current.clear()
+            self._attempts += 1
+            if self._attempts > self.policy.max_attempts:
+                self._failed = True
                 self._connected = False
-                delay = self.policy.delay(self._attempts)
-                if self._rate_limited_until is not None:
-                    delay = max(delay, self._rate_limited_until - self.clock())
-                if self.pause is sleep:
-                    if self._stop_event.wait(delay):
-                        return
-                else:
-                    self.pause(delay)
-                if not self._running:
-                    return
                 self.socket.close()
-                self._connect()
-            finally:
+                return
+            self._connected = False
+            delay = self.policy.delay(self._attempts)
+            if self._rate_limited_until is not None:
+                delay = max(delay, self._rate_limited_until - self.clock())
+            if self.pause is sleep:
+                if self._stop_event.wait(delay):
+                    return
+            else:
+                self.pause(delay)
+            if not self._running:
+                return
+            self.socket.close()
+            self._connect()
+        finally:
+            with self._reconnect_lock:
                 self._reconnecting = False
 
     def _on_close(self, code: int | None = None, reason: str = "", *, generation: int | None = None) -> None:
