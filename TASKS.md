@@ -1,13 +1,15 @@
 # FTX Paper Task List
 
-Open parity and coexistence-symmetry work is tracked below. Completed foundation,
-feature, location, score, sizing, and risk-gate work is intentionally omitted.
+Open parity and coexistence-symmetry work is tracked below. P0's behavioral
+baseline is complete for its defined scope; documented P0 differences are
+later-phase work. Completed foundation, feature, location, score, sizing, and
+risk-gate work is intentionally omitted.
 
 ## Bit-for-bit canonical FTX parity
 
 ### Track P9 — Decision-replay comparator
 
-- [ ] Compare event identity, cell, direction, score, factors, stop, quantity, reason, and timing
+- [x] Compare event identity, cell, direction, score, factors, stop, quantity, reason, and timing
 
 The comparator reads the requested range from the canonical decision-artifact
 manifest (rather than widening or narrowing it to the trade audit's range) and
@@ -42,16 +44,27 @@ session cells with their direction, exit mode, hypothesis, and stability.
 Paper remains an independent implementation. The saved comparison predates
 this alignment and remains historical evidence only; regenerate an isolated
 Paper replay over dates shared with canonical before claiming ordered parity.
-Stop distance is also unavailable in the canonical decision-trace row.
+Stop distance is also unavailable in the canonical decision-trace row. P9 is
+complete for its intended accepted-decision scope; it is not a claim that all
+downstream execution and settlement fields are complete.
 
 ### Track P10 — Ledger and vehicle comparator
 
-- [ ] Complete futures exit, fill, cost, and final-ledger parity comparison
-- [ ] Complete synthetic premium entry/exit, sizing, cost, and settlement comparison
-- [ ] Compare daily PnL, drawdown, and rejection counts in the Phase 2 report
+- [x] Implement separate execution, exit, synthetic, and ledger normalization/comparison
+- [x] Compare published futures fill/exit fields and synthetic settlement fields
+- [ ] Resolve remaining Paper-only execution artifacts and unavailable ledger fields
+- [ ] Close futures exit, fill, cost, final-ledger, daily PnL, drawdown, and rejection-counter parity
+
+The verified Sep 3 replay used the canonical Sep 2–Sep 3 fixture and the
+consolidated runtime at `data/runtime/ftx-paper`; rejected decisions were not
+emitted. The P10 report currently shows 3 matched rows, 0 modified rows, 0
+canonical-only rows, 2 Paper-only rows, 20 unavailable fields, 0
+synthetic-only differences, and 0 ledger-only differences. The two Paper-only
+rows are synthetic execution records not published by the canonical trade
+artifact; the synthetic settlement comparison matches the available fields.
 
 ### Track P11 — Coexistence validation
 
-- [ ] Run the complete holdout replay and achieve zero unexplained differences in required shared decision fields
+- [ ] Run the complete holdout replay and achieve zero unexplained differences in required shared execution/settlement fields
 - [ ] Obtain explicit approval for any remaining intentional differences
 - [ ] Record the coexistence-symmetry result, configuration hashes, fixtures, and holdout artifacts

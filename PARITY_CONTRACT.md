@@ -1,8 +1,10 @@
 # Canonical FTX Decision Parity Contract
 
-Status: P0 approved working specification. The current `ftx-paper`
-implementation does not yet satisfy the full coexistence-symmetry contract;
-the remaining work is tracked in `TASKS.md`. This contract governs two
+Status: P0 baseline complete for its defined behavioral-contract scope. P9 is
+complete for its intended accepted-decision comparison scope. P10's separate
+execution/settlement comparator is implemented, but the full coexistence-
+symmetry contract remains open because published Paper-only artifacts and
+unavailable ledger fields still require resolution. This contract governs two
 independent implementations that coexist; it does not require replacing or
 removing the canonical implementation.
 
@@ -27,10 +29,42 @@ disagreeing about candidates, transition eligibility, rejection reasons,
 sizing gates, event ordering, or state mutations. Phase 2 is the decision-
 symmetry gate for coexistence, not a runtime-cutover gate.
 
-Phase 1 is not a claim that this full contract has passed. The complete
-decision-symmetry gate remains Phase 2. The detailed scope, reports, and
-completion criteria are defined in
+Phase 1 is not a claim that this full contract has passed. P9's accepted
+decision scope is complete, while downstream execution and settlement remain
+P10 work. The complete coexistence-symmetry gate remains Phase 2. The detailed
+scope, reports, and completion criteria are defined in
 `P9_DECISION_REPLAY_COMPARATOR.md`.
+
+## P10 execution and settlement parity
+
+P10 is a separate comparison contract and must not change or widen the P9
+decision contract. It compares only locally published execution and settlement
+artifacts; broker integrations and network acknowledgements are out of scope.
+
+The normalized P10 contract covers:
+
+- order intent identity and decision/order linkage;
+- vehicle, instrument, side, requested/effective executable quantity, fill
+  quantity, fill price and timestamp, order/fill status, and suppression or
+  execution rejection reason;
+- exit identity/linkage, timestamp, price, exact reason, and bars held;
+- synthetic entry/exit prices, CE/PE symbols and strikes, option premiums,
+  expiry, quote source/timestamps, premium status, and settlement result;
+- gross P&L, execution costs, net P&L, daily realized P&L, equity, drawdown,
+  open margin, reservations, directional exposure, and rejection counters when
+  both sides publish them.
+
+Missing published values are reported as `unavailable`; they are never treated
+as zero. Matching uses the shared date/session/vehicle/cell/direction/entry
+identity while retaining raw implementation IDs for diagnostics. Normal Paper
+replay does not emit rejected decisions; `--emit-rejected-decisions` is only
+for explicit diagnostic runs.
+
+The Sep 3 verification, using Sep 2 prior-day context from the consolidated
+`data/runtime/ftx-paper` runtime, reported 3 matched P10 rows, 0 modified, 0
+canonical-only, 2 Paper-only, 20 unavailable fields, 0 synthetic-only
+differences, and 0 ledger-only differences. This is implementation evidence,
+not completion of the P10 parity gate.
 
 ## Scope
 
