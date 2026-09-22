@@ -36,6 +36,21 @@ def test_runtime_store_clears_replay_runs_for_requested_date(tmp_path):
     assert [run["run_id"] for run in store.read_replay_runs()] == ["old-jan-6"]
 
 
+def test_runtime_store_replay_summaries_omit_event_payloads(tmp_path):
+    store = RuntimeStore(tmp_path)
+    store.create_replay_run("summary-run", {"session_date": "2026-01-05"})
+    store.update_replay_run(
+        "summary-run",
+        status="completed",
+        result={"events": [{"event_type": "REJECTEDDECISION", "payload": {"x": "y"}}]},
+    )
+
+    summaries = store.read_replay_run_summaries()
+
+    assert summaries[0]["run_id"] == "summary-run"
+    assert summaries[0]["result"] is None
+
+
 def test_runtime_store_preserves_warmup_event_payload(tmp_path):
     store = RuntimeStore(tmp_path)
     store.append_event("WARMUP", {

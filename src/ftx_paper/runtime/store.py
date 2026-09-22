@@ -371,6 +371,28 @@ class RuntimeStore:
             ids = connection.execute("SELECT run_id FROM replay_runs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
         return [run for row in ids if (run := self.read_replay_run(str(row[0]))) is not None]
 
+    def read_replay_run_summaries(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Read replay metadata without deserializing the event-heavy result."""
+        with sqlite3.connect(self.database) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                "SELECT run_id, status, request, created_at, updated_at, error "
+                "FROM replay_runs ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [
+            {
+                "run_id": row["run_id"],
+                "status": row["status"],
+                "request": json.loads(row["request"]),
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "error": row["error"],
+                "result": None,
+            }
+            for row in rows
+        ]
+
     def clear_replay_runs(self) -> int:
         """Delete diagnostic replay history without touching live runtime data."""
         with sqlite3.connect(self.database) as connection:

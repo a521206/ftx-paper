@@ -99,7 +99,7 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
 
     @app.get("/api/v1/replay")
     def list_replays():
-        return jsonify(json_safe({"runs": store.read_replay_runs()}))
+        return jsonify(json_safe({"runs": store.read_replay_run_summaries()}))
 
     @app.get("/api/v1/replay/<run_id>")
     def replay_detail(run_id: str):

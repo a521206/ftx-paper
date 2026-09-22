@@ -1108,6 +1108,8 @@
     let replayFilterState = {
       search: '', date: '', session: '', type: 'key', direction: '', status: '', run: '',
     };
+    const replayDetails = new Map();
+    let latestData = null;
 
     function scheduleRefresh(delayMs) {
       if (refreshTimer) clearTimeout(refreshTimer);
@@ -1317,6 +1319,10 @@
       return Array.isArray(run?.result?.events) ? run.result.events.filter((event) => event && typeof event === 'object') : [];
     }
 
+    function replayRunData(run) {
+      return replayDetails.get(String(run?.run_id || '')) || run;
+    }
+
     function replayEventCount(events, eventType) {
       return events.filter((event) => String(event.event_type || '').toUpperCase() === eventType).length;
     }
@@ -1412,6 +1418,11 @@
     }
 
     function replayRunView(run, filters = {}) {
+      run = replayRunData(run);
+      if (!run?.result) {
+        const runId = String(run?.run_id || '');
+        return `<article class="replay-run"><div class="replay-run-head"><div><div class="replay-run-title">${esc(replayDateLabel(replayRunDate(run)))}</div><div class="replay-run-meta">Run ID ${esc(runId || 'not reported')}</div></div>${badge(replayStatusLabel(String(run.status || '').toLowerCase()), replayStatusTone(String(run.status || '').toLowerCase()))}</div><p class="replay-intro">Replay details are loaded only when requested.</p><button class="replay-load-detail secondary" type="button" data-run-id="${esc(runId)}">Load replay details</button></article>`;
+      }
       const allEvents = replayEvents(run);
       const events = allEvents.filter((event) => replayEventMatches(event, filters));
       const result = run.result || {};
@@ -1476,6 +1487,25 @@
       return visibleRuns.map((run) => replayRunView(run, filters)).join('');
     }
 
+    async function loadReplayDetail(runId) {
+      if (!runId || replayDetails.has(runId)) return;
+      const buttons = document.querySelectorAll(`[data-run-id="${CSS.escape(runId)}"]`);
+      buttons.forEach((button) => { button.disabled = true; button.textContent = 'Loading replay details…'; });
+      try {
+        replayDetails.set(runId, await get(`/api/v1/replay/${encodeURIComponent(runId)}`));
+        if (latestData) render(latestData);
+      } catch (e) {
+        buttons.forEach((button) => { button.disabled = false; button.textContent = 'Load replay details'; });
+        flash(e.message);
+      }
+    }
+
+    function wireReplayDetailLoading() {
+      document.querySelectorAll('.replay-load-detail').forEach((button) => {
+        button.addEventListener('click', () => loadReplayDetail(button.dataset.runId));
+      });
+    }
+
     function replayFilterOptions(runs) {
       const dates = [...new Set(runs.map(replayRunDate).filter((value) => value !== 'all'))].sort().reverse();
       const orderedRuns = [...runs].sort((a, b) => replayRunDate(b).localeCompare(replayRunDate(a)) || String(b.created_at || '').localeCompare(String(a.created_at || '')));
@@ -1488,11 +1518,13 @@
       const apply = () => {
         ids.forEach((id) => { replayFilterState[{ 'replay-search': 'search', 'replay-date': 'date', 'replay-type': 'type', 'replay-direction': 'direction', 'replay-session': 'session', 'replay-status': 'status', 'replay-run': 'run' }[id]] = document.getElementById(id)?.value || ''; });
         document.getElementById('replay-results').innerHTML = renderReplayPage(runs, replayFilterState);
+        wireReplayDetailLoading();
         const count = document.getElementById('replay-visible-runs');
         if (count) count.textContent = runs.filter((run) => (!replayFilterState.date || replayRunDate(run) === replayFilterState.date) && (!replayFilterState.status || String(run.status || '').toLowerCase() === replayFilterState.status) && (!replayFilterState.run || String(run.run_id || '') === replayFilterState.run)).length;
       };
       ids.forEach((id) => document.getElementById(id)?.addEventListener(id === 'replay-search' ? 'input' : 'change', apply));
       document.getElementById('replay-clear-filters')?.addEventListener('click', () => { replayFilterState = { search: '', date: '', session: '', type: 'key', direction: '', status: '', run: '' }; render({ replays: { runs }, runtime: {}, capital: {}, positions: {}, trades: {}, decisions: { decisions: [] }, events: { events: [] }, broker: { authenticated: false } }); });
+      wireReplayDetailLoading();
     }
 
     function performanceStats(run) {
@@ -1516,10 +1548,12 @@
     function performancePage(runs, runtime = {}, broker = {}) {
       const completed = (runs || []).filter((run) => String(run.status).toLowerCase() === 'completed');
       const requestedDate = new URLSearchParams(window.location.search).get('date') || '';
-      const run = completed.find((candidate) => replayRunDate(candidate) === requestedDate) || completed[0] || runs?.[0];
+      const summaryRun = completed.find((candidate) => replayRunDate(candidate) === requestedDate) || completed[0] || runs?.[0];
+      const run = replayRunData(summaryRun);
       const recentDates = [...new Set((runs || []).map(replayRunDate).filter((value) => value !== 'all'))].sort().reverse().slice(0, 4);
       const dateValue = requestedDate || run?.request?.session_date || '';
-      if (!run) return `<div class="replay-runtime-row"><span><strong>Replay workspace</strong> · historical strategy evaluation</span><span>Live runtime remains separate · paper mode</span></div><section class="replay-control-bar"><form id="replay-form"><label>Replay date<input id="replay-date" type="date" aria-label="Replay date"></label><button>Replay strategy</button></form></section><div class="card"><div class="empty">No replay runs yet. Choose a session date above to begin.</div></div>`;
+       if (!run) return `<div class="replay-runtime-row"><span><strong>Replay workspace</strong> · historical strategy evaluation</span><span>Live runtime remains separate · paper mode</span></div><section class="replay-control-bar"><form id="replay-form"><label>Replay date<input id="replay-date" type="date" aria-label="Replay date"></label><button>Replay strategy</button></form></section><div class="card"><div class="empty">No replay runs yet. Choose a session date above to begin.</div></div>`;
+       if (!run.result) return `<div class="replay-runtime-row"><span><strong>Replay workspace</strong> · historical strategy evaluation</span><span>Live runtime remains separate · ${esc(broker.authenticated ? 'Connected' : 'Not connected')} · ${esc(runtime.state || 'Unknown')}</span></div><section class="replay-control-bar"><form id="replay-form"><label>Replay date<input id="replay-date" type="date" value="${esc(run.request?.session_date || requestedDate)}" aria-label="Replay date"></label><button>Replay strategy</button></form></section><div class="card"><h2>Replay details</h2><p class="replay-intro">The selected run summary loaded quickly. Fetch the full event stream only when you need the detailed result.</p><button class="replay-load-detail secondary" type="button" data-run-id="${esc(String(run.run_id || ''))}">Load replay details</button></div>`;
       const stats = performanceStats(run);
       const result = run.result || {};
       const requestDate = run.request?.session_date || 'All available dates';
@@ -1565,6 +1599,7 @@
     }
 
     function render(data) {
+      latestData = data;
       const runtime = data.runtime || {};
       const capital = data.capital || {};
       const decisionRows = data.decisions.decisions || [];
@@ -1714,6 +1749,7 @@
       wire();
       if (page === 'activity') wireActivityPage();
       if (page === 'investigate') wireReplayInvestigation(data.replays.runs || []);
+      if (page === 'replay') wireReplayDetailLoading();
     }
 
     function wire() {
