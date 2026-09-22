@@ -175,6 +175,31 @@ class RuntimeStore:
                 "UPDATE market_bars SET open_interest = 0.0 "
                 "WHERE upper(instrument_type) IN ('FUT', 'FUTURES') AND open_interest IS NULL"
             )
+        self.compact_replay_runs()
+
+    def compact_replay_runs(self) -> int:
+        """Remove legacy all-date and duplicate replay snapshots."""
+        with sqlite3.connect(self.database) as connection:
+            cursor = connection.execute(
+                """
+                DELETE FROM replay_runs
+                WHERE json_extract(request, '$.session_date') IS NULL
+                   OR json_extract(request, '$.session_date') = ''
+                   OR run_id IN (
+                       SELECT run_id FROM (
+                           SELECT run_id,
+                                  ROW_NUMBER() OVER (
+                                      PARTITION BY json_extract(request, '$.session_date')
+                                      ORDER BY created_at DESC
+                                  ) AS rank_for_day
+                           FROM replay_runs
+                           WHERE json_extract(request, '$.session_date') IS NOT NULL
+                             AND json_extract(request, '$.session_date') <> ''
+                       ) WHERE rank_for_day > 1
+                   )
+                """
+            )
+            return cursor.rowcount
     def acquire_process_lease(self, service: str) -> str:
         """Atomically claim a service lease, removing leases for dead PIDs."""
         pid = os.getpid()
@@ -372,12 +397,25 @@ class RuntimeStore:
         return [run for row in ids if (run := self.read_replay_run(str(row[0]))) is not None]
 
     def read_replay_run_summaries(self, limit: int = 100) -> list[dict[str, Any]]:
-        """Read replay metadata without deserializing the event-heavy result."""
+        """Read the newest stored replay for each requested trading day."""
         with sqlite3.connect(self.database) as connection:
             connection.row_factory = sqlite3.Row
             rows = connection.execute(
-                "SELECT run_id, status, request, created_at, updated_at, error "
-                "FROM replay_runs ORDER BY created_at DESC LIMIT ?",
+                """
+                WITH ranked AS (
+                    SELECT run_id, status, request, created_at, updated_at, error,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY json_extract(request, '$.session_date')
+                               ORDER BY created_at DESC
+                           ) AS rank_for_day
+                    FROM replay_runs
+                    WHERE json_extract(request, '$.session_date') IS NOT NULL
+                      AND json_extract(request, '$.session_date') <> ''
+                )
+                SELECT run_id, status, request, created_at, updated_at, error
+                FROM ranked WHERE rank_for_day = 1
+                ORDER BY created_at DESC LIMIT ?
+                """,
                 (limit,),
             ).fetchall()
         return [
@@ -392,6 +430,22 @@ class RuntimeStore:
             }
             for row in rows
         ]
+
+    def read_latest_replay_for_date(self, session_date: str) -> dict[str, Any] | None:
+        """Return the newest replay row for one trading day, if any."""
+        normalized = str(session_date).strip()[:10]
+        if not normalized:
+            return None
+        with sqlite3.connect(self.database) as connection:
+            row = connection.execute(
+                """
+                SELECT run_id FROM replay_runs
+                WHERE substr(json_extract(request, '$.session_date'), 1, 10) = ?
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (normalized,),
+            ).fetchone()
+        return self.read_replay_run(str(row[0])) if row else None
 
     def clear_replay_runs(self) -> int:
         """Delete diagnostic replay history without touching live runtime data."""
@@ -408,9 +462,8 @@ class RuntimeStore:
         with sqlite3.connect(self.database) as connection:
             cursor = connection.execute(
                 "DELETE FROM replay_runs "
-                "WHERE substr(json_extract(request, '$.session_date'), 1, 10) = ? "
-                "OR substr(json_extract(request, '$.date'), 1, 10) = ?",
-                (normalized, normalized),
+                "WHERE substr(json_extract(request, '$.session_date'), 1, 10) = ?",
+                (normalized,),
             )
             return cursor.rowcount
 

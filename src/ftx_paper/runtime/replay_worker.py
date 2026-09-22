@@ -73,12 +73,12 @@ class ReplayWorker:
     def submit(self, request: dict[str, Any]) -> str:
         run_id = uuid4().hex
         cancel = Event()
-        session_date = str(request.get("session_date") or request.get("date") or "").strip()[:10]
-        if session_date:
-            # The replay page is a date-level diagnostic view.  Re-running a
-            # date replaces its prior stored result so stale trades cannot
-            # remain visible beside the fresh run.
-            self.store.clear_replay_runs_for_date(session_date)
+        session_date = str(request.get("session_date") or "").strip()[:10]
+        if not session_date:
+            raise ValueError("replay requires one session_date")
+        # One stored result per trading day. Re-running a date replaces its
+        # prior result so stale trades cannot remain visible.
+        self.store.clear_replay_runs_for_date(session_date)
         with self._lock:
             self._cancel[run_id] = cancel
         self.store.create_replay_run(run_id, request)
@@ -126,7 +126,9 @@ class ReplayWorker:
                 self._queue.task_done()
 
     def _execute(self, request: dict[str, Any], cancel: Event) -> dict[str, Any]:
-        session_date = str(request.get("session_date") or request.get("date") or "")[:10]
+        session_date = str(request.get("session_date") or "")[:10]
+        if not session_date:
+            raise ValueError("replay requires one session_date")
         raw_vehicles = request.get("vehicles")
         if raw_vehicles is None:
             vehicles = ("futures", "synthetic")
@@ -138,7 +140,10 @@ class ReplayWorker:
             raise ValueError(f"unsupported replay vehicles: {vehicles}")
         if "futures" not in vehicles:
             raise ValueError("synthetic replay is reporting-only; futures must be enabled")
-        dates = [session_date] if session_date else self._dates()
+        emit_rejected_decisions = request.get("emit_rejected_decisions", False)
+        if not isinstance(emit_rejected_decisions, bool):
+            raise ValueError("emit_rejected_decisions must be a boolean")
+        dates = [session_date]
         all_events: list[dict[str, Any]] = []
         diagnostic_trades: list[dict[str, Any]] = []
         bars_seen = 0
@@ -177,7 +182,9 @@ class ReplayWorker:
                 prior_day_low=prior_day_low,
             )
             coordinator = PaperExecutionCoordinator(strategy.portfolio, strategy.capital_context)
-            engine = PaperEngine(strategy)
+            engine = PaperEngine(
+                strategy, emit_rejected_decisions=emit_rejected_decisions,
+            )
             # Each date gets a fresh position/risk session while cumulative
             # capital is carried by the authoritative PortfolioState.
             bars = self._bars(date)

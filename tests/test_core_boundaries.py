@@ -740,7 +740,10 @@ def test_late_vix_reaches_configured_strategy_without_repeated_missing_vix() -> 
         ("NFO", "NIFTYFUT"): "futures",
         ("NSE", "INDIA VIX"): "vix",
     }, required_roles=("futures",))
-    engine = PaperEngine(ConfiguredLiveStrategy(capital_profile=CAPITAL_CONFIG))
+    engine = PaperEngine(
+        ConfiguredLiveStrategy(capital_profile=CAPITAL_CONFIG),
+        emit_rejected_decisions=True,
+    )
     first_minute = datetime(2026, 1, 1, 10, 20, tzinfo=ZoneInfo("Asia/Kolkata"))
     bars = (
         MarketBar(future, first_minute, 100, 102, 99, 101),
@@ -1093,3 +1096,29 @@ def test_paper_engine_preserves_live_decision_domain_values_at_boundary() -> Non
 
     assert event["decision_at"] == decision_at
     assert event["nested"]["observed_at"] == decision_at
+
+
+def test_paper_engine_suppresses_rejected_decisions_by_default_with_opt_in() -> None:
+    from ftx_paper.core import LiveDecision
+
+    class Strategy:
+        def on_bundle(self, bundle):
+            return (
+                LiveDecision("CANDIDATEDECISION", {"decision_id": "candidate"}),
+                LiveDecision("REJECTEDDECISION", {"decision_id": "candidate", "reason": "test"}),
+                LiveDecision("ACCEPTEDDECISION", {"decision_id": "accepted"}),
+                LiveDecision("SIZING_REJECTED", {"decision_id": "sized", "reason": "test"}),
+            )
+
+    bundle = DecisionBundle("b0", "2026-01-01", "10:20", {}, ())
+    default_events = PaperEngine(Strategy()).on_bundle(bundle).events
+    opted_in_events = PaperEngine(
+        Strategy(), emit_rejected_decisions=True,
+    ).on_bundle(bundle).events
+
+    assert [event["event_type"] for event in default_events] == [
+        "CANDIDATEDECISION", "ACCEPTEDDECISION",
+    ]
+    assert [event["event_type"] for event in opted_in_events] == [
+        "CANDIDATEDECISION", "REJECTEDDECISION", "ACCEPTEDDECISION", "SIZING_REJECTED",
+    ]

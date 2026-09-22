@@ -51,6 +51,16 @@ def test_runtime_store_replay_summaries_omit_event_payloads(tmp_path):
     assert summaries[0]["result"] is None
 
 
+def test_runtime_store_replay_summaries_keep_latest_run_per_day(tmp_path):
+    store = RuntimeStore(tmp_path)
+    store.create_replay_run("old-run", {"session_date": "2026-01-05"})
+    store.create_replay_run("new-run", {"session_date": "2026-01-05"})
+    store.create_replay_run("other-day", {"session_date": "2026-01-06"})
+
+    assert {run["run_id"] for run in store.read_replay_run_summaries()} == {"new-run", "other-day"}
+    assert store.read_latest_replay_for_date("2026-01-05")["run_id"] == "new-run"
+
+
 def test_runtime_store_preserves_warmup_event_payload(tmp_path):
     store = RuntimeStore(tmp_path)
     store.append_event("WARMUP", {

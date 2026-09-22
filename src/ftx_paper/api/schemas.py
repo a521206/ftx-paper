@@ -50,6 +50,7 @@ def openapi_document() -> dict[str, Any]:
                 "get": {"responses": {"200": {"description": "Replay runs"}}},
                 "post": {"responses": {"202": {"description": "Replay queued"}, "400": {"description": "Invalid request"}}},
             },
+            "/api/v1/replay/dates": {"get": {"responses": {"200": {"description": "Available replay dates"}}}},
             "/api/v1/replay/{run_id}": {"get": {"parameters": [{"name": "run_id", "in": "path", "required": True, "schema": {"type": "string"}}], "responses": {"200": {"description": "Replay run"}, "404": {"description": "Not found"}}}},
             "/api/v1/replay/{run_id}/cancel": {"post": {"parameters": [{"name": "run_id", "in": "path", "required": True, "schema": {"type": "string"}}], "responses": {"200": {"description": "Replay cancelled"}, "409": {"description": "Replay cannot be cancelled"}}}},
         },

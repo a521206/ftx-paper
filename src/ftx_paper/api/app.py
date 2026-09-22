@@ -69,6 +69,14 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             return jsonify(error_payload("invalid_request", "JSON object body required")), 400
         if "vehicle" in payload:
             return jsonify(error_payload("invalid_request", "use vehicles array; vehicle is no longer supported")), 400
+        if set(payload) - {"session_date", "vehicles", "emit_rejected_decisions"}:
+            return jsonify(error_payload("invalid_request", "unsupported replay request fields")), 400
+        if "emit_rejected_decisions" in payload and not isinstance(
+            payload["emit_rejected_decisions"], bool,
+        ):
+            return jsonify(error_payload(
+                "invalid_request", "emit_rejected_decisions must be a boolean",
+            )), 400
         vehicles = payload.get("vehicles")
         if vehicles is not None and (
             not isinstance(vehicles, list)
@@ -78,19 +86,16 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             or "futures" not in vehicles
         ):
             return jsonify(error_payload("invalid_request", "vehicles must include futures; synthetic is reporting-only")), 400
-        requested_date = payload.get("session_date", payload.get("date"))
-        if requested_date not in (None, ""):
-            if not isinstance(requested_date, str):
-                return jsonify(error_payload("invalid_date", "session_date must be YYYY-MM-DD")), 400
-            try:
-                parsed_date = datetime.strptime(requested_date, "%Y-%m-%d").date().isoformat()
-            except ValueError:
-                return jsonify(error_payload("invalid_date", "session_date must be YYYY-MM-DD")), 400
-            if parsed_date != requested_date or parsed_date not in store.read_market_dates():
-                return jsonify(error_payload("no_data", "no market data for session_date")), 404
-            payload["session_date"] = parsed_date
-        elif not store.read_market_dates():
-            return jsonify(error_payload("no_data", "no market data available for replay")), 404
+        requested_date = payload.get("session_date")
+        if not isinstance(requested_date, str):
+            return jsonify(error_payload("invalid_date", "session_date is required and must be YYYY-MM-DD")), 400
+        try:
+            parsed_date = datetime.strptime(requested_date, "%Y-%m-%d").date().isoformat()
+        except ValueError:
+            return jsonify(error_payload("invalid_date", "session_date must be YYYY-MM-DD")), 400
+        if parsed_date != requested_date or parsed_date not in store.read_market_dates():
+            return jsonify(error_payload("no_data", "no market data for session_date")), 404
+        payload["session_date"] = parsed_date
         try:
             run_id = replay_worker.submit(payload)
         except RuntimeError as exc:
@@ -100,6 +105,10 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
     @app.get("/api/v1/replay")
     def list_replays():
         return jsonify(json_safe({"runs": store.read_replay_run_summaries()}))
+
+    @app.get("/api/v1/replay/dates")
+    def replay_dates():
+        return jsonify({"dates": store.read_market_dates()})
 
     @app.get("/api/v1/replay/<run_id>")
     def replay_detail(run_id: str):

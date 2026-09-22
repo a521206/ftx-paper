@@ -16,9 +16,11 @@ class EngineResult:
 class PaperEngine:
     """Runtime coordinator around a replaceable, broker-neutral strategy."""
 
-    def __init__(self, strategy: Strategy | None = None) -> None:
+    def __init__(self, strategy: Strategy | None = None, *,
+                 emit_rejected_decisions: bool = False) -> None:
         self.bars_seen = 0
         self.strategy = strategy
+        self.emit_rejected_decisions = emit_rejected_decisions
 
     @property
     def strategy_metadata(self) -> StrategyMetadata | None:
@@ -39,7 +41,12 @@ class PaperEngine:
                                          "bundle_complete": bundle.complete},))
         decisions = self.strategy.on_bundle(bundle)
         orders = tuple(order for item in decisions if (order := item.order) is not None)
-        events = tuple({"event_type": item.event_type, **dict(item.payload)} for item in decisions)
+        events = tuple(
+            {"event_type": item.event_type, **dict(item.payload)}
+            for item in decisions
+            if self.emit_rejected_decisions
+            or item.event_type not in {"REJECTEDDECISION", "SIZING_REJECTED"}
+        )
         return EngineResult(orders=orders, events=events)
 
     def record_exit(self, **kwargs: object) -> None:

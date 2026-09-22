@@ -969,11 +969,10 @@
         ('trades', 'Trades'),
         ('capital', 'Capital'),
         ('replay', 'Replay'),
-        ('investigate', 'Investigate'),
         ('activity', 'Activity')
       ] %}
         <a class="{% if page == item[0] %}active{% endif %}"
-           href="{% if item[0] == 'dashboard' %}/{% elif item[0] == 'investigate' %}/replay/investigate{% else %}/{{ item[0] }}{% endif %}">
+           href="{% if item[0] == 'dashboard' %}/{% else %}/{{ item[0] }}{% endif %}">
           {{ item[1] }}
         </a>
       {% endfor %}
@@ -1105,11 +1104,10 @@
     let refreshTimer = null;
     let refreshDelayMs = 5000;
     let refreshInFlight = false;
-    let replayFilterState = {
-      search: '', date: '', session: '', type: 'key', direction: '', status: '', run: '',
-    };
     const replayDetails = new Map();
     let latestData = null;
+    let replaySelectionInFlight = false;
+    let replayRangeState = { from: '', to: '' };
 
     function scheduleRefresh(delayMs) {
       if (refreshTimer) clearTimeout(refreshTimer);
@@ -1417,6 +1415,14 @@
         (!search || haystack.includes(search));
     }
 
+    function replayRangeControls(dates, selectedDate, status = '') {
+      const available = Array.isArray(dates) ? dates : [];
+      const fallback = selectedDate || available[available.length - 1] || '';
+      const from = replayRangeState.from || fallback;
+      const to = replayRangeState.to || fallback;
+      return `<section class="replay-control-bar"><form id="replay-form" class="replay-form"><label>From<input id="replay-from" type="date" value="${esc(from)}" aria-label="Replay range start"></label><label>To<input id="replay-to" type="date" value="${esc(to)}" aria-label="Replay range end"></label><button>${status === 'queued' || status === 'running' ? 'Replay running…' : 'Load date range'}</button></form><div class="replay-shortcuts"><span>${available.length} market days · cached days are reused</span><a href="/replay?date=${encodeURIComponent(fallback)}">Selected day</a></div></section>`;
+    }
+
     function replayRunView(run, filters = {}) {
       run = replayRunData(run);
       if (!run?.result) {
@@ -1500,6 +1506,28 @@
       }
     }
 
+    async function ensureReplaySelection(runs, marketDates) {
+      const requestedDate = new URLSearchParams(window.location.search).get('date');
+      const dateValue = requestedDate || marketDates[marketDates.length - 1];
+      if (!dateValue || replaySelectionInFlight) return;
+      const run = runs.find((candidate) => replayRunDate(candidate) === dateValue);
+      if (run) {
+        if (String(run.status).toLowerCase() === 'completed' && !replayDetails.has(String(run.run_id || ''))) {
+          await loadReplayDetail(String(run.run_id || ''));
+        }
+        return;
+      }
+      replaySelectionInFlight = true;
+      try {
+        await get('/api/v1/replay', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({session_date: dateValue})});
+        flash(`Replay queued for ${replayDateLabel(dateValue)}`);
+      } catch (e) {
+        flash(e.message);
+      } finally {
+        replaySelectionInFlight = false;
+      }
+    }
+
     function wireReplayDetailLoading() {
       document.querySelectorAll('.replay-load-detail').forEach((button) => {
         button.addEventListener('click', () => loadReplayDetail(button.dataset.runId));
@@ -1545,15 +1573,16 @@
       return { trades, closed, pnls, net, wins, losses, drawdown, winRate: closed.length ? wins.length / closed.length : null };
     }
 
-    function performancePage(runs, runtime = {}, broker = {}) {
+    function performancePage(runs, runtime = {}, broker = {}, marketDates = []) {
       const completed = (runs || []).filter((run) => String(run.status).toLowerCase() === 'completed');
       const requestedDate = new URLSearchParams(window.location.search).get('date') || '';
-      const summaryRun = completed.find((candidate) => replayRunDate(candidate) === requestedDate) || completed[0] || runs?.[0];
+      const activeDate = requestedDate || marketDates[marketDates.length - 1] || replayRunDate(completed[0] || runs?.[0] || {});
+      const summaryRun = (runs || []).find((candidate) => replayRunDate(candidate) === activeDate) || (!requestedDate ? completed[0] || runs?.[0] : undefined);
       const run = replayRunData(summaryRun);
-      const recentDates = [...new Set((runs || []).map(replayRunDate).filter((value) => value !== 'all'))].sort().reverse().slice(0, 4);
-      const dateValue = requestedDate || run?.request?.session_date || '';
-       if (!run) return `<div class="replay-runtime-row"><span><strong>Replay workspace</strong> · historical strategy evaluation</span><span>Live runtime remains separate · paper mode</span></div><section class="replay-control-bar"><form id="replay-form"><label>Replay date<input id="replay-date" type="date" aria-label="Replay date"></label><button>Replay strategy</button></form></section><div class="card"><div class="empty">No replay runs yet. Choose a session date above to begin.</div></div>`;
-       if (!run.result) return `<div class="replay-runtime-row"><span><strong>Replay workspace</strong> · historical strategy evaluation</span><span>Live runtime remains separate · ${esc(broker.authenticated ? 'Connected' : 'Not connected')} · ${esc(runtime.state || 'Unknown')}</span></div><section class="replay-control-bar"><form id="replay-form"><label>Replay date<input id="replay-date" type="date" value="${esc(run.request?.session_date || requestedDate)}" aria-label="Replay date"></label><button>Replay strategy</button></form></section><div class="card"><h2>Replay details</h2><p class="replay-intro">The selected run summary loaded quickly. Fetch the full event stream only when you need the detailed result.</p><button class="replay-load-detail secondary" type="button" data-run-id="${esc(String(run.run_id || ''))}">Load replay details</button></div>`;
+      const dateValue = activeDate || run?.request?.session_date || '';
+      const controls = replayRangeControls(marketDates, dateValue, String(run?.status || '').toLowerCase());
+       if (!run) return `<div class="replay-runtime-row"><span><strong>Replay workspace</strong> · one cached result per market day</span><span>Live runtime remains separate · paper mode</span></div>${controls}<div class="card"><div class="empty">Select a day or range. Missing days will be replayed once and then loaded from cache.</div></div>`;
+       if (!run.result) return `<div class="replay-runtime-row"><span><strong>Replay workspace</strong> · one cached result per market day</span><span>Live runtime remains separate · ${esc(broker.authenticated ? 'Connected' : 'Not connected')} · ${esc(runtime.state || 'Unknown')}</span></div>${controls}<div class="card"><h2>${esc(replayDateLabel(activeDate))}</h2><p class="replay-intro">This day is ${esc(replayStatusLabel(String(run.status || '').toLowerCase()).toLowerCase())}. Its stored result will open automatically when complete.</p><button class="replay-load-detail secondary" type="button" data-run-id="${esc(String(run.run_id || ''))}">Load replay details</button></div>`;
       const stats = performanceStats(run);
       const result = run.result || {};
       const requestDate = run.request?.session_date || 'All available dates';
@@ -1587,8 +1616,8 @@
           }).join('')
         : '<div class="empty">No decision events recorded for this replay.</div>';
       return `<div class="replay-runtime-row"><span><strong>Replay workspace</strong> · historical strategy evaluation</span><span>Live runtime status (separate) · ${esc(broker.authenticated ? 'Connected' : 'Not connected')} · ${esc(runtime.state || 'Unknown')}</span></div>
-      <section class="replay-control-bar"><form id="replay-form"><label>Replay date<input id="replay-date" type="date" value="${esc(dateValue)}" aria-label="Replay date"></label><button>Replay strategy</button></form><div class="replay-shortcuts"><span>Recent dates</span>${recentDates.map((dateValue) => `<a href="/replay?date=${encodeURIComponent(dateValue)}">${esc(replayDateLabel(dateValue))}</a>`).join('')}</div></section>
-      <div class="section-head"><div><h1>Replay outcome</h1><p class="replay-intro">${esc(requestDate)} · Completed ${esc(date(run.updated_at || run.created_at))}</p></div><a class="investigation-link" href="/replay/investigate">Inspect decision path →</a></div>
+      ${controls}
+      <div class="section-head"><div><h1>Replay outcome</h1><p class="replay-intro">${esc(requestDate)} · Completed ${esc(date(run.updated_at || run.created_at))}</p></div></div>
       <div class="replay-outcome">
         <div class="metric headline"><div class="label">${noTrades ? 'Replay completed' : 'Net P&amp;L'}</div><div class="value">${noTrades ? 'No trades taken' : esc(money(stats.net))}</div><div>${noTrades ? `${esc(String(result.bars_seen ?? 0))} market bars evaluated` : (stats.net >= 0 ? 'Strategy finished positive' : 'Strategy finished negative')}</div></div>
         ${[['Win rate', stats.winRate == null || noTrades ? '—' : `${stats.wins.length}/${stats.closed.length} (${Math.round(stats.winRate * 100)}%)`]].map(([label, value]) => `<div class="metric"><div class="label">${label}</div><div class="value">${esc(value)}</div></div>`).join('')}
@@ -1636,10 +1665,7 @@
       let body = '';
 
       if (page === 'replay') {
-        body = performancePage(data.replays.runs || [], runtime, data.broker || {});
-      } else if (page === 'investigate') {
-        const runs = data.replays.runs || [];
-        body = `<div class="card"><div class="section-head"><div><h2>Investigate replay</h2><p class="replay-intro">Trace the strategy’s decisions bar by bar when you need to understand the replay result.</p></div><a class="investigation-link" href="/replay">← Back to replay</a></div><div class="replay-note">Technical view: replay is isolated from live positions and never submits broker orders.</div></div><div class="card"><div class="section-head"><div><h2>Replay runs</h2><span class="label">Newest first</span></div></div>${replayFilterOptions(runs)}<div id="replay-results">${renderReplayPage(runs)}</div></div>`;
+        body = performancePage(data.replays.runs || [], runtime, data.broker || {}, data.replayDates || []);
       } else if (page === 'dashboard') {
         body = `<div class="card">
           <div class="section-head">
@@ -1748,7 +1774,6 @@
       document.getElementById('app').innerHTML = top + body;
       wire();
       if (page === 'activity') wireActivityPage();
-      if (page === 'investigate') wireReplayInvestigation(data.replays.runs || []);
       if (page === 'replay') wireReplayDetailLoading();
     }
 
@@ -1775,8 +1800,30 @@
       });
       document.getElementById('replay-form')?.addEventListener('submit', async (event) => {
         event.preventDefault();
-        try { await get('/api/v1/replay', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({session_date: document.getElementById('replay-date').value})}); flash('Replay queued'); refresh(); }
+        try {
+          const from = document.getElementById('replay-from')?.value;
+          const to = document.getElementById('replay-to')?.value || from;
+          replayRangeState = { from, to };
+          if (!from || !to || from > to) throw new Error('Choose a valid date range');
+          const dates = (latestData?.replayDates || []).filter((value) => value >= from && value <= to);
+          if (!dates.length) throw new Error('No market data exists in that range');
+          const latestByDate = new Map((latestData?.replays?.runs || []).map((run) => [replayRunDate(run), run]));
+          const missing = dates.filter((value) => {
+            const run = latestByDate.get(value);
+            return !run || ['failed', 'rejected', 'cancelled'].includes(String(run.status || '').toLowerCase());
+          });
+          await Promise.all(missing.map((session_date) => get('/api/v1/replay', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({session_date})})));
+          history.replaceState({}, '', `/replay?date=${encodeURIComponent(from)}`);
+          flash(missing.length ? `${missing.length} missing day${missing.length === 1 ? '' : 's'} queued` : 'Loaded cached replay days');
+          refresh();
+        }
         catch (e) { flash(e.message); }
+      });
+      document.getElementById('replay-from')?.addEventListener('input', (event) => {
+        replayRangeState.from = event.target.value;
+      });
+      document.getElementById('replay-to')?.addEventListener('input', (event) => {
+        replayRangeState.to = event.target.value;
       });
 
     }
@@ -1785,7 +1832,7 @@
       if (refreshInFlight) return;
       refreshInFlight = true;
       try {
-        const [health, runtime, capital, positions, trades, decisionsData, events, broker, replays] =
+        const [health, runtime, capital, positions, trades, decisionsData, events, broker, replays, replayDates] =
           await Promise.all(
             [
               '/api/v1/health',
@@ -1797,6 +1844,7 @@
               '/api/v1/events?limit=100',
               '/api/v1/broker/zerodha/status',
               '/api/v1/replay',
+              '/api/v1/replay/dates',
             ].map(get)
           );
 
@@ -1810,7 +1858,9 @@
           events,
           broker,
           replays,
+          replayDates: replayDates.dates || [],
         });
+        if (page === 'replay') ensureReplaySelection(replays.runs || [], replayDates.dates || []);
         refreshDelayMs = 5000;
         scheduleRefresh(refreshDelayMs);
       } catch (e) {

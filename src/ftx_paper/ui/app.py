@@ -22,6 +22,6 @@ def create_ui_app(api_base_url: str | None = None) -> Flask:
 
     @app.get("/replay/investigate")
     def replay_investigation():
-        return render_template("index.html", api_base_url=configured_api.rstrip("/"), page="investigate")
+        return redirect(url_for("index", page="replay"))
 
     return app
