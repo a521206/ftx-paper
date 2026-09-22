@@ -6,7 +6,9 @@ from datetime import datetime
 from hashlib import sha256
 from zoneinfo import ZoneInfo
 from .bundles import DecisionBundle
+from ftx_paper.config import NIFTY_LOT_SIZE
 from ftx_paper.contracts import MarketBar, MarketRole, OptionRole, OrderIntent, OrderRole, Role, synthetic_future_quote, role_to_key
+from .cost import FUTURES_RTD_COST_PER_LOT
 from .features import option_pcr_at_event, vix_open_and_event
 from .location_engine import Cell, LocationDetector, TransitionPattern, transition_patterns_allow
 from .risk import RiskConfig, RiskEngine, VehicleRiskLimits
@@ -137,9 +139,8 @@ class IndependentLiveDecisionEngine:
     direction, and cooldown logic.  It has no historical-pipeline imports.
     """
 
-    def __init__(self, *, version: str, config_hash: str, capital: float, portfolio: PortfolioState | None = None, max_daily_loss: float = 0.05, max_net_directional_lots: float = 8.0, risk_per_trade: float = 0.01, max_lots: int = 3, cooldown_minutes: int = 30, prior_day_high: float | None = None, prior_day_low: float | None = None, morning_entry_minutes: tuple[int, int] = MORNING_ENTRY_MINUTES, afternoon_entry_minutes: tuple[int, int] = AFTERNOON_ENTRY_MINUTES, transition_patterns: tuple[TransitionPattern, ...] = (), expiry_dates: frozenset[str] = frozenset(), risk_gate: RiskGateState | None = None, enabled_vehicles: tuple[str, ...] = ("futures", "synthetic"), vehicle: str | None = None, vehicle_risk_limits: Mapping[str, VehicleRiskLimits] | None = None, capital_context: CapitalRuntimeContext | None = None) -> None:
+    def __init__(self, *, version: str, config_hash: str, capital: float, portfolio: PortfolioState | None = None, max_daily_loss: float = 0.05, max_net_directional_lots: float = 8.0, risk_per_trade: float = 0.01, max_lots: int = 3, entry_cooldown_bars: int = 15, post_exit_cooldown_bars: int = 30, prior_day_high: float | None = None, prior_day_low: float | None = None, morning_entry_minutes: tuple[int, int] = MORNING_ENTRY_MINUTES, afternoon_entry_minutes: tuple[int, int] = AFTERNOON_ENTRY_MINUTES, transition_patterns: tuple[TransitionPattern, ...] = (), expiry_dates: frozenset[str] = frozenset(), risk_gate: RiskGateState | None = None, enabled_vehicles: tuple[str, ...] = ("futures", "synthetic"), vehicle: str | None = None, vehicle_risk_limits: Mapping[str, VehicleRiskLimits] | None = None, capital_context: CapitalRuntimeContext | None = None) -> None:
         self.version, self.config_hash = version, config_hash
-        self.cooldown_minutes = cooldown_minutes
         self.portfolio = portfolio or PortfolioState(capital)
         self.capital = self.portfolio.initial_capital
         self.capital_context = capital_context
@@ -174,9 +175,19 @@ class IndependentLiveDecisionEngine:
         # retained as optional settlement metadata, never as a second gate or
         # sizing path.
         self.risk_gate = risk_gate or (
-            RiskGateState.from_context(capital_context)
+            RiskGateState.from_context(
+                capital_context,
+                entry_cooldown_bars=entry_cooldown_bars,
+                thesis_cooldown_bars=0,
+                cell_cooldown_bars=post_exit_cooldown_bars,
+            )
             if capital_context is not None
-            else RiskGateState(max_net_directional_lots=max_net_directional_lots)
+            else RiskGateState(
+                max_net_directional_lots=max_net_directional_lots,
+                entry_cooldown_bars=entry_cooldown_bars,
+                thesis_cooldown_bars=0,
+                cell_cooldown_bars=post_exit_cooldown_bars,
+            )
         )
         effective_vehicle_limits = dict(vehicle_risk_limits or {})
         if capital_context is not None:
@@ -221,22 +232,11 @@ class IndependentLiveDecisionEngine:
         )
 
     def _session_segment(self, decision_at: datetime) -> tuple[Session, int] | None:
-        """Return the canonical cooldown segment containing ``decision_at``."""
+        """Return the session state scope; cooldowns advance on market bars."""
         session = self._session_for_time(decision_at)
         if session is Session.OUTSIDE:
             return None
-        ist_time = decision_at.astimezone(ZoneInfo("Asia/Kolkata"))
-        minutes_from_open = ist_time.hour * 60 + ist_time.minute - (9 * 60 + 15)
-        entry_minutes = (
-            self.morning_entry_minutes
-            if session is Session.MORNING else self.afternoon_entry_minutes
-        )
-        segment_start = entry_minutes[0]
-        if self.cooldown_minutes > 0:
-            segment_start += (
-                (minutes_from_open - entry_minutes[0]) // self.cooldown_minutes
-            ) * self.cooldown_minutes
-        return session, segment_start
+        return session, 0
 
     def evaluate(self, bundle: DecisionBundle) -> tuple[LiveDecision, ...]:
         if self._trading_date != bundle.trading_date:
@@ -399,23 +399,16 @@ class IndependentLiveDecisionEngine:
                       "decision_id": candidate_id},
                 ))
                 continue
-            if self.risk_gate.remaining_directional_lots(direction) < 1:
-                reason = "directional_exposure_limit"
-                events.append(LiveDecision(
-                    "REJECTEDDECISION",
-                    {**candidate, "outcome": "concurrency rejection", "reason": reason,
-                      "decision_id": candidate_id},
-                ))
-                continue
             for vehicle in ("futures",):
                 sizing = self._vehicle_sizers[vehicle].size(
                     capital=self.portfolio.initial_capital, equity=self.portfolio.equity, peak_equity=self.portfolio.peak_equity,
-                    entry=current, stop=stop, score=score, vix=float(vix_bar.close),
+                    # Score qualifies the setup but is not a sizing input in
+                    # the current canonical FTX capital path.
+                    entry=current, stop=stop, score=None, vix=float(vix_bar.close),
                     is_expiry_day=bundle.trading_date in self.expiry_dates,
                     vehicle=vehicle,
                     open_margin_used=self.portfolio.open_margin,
                 )
-                score_scale = 1.0 if score is None else (1.5 if score >= 8 else 1.0 if score >= 5 else 0.5)
                 stability = (
                     self.capital_context.profile.stability_for(f"{decision_session.value}:{cell.name}")
                     if self.capital_context is not None else cell_policy.stability
@@ -432,9 +425,9 @@ class IndependentLiveDecisionEngine:
                 sizing_decision = self._sizing_pipeline.decide(SizingPipelineInput(
                     risk=sizing,
                     requested_quantity=sizing.quantity,
-                    # RiskEngine exposes the raw permission ceiling; downstream
-                    # score and policy factors are applied by SizingPipeline.
-                    score_multiplier=score_scale,
+                    # RiskEngine exposes the raw permission ceiling; drawdown
+                    # and policy stability are downstream sizing stages.
+                    score_multiplier=1.0,
                     direction=direction,
                     net_directional_lots=self.risk_gate.net_directional_lots,
                     concurrency_limit_lots=self.risk_gate.max_net_directional_lots,
@@ -443,11 +436,42 @@ class IndependentLiveDecisionEngine:
                     vehicle_limit_lots=None,
                     candidate_id=candidate_id,
                 ))
+                normalized_direction = "long" if direction in {"long", "buy"} else "short"
+                risk_scope = "|".join((
+                    bundle.trading_date, decision_session.value, cell.name,
+                    normalized_direction,
+                ))
+                risk_per_lot = abs(current - stop) * NIFTY_LOT_SIZE + FUTURES_RTD_COST_PER_LOT
+                risk_allowance = (
+                    self.capital_context.profile.initial_capital
+                    * self.capital_context.profile.max_daily_loss
+                    * self.capital_context.profile.cell_session_risk_buffer_fraction
+                    if self.capital_context is not None
+                    else self.capital * self.max_daily_loss
+                )
+                available_scoped_risk = None
+                scoped_risk_lot_ceiling = sizing_decision.final_quantity
+                if risk_allowance > 0:
+                    available_scoped_risk = self.portfolio.available_scoped_risk(
+                        risk_scope, risk_allowance,
+                    )
+                    scoped_risk_lot_ceiling = (
+                        int(available_scoped_risk // risk_per_lot)
+                        if risk_per_lot > 0 else 0
+                    )
                 quantity_before_stability = next(
                     (value for name, value in reversed(sizing_decision.stage_results) if name != "stability"),
                     sizing.quantity,
                 )
-                quantity = sizing_decision.final_quantity
+                quantity = min(sizing_decision.final_quantity, scoped_risk_lot_ceiling)
+                sizing_metadata = dict(sizing_decision.metadata)
+                sizing_metadata.update({
+                    "risk_scope": risk_scope,
+                    "risk_per_lot_rs": risk_per_lot,
+                    "risk_allowance_rs": risk_allowance,
+                    "available_scoped_risk_rs": available_scoped_risk,
+                    "scoped_risk_lot_ceiling": scoped_risk_lot_ceiling,
+                })
                 vehicle_candidate = {**candidate, "vehicle": vehicle,
                                      "requested_quantity": quantity_before_stability,
                                      "final_quantity": quantity,
@@ -455,7 +479,7 @@ class IndependentLiveDecisionEngine:
                                      "stability": stability, "risk_amount": sizing.risk_amount,
                                      "quantity_before_stability": quantity_before_stability,
                                      "risk_budget": sizing.risk_budget, "stop_bp": sizing.stop_bp,
-                                     "sizing_pipeline": sizing_decision.metadata}
+                                     "sizing_pipeline": sizing_metadata}
                 vehicle_candidate.update({
                     "available_capital": sizing.available_capital,
                     "open_margin_used": sizing.open_margin_used,
@@ -469,6 +493,11 @@ class IndependentLiveDecisionEngine:
                     "max_quantity": self._vehicle_sizers[vehicle].vehicle_limits[vehicle].max_quantity,
                     "shared_directional_headroom": self.risk_gate.remaining_directional_lots(direction),
                     "vehicle_directional_headroom": self.risk_gate.remaining_directional_lots(direction),
+                    "risk_scope": risk_scope,
+                    "risk_per_lot_rs": risk_per_lot,
+                    "risk_allowance_rs": risk_allowance,
+                    "available_scoped_risk_rs": available_scoped_risk,
+                    "scoped_risk_lot_ceiling": scoped_risk_lot_ceiling,
                 })
                 if not sizing.approved:
                     events.append(LiveDecision("SIZING_REJECTED", {
@@ -484,7 +513,11 @@ class IndependentLiveDecisionEngine:
                 if quantity < 1:
                     events.append(LiveDecision("SIZING_REJECTED", {
                         **vehicle_candidate, "outcome": "sizing rejection",
-                        "reason": "insufficient_risk_budget",
+                        "reason": (
+                            "scoped_risk_buffer_exhausted"
+                            if scoped_risk_lot_ceiling < 1
+                            else "insufficient_risk_budget"
+                        ),
                     }))
                     continue
                 if gate_reason is not None:
@@ -498,10 +531,20 @@ class IndependentLiveDecisionEngine:
                                     reason="live_policy_accepted", cell=cell.name, stop_price=stop,
                                     exit_mode=cell_policy.exit_mode.value, entry_bar=sequence,
                     role=OrderRole.ENTRY, vehicle=vehicle)
+                if risk_allowance > 0:
+                    self.portfolio.reserve_scoped_risk(
+                        order.client_order_id,
+                        scope=risk_scope,
+                        allowance=risk_allowance,
+                        amount=risk_per_lot * quantity,
+                    )
                 events.append(LiveDecision("ACCEPTEDDECISION", {
                     **vehicle_candidate, "outcome": "accepted", "reason": "eligible",
                 }, order=order))
-                self.risk_gate.record_entry(cell=cell.name, direction=direction, quantity=quantity, date=bundle.trading_date)
+                self.risk_gate.record_entry(
+                    cell=cell.name, direction=direction, quantity=quantity,
+                    date=bundle.trading_date, bar=sequence,
+                )
         return tuple(events)
 
     def record_exit(self, *, cell: str, reason: str, entry_bar: int,

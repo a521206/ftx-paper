@@ -35,22 +35,46 @@ canonical-batch lookahead differences; the decision is documented in
 
 ### Track P9 — Decision-replay comparator
 
+- [x] Match the current signed OHLCV delta-divergence proxy and disable score-based quantity scaling by default
+- [x] Keep risk-gate state continuous within each session and use configured 15-bar entry / 30-bar post-exit cooldowns
+- [x] Add persistent scoped risk buckets keyed by date, session, cell, and direction
+- [x] Regenerate canonical and Paper replay artifacts after the core pipeline alignment changes
 - [ ] Compare event identity, cell, direction, score, factors, stop, quantity, reason, and timing
 - [x] Connect the ordered replay comparator to both independent implementations
 - [x] Add regression tests for every discovered decision-stream mismatch
 
-The comparator is now wired to the canonical run decision artifact and Paper's
-replay events through `--canonical-decisions`. It normalizes terminal decisions
-onto a shared semantic stream, converts Paper's one-based sequence to the
-canonical zero-based bar, scopes Paper events to canonical candidate identity,
-and preserves out-of-scope event counts in `decision_replay.json`.
+The comparator reads the requested range from the canonical decision-artifact
+manifest (rather than widening or narrowing it to the trade audit's range) and
+compares Paper replay terminal decisions directly when `--canonical-decisions`
+is supplied. It normalizes Paper's one-based sequence to the canonical
+zero-based bar, scopes by candidate date/sequence/cell, and reports unscoped
+Paper decisions rather than hiding them.
 
-The event-field comparison remains open. Fresh runs for 2026-09-07,
-2026-09-08, and 2026-09-15 are still mismatched; the streams now compare
-`score_factors` with no unavailable-field warning. The first differences remain
-quantity/candidate-scope differences (for example, canonical requested quantity
-1 versus Paper 3 on 2026-09-07). P9 remains open until factor parity and
-candidate-scope alignment are both evidenced by fresh comparator results.
+Fresh validation used canonical run
+`research_20260922T013200649202Z_research-replay-v2-ftx-pipeline-research_810d8dba`
+for 2026-09-01..2026-09-21. Paper initially had no market bars on
+2026-09-03; an isolated replay copy was then seeded through the DuckDB
+futures/index repository APIs, including September 2 prior-day context. The
+Pipeline's direct ATM lookup also returns the September 3 contract rows (752
+CE/PE bars for expiry `260915`, strike `23950`); the earlier zero result came
+from a different weekly-expiry helper. Those rows were copied into the
+isolated Paper runtime only. Paper now matches both canonical trades exactly:
+cell, short direction, eight lots, 13:33 entry, 15:10 exit, futures net
+Rs 14,200, and synthetic net Rs 13,377.90. Synthetic remains a derived
+reporting record and does not create a second decision or mutate futures state.
+The ordered decision stream still reports one modified field (`entry_price`,
+absent from the canonical decision trace), `stop_bp` unavailable, and 373
+diagnostic Paper events outside the one canonical candidate scope. The saved
+comparison predates the synthetic fix and should be regenerated before claiming
+zero unexplained decision differences.
+Paper's default research profile and cell manifest have since been aligned to
+the Pipeline research run: 3% per-trade risk, 8 lots, 12 directional lots,
+no drawdown scaling, the 09:15–11:45 morning window, and the same seven active
+session cells with their direction, exit mode, hypothesis, and stability.
+Paper remains an independent implementation. The saved comparison predates
+this alignment and remains historical evidence only; regenerate an isolated
+Paper replay over dates shared with canonical before claiming ordered parity.
+Stop distance is also unavailable in the canonical decision-trace row.
 
 ### Track P10 — Ledger and vehicle comparator
 

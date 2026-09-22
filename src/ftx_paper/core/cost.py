@@ -19,8 +19,12 @@ def synthetic_futures_cost(ce_entry_premium: float, pe_entry_premium: float,
     if ce_entry_premium <= 0 or pe_entry_premium <= 0 or lots < 0:
         raise ValueError("premiums must be positive and lots non-negative")
     sold_premium = ce_entry_premium if is_short else pe_entry_premium
-    return (OPTION_BASE_COST_PER_LEG * OPTION_LEGS
-            + STT_RATE * sold_premium * 65.0 * lots)
+    # The canonical pipeline scales the complete two-leg cost stack by the
+    # traded lot count.  Keep the Paper implementation local, but preserve
+    # the same economics for reporting parity.
+    one_lot_cost = (OPTION_BASE_COST_PER_LEG * OPTION_LEGS
+                    + STT_RATE * sold_premium * 65.0)
+    return one_lot_cost * lots
 
 
 __all__ = ["FUTURES_RTD_COST_PER_LOT", "OPTION_BASE_COST_PER_LEG", "OPTION_LEGS",

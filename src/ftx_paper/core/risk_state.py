@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 class CellGateState:
     consecutive_stops: int = 0
     total_entries: int = 0
+    last_entry_bar: int | None = None
     locked_until_bar: int = 0
     cooldown_until_bar: int = 0
     failed_today: bool = False
@@ -29,10 +30,11 @@ class RiskGateState:
     """State machine for directional, thesis, and per-cell entry gates."""
 
     max_net_directional_lots: float = 8.0
-    thesis_cooldown_bars: int = 60
+    thesis_cooldown_bars: int = 0
+    entry_cooldown_bars: int = 15
     max_consecutive_stops: int = 2
     max_daily_entries: int = 2
-    cell_cooldown_bars: int = 20
+    cell_cooldown_bars: int = 30
     net_directional_lots: float = 0.0
     trading_date: str | None = None
     cells: dict[str, CellGateState] = field(default_factory=dict)
@@ -77,6 +79,11 @@ class RiskGateState:
         state = self.cells.setdefault(cell, CellGateState())
         if state.failed_today or state.consecutive_stops >= self.max_consecutive_stops:
             return "thesis_failed"
+        if (
+            state.last_entry_bar is not None
+            and bar < state.last_entry_bar + self.entry_cooldown_bars
+        ):
+            return "entry_cooldown"
         if bar < state.locked_until_bar:
             return "thesis_cooldown"
         if bar < state.cooldown_until_bar:
@@ -111,13 +118,16 @@ class RiskGateState:
         )
 
     def record_entry(self, *, cell: str, direction: str, quantity: int,
-                     date: str | None = None) -> None:
+                     date: str | None = None, bar: int | None = None) -> None:
         self._new_day(date)
         # The canonical decision loop resolves the candidate's exit before
         # evaluating the next candidate. Its thesis counter therefore
         # behaves as an entry-time gate during replay, even though the
         # canonical tracker is updated through its result callback.
-        self.cells.setdefault(cell, CellGateState()).total_entries += 1
+        state = self.cells.setdefault(cell, CellGateState())
+        state.total_entries += 1
+        if bar is not None:
+            state.last_entry_bar = int(bar)
         self.net_directional_lots += self._signed(direction, quantity)
 
     def cancel_entry(self, *, cell: str, direction: str, quantity: int,
@@ -138,8 +148,8 @@ class RiskGateState:
         if direction is not None and quantity > 0:
             self.net_directional_lots -= self._signed(direction, quantity)
         state = self.cells.setdefault(cell, CellGateState())
-        state.cooldown_until_bar = exit_bar + self.cell_cooldown_bars + 1
-        if reason in {"hard_stop", "stop", "thesis_failure"}:
+        state.cooldown_until_bar = exit_bar + self.cell_cooldown_bars
+        if reason == "hard_stop":
             state.consecutive_stops += 1
             state.locked_until_bar = exit_bar + self.thesis_cooldown_bars
             if state.consecutive_stops >= self.max_consecutive_stops:
@@ -165,9 +175,10 @@ class RiskGateState:
 
     def snapshot(self) -> dict[str, object]:
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "max_net_directional_lots": self.max_net_directional_lots,
             "thesis_cooldown_bars": self.thesis_cooldown_bars,
+            "entry_cooldown_bars": self.entry_cooldown_bars,
             "max_consecutive_stops": self.max_consecutive_stops,
             "max_daily_entries": self.max_daily_entries,
             "cell_cooldown_bars": self.cell_cooldown_bars,
@@ -177,12 +188,15 @@ class RiskGateState:
         }
 
     def restore(self, snapshot: Mapping[str, object]) -> None:
-        if snapshot.get("schema_version") != 1:
+        version = snapshot.get("schema_version")
+        if version not in (1, 2):
             raise ValueError("unsupported risk-gate snapshot schema")
-        for name in (
-            "max_net_directional_lots", "thesis_cooldown_bars",
-            "max_consecutive_stops", "max_daily_entries", "cell_cooldown_bars",
-        ):
+        fields = [
+            "max_net_directional_lots", "max_consecutive_stops", "max_daily_entries",
+        ]
+        if version == 2:
+            fields.extend(("thesis_cooldown_bars", "entry_cooldown_bars", "cell_cooldown_bars"))
+        for name in fields:
             if name in snapshot:
                 value = snapshot[name]
                 if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -197,11 +211,18 @@ class RiskGateState:
         self.net_directional_lots = float(raw_net_directional_lots)
         raw_date = snapshot.get("trading_date")
         self.trading_date = str(raw_date) if raw_date is not None else None
-        self.cells = {
-            str(cell): CellGateState(**dict(values))
-            for cell, values in raw_cells.items()
-            if isinstance(values, Mapping)
-        }
+        self.cells = {}
+        for cell, values in raw_cells.items():
+            if not isinstance(values, Mapping):
+                continue
+            state = CellGateState(**dict(values))
+            if version == 1:
+                # Old snapshots held 30-minute segment timers. They are not
+                # compatible with the current bar-based entry/exit cooldowns.
+                state.last_entry_bar = None
+                state.locked_until_bar = 0
+                state.cooldown_until_bar = 0
+            self.cells[str(cell)] = state
 
 
 __all__ = ["CellGateState", "RiskGateState"]

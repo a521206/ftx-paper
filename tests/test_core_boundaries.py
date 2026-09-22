@@ -12,10 +12,58 @@ from ftx_paper.core import CompletedBarAggregator, DecisionBundle, ExitStateMach
 from ftx_paper.execution import PaperExecutionCoordinator
 from ftx_paper.core.location_engine import Cell, Location
 from ftx_paper.core.live_decision import _configured_policies_for_cell
+from ftx_paper.core.scoring import _synthetic_delta_divergence
 from ftx_paper.strategy.config import Session
 from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.strategy import ConfiguredLiveStrategy
 from ftx_paper.capital_config import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE as CAPITAL_CONFIG
+
+
+def test_delta_divergence_uses_signed_volume_from_actual_ohlc() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    bars = tuple(
+        MarketBar(
+            instrument=instrument,
+            timestamp=datetime(2026, 9, 10, 4, 0 + index, tzinfo=timezone.utc),
+            open=close,
+            high=high,
+            low=0.0,
+            close=close,
+            volume=volume,
+        )
+        for index, (close, high, volume) in enumerate(
+            ((10.0, 30.0, 300.0), (15.0, 40.0, 400.0), (20.0, 50.0, 500.0))
+        )
+    )
+
+    # Signed close-location volume falls while closes rise. The prior
+    # positive-only proxy using close as high returned +1.0 for these bars.
+    assert _synthetic_delta_divergence(bars) == pytest.approx(-1.0)
+
+
+def test_scoped_risk_reservation_releases_and_settles_into_its_bucket() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    entry = OrderIntent("scoped-entry", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY)
+    exit_order = OrderIntent(
+        "scoped-exit", instrument, OrderSide.SELL, 1,
+        role=OrderRole.EXIT, entry_order_id=entry.client_order_id,
+    )
+    portfolio = PortfolioState(100_000.0)
+    scope = "2026-09-10|morning|low|long"
+    portfolio.reserve_scoped_risk(
+        entry.client_order_id, scope=scope, allowance=5_000.0, amount=2_000.0,
+    )
+    assert portfolio.available_scoped_risk(scope, 5_000.0) == pytest.approx(3_000.0)
+
+    portfolio.reserve_entry(entry, margin_per_lot=0.0)
+    portfolio.fill_entry(entry, price=100.0, margin_per_lot=0.0)
+    assert portfolio.available_scoped_risk(scope, 5_000.0) == pytest.approx(3_000.0)
+
+    portfolio.settle_exit(exit_order, price=90.0, cost=850.0)
+    assert portfolio.available_scoped_risk(scope, 5_000.0) == pytest.approx(3_500.0)
+
+    restored = PortfolioState.from_snapshot(portfolio.snapshot())
+    assert restored.available_scoped_risk(scope, 5_000.0) == pytest.approx(3_500.0)
 
 
 def test_paper_portfolio_lifecycle_is_idempotent_and_restorable() -> None:
@@ -277,6 +325,24 @@ def test_strategy_uses_explicit_capital_limits_and_rejects_mismatch() -> None:
         ConfiguredLiveStrategy.from_snapshot(strategy.snapshot(), capital_profile=mismatched)
 
 
+def test_legacy_snapshot_requires_one_time_migration() -> None:
+    snapshot = ConfiguredLiveStrategy(capital_profile=CAPITAL_CONFIG).snapshot()
+    snapshot["capital"].update({
+        "risk_per_trade": 0.01,
+        "max_lots": 3,
+        "max_net_directional_lots": 8.0,
+    })
+    snapshot["config"].update({
+        "name": "ftx-paper-production",
+        "version": "0.2.0-live-composition",
+        "morning_entry_minutes": [60, 120],
+    })
+    snapshot["risk_gate"]["max_net_directional_lots"] = 8.0
+
+    with pytest.raises(ValueError, match="capital config does not match"):
+        ConfiguredLiveStrategy.from_snapshot(snapshot, capital_profile=CAPITAL_CONFIG)
+
+
 def test_live_features_are_causal_and_deterministic() -> None:
     instrument = Instrument("NIFTY", "NSE", "INDEX")
     bars = tuple(MarketBar(instrument, datetime(2026, 1, 1, 9, 15 + i), 100 + i, 102 + i, 99 + i, 101 + i, 10) for i in range(3))
@@ -369,7 +435,9 @@ def test_risk_sizer_enforces_drawdown_and_lot_sizing() -> None:
 def test_replay_trade_session_classification_matches_canonical_windows() -> None:
     assert ReplayWorker._session_for_minutes(60) == "morning"
     assert ReplayWorker._session_for_minutes(119) == "morning"
-    assert ReplayWorker._session_for_minutes(120) == "unknown"
+    assert ReplayWorker._session_for_minutes(120) == "morning"
+    assert ReplayWorker._session_for_minutes(149) == "morning"
+    assert ReplayWorker._session_for_minutes(150) == "unknown"
     assert ReplayWorker._session_for_minutes(255) == "afternoon"
     assert ReplayWorker._session_for_minutes(299) == "afternoon"
     assert ReplayWorker._session_for_minutes(300) == "unknown"
@@ -880,11 +948,11 @@ def test_live_decision_engine_emits_input_rejection_for_incomplete_bundle() -> N
 
 def test_configured_policy_requires_exact_location_composite() -> None:
     engine = IndependentLiveDecisionEngine(version="test", config_hash="hash", capital=CAPITAL_CONFIG.initial_capital)
-    exact = Cell(Location.SESSION_HIGH, Location.OR_HIGH)
-    with_vwap = Cell(Location.VWAP_ZONE, Location.SESSION_HIGH, Location.OR_HIGH)
+    exact = Cell(Location.VWAP_ZONE, Location.OR_HIGH, Location.PRIOR_DAY_LOW)
+    with_extra_location = Cell(Location.VWAP_ZONE, Location.OR_HIGH, Location.PRIOR_DAY_LOW, Location.SESSION_HIGH)
 
     assert _configured_policies_for_cell(engine._cell_policies, Session.MORNING, exact)
-    assert not _configured_policies_for_cell(engine._cell_policies, Session.MORNING, with_vwap)
+    assert not _configured_policies_for_cell(engine._cell_policies, Session.MORNING, with_extra_location)
 
 
 def test_live_decision_engine_persists_score_and_quality_bucket() -> None:
@@ -940,10 +1008,7 @@ def test_risk_sizer_reserves_open_margin_before_score_sizing() -> None:
 
 def test_research_capital_config_drives_canonical_futures_sizing_limits() -> None:
     capital = CAPITAL_CONFIG
-    engine = IndependentLiveDecisionEngine(
-        version="test", config_hash="hash", capital=capital.initial_capital,
-        max_net_directional_lots=capital.max_net_directional_lots,
-    )
+    engine = ConfiguredLiveStrategy(capital_profile=capital)._decision_engine
     sizer = engine._vehicle_sizers["futures"]
     assert sizer.config.risk_fraction == pytest.approx(capital.risk_per_trade)
     assert sizer.config.max_quantity == capital.max_lots

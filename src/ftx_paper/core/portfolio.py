@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
+from math import isfinite
 from typing import Mapping
 
 from ftx_paper.config import NIFTY_LOT_SIZE
@@ -14,6 +15,17 @@ class MarginReservation:
     order_id: str
     vehicle: str
     quantity: int
+    amount: float
+    risk_scope: str = ""
+    risk_allowance: float = 0.0
+    reserved_risk: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class ScopedRiskReservation:
+    order_id: str
+    scope: str
+    allowance: float
     amount: float
 
 
@@ -42,6 +54,8 @@ class PortfolioState:
     realized_pnl: float = field(default=0.0, init=False)
     total_costs: float = field(default=0.0, init=False)
     reservations: dict[str, MarginReservation] = field(default_factory=dict, init=False)
+    scoped_risk_buffers: dict[str, float] = field(default_factory=dict, init=False)
+    scoped_risk_reservations: dict[str, ScopedRiskReservation] = field(default_factory=dict, init=False)
     positions: dict[str, PaperPosition] = field(default_factory=dict, init=False)
     pending_orders: dict[str, str] = field(default_factory=dict, init=False)
     settled_orders: set[str] = field(default_factory=set, init=False)
@@ -80,6 +94,44 @@ class PortfolioState:
         if order.client_order_id not in self.settled_orders:
             self.pending_orders.setdefault(order.client_order_id, "submitted")
 
+    def available_scoped_risk(self, scope: str, allowance: float) -> float:
+        """Return a session/cell/direction risk bucket after open reservations."""
+        key, cap = str(scope), float(allowance)
+        if not key or not isfinite(cap) or cap < 0:
+            raise ValueError("risk scope and non-negative allowance are required")
+        balance = self.scoped_risk_buffers.setdefault(key, cap)
+        reserved = sum(
+            item.amount for item in self.scoped_risk_reservations.values()
+            if item.scope == key
+        ) + sum(
+            item.reserved_risk for item in self.reservations.values()
+            if item.risk_scope == key
+        )
+        return max(0.0, balance - reserved)
+
+    def reserve_scoped_risk(
+        self, order_id: str, *, scope: str, allowance: float, amount: float,
+    ) -> ScopedRiskReservation:
+        """Hold risk room for an accepted entry until it is settled or cancelled."""
+        order_key, risk_scope = str(order_id), str(scope)
+        cap, risk = float(allowance), float(amount)
+        if (
+            not order_key or not risk_scope or not isfinite(cap)
+            or not isfinite(risk) or cap < 0 or risk < 0
+        ):
+            raise ValueError("scoped risk reservation fields are invalid")
+        existing = self.scoped_risk_reservations.get(order_key)
+        if existing is not None:
+            if existing != ScopedRiskReservation(order_key, risk_scope, cap, risk):
+                raise ValueError("order already has a different scoped risk reservation")
+            return existing
+        if risk > self.available_scoped_risk(risk_scope, cap) + 1e-7:
+            raise ValueError("entry exceeds available scoped risk")
+        reservation = ScopedRiskReservation(order_key, risk_scope, cap, risk)
+        self.scoped_risk_reservations[order_key] = reservation
+        self.state_revision += 1
+        return reservation
+
     def reserve_entry(self, order: OrderIntent, *, margin_per_lot: float) -> MarginReservation:
         if order.role is not OrderRole.ENTRY:
             raise ValueError("only entry orders may reserve margin")
@@ -93,8 +145,13 @@ class PortfolioState:
         if quantity <= 0:
             raise ValueError("entry quantity must be positive")
         amount = quantity * float(margin_per_lot)
-        reservation = MarginReservation(order.client_order_id, vehicle, int(order.quantity),
-                                         amount)
+        risk = self.scoped_risk_reservations.pop(order.client_order_id, None)
+        reservation = MarginReservation(
+            order.client_order_id, vehicle, int(order.quantity), amount,
+            risk_scope=risk.scope if risk is not None else "",
+            risk_allowance=risk.allowance if risk is not None else 0.0,
+            reserved_risk=risk.amount if risk is not None else 0.0,
+        )
         self.reservations[order.client_order_id] = reservation
         self.pending_orders[order.client_order_id] = "reserved"
         self.state_revision += 1
@@ -121,6 +178,7 @@ class PortfolioState:
             return False
         changed = order_id in self.reservations or order_id in self.pending_orders
         self.reservations.pop(order_id, None)
+        self.scoped_risk_reservations.pop(order_id, None)
         self.pending_orders[order_id] = "cancelled"
         self.settled_orders.add(order_id)
         if changed:
@@ -153,7 +211,15 @@ class PortfolioState:
         self.total_costs += float(cost)
         self.equity += net
         self.peak_equity = max(self.peak_equity, self.equity)
-        self.reservations.pop(entry_id, None)
+        reservation = self.reservations.pop(entry_id, None)
+        if reservation is not None and reservation.risk_scope:
+            balance = self.scoped_risk_buffers.setdefault(
+                reservation.risk_scope, reservation.risk_allowance,
+            )
+            self.scoped_risk_buffers[reservation.risk_scope] = min(
+                reservation.risk_allowance,
+                max(0.0, balance + net),
+            )
         self.pending_orders[order.client_order_id] = "settled"
         self.settled_orders.add(order.client_order_id)
         self.state_revision += 1
@@ -163,6 +229,8 @@ class PortfolioState:
         self.equity = self.peak_equity = self.daily_baseline = float(self.initial_capital)
         self.realized_pnl = self.total_costs = 0.0
         self.reservations.clear()
+        self.scoped_risk_buffers.clear()
+        self.scoped_risk_reservations.clear()
         self.positions.clear()
         self.pending_orders.clear()
         self.settled_orders.clear()
@@ -174,6 +242,10 @@ class PortfolioState:
         return {"schema_version": 1, "capital": self.capital_snapshot(), "peak_equity": self.peak_equity,
                 "daily_baseline": self.daily_baseline, "total_costs": self.total_costs,
                 "reservations": {k: asdict(v) for k, v in self.reservations.items()},
+                "scoped_risk_buffers": dict(self.scoped_risk_buffers),
+                "scoped_risk_reservations": {
+                    k: asdict(v) for k, v in self.scoped_risk_reservations.items()
+                },
                 "positions": {k: {**asdict(v), "side": v.side.value} for k, v in self.positions.items()},
                 "pending_orders": dict(self.pending_orders), "settled_orders": sorted(self.settled_orders),
                 "gates": deepcopy(self.gate_snapshot), "quote_provenance": deepcopy(self.quote_provenance),
@@ -196,6 +268,17 @@ class PortfolioState:
             portfolio.reservations = {
                 str(k): MarginReservation(**dict(v))
                 for k, v in raw.items() if isinstance(v, Mapping)
+            }
+        raw = snapshot.get("scoped_risk_buffers", {})
+        if isinstance(raw, Mapping):
+            portfolio.scoped_risk_buffers = {
+                str(scope): float(balance) for scope, balance in raw.items()
+            }
+        raw = snapshot.get("scoped_risk_reservations", {})
+        if isinstance(raw, Mapping):
+            portfolio.scoped_risk_reservations = {
+                str(order_id): ScopedRiskReservation(**dict(values))
+                for order_id, values in raw.items() if isinstance(values, Mapping)
             }
         raw = snapshot.get("positions", {})
         if isinstance(raw, Mapping):

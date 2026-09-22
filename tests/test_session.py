@@ -64,6 +64,27 @@ def test_replay_and_runtime_share_paper_engine_bundle_path(monkeypatch, tmp_path
     assert any(event["event_type"] == "BUNDLE_PATH_CHECK" for event in result["events"])
 
 
+def test_replay_seeds_prior_day_futures_levels(tmp_path):
+    store = RuntimeStore(tmp_path / "replay-context")
+    store.append_market_bars((
+        MarketBar(
+            Instrument("NIFTYFUT", "NFO", "FUTURES"),
+            datetime(2026, 1, 1, 4, 0, tzinfo=timezone.utc),
+            100, 110, 90, 105,
+        ),
+    ), source="fixture")
+    store.append_market_bars((
+        MarketBar(
+            Instrument("NIFTYFUT", "NFO", "FUTURES"),
+            datetime(2026, 1, 2, 4, 0, tzinfo=timezone.utc),
+            101, 111, 91, 106,
+        ),
+    ), source="fixture")
+
+    worker = ReplayWorker(store)
+    assert worker._prior_day_levels("2026-01-02") == (110.0, 90.0)
+
+
 def test_closed_bar_is_processed_under_session_lifecycle(tmp_path):
     store = RuntimeStore(tmp_path)
     session = RuntimeSession(store, None, [], engine=PaperEngine())

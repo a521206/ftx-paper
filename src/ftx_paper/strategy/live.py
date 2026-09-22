@@ -9,7 +9,6 @@ from ftx_paper.capital_context import CapitalRuntimeContext
 
 from .config import (
     AFTERNOON_ENTRY_MINUTES,
-    COOLDOWN_MINUTES,
     DEFAULT_CONFIG,
     MORNING_ENTRY_MINUTES,
     TRAIL_ACTIVATE_BP,
@@ -45,6 +44,8 @@ class ConfiguredLiveStrategy:
         capital_profile: ResearchCapitalProfile = RESEARCH_CAPITAL_PROFILE,
         config: StrategyConfig = DEFAULT_CONFIG,
         expiry_dates: frozenset[str] = frozenset(),
+        prior_day_high: float | None = None,
+        prior_day_low: float | None = None,
         enabled_vehicles: Sequence[str] = ("futures", "synthetic"),
         vehicle: str | None = None,
         vehicle_risk_limits: Mapping[str, VehicleRiskLimits] | None = None,
@@ -67,7 +68,9 @@ class ConfiguredLiveStrategy:
             raise ValueError("enabled_vehicles must contain 'futures' and/or 'synthetic'")
         self._decision_engine = IndependentLiveDecisionEngine(
             version=self.version, config_hash=self.metadata.config_hash,
-            cooldown_minutes=config.cooldown_minutes, capital=self._capital,
+            entry_cooldown_bars=config.entry_cooldown_bars,
+            post_exit_cooldown_bars=config.post_exit_cooldown_bars,
+            capital=self._capital,
             portfolio=self.portfolio,
             max_daily_loss=self.capital_context.profile.max_daily_loss,
             max_net_directional_lots=self.capital_context.max_net_directional_lots,
@@ -75,6 +78,8 @@ class ConfiguredLiveStrategy:
             max_lots=self.capital_context.max_lots,
             morning_entry_minutes=config.morning_entry_minutes,
             afternoon_entry_minutes=config.afternoon_entry_minutes,
+            prior_day_high=prior_day_high,
+            prior_day_low=prior_day_low,
             expiry_dates=expiry_dates,
             enabled_vehicles=self.enabled_vehicles,
             vehicle_risk_limits=self.vehicle_risk_limits,
@@ -109,6 +114,7 @@ class ConfiguredLiveStrategy:
                 "max_net_directional_lots": self.capital_profile.max_net_directional_lots,
                 "risk_per_trade": self.capital_profile.risk_per_trade,
                 "max_lots": self.capital_profile.max_lots,
+                "cell_session_risk_buffer_fraction": self.capital_profile.cell_session_risk_buffer_fraction,
             },
             "config": self.config.as_dict(),
             "risk_gate": self._decision_engine.risk_snapshot(),
@@ -146,10 +152,19 @@ class ConfiguredLiveStrategy:
                     f"capital config does not match strategy snapshot for {name}: "
                     f"configured={configured}, snapshot={persisted}"
                 )
+        persisted_buffer = raw_capital.get("cell_session_risk_buffer_fraction")
+        if persisted_buffer is not None and float(persisted_buffer) != capital_profile.cell_session_risk_buffer_fraction:
+            raise ValueError(
+                "capital config does not match strategy snapshot for "
+                "cell_session_risk_buffer_fraction"
+            )
         raw_config = snapshot.get("config", {})
         if not isinstance(raw_config, Mapping):
             raise ValueError("strategy snapshot config must be an object")
-        allowed_keys = {"name", "version", "morning_entry_minutes", "afternoon_entry_minutes", "cooldown_minutes"}
+        allowed_keys = {
+            "name", "version", "morning_entry_minutes", "afternoon_entry_minutes",
+            "entry_cooldown_bars", "post_exit_cooldown_bars",
+        }
         for key in raw_config:
             if not isinstance(key, str) or key not in allowed_keys:
                 raise ValueError(f"unexpected strategy snapshot config key: {key!r}")
@@ -166,18 +181,19 @@ class ConfiguredLiveStrategy:
         afternoon_entry_minutes = AFTERNOON_ENTRY_MINUTES
         if "afternoon_entry_minutes" in raw_config:
             afternoon_entry_minutes = cls._parse_minute_pair("afternoon_entry_minutes", raw_config["afternoon_entry_minutes"])
-        cooldown_minutes = COOLDOWN_MINUTES
-        if "cooldown_minutes" in raw_config:
-            cooldown = raw_config["cooldown_minutes"]
-            if not isinstance(cooldown, int) or isinstance(cooldown, bool) or cooldown < 0:
-                raise ValueError("cooldown_minutes must be a non-negative integer")
-            cooldown_minutes = cooldown
+        entry_cooldown_bars = cls._parse_non_negative_int(
+            "entry_cooldown_bars", raw_config.get("entry_cooldown_bars", DEFAULT_CONFIG.entry_cooldown_bars),
+        )
+        post_exit_cooldown_bars = cls._parse_non_negative_int(
+            "post_exit_cooldown_bars", raw_config.get("post_exit_cooldown_bars", DEFAULT_CONFIG.post_exit_cooldown_bars),
+        )
         config = StrategyConfig(
             name=name,
             version=version,
             morning_entry_minutes=morning_entry_minutes,
             afternoon_entry_minutes=afternoon_entry_minutes,
-            cooldown_minutes=cooldown_minutes,
+            entry_cooldown_bars=entry_cooldown_bars,
+            post_exit_cooldown_bars=post_exit_cooldown_bars,
         )
         raw_limits = snapshot.get("vehicle_risk_limits", {})
         if not isinstance(raw_limits, Mapping):
@@ -305,6 +321,12 @@ class ConfiguredLiveStrategy:
         if len(value) != 2 or any(not isinstance(item, int) or isinstance(item, bool) for item in value):
             raise ValueError(f"{key} must contain exactly two integers")
         return (int(value[0]), int(value[1]))
+
+    @staticmethod
+    def _parse_non_negative_int(key: str, value: object) -> int:
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"{key} must be a non-negative integer")
+        return value
 
     def on_bundle(self, bundle: DecisionBundle):
         return self._decision_engine.evaluate(bundle)

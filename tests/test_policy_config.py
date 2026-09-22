@@ -32,16 +32,19 @@ def test_session_entry_gates_are_half_open_at_both_boundaries() -> None:
         assert engine._session_for_time(boundary) is Session.OUTSIDE
 
 
-def test_cooldown_segments_reset_every_30_minutes_in_both_sessions() -> None:
+def test_gate_state_scope_is_the_session_not_a_30_minute_segment() -> None:
     engine = _engine()
-    for before, after in (("10:44", "10:45"), ("13:59", "14:00")):
-        before_segment = engine._session_segment(
-            datetime.fromisoformat(f"2026-01-01T{before}:00+05:30")
-        )
-        after_segment = engine._session_segment(
-            datetime.fromisoformat(f"2026-01-01T{after}:00+05:30")
-        )
-        assert before_segment != after_segment
+    morning_before = engine._session_segment(
+        datetime.fromisoformat("2026-01-01T10:44:00+05:30")
+    )
+    morning_after = engine._session_segment(
+        datetime.fromisoformat("2026-01-01T10:45:00+05:30")
+    )
+    afternoon = engine._session_segment(
+        datetime.fromisoformat("2026-01-01T13:30:00+05:30")
+    )
+    assert morning_before == morning_after
+    assert morning_before != afternoon
 
 
 def test_configured_cell_matrix_has_fixed_session_directions() -> None:
@@ -49,32 +52,41 @@ def test_configured_cell_matrix_has_fixed_session_directions() -> None:
     afternoon = {(item.cell): item.direction.value.lower() for item in AFTERNOON_CELL_POLICIES}
 
     assert morning == {
-        "session_low+or_low": "buy",
-        "vwap_zone+or_low": "sell",
-        "session_high+or_high": "sell",
+        "vwap_zone+or_high+prior_day_low": "buy",
+        "vwap_zone+or_low+prior_day_high": "sell",
+        "vwap_zone+session_low+or_low+prior_day_high": "sell",
+        "vwap_zone+session_low+or_low+prior_day_low": "sell",
+        "new_low": "buy",
     }
     assert afternoon == {
-        "session_high+or_high": "buy",
-        "or_low": "buy",
         "vwap_zone+prior_day_high": "sell",
+        "vwap_zone+or_low+prior_day_high": "sell",
     }
 
 
 def test_policy_lookup_is_session_specific_for_shared_cell() -> None:
     engine = _engine()
-    assert engine._cell_policies[(Session.MORNING, "session_high+or_high")].direction.value == "SELL"
-    assert engine._cell_policies[(Session.AFTERNOON, "session_high+or_high")].direction.value == "BUY"
+    assert engine._cell_policies[(Session.MORNING, "vwap_zone+or_low+prior_day_high")].direction.value == "SELL"
+    assert engine._cell_policies[(Session.AFTERNOON, "vwap_zone+or_low+prior_day_high")].direction.value == "SELL"
 
 
 def test_configured_cell_policies_expose_canonical_stability_factors() -> None:
     morning = {item.cell: item.stability for item in MORNING_CELL_POLICIES}
     afternoon = {item.cell: item.stability for item in AFTERNOON_CELL_POLICIES}
 
-    assert morning["session_high+or_high"] == 0.5
-    assert morning["vwap_zone+or_low"] == 0.5
-    assert afternoon["session_high+or_high"] == 0.5
-    assert afternoon["or_low"] == 0.5
+    assert all(value == 1.0 for value in morning.values())
+    assert all(value == 1.0 for value in afternoon.values())
     assert afternoon["vwap_zone+prior_day_high"] == 1.0
+
+
+def test_default_profile_matches_pipeline_research_sizing() -> None:
+    from ftx_paper.capital_config import RESEARCH_CAPITAL_PROFILE
+
+    assert RESEARCH_CAPITAL_PROFILE.risk_per_trade == 0.03
+    assert RESEARCH_CAPITAL_PROFILE.max_lots == 8
+    assert RESEARCH_CAPITAL_PROFILE.max_net_directional_lots == 12
+    assert RESEARCH_CAPITAL_PROFILE.drawdown_policy.tiers == ()
+    assert RESEARCH_CAPITAL_PROFILE.vehicle_limit("futures").max_lots == 8
 
 
 def test_code_defined_research_profile_is_the_paper_configuration() -> None:
@@ -96,7 +108,7 @@ def test_capital_runtime_context_is_deterministic_and_profile_owned() -> None:
     first = CapitalRuntimeContext(profile, environment="replay")
     second = CapitalRuntimeContext(profile, environment="replay")
     assert first == second
-    assert first.max_net_directional_lots == 8.0
+    assert first.max_net_directional_lots == 12.0
     assert first.profile.stability_for("cell") == 0.5
     assert first.profile == second.profile
 
@@ -134,8 +146,9 @@ def test_policy_manifest_is_separate_from_runtime_snapshot() -> None:
     assert "cell_policies" not in DEFAULT_CONFIG.as_dict()
     assert DEFAULT_CONFIG.policy_manifest()[0] == {
         "session": "morning",
-        "cell": "session_low+or_low",
+        "cell": "vwap_zone+or_high+prior_day_low",
         "direction": "buy",
-        "exit_mode": "signal",
+        "exit_mode": "trail",
         "stability": 1.0,
+        "hypothesis": "trend_continuation",
     }

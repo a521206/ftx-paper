@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread
@@ -146,6 +146,7 @@ class ReplayWorker:
         current_equity = initial_capital
         peak_equity = initial_capital
         max_drawdown = 0.0
+        available_dates = self._dates()
         # This engine/strategy is private to this replay run and never shared
         # with RuntimeSession, its broker, ledger, or risk state.
         for date in dates:
@@ -167,10 +168,13 @@ class ReplayWorker:
                 "pending_orders": {},
                 "settled_orders": [],
             })
+            prior_day_high, prior_day_low = self._prior_day_levels(date, available_dates)
             strategy = ConfiguredLiveStrategy(
                 capital_profile=self.capital_profile,
                 enabled_vehicles=vehicles,
                 portfolio=portfolio,
+                prior_day_high=prior_day_high,
+                prior_day_low=prior_day_low,
             )
             coordinator = PaperExecutionCoordinator(strategy.portfolio, strategy.capital_context)
             engine = PaperEngine(strategy)
@@ -179,6 +183,10 @@ class ReplayWorker:
             bars = self._bars(date)
             aggregator = self._aggregator(bars)
             open_trades: list[dict[str, Any]] = []
+            # Synthetic is a reporting-only view of the accepted futures
+            # decision.  Keep its diagnostic lifecycle separate so it cannot
+            # consume risk, margin, cooldown, or execution state.
+            synthetic_open_trades: list[dict[str, Any]] = []
             last_quotes: dict[str, SyntheticFutureQuote] = {}
             for bar in bars:
                 if cancel.is_set():
@@ -243,6 +251,35 @@ class ReplayWorker:
                     realized = self._settle_trade(open_trades, diagnostic_trades, action.intent, futures_bar,
                                                   exit_quote, action.reason, exit_price=exit_price,
                                                   trade=open_trade)
+                    if action.intent.vehicle == "futures" and "synthetic" in vehicles:
+                        synthetic_trade = next(
+                            (item for item in synthetic_open_trades
+                             if item["futures_entry_order_id"] == action.intent.entry_order_id),
+                            None,
+                        )
+                        synthetic_exit_quote = (
+                            synthetic_future_quote(
+                                quote_selection_bar, option_bars,
+                                symbols=(synthetic_trade["ce_symbol"], synthetic_trade["pe_symbol"]),
+                            )
+                            if synthetic_trade is not None else None
+                        )
+                        if synthetic_trade is not None and synthetic_exit_quote is not None:
+                            synthetic_order = replace(
+                                action.intent,
+                                client_order_id=f"{action.intent.client_order_id}:synthetic-report",
+                                vehicle="synthetic",
+                                synthetic_legs=(
+                                    synthetic_exit_quote.ce.instrument,
+                                    synthetic_exit_quote.pe.instrument,
+                                ),
+                            )
+                            self._settle_trade(
+                                synthetic_open_trades, diagnostic_trades,
+                                synthetic_order, futures_bar, synthetic_exit_quote,
+                                action.reason, exit_price=synthetic_exit_quote.price,
+                                trade=synthetic_trade,
+                            )
                     if action.intent.vehicle == "futures":
                         coordinator.fill(action.intent, price=exit_price,
                                          timestamp=futures_bar.timestamp.isoformat(),
@@ -325,6 +362,33 @@ class ReplayWorker:
                                                      "quote_timestamp": entry_quote.ce.timestamp.isoformat(),
                                                      "quote_source": "same_minute_bundle"})
                             last_quotes[order.client_order_id] = entry_quote
+                        elif order.vehicle == "futures" and "synthetic" in vehicles:
+                            report_quote = synthetic_future_quote(
+                                quote_selection_bar, option_bars,
+                            )
+                            if report_quote is not None:
+                                synthetic_open_trades.append({
+                                    "futures_entry_order_id": order.client_order_id,
+                                    "entry_order_id": f"{order.client_order_id}:synthetic-report",
+                                    "instrument": order.instrument.symbol,
+                                    "side": order.side.value,
+                                    "quantity": order.quantity,
+                                    "entry_timestamp": futures_bar.timestamp.isoformat(),
+                                    "entry_price": report_quote.price,
+                                    "vehicle": "synthetic",
+                                    "cell": order.cell,
+                                    "entry_bar": order.entry_bar or engine.bars_seen,
+                                    "ce_symbol": report_quote.ce.instrument.symbol,
+                                    "pe_symbol": report_quote.pe.instrument.symbol,
+                                    "ce_expiry": report_quote.ce.instrument.expiry,
+                                    "pe_expiry": report_quote.pe.instrument.expiry,
+                                    "ce_strike": report_quote.strike,
+                                    "ce_entry_price": report_quote.ce.close,
+                                    "pe_entry_price": report_quote.pe.close,
+                                    "synthetic_entry_price": report_quote.price,
+                                    "quote_timestamp": report_quote.ce.timestamp.isoformat(),
+                                    "quote_source": "same_minute_bundle",
+                                })
                     elif order.role is OrderRole.EXIT:
                         try:
                             open_trade = self._matching_trade(open_trades, order)
@@ -363,6 +427,7 @@ class ReplayWorker:
                         max_drawdown = min(max_drawdown, current_equity - peak_equity)
             # Preserve open positions as mark-to-market/open replay results.
             diagnostic_trades.extend({**trade, "status": "open"} for trade in open_trades)
+            diagnostic_trades.extend({**trade, "status": "open"} for trade in synthetic_open_trades)
         scores = [int(event["score"]) for event in all_events
                   if isinstance(event.get("score"), (int, float))]
         normalized_trades = [self._normalize_trade(trade) for trade in diagnostic_trades]
@@ -518,6 +583,32 @@ class ReplayWorker:
 
     def _dates(self) -> list[str]:
         return self.store.read_market_dates()
+
+    def _prior_day_levels(
+        self, session_date: str, available_dates: list[str] | None = None,
+    ) -> tuple[float | None, float | None]:
+        """Return the preceding stored futures high/low for replay context.
+
+        Pipeline replays seed each date with the immediately preceding
+        trading day's futures range. Paper dates are evaluated independently
+        for positions and risk, but their feature context must retain this
+        causal cross-date input.
+        """
+        dates = sorted(available_dates or self._dates())
+        prior = [value for value in dates if value < session_date]
+        if not prior:
+            return None, None
+        rows = self.store.read_market_bars(prior[-1])
+        futures = [
+            row for row in rows
+            if str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
+        ]
+        if not futures:
+            return None, None
+        return (
+            max(float(row["high"]) for row in futures),
+            min(float(row["low"]) for row in futures),
+        )
 
     def _bars(self, session_date: str) -> tuple[MarketBar, ...]:
         rows = self.store.read_market_bars(session_date)

@@ -168,23 +168,56 @@ parity failure.
 
 ## Decision gate ordering
 
-For every candidate, the decision engine evaluates gates in this order:
+The maintained pipeline evaluates each candidate in this order:
 
 ```text
 policy and transition eligibility
-    -> thesis gate
-    -> shared directional concurrency
+    -> thesis / occupancy gate
     -> risk permission and capital availability
-    -> ordered sizing (score/stability, drawdown scaling, directional headroom, and vehicle lot limits)
+    -> ordered quantity stages (score multiplier, directional headroom,
+       vehicle limit, drawdown scale, policy stability)
+    -> scoped date/session/cell/direction risk ceiling
     -> final quantity limits and downward lot rounding
     -> acceptance
 ```
 
-Sizing must not run before a candidate passes the earlier thesis and
-concurrency gates. A rejected candidate reports the first failed gate; later
-stage sizing diagnostics must not be presented as if the candidate was
-eligible for sizing. The risk liquidity ceiling and the final vehicle lot cap
-are separate checks and must not be collapsed.
+The canonical capital path currently passes no score into the sizing
+multiplier, so its effective score multiplier is 1.0. Score remains a setup
+qualification and audit value. Paper must report the risk and sizing stages
+only after a candidate passes its policy and thesis/occupancy gates. The
+directional headroom check belongs inside the sizing waterfall; the risk
+liquidity ceiling and vehicle lot cap remain separate limits.
+
+### Current core behavior matrix
+
+| Area | Active Pipeline behavior | Paper status | Research-only or unresolved |
+|---|---|---|---|
+| Candidate score | Signed close-location volume proxy from OHLCV; score qualifies and audits the setup | Aligned; Paper does not treat bar-derived proxy as reported exchange order flow | Hypothesis veto scoring remains research-only |
+| Gate order | Policy/transition, thesis and occupancy, risk permission, sizing waterfall, scoped risk, acceptance | Aligned in the decision path | Sweep-specific gate combinations remain research-only |
+| Sizing | Score multiplier is 1.0; directional headroom, vehicle, drawdown, stability, then scoped risk | Paper research profile now mirrors Pipeline research: 3% risk, 8 max lots, 12 directional lots, and no drawdown scaling | Verify identical intermediate sizing decisions on the same candidate stream |
+| Research cells | Morning 09:15–11:45: five active cells; Afternoon 13:30–14:15: two active cells | Paper-owned manifest now mirrors Pipeline cell, direction, exit mode, hypothesis, and stability assignments | Verify feature-to-cell identity and ordered accept/reject parity |
+| Replay state | State is continuous within each session and resets at the date boundary; each date is seeded with the preceding futures high/low | Aligned, including prior-day context and legacy snapshot migration | — |
+| Cooldown and occupancy | 15-bar per-cell entry spacing; 30 bars after any exit; `block_open_positions=false` | Aligned | Open-position blocking and alternative cooldown scopes are sweep variants, not active policy |
+
+These settings describe the processing contract and the active research run
+profile. Paper keeps its own profile type and implementation, but its default
+research values are intentionally like-for-like with Pipeline for quantity
+parity.
+
+The scoped risk allowance is
+`initial_capital × max_daily_loss × cell_session_risk_buffer_fraction`.
+Each accepted position reserves its stop/stress loss plus round-trip futures
+costs from a `(date, session, cell, direction)` bucket. Open reservations reduce
+available risk; settlement adjusts the bucket by net P&L, capped at its
+configured allowance.
+
+The active replay configuration uses a 15-bar per-cell entry cooldown and a
+30-bar post-exit cooldown after any exit. Thesis state persists continuously
+through each session and resets at the trading-date boundary. The active
+canonical config sets `block_open_positions=false`, so a same-cell open
+position alone does not reject another entry; the entry and post-exit cooldowns
+still apply. Occupancy sweeps and alternative candidate-policy settings are
+research-only unless promoted into the canonical configuration.
 
 Final quantity remains bounded by every applicable risk, margin, liquidity,
 stability, vehicle-lot, and shared directional-headroom limit. Integer lot

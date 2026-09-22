@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import isfinite
 @dataclass(frozen=True, slots=True)
 class DrawdownPolicy:
     """Paper-owned position scaling policy, independent of canonical FTX."""
 
-    tiers: tuple[tuple[float, float], ...] = (
-        (-100_000.0, 0.50),
-        (-200_000.0, 0.25),
-    )
+    tiers: tuple[tuple[float, float], ...] = ()
 
     def __post_init__(self) -> None:
         normalized = tuple(sorted((float(level), float(scale)) for level, scale in self.tiers))
@@ -23,7 +21,7 @@ class DrawdownPolicy:
 class VehicleLimits:
     """Immutable Paper vehicle sizing limits."""
 
-    max_lots: int = 3
+    max_lots: int = 8
     margin_per_lot: float = 175_000.0
 
     def __post_init__(self) -> None:
@@ -39,15 +37,19 @@ class ResearchCapitalProfile:
     is a separate implementation and type under the ``ftx_paper`` namespace.
     """
 
-    name: str = "paper-research"
+    name: str = "ftx-paper-research"
     schema_version: int = 1
     strategy_version: str = ""
     initial_capital: float = 2_500_000.0
     max_daily_loss: float = 0.05
     max_drawdown_fraction: float = 0.15
-    risk_per_trade: float = 0.01
-    max_lots: int = 3
-    max_net_directional_lots: float = 8.0
+    # Keep the same stable candidate identifier as Pipeline research while
+    # retaining an independently owned Paper profile and implementation.
+    candidate_id: str = "r0.03-l8-n12-dd2f6c5b1246"
+    risk_per_trade: float = 0.03
+    max_lots: int = 8
+    max_net_directional_lots: float = 12.0
+    cell_session_risk_buffer_fraction: float = 1.0
     drawdown_policy: DrawdownPolicy = field(default_factory=DrawdownPolicy)
     selected_sessions: tuple[str, ...] = ("morning", "afternoon")
     enabled_vehicles: tuple[str, ...] = ("futures", "synthetic")
@@ -56,7 +58,6 @@ class ResearchCapitalProfile:
         ("synthetic", VehicleLimits()),
     )
     stability_policy: tuple[tuple[str, float], ...] = ()
-    candidate_id: str = "baseline"
 
     def __post_init__(self) -> None:
         if self.schema_version < 1 or not self.name or self.initial_capital <= 0:
@@ -65,6 +66,10 @@ class ResearchCapitalProfile:
             raise ValueError("Paper risk fractions must be between zero and one")
         if self.max_lots <= 0 or self.max_net_directional_lots <= 0:
             raise ValueError("Paper capital limits must be positive")
+        buffer_fraction = float(self.cell_session_risk_buffer_fraction)
+        if not isfinite(buffer_fraction) or not 0.20 <= buffer_fraction <= 1.0:
+            raise ValueError("cell_session_risk_buffer_fraction must be in [0.20, 1.0]")
+        object.__setattr__(self, "cell_session_risk_buffer_fraction", buffer_fraction)
         sessions = tuple(dict.fromkeys(str(value).lower() for value in self.selected_sessions))
         vehicles = tuple(dict.fromkeys(str(value).lower() for value in self.enabled_vehicles))
         if not sessions or any(value not in {"morning", "afternoon"} for value in sessions):
@@ -94,13 +99,13 @@ class ResearchCapitalProfile:
 RESEARCH_CAPITAL_PROFILE = ResearchCapitalProfile(
     name="ftx-paper-research",
     strategy_version="ftx-paper-v1",
-    stability_policy=(
-        ("morning:session_low+or_low", 1.0),
-        ("morning:vwap_zone+or_low", 0.5),
-        ("morning:session_high+or_high", 0.5),
-        ("afternoon:session_high+or_high", 0.5),
-        ("afternoon:or_low", 0.5),
-        ("afternoon:vwap_zone+prior_day_high", 1.0),
+    max_lots=8,
+    max_net_directional_lots=12,
+    risk_per_trade=0.03,
+    drawdown_policy=DrawdownPolicy(tiers=()),
+    vehicle_limits=(
+        ("futures", VehicleLimits(max_lots=8)),
+        ("synthetic", VehicleLimits(max_lots=8)),
     ),
 )
 

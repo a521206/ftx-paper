@@ -48,11 +48,10 @@ def _synthetic_delta_divergence(
     *,
     event_time: str | None = None,
 ) -> float:
-    """Correlate canonical ``sc`` closes with cumulative synthetic delta.
+    """Correlate closes with cumulative signed close-location volume.
 
-    The canonical implementation intentionally reconstructs each bar as
-    ``high=sc``, ``low=sl``, ``close=sc``.  That is not the ordinary OHLC CLV
-    calculation, so keep the unusual construction explicit here.
+    This is a bar-based OHLCV order-flow proxy, not exchange-reported signed
+    trade flow. Only completed bars before ``event_time`` contribute.
     """
     if len(bars) < 2:
         return 0.0
@@ -64,7 +63,7 @@ def _synthetic_delta_divergence(
             minute = bar.timestamp.astimezone(IST).strftime("%H:%M")
             if not ("09:15" <= minute < event_time):
                 continue
-        high = float(bar.close)
+        high = float(bar.high)
         low = float(bar.low)
         close = float(bar.close)
         volume = float(bar.volume or 0.0)
@@ -72,8 +71,14 @@ def _synthetic_delta_divergence(
             isfinite(value) for value in (high, low, close, volume)
         ):
             continue
-        clv = (close - low) / (high - low) if high > low else 0.5
-        running += clv * volume
+        price_range = high - low
+        if price_range < 0 or close < low or close > high:
+            continue
+        signed_close_location = (
+            ((close - low) - (high - close)) / price_range
+            if price_range > 0 else 0.0
+        )
+        running += signed_close_location * volume
         cumulative.append(running)
         closes.append(close)
     if len(cumulative) < 2:
