@@ -61,10 +61,11 @@ replay does not emit rejected decisions; `--emit-rejected-decisions` is only
 for explicit diagnostic runs.
 
 The Sep 3 verification, using Sep 2 prior-day context from the consolidated
-`data/runtime/ftx-paper` runtime, reported 3 matched P10 rows, 0 modified, 0
-canonical-only, 2 Paper-only, 20 unavailable fields, 0 synthetic-only
-differences, and 0 ledger-only differences. This is implementation evidence,
-not completion of the P10 parity gate.
+`data/runtime/ftx-paper` runtime, reported 4 matched P10 rows, 0 modified, 0
+canonical-only, 0 Paper-only, 21 unavailable fields, 0 synthetic-only
+differences, and 0 ledger-only differences. The available ledger fields
+matched; canonical still does not publish equity or directional exposure.
+This is implementation evidence, not completion of the P10 parity gate.
 
 ## Scope
 

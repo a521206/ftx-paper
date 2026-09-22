@@ -57,8 +57,8 @@ downstream execution and settlement fields are complete.
 
 The verified Sep 3 replay used the canonical Sep 2–Sep 3 fixture and the
 consolidated runtime at `data/runtime/ftx-paper`; rejected decisions were not
-emitted. The P10 report currently shows 3 matched rows, 0 modified rows, 0
-canonical-only rows, 2 Paper-only rows, 20 unavailable fields, 0
+emitted. The P10 report currently shows 4 matched rows, 0 modified rows, 0
+canonical-only rows, 0 Paper-only rows, 21 unavailable fields, 0
 synthetic-only differences, and 0 ledger-only differences. The two Paper-only
 rows are synthetic execution records not published by the canonical trade
 artifact; the synthetic settlement comparison matches the available fields.

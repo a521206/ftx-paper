@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread
@@ -438,6 +438,43 @@ class ReplayWorker:
         scores = [int(event["score"]) for event in all_events
                   if isinstance(event.get("score"), (int, float))]
         normalized_trades = [self._normalize_trade(trade) for trade in diagnostic_trades]
+        ledger_by_date: dict[str, dict[str, Any]] = {}
+        for trade in normalized_trades:
+            if trade.get("vehicle") != "futures":
+                continue
+            date = str(trade.get("date", ""))[:10]
+            if not date:
+                continue
+            row = ledger_by_date.setdefault(date, {
+                "date": date, "gross_pnl_rs": 0.0, "cost_rs": 0.0,
+                "net_pnl_rs": 0.0, "daily_pnl": 0.0,
+            })
+            row["gross_pnl_rs"] += float(trade.get("gross_pnl_rs") or 0.0)
+            row["cost_rs"] += float(trade.get("cost_rs") or 0.0)
+            row["net_pnl_rs"] += float(trade.get("net_pnl_rs") or 0.0)
+            row["daily_pnl"] += float(trade.get("net_pnl_rs") or 0.0)
+        if ledger_by_date:
+            final_date = max(ledger_by_date)
+            final_row = ledger_by_date[final_date]
+            final_row.update({
+                "equity": current_equity,
+                "drawdown": max(0.0, -max_drawdown),
+                "open_margin": max(
+                    float(item.get("quantity") or 0.0)
+                    * self.capital_profile.vehicle_limit("futures").margin_per_lot
+                    for item in normalized_trades
+                    if item.get("vehicle") == "futures"
+                ) if normalized_trades else 0.0,
+                "reservations": {
+                    order_id: asdict(reservation)
+                    for order_id, reservation in strategy.portfolio.reservations.items()
+                },
+                "directional_exposure": sum(
+                    position.quantity * (1 if position.side is OrderSide.BUY else -1)
+                    for position in strategy.portfolio.positions.values()
+                ),
+                "rejection_counts": {},
+            })
         return {
             "result_schema_version": 2,
             "source": "replay",
@@ -466,6 +503,7 @@ class ReplayWorker:
                 "max_drawdown": max_drawdown,
                 "lot_size": NIFTY_LOT_SIZE,
             },
+            "ledger": ledger_by_date,
             "scoring": {
                 "decisions_scored": len(scores),
                 "score_min": min(scores) if scores else None,
