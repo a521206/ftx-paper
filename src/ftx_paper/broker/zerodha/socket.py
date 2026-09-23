@@ -55,25 +55,23 @@ class AsyncZerodhaSocket:
         on_message: Callable[[Mapping[str, Any]], None],
         on_close: Callable[..., None],
     ) -> None:
-        shutdown = self.close()
-        if not shutdown.stopped:
-            raise RuntimeError("previous Zerodha WebSocket worker did not stop")
-        if self._thread is not None and self._thread.is_alive():
-            raise RuntimeError("previous Zerodha WebSocket worker did not stop")
-        self._connected = False
-        self._ready.clear()
-        self._close_notified = False
-        self._last_activity = 0.0
-        self._on_message = on_message
-        self._on_close = on_close
-        self._stop_event.clear()
-        self._state = SocketState.CONNECTING
-        self._thread = Thread(
-            target=self._run_thread,
-            daemon=True,
-            name="ftx-paper-zerodha-ws",
-        )
-        self._thread.start()
+        with self._lifecycle_lock:
+            if self._thread is not None and self._thread.is_alive():
+                raise RuntimeError("previous Zerodha WebSocket worker did not stop")
+            self._connected = False
+            self._ready.clear()
+            self._close_notified = False
+            self._last_activity = 0.0
+            self._on_message = on_message
+            self._on_close = on_close
+            self._stop_event.clear()
+            self._state = SocketState.CONNECTING
+            self._thread = Thread(
+                target=self._run_thread,
+                daemon=True,
+                name="ftx-paper-zerodha-ws",
+            )
+            self._thread.start()
 
     def _run_thread(self) -> None:
         loop = asyncio.new_event_loop()

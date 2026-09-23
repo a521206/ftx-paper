@@ -80,6 +80,7 @@ class ZerodhaFeed:
         self._last_error: str | None = None
         self._rate_limited_until: float | None = None
         self._next_retry_at: datetime | None = None
+        self._connection_lock = RLock()
         self._reconnect_lock = RLock()
         self._reconnecting = False
         self._connection_generation = 0
@@ -125,7 +126,8 @@ class ZerodhaFeed:
         self._reconnect_requested.set()
         self._connected = False
         self._next_retry_at = None
-        shutdown = self.socket.close()
+        with self._connection_lock:
+            shutdown = self.socket.close()
         shutdown_ok = getattr(shutdown, "stopped", True) is not False
         if not shutdown_ok:
             self._failed = True
@@ -137,25 +139,26 @@ class ZerodhaFeed:
         return shutdown_ok
 
     def _connect(self) -> None:
-        self._connection_generation += 1
-        generation = self._connection_generation
-        self._close_handled_generation = None
+        with self._connection_lock:
+            self._connection_generation += 1
+            generation = self._connection_generation
+            self._close_handled_generation = None
 
-        def on_close(code: int | None = None, reason: str = "") -> None:
-            self._on_close(code, reason, generation=generation)
+            def on_close(code: int | None = None, reason: str = "") -> None:
+                self._on_close(code, reason, generation=generation)
 
-        self.socket.connect(self._on_message, on_close)
-        self.socket.subscribe(self.tokens)
-        wait_until_connected = getattr(self.socket, "wait_until_connected", None)
-        if callable(wait_until_connected):
-            self._connected = bool(wait_until_connected(12.0))
-        else:
-            self._connected = True
-        if self._connected:
-            self._last_error = None
-            self._next_retry_at = None
-        elif not self._last_error:
-            self._last_error = "Timed out waiting for the Zerodha WebSocket connection"
+            self.socket.connect(self._on_message, on_close)
+            self.socket.subscribe(self.tokens)
+            wait_until_connected = getattr(self.socket, "wait_until_connected", None)
+            if callable(wait_until_connected):
+                self._connected = bool(wait_until_connected(12.0))
+            else:
+                self._connected = True
+            if self._connected:
+                self._last_error = None
+                self._next_retry_at = None
+            elif not self._last_error:
+                self._last_error = "Timed out waiting for the Zerodha WebSocket connection"
 
     def _on_message(self, payload: Mapping[str, Any]) -> None:
         if self._running:
@@ -272,11 +275,17 @@ class ZerodhaFeed:
                 except Exception as exc:
                     self._connected = False
                     self._last_error = f"Reconnect failed: {exc}"
+                    next_attempt = self._attempts + 1
+                    retry_delay = self.policy.delay(next_attempt)
+                    if self._rate_limited_until is not None:
+                        retry_delay = max(retry_delay, self._rate_limited_until - self.clock())
                     self._next_retry_at = datetime.now(timezone.utc) + timedelta(
-                        seconds=self.watchdog_interval_seconds
+                        seconds=max(0.0, retry_delay)
                     )
                     logger.exception("Zerodha feed reconnect failed")
                     self._emit_health()
+                    if self._attempts < self.policy.max_attempts and self._running:
+                        self._reconnect_requested.set()
 
     def _reconnect(self) -> None:
         # Drop partial bars: a bar crossing a socket generation is not causal.
@@ -289,7 +298,6 @@ class ZerodhaFeed:
             if self._attempts >= self.policy.max_attempts:
                 self._failed = True
                 self._connected = False
-                self.socket.close()
                 self._next_retry_at = None
                 self._emit_health()
                 return
@@ -308,8 +316,22 @@ class ZerodhaFeed:
             if not self._running:
                 return
             self._next_retry_at = None
-            self.socket.close()
-            self._connect()
+            with self._connection_lock:
+                shutdown = self.socket.close()
+                if getattr(shutdown, "stopped", True) is False:
+                    self._connected = False
+                    self._last_error = "Previous Zerodha WebSocket worker is still stopping"
+                    next_attempt = self._attempts + 1
+                    retry_delay = self.policy.delay(next_attempt)
+                    if self._rate_limited_until is not None:
+                        retry_delay = max(retry_delay, self._rate_limited_until - self.clock())
+                    self._next_retry_at = datetime.now(timezone.utc) + timedelta(
+                        seconds=max(0.0, retry_delay)
+                    )
+                    self._emit_health()
+                    self._reconnect_requested.set()
+                    return
+                self._connect()
             self._emit_health()
         finally:
             with self._reconnect_lock:
