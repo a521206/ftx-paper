@@ -109,7 +109,9 @@ class RuntimeSession:
                 self._feed_lease_id = self.store.acquire_process_lease(self.LIVE_FEED_LEASE)
             self._stopping = False
             self._started.clear()
-            self.store.patch_status({"state": "STARTING", "error": None, "started_at": datetime.now(timezone.utc).isoformat(),
+            self.store.patch_status({"state": "STARTING", "health_state": "STARTING",
+                                     "feed_connected": False, "feed_health": None,
+                                     "error": None, "started_at": datetime.now(timezone.utc).isoformat(),
                                      "initial_capital": self.capital_profile.initial_capital if self.capital_profile else None,
                                      "max_daily_loss": self.capital_profile.max_daily_loss if self.capital_profile else None,
                                      "max_net_directional_lots": self.capital_profile.max_net_directional_lots if self.capital_profile else None,
@@ -164,6 +166,7 @@ class RuntimeSession:
                     self.broker.close()
                 self.store.patch_status({
                     "state": "WAITING_FOR_MARKET",
+                    "health_state": "WAITING",
                     "phase": "BACKFILL",
                     "execution_enabled": False,
                     "feed_connected": False,
@@ -196,15 +199,19 @@ class RuntimeSession:
                     self._release_feed_lease()
                     return
                 self.feed.start()
-                self.store.patch_status({"state": "RUNNING", "phase": "LIVE", "execution_enabled": True,
-                                         "feed_connected": True})
+                self.store.patch_status({"state": "RUNNING", "health_state": "DEGRADED",
+                                         "phase": "LIVE", "execution_enabled": True})
+                health_snapshot = getattr(self.feed, "health_snapshot", None)
+                if callable(health_snapshot):
+                    self.on_feed_health(health_snapshot())
                 self._started.set()
         except Exception as exc:
             self._replaying = False
             if self.broker is not None:
                 self.broker.close()
             logger.exception("Runtime worker failed during startup")
-            self.store.patch_status({"state": "ERROR", "error": str(exc)})
+            self.store.patch_status({"state": "ERROR", "health_state": "FAILED",
+                                     "feed_connected": False, "error": str(exc)})
             self._release_feed_lease()
             self._started.set()
 
@@ -772,7 +779,15 @@ class RuntimeSession:
                 return
             if self._aggregator is not None:
                 self._refresh_pending_status()
-            self.store.patch_status({"feed_health": health, "feed_connected": bool(health.get("connected"))})
+            connected = bool(health.get("connected"))
+            failed = str(health.get("state", "")).upper() == "FAILED"
+            degraded = not connected or bool(health.get("transport_stale"))
+            health_state = "FAILED" if failed else "DEGRADED" if degraded else "HEALTHY"
+            self.store.patch_status({
+                "feed_health": health,
+                "feed_connected": connected,
+                "health_state": health_state,
+            })
 
     def stop(self) -> None:
         with self._lock:
@@ -780,7 +795,7 @@ class RuntimeSession:
             feed = self.feed
             broker = self.broker
             self._stopping = True
-            self.store.patch_status({"state": "STOPPING", "feed_connected": False})
+            self.store.patch_status({"state": "STOPPING", "health_state": "STOPPING", "feed_connected": False})
         feed_stopped = True
         try:
             if feed:
@@ -799,13 +814,17 @@ class RuntimeSession:
             finally:
                 with self._lock:
                     self._release_feed_lease()
-                    self.store.patch_status({"state": "STOPPED" if feed_stopped else "ERROR", "bars_seen": self.engine.bars_seen,
+                    final_state = "STOPPED" if feed_stopped else "ERROR"
+                    self.store.patch_status({"state": final_state, "health_state": final_state,
+                                             "feed_connected": False, "bars_seen": self.engine.bars_seen,
                                              "pending_bundle_minutes": [], "pending_bundle_details": []})
         if startup and startup is not threading.current_thread():
             startup.join()
         with self._lock:
             try:
-                self.store.patch_status({"state": "STOPPED" if feed_stopped else "ERROR", "bars_seen": self.engine.bars_seen})
+                final_state = "STOPPED" if feed_stopped else "ERROR"
+                self.store.patch_status({"state": final_state, "health_state": final_state,
+                                         "feed_connected": False, "bars_seen": self.engine.bars_seen})
             except Exception as exc:
                 logger.exception("Runtime worker failed while stopping")
                 self.store.patch_status({"state": "ERROR", "error": str(exc)})

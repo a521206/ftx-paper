@@ -482,6 +482,7 @@ class RuntimeStore:
         # audit event so the interruption remains visible in the UI.
         self.patch_status({
             "state": "STOPPED",
+            "health_state": "STOPPED",
             "feed_connected": False,
             "recovered_from": previous_state,
         })

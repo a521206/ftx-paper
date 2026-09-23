@@ -149,6 +149,14 @@
       margin-top: 7px;
     }
 
+    .status-detail {
+      color: var(--md-on-surface-variant);
+      font-size: 11px;
+      line-height: 15px;
+      margin-top: 4px;
+      overflow-wrap: anywhere;
+    }
+
     .dot {
       display: inline-block;
       width: 8px;
@@ -1630,6 +1638,7 @@
     function render(data) {
       latestData = data;
       const runtime = data.runtime || {};
+      const feedHealth = runtime.feed_health || {};
       const capital = data.capital || {};
       const decisionRows = data.decisions.decisions || [];
 
@@ -1644,19 +1653,47 @@
         </div>
       </div>
       <div class="status-strip">
-        ${[
-          ['Zerodha', data.broker.authenticated ? 'Connected' : 'Not connected', data.broker.authenticated ? 'good' : 'warn'],
-          ['Runtime session', runtime.state || 'Unknown', runtime.state === 'RUNNING' ? 'good' : 'warn'],
-          ['Feed', runtime.feed_connected ? 'Healthy' : 'Not connected', runtime.feed_connected ? 'good' : 'bad'],
-          ['Last bar', date(runtime.last_bar_at), ''],
-          ['Heartbeat', date(runtime.last_heartbeat_at), runtime.last_heartbeat_at ? 'good' : 'warn'],
-        ]
+        ${(() => {
+          const feedConnected = Boolean(runtime.feed_connected);
+          const feedState = String(feedHealth.state || '').toUpperCase();
+          const feedValue = runtime.state === 'STOPPED' || feedState === 'STOPPED' ? 'Stopped'
+            : feedHealth.market_open === false ? 'Waiting for market'
+            : feedState === 'RECONNECTING'
+            ? `Reconnecting · attempt ${feedHealth.reconnect_attempts ?? 0}`
+            : feedState === 'FAILED' ? 'Failed'
+            : feedConnected && !feedHealth.transport_stale ? 'Healthy'
+            : 'Disconnected';
+          const tickDetail = feedHealth.last_tick_at ? `Last tick ${date(feedHealth.last_tick_at)}` : 'No live ticks received';
+          const retryDetail = feedHealth.next_retry_at ? `Retry ${date(feedHealth.next_retry_at)}` : '';
+          const feedDetail = [
+            tickDetail,
+            retryDetail,
+            feedHealth.rate_limited ? 'Broker rate limit active' : '',
+            feedHealth.message,
+            feedHealth.last_error || (feedConnected && feedHealth.transport_stale ? 'Market data is stale' : ''),
+            runtime.state === 'ERROR' ? runtime.error : '',
+          ].filter(Boolean).join(' · ');
+          const heartbeatDate = runtime.last_heartbeat_at ? new Date(runtime.last_heartbeat_at) : null;
+          const heartbeatAgeMs = heartbeatDate && !isNaN(heartbeatDate) ? Date.now() - heartbeatDate.getTime() : null;
+          const heartbeatStale = runtime.state === 'RUNNING' && heartbeatAgeMs != null && heartbeatAgeMs > 120000;
+          const heartbeatAge = heartbeatAgeMs == null ? '' : heartbeatStale
+            ? `Stale · ${Math.floor(heartbeatAgeMs / 60000)} min ago`
+            : `Updated ${Math.max(0, Math.floor(heartbeatAgeMs / 1000))} sec ago`;
+          return [
+            ['Zerodha', data.broker.authenticated ? 'Connected' : 'Not connected', data.broker.authenticated ? 'good' : 'warn', ''],
+            ['Runtime session', runtime.state || 'Unknown', runtime.health_state === 'HEALTHY' ? 'good' : runtime.health_state === 'FAILED' ? 'bad' : runtime.state === 'RUNNING' ? 'warn' : '', runtime.health_state && runtime.health_state !== 'HEALTHY' ? runtime.health_state : ''],
+            ['Feed', feedValue, feedConnected && !feedHealth.transport_stale ? 'good' : feedState === 'FAILED' ? 'bad' : 'warn', feedDetail],
+            ['Last bar', date(runtime.last_bar_at), '', ''],
+            ['Heartbeat', date(runtime.last_heartbeat_at), heartbeatStale ? 'bad' : runtime.last_heartbeat_at ? 'good' : 'warn', heartbeatAge],
+          ];
+        })()
           .map(
             (x) => `<div class="status-item">
               <div class="label">${x[0]}</div>
               <div class="status-value">
                 <span class="dot ${x[2]}"></span>${esc(x[1])}
               </div>
+              ${x[3] ? `<div class="status-detail">${esc(x[3])}</div>` : ''}
             </div>`
           )
           .join('')}
