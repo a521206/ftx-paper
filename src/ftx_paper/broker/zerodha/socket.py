@@ -140,6 +140,7 @@ class AsyncZerodhaSocket:
                 self._url,
                 open_timeout=10,
                 close_timeout=2,
+                ping_interval=None,
                 compression=None,
                 max_size=10 * 1024 * 1024,
                 additional_headers={"User-Agent": "FTX-Paper-ZerodhaClient/1.0"},
