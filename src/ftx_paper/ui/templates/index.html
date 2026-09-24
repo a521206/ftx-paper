@@ -1115,7 +1115,12 @@
     const replayDetails = new Map();
     let latestData = null;
     let replaySelectionInFlight = false;
-    let replayRangeState = { from: '', to: '' };
+    const replaySearch = new URLSearchParams(location.search);
+    let replayRangeState = {
+      from: replaySearch.get('date_from') || '',
+      to: replaySearch.get('date_to') || '',
+    };
+    let invalidReplayDateNotified = '';
 
     function scheduleRefresh(delayMs) {
       if (refreshTimer) clearTimeout(refreshTimer);
@@ -1425,7 +1430,7 @@
 
     function replayRangeControls(dates, selectedDate, status = '') {
       const available = Array.isArray(dates) ? dates : [];
-      const fallback = selectedDate || available[available.length - 1] || '';
+      const fallback = available.includes(selectedDate) ? selectedDate : (available[available.length - 1] || '');
       const from = replayRangeState.from || fallback;
       const to = replayRangeState.to || fallback;
       return `<section class="replay-control-bar"><form id="replay-form" class="replay-form"><label>From<input id="replay-from" type="date" value="${esc(from)}" aria-label="Replay range start"></label><label>To<input id="replay-to" type="date" value="${esc(to)}" aria-label="Replay range end"></label><button>${status === 'queued' || status === 'running' ? 'Replay running…' : 'Load date range'}</button></form><div class="replay-shortcuts"><span>${available.length} market days · cached days are reused</span><a href="/replay?date=${encodeURIComponent(fallback)}">Selected day</a></div></section>`;
@@ -1518,6 +1523,13 @@
       const requestedDate = new URLSearchParams(window.location.search).get('date');
       const dateValue = requestedDate || marketDates[marketDates.length - 1];
       if (!dateValue || replaySelectionInFlight) return;
+      if (!marketDates.includes(dateValue)) {
+        if (invalidReplayDateNotified !== dateValue) {
+          invalidReplayDateNotified = dateValue;
+          flash(`No market data for ${replayDateLabel(dateValue)}. Choose an available From and To date.`);
+        }
+        return;
+      }
       const run = runs.find((candidate) => replayRunDate(candidate) === dateValue);
       if (run) {
         if (String(run.status).toLowerCase() === 'completed' && !replayDetails.has(String(run.run_id || ''))) {
@@ -1850,7 +1862,8 @@
             return !run || ['failed', 'rejected', 'cancelled'].includes(String(run.status || '').toLowerCase());
           });
           await Promise.all(missing.map((session_date) => get('/api/v1/replay', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({session_date})})));
-          history.replaceState({}, '', `/replay?date=${encodeURIComponent(from)}`);
+          const query = new URLSearchParams({ date: from, date_from: from, date_to: to });
+          history.replaceState({}, '', `/replay?${query.toString()}`);
           flash(missing.length ? `${missing.length} missing day${missing.length === 1 ? '' : 's'} queued` : 'Loaded cached replay days');
           refresh();
         }
