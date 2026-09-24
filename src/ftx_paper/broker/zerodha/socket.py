@@ -77,6 +77,7 @@ class AsyncZerodhaSocket:
 
     def _run_thread(self) -> None:
         loop = asyncio.new_event_loop()
+        loop.set_exception_handler(self._handle_loop_exception)
         with self._lifecycle_lock:
             self._loop = loop
             # close() sets the stop event before taking this lock. Publishing
@@ -112,6 +113,16 @@ class AsyncZerodhaSocket:
                 if self._stop_event.is_set():
                     self._state = SocketState.STOPPED
 
+    @staticmethod
+    def _handle_loop_exception(
+        loop: asyncio.AbstractEventLoop,
+        context: dict[str, Any],
+    ) -> None:
+        exception = context.get("exception")
+        if isinstance(exception, ConnectionResetError) and getattr(exception, "winerror", None) == 10054:
+            return
+        loop.default_exception_handler(context)
+
     async def _run_once(self) -> None:
         if self._stop_event.is_set():
             return
@@ -129,7 +140,6 @@ class AsyncZerodhaSocket:
                 self._url,
                 open_timeout=10,
                 close_timeout=2,
-                ping_interval=None,
                 compression=None,
                 max_size=10 * 1024 * 1024,
                 additional_headers={"User-Agent": "FTX-Paper-ZerodhaClient/1.0"},
