@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
+import traceback
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -42,7 +44,6 @@ class AsyncZerodhaSocket:
         self._thread: Thread | None = None
         self._task: asyncio.Task[None] | None = None
         self._stop_event = Event()
-        self._ready = Event()
         self._connection_done = Event()
         self._last_activity = 0.0
         self._close_notified = False
@@ -60,7 +61,6 @@ class AsyncZerodhaSocket:
             if self._thread is not None and self._thread.is_alive():
                 raise RuntimeError("previous Zerodha WebSocket worker did not stop")
             self._connected = False
-            self._ready.clear()
             self._connection_done.clear()
             self._close_notified = False
             self._last_activity = 0.0
@@ -128,7 +128,7 @@ class AsyncZerodhaSocket:
             async with websockets_client.connect(
                 self._url,
                 open_timeout=10,
-                close_timeout=5,
+                close_timeout=2,
                 ping_interval=None,
                 compression=None,
                 max_size=10 * 1024 * 1024,
@@ -139,7 +139,6 @@ class AsyncZerodhaSocket:
                     self._connected = True
                     self._state = SocketState.CONNECTED
                 self._mark_activity()
-                self._ready.set()
                 self._connection_done.set()
                 await self._send_subscription()
                 async for message in websocket:
@@ -161,7 +160,6 @@ class AsyncZerodhaSocket:
         finally:
             with self._lifecycle_lock:
                 self._connected = False
-                self._ready.clear()
                 self._websocket = None
             if not self._stop_event.is_set():
                 self._notify_close(1006, "WebSocket connection closed")
@@ -237,19 +235,10 @@ class AsyncZerodhaSocket:
         with self._lifecycle_lock:
             self._state = SocketState.STOPPING
             loop = self._loop
-            websocket = self._websocket
             task = self._task
             thread = self._thread
         self._connected = False
-        self._ready.clear()
         self._connection_done.set()
-        if loop is not None and loop.is_running() and websocket is not None:
-            try:
-                future = asyncio.run_coroutine_threadsafe(websocket.close(), loop)
-                future.result(timeout=5)
-            except Exception:
-                if "future" in locals():
-                    future.cancel()
         if loop is not None and loop.is_running() and task is not None:
             loop.call_soon_threadsafe(task.cancel)
         if thread is not None and thread is not current_thread():
@@ -262,8 +251,13 @@ class AsyncZerodhaSocket:
             else:
                 self._state = SocketState.FAILED
         if worker_alive:
-            logger.error("Zerodha WebSocket worker did not stop within 5 seconds")
-        self._websocket = None
+            frames = sys._current_frames()
+            frame = frames.get(thread.ident) if thread is not None else None
+            stack = "".join(traceback.format_stack(frame)) if frame is not None else "<stack unavailable>"
+            logger.error(
+                "Zerodha WebSocket worker did not stop within 5 seconds; current stack:\n%s",
+                stack,
+            )
         return ShutdownResult(stopped=not worker_alive, worker_alive=worker_alive)
 
     def wait_until_connected(self, timeout: float = 15.0) -> bool:
