@@ -72,8 +72,10 @@ class ZerodhaFeed:
         self._health: dict[str, dict[str, Any]] = {}
         self._watchdog_stop = Event()
         self._stop_event = Event()
+        self._initial_done = Event()
         self._reconnect_requested = Event()
         self._watchdog: Thread | None = None
+        self._initial_worker: Thread | None = None
         self._reconnect_worker: Thread | None = None
         self._started_at = 0.0
         self._connected = False
@@ -102,22 +104,33 @@ class ZerodhaFeed:
         self._failed = False
         self._started_at = self.clock()
         self._stop_event.clear()
+        self._initial_done.clear()
         self._watchdog_stop.clear()
         self._reconnect_requested.clear()
         self._reconnect_worker = Thread(
             target=self._reconnect_loop, daemon=True, name="ftx-paper-feed-reconnector"
         )
         self._reconnect_worker.start()
+        self._initial_worker = Thread(
+            target=self._initial_connect, daemon=True, name="ftx-paper-feed-initial-connect"
+        )
+        self._initial_worker.start()
+        self._watchdog = Thread(target=self._watchdog_loop, daemon=True, name="ftx-paper-feed-watchdog")
+        self._watchdog.start()
+        self._emit_health()
+
+    def _initial_connect(self) -> None:
         try:
             self._connect()
         except Exception as exc:
+            if not self._running:
+                return
             self._connected = False
             self._last_error = f"Initial connection failed: {exc}"
             logger.exception("Initial Zerodha feed connection failed")
             self._reconnect_requested.set()
-        self._watchdog = Thread(target=self._watchdog_loop, daemon=True, name="ftx-paper-feed-watchdog")
-        self._watchdog.start()
-        self._emit_health()
+        finally:
+            self._initial_done.set()
 
     def stop(self) -> bool:
         self._running = False
@@ -134,12 +147,19 @@ class ZerodhaFeed:
             self._last_error = "WebSocket worker did not stop cleanly"
         if self._watchdog and self._watchdog is not current_thread():
             self._watchdog.join(timeout=1)
+        if self._initial_worker and self._initial_worker is not current_thread():
+            self._initial_worker.join(timeout=1)
         if self._reconnect_worker and self._reconnect_worker is not current_thread():
             self._reconnect_worker.join(timeout=1)
         return shutdown_ok
 
     def _connect(self) -> None:
         with self._connection_lock:
+            # A reconnect may have passed its earlier running check just as
+            # stop() began. Recheck while holding the same lock stop() uses to
+            # close the socket so shutdown cannot be followed by a new connect.
+            if not self._running:
+                return
             self._connection_generation += 1
             generation = self._connection_generation
             self._close_handled_generation = None
@@ -149,12 +169,17 @@ class ZerodhaFeed:
 
             self.socket.connect(self._on_message, on_close)
             self.socket.subscribe(self.tokens)
-            wait_until_connected = getattr(self.socket, "wait_until_connected", None)
-            if callable(wait_until_connected):
-                self._connected = bool(wait_until_connected(12.0))
-            else:
-                self._connected = True
-            if self._connected:
+
+        # Waiting for the transport handshake can take several seconds. Do not
+        # hold _connection_lock during that wait: stop() needs the lock to close
+        # the socket and interrupt a stalled connection attempt.
+        wait_until_connected = getattr(self.socket, "wait_until_connected", None)
+        connected = bool(wait_until_connected(12.0)) if callable(wait_until_connected) else True
+        with self._connection_lock:
+            if generation != self._connection_generation or not self._running:
+                return
+            self._connected = connected
+            if connected:
                 self._last_error = None
                 self._next_retry_at = None
             elif not self._last_error:
@@ -269,6 +294,7 @@ class ZerodhaFeed:
         while self._running:
             self._reconnect_requested.wait()
             self._reconnect_requested.clear()
+            self._initial_done.wait()
             if self._running:
                 try:
                     self._reconnect()
@@ -331,7 +357,7 @@ class ZerodhaFeed:
                     self._emit_health()
                     self._reconnect_requested.set()
                     return
-                self._connect()
+            self._connect()
             self._emit_health()
         finally:
             with self._reconnect_lock:
