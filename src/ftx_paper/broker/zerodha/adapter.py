@@ -181,11 +181,17 @@ def load_startup_backfill(client: Any, instruments: list[ZerodhaInstrument], *, 
     start = end - timedelta(days=max(1, days + 3))
     bars: list[MarketBar] = []
     for item in instruments:
+        instrument_type = str(item.get("instrument_type", "INDEX"))
+        if _is_index_symbol(item["symbol"]):
+            instrument_type = "INDEX"
         rows = None
         for attempt in range(HISTORICAL_RATE_LIMIT_RETRIES + 1):
             _reserve_historical_request_slot()
             try:
-                rows = client.historical_data(int(item["instrument_token"]), start, end, "minute")
+                rows = client.historical_data(
+                    int(item["instrument_token"]), start, end, "minute",
+                    oi=instrument_type in {"FUT", "CE", "PE"},
+                )
                 break
             except Exception as exc:
                 if not _is_rate_limit_error(exc) or attempt >= HISTORICAL_RATE_LIMIT_RETRIES:
@@ -201,9 +207,6 @@ def load_startup_backfill(client: Any, instruments: list[ZerodhaInstrument], *, 
         for row in rows or ():
             timestamp = row.get("date")
             parsed = normalize_exchange_timestamp(timestamp)
-            instrument_type = str(item.get("instrument_type", "INDEX"))
-            if _is_index_symbol(item["symbol"]):
-                instrument_type = "INDEX"
             expiry = instrument_expiry_iso(item.get("expiry")) if instrument_type in {"FUT", "CE", "PE"} else None
             raw_strike = item.get("strike")
             strike = float(raw_strike) if raw_strike is not None and instrument_type in {"CE", "PE"} else None

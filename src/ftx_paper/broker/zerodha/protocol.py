@@ -10,10 +10,10 @@ from typing import Any
 
 
 def subscription_messages(tokens: list[int]) -> tuple[str, str]:
-    """Build the subscribe and quote-mode commands for one connection."""
+    """Build subscribe and full-quote mode commands for one connection."""
     return (
         json.dumps({"a": "subscribe", "v": tokens}),
-        json.dumps({"a": "mode", "v": ["quote", tokens]}),
+        json.dumps({"a": "mode", "v": ["full", tokens]}),
     )
 
 
@@ -75,4 +75,3 @@ def decode_text_error(message: str) -> str | None:
     if payload.get("type") != "error" and payload.get("status") != "error":
         return None
     return str(payload.get("message") or payload.get("code") or payload)
-
