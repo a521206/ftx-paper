@@ -11,12 +11,16 @@ from zoneinfo import ZoneInfo
 IST = ZoneInfo("Asia/Kolkata")
 
 
-def normalize_exchange_timestamp(value: datetime | str) -> datetime:
+def normalize_exchange_timestamp(value: datetime | int | float | str) -> datetime:
     """Normalize an exchange timestamp to timezone-aware UTC."""
     if isinstance(value, datetime):
         parsed = value
     else:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        raw = str(value).strip()
+        try:
+            parsed = datetime.fromtimestamp(float(raw), tz=timezone.utc)
+        except (OverflowError, ValueError):
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
         raise ValueError("exchange timestamp must include timezone information")
     return parsed.astimezone(timezone.utc)
