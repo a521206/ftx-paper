@@ -231,9 +231,21 @@ class RuntimeSession:
         def normalize(payload):
             from datetime import datetime
             item = by_token[int(payload["instrument_token"])]
-            timestamp = normalize_exchange_timestamp(
-                payload.get("exchange_timestamp") or datetime.now(ZoneInfo("Asia/Kolkata"))
-            )
+            # The exchange timestamp can lag for a live derivative quote even
+            # while the WebSocket is delivering fresh packets.  Use packet
+            # receipt time for the live aggregation clock. The broker timestamp
+            # remains available to the feed layer for diagnostics.
+            received = payload.get("timestamp")
+            if received is not None:
+                try:
+                    received_value = float(received)
+                    if received_value > 100_000_000_000:
+                        received_value /= 1000
+                    timestamp = normalize_exchange_timestamp(received_value)
+                except (OverflowError, TypeError, ValueError):
+                    timestamp = normalize_exchange_timestamp(datetime.now(ZoneInfo("Asia/Kolkata")))
+            else:
+                timestamp = normalize_exchange_timestamp(datetime.now(ZoneInfo("Asia/Kolkata")))
             price = float(payload["last_price"])
             instrument_type = str(item.get("instrument_type", "INDEX"))
             if str(item["symbol"]).upper() in {"NIFTY", "NIFTY 50", "INDIA VIX", "INDIAVIX"}:

@@ -108,6 +108,25 @@ def test_role_objects_are_json_safe_at_runtime_boundary():
     assert payload == {"futures": 1, "option:NIFTYCE": 2}
 
 
+def test_live_normalizer_uses_packet_receipt_time_for_bar_clock():
+    normalizer = RuntimeSession._make_normalizer([{
+        "instrument_token": 1,
+        "exchange": "NFO",
+        "symbol": "NIFTY26SEPFUT",
+        "instrument_type": "FUT",
+    }])
+    received_at = datetime(2026, 9, 28, 6, 40, tzinfo=timezone.utc)
+
+    bar = normalizer({
+        "instrument_token": 1,
+        "last_price": 22895.0,
+        "timestamp": int(received_at.timestamp() * 1000),
+        "exchange_timestamp": int(datetime(2026, 9, 28, 6, 35, tzinfo=timezone.utc).timestamp()),
+    })
+
+    assert bar.timestamp == received_at
+
+
 def test_exit_order_carries_explicit_entry_identity():
     entry_id = "entry-2026-01-01T10:20:00+05:30"
     order = OrderIntent(

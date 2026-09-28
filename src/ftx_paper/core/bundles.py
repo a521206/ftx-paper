@@ -163,6 +163,11 @@ class CompletedBarAggregator:
     def flush(self, *, incomplete: bool = True) -> tuple[DecisionBundle, ...]:
         result = []
         for key in sorted(tuple(self._pending)):
+            has_required_role = any(role in self._pending[key] for role in self.required_roles)
+            if not has_required_role:
+                self._pending.pop(key, None)
+                self._first_seen_monotonic.pop(key, None)
+                continue
             if incomplete or all(role in self._pending[key] for role in self.required_roles):
                 bundle = self._emit(key)
                 if bundle is not None:
@@ -184,10 +189,18 @@ class CompletedBarAggregator:
         result = []
         for key in sorted(tuple(self._pending)):
             first_seen = self._first_seen_monotonic.get(key, now)
-            if now - first_seen >= self.deadline_seconds:
-                bundle = self._emit(key)
-                if bundle is not None:
-                    result.append(bundle)
+            if now - first_seen < self.deadline_seconds:
+                continue
+            if not any(role in self._pending[key] for role in self.required_roles):
+                # Supporting bars may arrive before the futures decision clock.
+                # They must not create an incomplete bundle or advance the
+                # emitted watermark ahead of a delayed futures bar.
+                self._pending.pop(key, None)
+                self._first_seen_monotonic.pop(key, None)
+                continue
+            bundle = self._emit(key)
+            if bundle is not None:
+                result.append(bundle)
         return tuple(result)
 
     def pending_diagnostics(self) -> tuple[dict[str, object], ...]:

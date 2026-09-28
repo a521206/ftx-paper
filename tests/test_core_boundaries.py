@@ -900,6 +900,23 @@ def test_supporting_role_is_ignored_and_expired_bundle_has_diagnostics() -> None
     assert expired[0].bars["futures"].timestamp == minute
 
 
+def test_supporting_only_expiry_does_not_advance_futures_watermark() -> None:
+    future = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    spot = Instrument("NIFTY", "NSE", "INDEX")
+    aggregator = CompletedBarAggregator({
+        ("NFO", "NIFTYFUT"): "futures",
+        ("NSE", "NIFTY"): "spot",
+    }, required_roles=("futures",), deadline_seconds=0)
+    minute = datetime(2026, 1, 1, 10, 20, tzinfo=ZoneInfo("Asia/Kolkata"))
+
+    assert aggregator.ingest(MarketBar(spot, minute, 1, 1, 1, 1)) is None
+    assert aggregator.expire(now=time.monotonic() + 1) == ()
+    bundle = aggregator.ingest(MarketBar(future, minute, 100, 101, 99, 100))
+
+    assert bundle is not None
+    assert bundle.bars["futures"].close == 100
+
+
 def test_live_decision_engine_reports_unconfigured_cells() -> None:
     instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
     vix = Instrument("INDIA VIX", "NSE", "VIX")
