@@ -164,7 +164,9 @@ class CompletedBarAggregator:
         result = []
         for key in sorted(tuple(self._pending)):
             if incomplete or all(role in self._pending[key] for role in self.required_roles):
-                result.append(self._emit(key))
+                bundle = self._emit(key)
+                if bundle is not None:
+                    result.append(bundle)
         return tuple(result)
 
     def pending(self) -> tuple[tuple[str, tuple[Role, ...], tuple[Role, ...]], ...]:
@@ -183,7 +185,9 @@ class CompletedBarAggregator:
         for key in sorted(tuple(self._pending)):
             first_seen = self._first_seen_monotonic.get(key, now)
             if now - first_seen >= self.deadline_seconds:
-                result.append(self._emit(key))
+                bundle = self._emit(key)
+                if bundle is not None:
+                    result.append(bundle)
         return tuple(result)
 
     def pending_diagnostics(self) -> tuple[dict[str, object], ...]:
@@ -201,9 +205,11 @@ class CompletedBarAggregator:
             })
         return tuple(result)
 
-    def _emit(self, key: tuple[str, str]) -> DecisionBundle:
-        if self._last_emitted_key is not None and key < self._last_emitted_key:
-            raise RuntimeError("decision bundles cannot be emitted out of order")
+    def _emit(self, key: tuple[str, str]) -> DecisionBundle | None:
+        if self._last_emitted_key is not None and key <= self._last_emitted_key:
+            self._pending.pop(key, None)
+            self._first_seen_monotonic.pop(key, None)
+            return None
         current = self._pending.pop(key)
         self._first_seen_monotonic.pop(key, None)
         bars = dict(current)
