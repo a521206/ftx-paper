@@ -114,14 +114,14 @@ def _decision_datetime(bundle: DecisionBundle) -> datetime:
 
 
 def _configured_policies_for_cell(
-    cell_policies: dict[tuple[Session, str], CellPolicyConfig],
+    cell_policies: dict[tuple[Session, Cell], CellPolicyConfig],
     session: Session,
     detected_cell: Cell,
 ) -> list[tuple[Cell, CellPolicyConfig]]:
     """Return policies whose canonical composite exactly matches the event."""
     return [
-        (Cell.parse(name), policy) for (policy_session, name), policy in cell_policies.items()
-        if policy_session is session and Cell.parse(name) == detected_cell
+        (cell, policy) for (policy_session, cell), policy in cell_policies.items()
+        if policy_session is session and cell == detected_cell
     ]
 
 

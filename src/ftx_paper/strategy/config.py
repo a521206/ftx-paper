@@ -9,7 +9,7 @@ from hashlib import sha256
 from typing import TYPE_CHECKING
 
 from ftx_paper.contracts import OrderSide
-from ftx_paper.config import NIFTY_LOT_SIZE
+from ftx_paper.core.location_engine import Cell, Location
 
 if TYPE_CHECKING:
     from ftx_paper.core.location_engine import TransitionPattern
@@ -23,7 +23,8 @@ ENTRY_COOLDOWN_BARS = 15
 POST_EXIT_COOLDOWN_BARS = 30
 TRAIL_ACTIVATE_BP = 20.0
 TRAIL_DISTANCE_BP = 20.0
-LOT_SIZE = NIFTY_LOT_SIZE
+
+
 class Session(StrEnum):
     MORNING = "morning"
     AFTERNOON = "afternoon"
@@ -35,33 +36,57 @@ class ExitMode(StrEnum):
     TRAIL = "trail"
 
 
+class TradeHypothesis(StrEnum):
+    MEAN_REVERSION = "mean_reversion"
+    TREND_CONTINUATION = "trend_continuation"
+
+
 @dataclass(frozen=True, slots=True)
 class CellPolicyConfig:
     """Fixed production assignment for one canonical composite cell."""
 
-    cell: str
+    cell: Cell
     direction: OrderSide
     exit_mode: ExitMode = ExitMode.SIGNAL
     stability: float = 1.0
     transition_patterns: tuple[TransitionPattern, ...] = ()
-    hypothesis: str = "trend_continuation"
+    hypothesis: TradeHypothesis = TradeHypothesis.TREND_CONTINUATION
 
     def __post_init__(self) -> None:
+        if not isinstance(self.cell, Cell):
+            raise TypeError("cell must be a Cell")
         if not 0 < self.stability <= 1:
             raise ValueError("stability must be greater than zero and at most one")
 
+    def as_manifest(self, session: Session) -> dict[str, object]:
+        return {
+            "session": session,
+            "cell": self.cell.name,
+            "direction": self.direction.value.lower(),
+            "exit_mode": self.exit_mode.value,
+            "stability": self.stability,
+            "hypothesis": self.hypothesis.value,
+        }
+
 
 MORNING_CELL_POLICIES = (
-    CellPolicyConfig("new_low", OrderSide.BUY, ExitMode.SIGNAL, hypothesis="mean_reversion"),
-    CellPolicyConfig("vwap_zone+new_high+prior_day_high", OrderSide.BUY, ExitMode.TRAIL),
-    CellPolicyConfig("vwap_zone+or_high+prior_day_low", OrderSide.BUY, ExitMode.TRAIL),
-    CellPolicyConfig("vwap_zone+or_low+prior_day_high", OrderSide.SELL, ExitMode.TRAIL),
-    CellPolicyConfig("vwap_zone+session_high+or_high+prior_day_high", OrderSide.SELL, ExitMode.TRAIL),
+    CellPolicyConfig(Cell(Location.NEW_LOW), OrderSide.BUY, ExitMode.SIGNAL, 0.5, hypothesis=TradeHypothesis.MEAN_REVERSION),
+    CellPolicyConfig(Cell(Location.VWAP_ZONE, Location.NEW_HIGH, Location.PRIOR_DAY_HIGH), OrderSide.BUY, ExitMode.TRAIL),
+    CellPolicyConfig(Cell(Location.VWAP_ZONE, Location.OR_HIGH, Location.PRIOR_DAY_LOW), OrderSide.BUY, ExitMode.TRAIL),
+    CellPolicyConfig(Cell(Location.VWAP_ZONE, Location.OR_LOW, Location.PRIOR_DAY_HIGH), OrderSide.SELL, ExitMode.TRAIL),
+    CellPolicyConfig(Cell(Location.PRIOR_DAY_HIGH), OrderSide.SELL, ExitMode.TRAIL, hypothesis=TradeHypothesis.MEAN_REVERSION),
+    CellPolicyConfig(Cell(Location.PRIOR_DAY_LOW), OrderSide.BUY, ExitMode.TRAIL, hypothesis=TradeHypothesis.MEAN_REVERSION),
 )
 AFTERNOON_CELL_POLICIES = (
-    CellPolicyConfig("vwap_zone+prior_day_high", OrderSide.SELL, ExitMode.TRAIL, hypothesis="mean_reversion"),
-    CellPolicyConfig("vwap_zone+or_low+prior_day_high", OrderSide.SELL, ExitMode.TRAIL),
-    CellPolicyConfig("vwap_zone+prior_day_low", OrderSide.BUY, ExitMode.TRAIL),
+    CellPolicyConfig(Cell(Location.VWAP_ZONE, Location.OR_LOW, Location.PRIOR_DAY_HIGH), OrderSide.SELL, ExitMode.TRAIL),
+    CellPolicyConfig(Cell(Location.VWAP_ZONE, Location.PRIOR_DAY_HIGH), OrderSide.SELL, ExitMode.TRAIL, hypothesis=TradeHypothesis.MEAN_REVERSION),
+    CellPolicyConfig(Cell(Location.VWAP_ZONE, Location.PRIOR_DAY_LOW), OrderSide.BUY, ExitMode.TRAIL, 0.5, hypothesis=TradeHypothesis.MEAN_REVERSION),
+    CellPolicyConfig(Cell(Location.OR_LOW, Location.PRIOR_DAY_LOW), OrderSide.BUY, ExitMode.TRAIL, 0.5, hypothesis=TradeHypothesis.MEAN_REVERSION),
+)
+
+SESSION_POLICIES = (
+    (Session.MORNING, MORNING_CELL_POLICIES),
+    (Session.AFTERNOON, AFTERNOON_CELL_POLICIES),
 )
 
 
@@ -82,18 +107,8 @@ class StrategyConfig:
     def policy_manifest(self) -> tuple[dict[str, object], ...]:
         """Return the stable, JSON-safe policy payload used for provenance."""
         return tuple(
-            {
-                "session": session,
-                "cell": item.cell,
-                "direction": item.direction.value.lower(),
-                "exit_mode": item.exit_mode.value,
-                "stability": item.stability,
-                "hypothesis": item.hypothesis,
-            }
-            for session, policies in (
-                ("morning", MORNING_CELL_POLICIES),
-                ("afternoon", AFTERNOON_CELL_POLICIES),
-            )
+            item.as_manifest(session)
+            for session, policies in SESSION_POLICIES
             for item in policies
         )
 
@@ -111,7 +126,6 @@ DEFAULT_CONFIG = StrategyConfig()
 
 __all__ = [
     "AFTERNOON_ENTRY_MINUTES",
-    "LOT_SIZE",
     "ENTRY_COOLDOWN_BARS",
     "POST_EXIT_COOLDOWN_BARS",
     "TRAIL_ACTIVATE_BP",
@@ -124,6 +138,8 @@ __all__ = [
     "CellPolicyConfig",
     "MORNING_CELL_POLICIES",
     "AFTERNOON_CELL_POLICIES",
+    "SESSION_POLICIES",
     "Session",
     "ExitMode",
+    "TradeHypothesis",
 ]
