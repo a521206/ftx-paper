@@ -87,6 +87,25 @@ def test_replay_seeds_prior_day_futures_levels(tmp_path):
     assert worker._prior_day_levels("2026-01-02") == (110.0, 90.0)
 
 
+def test_replay_prior_day_levels_use_nearest_unexpired_futures_contract(tmp_path):
+    store = RuntimeStore(tmp_path / "rollover-context")
+    store.append_market_bars((
+        MarketBar(
+            Instrument("NIFTY26JANFUT", "NFO", "FUTURES", "2026-01-29"),
+            datetime(2026, 1, 1, 4, 0, tzinfo=timezone.utc),
+            100, 110, 90, 105,
+        ),
+        MarketBar(
+            Instrument("NIFTY26FEBFUT", "NFO", "FUTURES", "2026-02-26"),
+            datetime(2026, 1, 1, 4, 0, tzinfo=timezone.utc),
+            200, 220, 180, 205,
+        ),
+    ), source="fixture")
+
+    worker = ReplayWorker(store)
+    assert worker._prior_day_levels("2026-01-02") == (110.0, 90.0)
+
+
 def test_closed_bar_is_processed_under_session_lifecycle(tmp_path):
     store = RuntimeStore(tmp_path)
     session = RuntimeSession(store, None, [], engine=PaperEngine())

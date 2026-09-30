@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime
+from datetime import date as date_type, datetime
 from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread
 from typing import Any
@@ -650,6 +650,20 @@ class ReplayWorker:
         ]
         if not futures:
             return None, None
+        prior_date = date_type.fromisoformat(prior[-1])
+        contracts: dict[date_type, list[dict[str, Any]]] = {}
+        for row in futures:
+            expiry = row.get("expiry")
+            if not expiry:
+                continue
+            try:
+                expiry_date = date_type.fromisoformat(str(expiry)[:10])
+            except ValueError:
+                continue
+            if expiry_date >= prior_date:
+                contracts.setdefault(expiry_date, []).append(row)
+        if contracts:
+            futures = contracts[min(contracts)]
         return (
             max(float(row["high"]) for row in futures),
             min(float(row["low"]) for row in futures),
