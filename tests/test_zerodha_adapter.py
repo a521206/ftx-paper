@@ -1,6 +1,10 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+import logging
 
-from ftx_paper.broker.zerodha.adapter import discover_option_surface_contracts
+import pytest
+
+from ftx_paper.broker.zerodha.adapter import discover_option_surface_contracts, resolve_instruments
+from ftx_paper.runtime import RuntimeStore
 
 
 class InstrumentMaster:
@@ -38,3 +42,49 @@ def test_discover_option_surface_normalizes_datetime_expiry():
     result = discover_option_surface_contracts(client, as_of=date(2026, 9, 11))
 
     assert len(result) == 1
+
+
+def test_resolve_instruments_rolls_stale_futures_to_nearest_live_contract(caplog):
+    yesterday = date.today() - timedelta(days=1)
+    next_expiry = date.today() + timedelta(days=27)
+    client = InstrumentMaster([
+        {"tradingsymbol": "NIFTY26SEPFUT", "name": "NIFTY", "instrument_type": "FUT", "expiry": yesterday, "instrument_token": 1},
+        {"tradingsymbol": "NIFTY26OCTFUT", "name": "NIFTY", "instrument_type": "FUT", "expiry": next_expiry, "instrument_token": 2},
+    ])
+
+    with caplog.at_level(logging.WARNING, logger="ftx_paper.broker.zerodha.adapter"):
+        result = resolve_instruments(client, [{"exchange": "NFO", "tradingsymbol": "NIFTY26SEPFUT", "role": "futures"}])
+
+    assert result[0]["symbol"] == "NIFTY26OCTFUT"
+    assert result[0]["instrument_token"] == 2
+    assert "NIFTY26SEPFUT" in caplog.text
+    assert "NIFTY26OCTFUT" in caplog.text
+
+
+def test_resolve_instruments_rejects_futures_without_expiry():
+    client = InstrumentMaster([
+        {"tradingsymbol": "NIFTY26SEPFUT", "name": "NIFTY", "instrument_type": "FUT", "instrument_token": 1},
+    ])
+
+    with pytest.raises(ValueError, match="NIFTY26SEPFUT"):
+        resolve_instruments(client, [{"exchange": "NFO", "tradingsymbol": "NIFTY26SEPFUT", "role": "futures"}])
+
+
+def test_resolve_instruments_uses_persisted_underlying_contract(tmp_path):
+    store = RuntimeStore(tmp_path)
+    store.record_runtime_contract({
+        "exchange": "NFO", "underlying": "NIFTY", "role": "futures",
+        "tradingsymbol": "NIFTY26OCTFUT", "instrument_token": 2,
+        "expiry": (date.today() + timedelta(days=27)).isoformat(),
+    })
+    client = InstrumentMaster([
+        {"tradingsymbol": "NIFTY26OCTFUT", "name": "NIFTY", "instrument_type": "FUT",
+         "expiry": date.today() + timedelta(days=27), "instrument_token": 2},
+    ])
+
+    result = resolve_instruments(
+        client, [{"exchange": "NFO", "underlying": "NIFTY", "role": "futures"}],
+        contract_store=store,
+    )
+
+    assert result[0]["symbol"] == "NIFTY26OCTFUT"

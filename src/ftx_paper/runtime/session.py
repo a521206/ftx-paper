@@ -102,6 +102,7 @@ class RuntimeSession:
             state = self.store.read_status().get("state")
             if state in {"STARTING", "RUNNING"} and self._feed_lease_id is not None:
                 return
+            self._assert_flat_startup()
             # Claim this before launching the worker. This closes the race where
             # two processes both observe a stale STARTING/RUNNING status and
             # create live WebSocket connections concurrently.
@@ -130,7 +131,9 @@ class RuntimeSession:
                 raise ValueError("Zerodha authentication required")
             from ftx_paper.broker.zerodha import ZerodhaFeed, classify_runtime_roles, create_kite_socket, discover_option_surface_contracts, is_nse_market_open, load_startup_backfill, resolve_instruments
             client = self.client_factory() if self.client_factory else self.auth.authenticated_client()
-            resolved: list[ZerodhaInstrument] = resolve_instruments(client, self.specifications)
+            resolved: list[ZerodhaInstrument] = resolve_instruments(
+                client, self.specifications, contract_store=self.store,
+            )
             discovered_options = discover_option_surface_contracts(client, underlying="NIFTY")
             resolved_keys = {(str(item["exchange"]), str(item["symbol"])) for item in resolved}
             resolved.extend(
@@ -214,6 +217,16 @@ class RuntimeSession:
                                      "feed_connected": False, "error": str(exc)})
             self._release_feed_lease()
             self._started.set()
+
+    def _assert_flat_startup(self) -> None:
+        portfolio = self.portfolio
+        if portfolio is None:
+            raise RuntimeError("intraday runtime cannot start without a verifiable flat portfolio")
+        active_orders = {"submitted", "reserved"}
+        if portfolio.positions or portfolio.reservations or getattr(portfolio, "scoped_risk_reservations", {}) or any(
+            state in active_orders for state in portfolio.pending_orders.values()
+        ):
+            raise RuntimeError("intraday runtime must start flat with no pending orders")
 
     def _release_feed_lease(self) -> None:
         lease_id = self._feed_lease_id

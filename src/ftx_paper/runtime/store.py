@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -70,6 +71,7 @@ class RuntimeStore:
         self.database = self.root / "runtime.sqlite3"
         self._event_counts_cache: dict[str, Any] | None = None
         self._read_only = False
+        self._status_lock = threading.RLock()
         self.initialize()
 
     @classmethod
@@ -80,15 +82,16 @@ class RuntimeStore:
         instance.database = instance.root / "runtime.sqlite3"
         instance._event_counts_cache = None
         instance._read_only = True
+        instance._status_lock = threading.RLock()
         if not instance.database.is_file():
             raise FileNotFoundError(f"runtime database not found: {instance.database}")
         return instance
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self, *, timeout: float = 10) -> sqlite3.Connection:
         if self._read_only:
             uri = f"file:{self.database.resolve().as_posix()}?mode=ro"
-            return sqlite3.connect(uri, uri=True)
-        return sqlite3.connect(self.database)
+            return sqlite3.connect(uri, uri=True, timeout=timeout)
+        return sqlite3.connect(self.database, timeout=timeout)
 
     def initialize(self) -> None:
         """Create the runtime directory and schema for a writable store."""
@@ -159,6 +162,16 @@ class RuntimeStore:
                     error TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS runtime_contracts (
+                    exchange TEXT NOT NULL,
+                    underlying TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    tradingsymbol TEXT NOT NULL,
+                    instrument_token INTEGER NOT NULL,
+                    expiry TEXT NOT NULL,
+                    selected_at TEXT NOT NULL,
+                    PRIMARY KEY (exchange, underlying, role)
                 );
                 """
             )
@@ -237,9 +250,57 @@ class RuntimeStore:
             )
 
     def read_status(self) -> dict[str, Any]:
-        with sqlite3.connect(self.database) as connection:
+        with self._status_lock, self._connect() as connection:
             row = connection.execute("SELECT payload FROM runtime_status WHERE id = 1").fetchone()
         return json.loads(row[0]) if row else {}
+
+    def read_runtime_contract(self, *, exchange: str, underlying: str, role: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                "SELECT exchange, underlying, role, tradingsymbol, instrument_token, expiry, selected_at "
+                "FROM runtime_contracts WHERE exchange = ? AND underlying = ? AND role = ?",
+                (exchange, underlying, role),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def record_runtime_contract(self, contract: dict[str, Any]) -> bool:
+        required = ("exchange", "underlying", "role", "tradingsymbol", "instrument_token", "expiry")
+        if any(contract.get(key) in (None, "") for key in required):
+            raise ValueError("runtime contract is missing required identity fields")
+        selected_at = datetime.now(timezone.utc).isoformat()
+        event_payload = {**contract, "selected_at": selected_at}
+        with self._connect() as connection:
+            previous = connection.execute(
+                "SELECT tradingsymbol, instrument_token, expiry FROM runtime_contracts "
+                "WHERE exchange = ? AND underlying = ? AND role = ?",
+                (contract["exchange"], contract["underlying"], contract["role"]),
+            ).fetchone()
+            changed = previous is None or tuple(previous) != (
+                contract["tradingsymbol"], int(contract["instrument_token"]), str(contract["expiry"]),
+            )
+            connection.execute(
+                "INSERT INTO runtime_contracts "
+                "(exchange, underlying, role, tradingsymbol, instrument_token, expiry, selected_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(exchange, underlying, role) DO UPDATE SET "
+                "tradingsymbol=excluded.tradingsymbol, instrument_token=excluded.instrument_token, "
+                "expiry=excluded.expiry, selected_at=excluded.selected_at",
+                (contract["exchange"], contract["underlying"], contract["role"],
+                 contract["tradingsymbol"], int(contract["instrument_token"]), str(contract["expiry"]), selected_at),
+            )
+            if changed:
+                connection.execute(
+                    "INSERT OR IGNORE INTO runtime_events "
+                    "(event_type, payload, created_at, idempotency_key) VALUES (?, ?, ?, ?)",
+                    (
+                        "CONTRACT_CHANGED", json.dumps(_json_safe(event_payload, path="contract event")),
+                        selected_at,
+                        f"contract:{contract['exchange']}:{contract['underlying']}:{contract['role']}"
+                        f":{contract['tradingsymbol']}:{contract['expiry']}:{selected_at}",
+                    ),
+                )
+        return changed
 
     def read_expiry_dates(self) -> frozenset[str]:
         """Return the one-time imported weekly expiry calendar."""
@@ -313,7 +374,7 @@ class RuntimeStore:
 
     def write_status(self, status: dict[str, Any]) -> None:
         now = datetime.now(timezone.utc).isoformat()
-        with sqlite3.connect(self.database) as connection:
+        with self._status_lock, self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO runtime_status(id, payload, updated_at) VALUES (1, ?, ?)
@@ -323,9 +384,10 @@ class RuntimeStore:
             )
 
     def patch_status(self, updates: dict[str, Any]) -> None:
-        current = self.read_status()
-        current.update(updates)
-        self.write_status(current)
+        with self._status_lock:
+            current = self.read_status()
+            current.update(updates)
+            self.write_status(current)
 
     def append_event(self, event_type: str, payload: dict[str, Any], idempotency_key: str | None = None,
                      *, timestamp: str | None = None) -> bool:

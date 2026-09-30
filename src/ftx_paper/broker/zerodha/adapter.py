@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, NotRequired, TypedDict
 from datetime import date, datetime, timedelta
+import logging
+import re
 import threading
 import time
 from zoneinfo import ZoneInfo
@@ -20,6 +22,7 @@ HISTORICAL_RATE_LIMIT_RETRIES = 3
 HISTORICAL_RATE_LIMIT_BACKOFF_SECONDS = 1.0
 _historical_rate_limit_lock = threading.Lock()
 _next_historical_request_at = 0.0
+logger = logging.getLogger(__name__)
 
 
 def _is_index_symbol(symbol: object) -> bool:
@@ -56,6 +59,45 @@ def instrument_expiry_iso(value: object) -> str | None:
     return _instrument_expiry(value).isoformat()
 
 
+def _normalized_instrument_name(value: object) -> str:
+    return str(value or "").upper().replace(" ", "")
+
+
+def _futures_underlying(symbol: str, row: dict[str, Any] | None) -> str | None:
+    metadata_name = _normalized_instrument_name(row.get("name")) if row else ""
+    if metadata_name:
+        return metadata_name
+    match = re.match(r"^([A-Z][A-Z0-9]*?)(?=\d{2})", symbol.upper())
+    return match.group(1) if match else None
+
+
+def _nearest_live_futures(
+    rows: list[dict[str, Any]], *, underlying: str, as_of: date,
+) -> dict[str, Any] | None:
+    candidates = []
+    for row in rows:
+        if (_normalized_instrument_name(row.get("name")) != underlying
+                or str(row.get("instrument_type", "")).upper() != "FUT"):
+            continue
+        expiry = row.get("expiry")
+        if expiry is None:
+            continue
+        parsed_expiry = _instrument_expiry(expiry)
+        if parsed_expiry >= as_of:
+            candidates.append((parsed_expiry, row))
+    return min(candidates, key=lambda item: item[0])[1] if candidates else None
+
+
+def _is_live_futures_row(row: dict[str, Any], *, underlying: str, as_of: date) -> bool:
+    expiry = row.get("expiry")
+    return (
+        _normalized_instrument_name(row.get("name")) == underlying
+        and str(row.get("instrument_type", "")).upper() == "FUT"
+        and expiry is not None
+        and _instrument_expiry(expiry) >= as_of
+    )
+
+
 @dataclass
 class RuntimeRoles:
     futures: ZerodhaInstrument
@@ -63,8 +105,18 @@ class RuntimeRoles:
     options: dict[str, object] | None = None
 
 
-def resolve_instruments(client: Any, specifications: list[dict[str, object]]) -> list[ZerodhaInstrument]:
-    """Resolve configured exchange/tradingsymbol pairs to broker tokens."""
+def resolve_instruments(
+    client: Any,
+    specifications: list[dict[str, object]],
+    *,
+    contract_store: Any | None = None,
+) -> list[ZerodhaInstrument]:
+    """Resolve configured exchange/tradingsymbol pairs to broker tokens.
+
+    Futures are selected from the broker instrument master and persisted through
+    ``contract_store``. The configuration identifies the underlying, not a
+    date-coded contract symbol.
+    """
     if not specifications:
         raise ValueError("No Zerodha instruments configured")
     resolved = []
@@ -72,18 +124,48 @@ def resolve_instruments(client: Any, specifications: list[dict[str, object]]) ->
     for spec in specifications:
         exchange = str(spec.get("exchange", "")).strip()
         symbol = str(spec.get("tradingsymbol", "")).strip()
-        if not exchange or not symbol:
-            raise ValueError("Each Zerodha instrument needs exchange and tradingsymbol")
+        raw_role = spec.get("role")
+        role = parse_role(raw_role) if raw_role is not None else None
         kite_exchange = KITE_EXCHANGE_MAP.get(exchange, exchange)
+        is_nfo_futures = role is MarketRole.FUTURES and kite_exchange == "NFO"
+        if not exchange or (not symbol and not is_nfo_futures):
+            raise ValueError("Each Zerodha instrument needs exchange and tradingsymbol, except futures")
         if kite_exchange not in contracts_by_exchange:
             contracts_by_exchange[kite_exchange] = client.instruments(kite_exchange)
         rows = contracts_by_exchange[kite_exchange]
-        match = next((row for row in rows if row.get("tradingsymbol") == symbol), None)
+        underlying = _normalized_instrument_name(spec.get("underlying"))
+        match = next((row for row in rows if row.get("tradingsymbol") == symbol), None) if symbol else None
+        today = datetime.now(IST).date() if is_nfo_futures else None
+        if is_nfo_futures:
+            if not underlying:
+                underlying = _futures_underlying(symbol, match)
+            stored = (
+                contract_store.read_runtime_contract(
+                    exchange=exchange, underlying=underlying, role=role.value,
+                ) if contract_store is not None and underlying else None
+            )
+            stored_symbol = str(stored.get("tradingsymbol", "")) if stored else ""
+            stored_match = next((row for row in rows if row.get("tradingsymbol") == stored_symbol), None)
+            if stored_match is not None and _is_live_futures_row(
+                stored_match, underlying=underlying, as_of=today,
+            ):
+                match = stored_match
+            if match is None or not _is_live_futures_row(match, underlying=underlying, as_of=today):
+                match = _nearest_live_futures(rows, underlying=underlying, as_of=today) if underlying else None
+            if match is not None:
+                if contract_store is not None:
+                    contract_store.record_runtime_contract({
+                        "exchange": exchange, "underlying": underlying,
+                        "role": role.value, "tradingsymbol": match["tradingsymbol"],
+                        "instrument_token": match["instrument_token"],
+                        "expiry": _instrument_expiry(match["expiry"]).isoformat(),
+                    })
+                if symbol and symbol != match["tradingsymbol"]:
+                    logger.warning("Zerodha futures contract changed from %s to %s expiring %s", symbol, match["tradingsymbol"], match.get("expiry"))
+                symbol = str(match["tradingsymbol"])
         if match is None:
-            raise ValueError(f"Zerodha instrument not found: {exchange}:{symbol}")
-        raw_role = spec.get("role")
-        role = parse_role(raw_role) if raw_role is not None else None
-        resolved.append({**dict(match), "exchange": exchange, "symbol": symbol, "role": role})
+            raise ValueError(f"Zerodha instrument not found: {exchange}:{symbol or underlying}")
+        resolved.append({**dict(match), "exchange": exchange, "symbol": str(match["tradingsymbol"]), "role": role})
     return resolved
 
 

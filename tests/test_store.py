@@ -10,7 +10,7 @@ from ftx_paper.runtime import RuntimeStore
 def test_runtime_store_round_trips_market_bars(tmp_path):
     store = RuntimeStore(tmp_path)
     bar = MarketBar(
-        Instrument("NIFTY24JAN18000CE", "NFO", "CE", "2024-01-25", 18000, OptionType.CALL),
+        Instrument("NIFTY26JAN18000CE", "NFO", "CE", "2026-01-29", 18000, OptionType.CALL),
         datetime(2026, 1, 5, 4, 0, tzinfo=ZoneInfo("UTC")),
         100, 102, 99, 101, 12, 345,
     )
@@ -19,10 +19,10 @@ def test_runtime_store_round_trips_market_bars(tmp_path):
     rows = store.read_market_bars("2026-01-05")
 
     assert rows == [{
-        "symbol": "NIFTY24JAN18000CE", "exchange": "NFO", "minute": "2026-01-05T09:30:00+05:30",
+        "symbol": "NIFTY26JAN18000CE", "exchange": "NFO", "minute": "2026-01-05T09:30:00+05:30",
         "open": 100.0, "high": 102.0, "low": 99.0, "close": 101.0,
         "volume": 12.0, "open_interest": 345.0, "instrument_type": "CE",
-        "expiry": "2024-01-25", "strike": 18000.0, "option_type": "CE",
+        "expiry": "2026-01-29", "strike": 18000.0, "option_type": "CE",
         "source": "historical_backfill", "ingested_at": rows[0]["ingested_at"],
     }]
     assert store.read_market_dates() == ["2026-01-05"]
@@ -77,3 +77,19 @@ def test_runtime_store_preserves_warmup_event_payload(tmp_path):
         "sequence": 2,
         "reason": "insufficient_history",
     }
+
+
+def test_runtime_store_persists_contract_changes_once(tmp_path):
+    store = RuntimeStore(tmp_path)
+    contract = {
+        "exchange": "NFO", "underlying": "NIFTY", "role": "futures",
+        "tradingsymbol": "NIFTY26OCTFUT", "instrument_token": 42,
+        "expiry": "2026-10-27",
+    }
+
+    assert store.record_runtime_contract(contract) is True
+    assert store.record_runtime_contract(contract) is False
+    assert store.read_runtime_contract(
+        exchange="NFO", underlying="NIFTY", role="futures",
+    )["tradingsymbol"] == "NIFTY26OCTFUT"
+    assert [event["event_type"] for event in store.read_events()] == ["CONTRACT_CHANGED"]

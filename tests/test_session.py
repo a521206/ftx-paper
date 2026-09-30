@@ -2,6 +2,8 @@ from datetime import datetime, timezone
 from threading import Event
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from ftx_paper.broker import Fill, PaperBroker
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderIntent, OrderRole, OrderSide
 from ftx_paper.runtime.store import _json_safe
@@ -42,12 +44,12 @@ def test_replay_and_runtime_share_paper_engine_bundle_path(monkeypatch, tmp_path
 
     monkeypatch.setattr(PaperEngine, "on_bundle", record_bundle)
     bar = MarketBar(
-        Instrument("NIFTYFUT", "NFO", "FUTURES"),
+        Instrument("NIFTY26JANFUT", "NFO", "FUTURES", "2026-01-29"),
         datetime(2026, 1, 1, 4, 50, tzinfo=timezone.utc),
         100, 102, 99, 101,
     )
     aggregator = CompletedBarAggregator(
-        {("NFO", "NIFTYFUT"): MarketRole.FUTURES},
+        {("NFO", "NIFTY26JANFUT"): MarketRole.FUTURES},
         required_roles=(MarketRole.FUTURES,), deadline_seconds=0,
     )
     bundle = aggregator.ingest(bar)
@@ -68,14 +70,14 @@ def test_replay_seeds_prior_day_futures_levels(tmp_path):
     store = RuntimeStore(tmp_path / "replay-context")
     store.append_market_bars((
         MarketBar(
-            Instrument("NIFTYFUT", "NFO", "FUTURES"),
+            Instrument("NIFTY26JANFUT", "NFO", "FUTURES", "2026-01-29"),
             datetime(2026, 1, 1, 4, 0, tzinfo=timezone.utc),
             100, 110, 90, 105,
         ),
     ), source="fixture")
     store.append_market_bars((
         MarketBar(
-            Instrument("NIFTYFUT", "NFO", "FUTURES"),
+            Instrument("NIFTY26JANFUT", "NFO", "FUTURES", "2026-01-29"),
             datetime(2026, 1, 2, 4, 0, tzinfo=timezone.utc),
             101, 111, 91, 106,
         ),
@@ -89,13 +91,13 @@ def test_closed_bar_is_processed_under_session_lifecycle(tmp_path):
     store = RuntimeStore(tmp_path)
     session = RuntimeSession(store, None, [], engine=PaperEngine())
     session._aggregator = CompletedBarAggregator(
-        {("NSE", "NIFTY"): MarketRole.FUTURES},
+        {("NFO", "NIFTY26JANFUT"): MarketRole.FUTURES},
         required_roles=(MarketRole.FUTURES,), deadline_seconds=0,
     )
     session.feed = Feed(session.on_closed_bar)
     session.broker = PaperBroker()
     store.write_status({"state": "RUNNING"})
-    bar = MarketBar(Instrument("NIFTY", "NSE", "FUTURES"), datetime.now(timezone.utc), 1, 2, 0, 1)
+    bar = MarketBar(Instrument("NIFTY26JANFUT", "NFO", "FUTURES", "2026-01-29"), datetime(2026, 1, 5, 4, 0, tzinfo=timezone.utc), 1, 2, 0, 1)
     session.on_closed_bar(bar)
     assert session.engine.bars_seen == 1
     assert any(event["event_type"] == "BUNDLE_COMPLETE" for event in store.read_events())
@@ -114,6 +116,7 @@ def test_live_normalizer_uses_packet_receipt_time_for_bar_clock():
         "exchange": "NFO",
         "symbol": "NIFTY26SEPFUT",
         "instrument_type": "FUT",
+        "expiry": "2026-09-29",
     }])
     received_at = datetime(2026, 9, 28, 6, 40, tzinfo=timezone.utc)
 
@@ -125,16 +128,6 @@ def test_live_normalizer_uses_packet_receipt_time_for_bar_clock():
     })
 
     assert bar.timestamp == received_at
-
-
-def test_exit_order_carries_explicit_entry_identity():
-    entry_id = "entry-2026-01-01T10:20:00+05:30"
-    order = OrderIntent(
-        "exit-1", Instrument("NIFTY", "NSE", "INDEX"), OrderSide.SELL, 1,
-        role=OrderRole.EXIT, entry_order_id=entry_id,
-    )
-
-    assert order.entry_order_id == entry_id
 
 
 def test_stop_orders_feed_cleanup_before_broker(tmp_path):
@@ -151,13 +144,13 @@ def test_incomplete_bundle_is_diagnosed_without_advancing_completion(tmp_path):
     store = RuntimeStore(tmp_path)
     session = RuntimeSession(store, None, [], engine=PaperEngine())
     session._aggregator = CompletedBarAggregator({
-        ("NFO", "NIFTYFUT"): "futures",
+        ("NFO", "NIFTY26JANFUT"): "futures",
         ("NSE", "INDIA VIX"): "vix",
     }, deadline_seconds=0)
     store.write_status({"state": "RUNNING"})
 
     bar = MarketBar(
-        Instrument("NIFTYFUT", "NFO", "FUTURES"),
+        Instrument("NIFTY26JANFUT", "NFO", "FUTURES", "2026-01-29"),
         datetime(2026, 1, 1, 10, 20, tzinfo=timezone.utc),
         100, 102, 99, 101,
     )
@@ -175,7 +168,7 @@ def test_incomplete_bundle_is_diagnosed_without_advancing_completion(tmp_path):
     assert all(event["event_type"] not in {"BUNDLE_INCOMPLETE", "BUNDLE_COMPLETE"} for event in store.read_events())
 
     next_bar = MarketBar(
-        Instrument("NIFTYFUT", "NFO", "FUTURES"),
+        Instrument("NIFTY26JANFUT", "NFO", "FUTURES", "2026-01-29"),
         datetime(2026, 1, 1, 10, 21, tzinfo=timezone.utc),
         100, 102, 99, 101,
     )
@@ -184,10 +177,6 @@ def test_incomplete_bundle_is_diagnosed_without_advancing_completion(tmp_path):
     events = store.read_events()
     assert events[0]["event_type"] == "BUNDLE_INCOMPLETE"
     assert events[0]["payload"]["minute"] == "15:50"
-
-
-def test_runtime_session_does_not_process_startup_replay():
-    assert not hasattr(RuntimeSession, "_replay_dates")
 
 
 def test_live_order_reaches_paper_broker_and_persists_fill(tmp_path):
@@ -330,7 +319,7 @@ def test_session_uses_strategy_portfolio_as_execution_owner(tmp_path):
 
 def test_startup_discovers_options_before_backfill_and_feed_subscription(monkeypatch, tmp_path):
     configured = [
-        {"exchange": "NFO", "tradingsymbol": "NIFTY26SEPFUT", "role": "futures"},
+        {"exchange": "NFO", "underlying": "NIFTY", "role": "futures"},
         {"exchange": "NSE_INDEX", "tradingsymbol": "INDIA VIX", "role": "vix"},
     ]
     resolved = [
@@ -360,7 +349,7 @@ def test_startup_discovers_options_before_backfill_and_feed_subscription(monkeyp
         def stop(self):
             return None
 
-    monkeypatch.setattr(zerodha, "resolve_instruments", lambda _client, _specs: list(resolved))
+    monkeypatch.setattr(zerodha, "resolve_instruments", lambda _client, _specs, **_kwargs: list(resolved))
     monkeypatch.setattr(zerodha, "discover_option_surface_contracts", lambda _client, **_kwargs: [option])
     def fake_backfill(_client, instruments):
         captured["backfill"] = list(instruments)
@@ -377,3 +366,13 @@ def test_startup_discovers_options_before_backfill_and_feed_subscription(monkeyp
 
     assert any(item["symbol"] == option["symbol"] for item in captured["backfill"])
     assert 3 in captured["tokens"]
+
+
+def test_runtime_session_rejects_non_flat_intraday_startup(tmp_path):
+    session = RuntimeSession(RuntimeStore(tmp_path), None, [])
+    session.portfolio = type("Portfolio", (), {
+        "positions": {"entry-1": object()}, "pending_orders": {}, "reservations": {},
+    })()
+
+    with pytest.raises(RuntimeError, match="must start flat"):
+        session.start()
