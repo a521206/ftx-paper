@@ -247,11 +247,20 @@ class AsyncZerodhaSocket:
             self._state = SocketState.STOPPING
             loop = self._loop
             task = self._task
+            websocket = self._websocket
             thread = self._thread
         self._connected = False
         self._connection_done.set()
-        if loop is not None and loop.is_running() and task is not None:
-            loop.call_soon_threadsafe(task.cancel)
+        if loop is not None and loop.is_running():
+            if websocket is not None:
+                close_coro = websocket.close()
+                try:
+                    asyncio.run_coroutine_threadsafe(close_coro, loop)
+                except RuntimeError:
+                    close_coro.close()
+                    logger.debug("Ignored WebSocket close while loop was stopping")
+            if task is not None:
+                loop.call_soon_threadsafe(task.cancel)
         if thread is not None and thread is not current_thread():
             thread.join(timeout=5)
         with self._lifecycle_lock:
