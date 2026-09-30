@@ -16,7 +16,7 @@ from .sizing import SizingPipeline, SizingPipelineInput
 from .risk_state import RiskGateState
 from .portfolio import PortfolioState
 from .adaptive_stop import adaptive_stop_bp, stop_price
-from .scoring import calculate_setup_score, compute_selling_structure, score_to_setup_type
+from .scoring import SCORE_WEAK, calculate_setup_score, compute_selling_structure, score_to_setup_type
 from ftx_paper.capital_context import CapitalRuntimeContext
 from ftx_paper.strategy.config import (
     AFTERNOON_CELL_POLICIES,
@@ -139,11 +139,12 @@ class IndependentLiveDecisionEngine:
     direction, and cooldown logic.  It has no historical-pipeline imports.
     """
 
-    def __init__(self, *, version: str, config_hash: str, capital: float, portfolio: PortfolioState | None = None, max_daily_loss: float = 0.05, max_net_directional_lots: float = 8.0, risk_per_trade: float = 0.01, max_lots: int = 3, entry_cooldown_bars: int = 15, post_exit_cooldown_bars: int = 30, prior_day_high: float | None = None, prior_day_low: float | None = None, morning_entry_minutes: tuple[int, int] = MORNING_ENTRY_MINUTES, afternoon_entry_minutes: tuple[int, int] = AFTERNOON_ENTRY_MINUTES, transition_patterns: tuple[TransitionPattern, ...] = (), expiry_dates: frozenset[str] = frozenset(), risk_gate: RiskGateState | None = None, enabled_vehicles: tuple[str, ...] = ("futures", "synthetic"), vehicle: str | None = None, vehicle_risk_limits: Mapping[str, VehicleRiskLimits] | None = None, capital_context: CapitalRuntimeContext | None = None) -> None:
+    def __init__(self, *, version: str, config_hash: str, capital: float, portfolio: PortfolioState | None = None, max_daily_loss: float = 0.05, max_net_directional_lots: float = 8.0, risk_per_trade: float = 0.01, max_lots: int = 3, entry_cooldown_bars: int = 15, post_exit_cooldown_bars: int = 30, prior_day_high: float | None = None, prior_day_low: float | None = None, morning_entry_minutes: tuple[int, int] = MORNING_ENTRY_MINUTES, afternoon_entry_minutes: tuple[int, int] = AFTERNOON_ENTRY_MINUTES, transition_patterns: tuple[TransitionPattern, ...] = (), expiry_dates: frozenset[str] = frozenset(), risk_gate: RiskGateState | None = None, enabled_vehicles: tuple[str, ...] = ("futures", "synthetic"), vehicle: str | None = None, vehicle_risk_limits: Mapping[str, VehicleRiskLimits] | None = None, capital_context: CapitalRuntimeContext | None = None, setup_score_skip_filter: bool = True) -> None:
         self.version, self.config_hash = version, config_hash
         self.portfolio = portfolio or PortfolioState(capital)
         self.capital = self.portfolio.initial_capital
         self.capital_context = capital_context
+        self.setup_score_skip_filter = setup_score_skip_filter
         if vehicle is not None:
             enabled_vehicles = (str(vehicle).lower(),)
         self.enabled_vehicles = tuple(dict.fromkeys(str(item).lower() for item in enabled_vehicles))
@@ -343,6 +344,7 @@ class IndependentLiveDecisionEngine:
             float(self._vix_open or vix_bar.close), pcr, structural_proximity,
         )
         score_setup_type, score_multiplier = score_to_setup_type(score)
+        score_skip = self.setup_score_skip_filter and score < SCORE_WEAK
         sequence = len(self._futures)
         events = []
         policies = configured or [(location_snapshot.cell, None)]
@@ -372,7 +374,7 @@ class IndependentLiveDecisionEngine:
                 reason = "session_not_selected"
             elif cell_policy is None:
                 reason = "cell_not_configured"
-            elif score_setup_type == "Skip":
+            elif score_skip:
                 reason = "setup_score_skip"
             elif not transition_patterns_allow(location_snapshot, cell_policy.transition_patterns or self.transition_patterns):
                 reason = "transition_policy_mismatch"

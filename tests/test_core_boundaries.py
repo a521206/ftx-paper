@@ -13,7 +13,7 @@ from ftx_paper.execution import PaperExecutionCoordinator
 from ftx_paper.core.location_engine import Cell, Location
 from ftx_paper.core.live_decision import _configured_policies_for_cell
 from ftx_paper.core.scoring import _synthetic_delta_divergence
-from ftx_paper.strategy.config import Session
+from ftx_paper.strategy.config import CellPolicyConfig, ExitMode, Session
 from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.strategy import ConfiguredLiveStrategy
 from ftx_paper.capital_config import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE as CAPITAL_CONFIG
@@ -1015,6 +1015,59 @@ def test_live_decision_engine_persists_score_and_quality_bucket() -> None:
     assert [event.event_type for event in events] == ["CANDIDATEDECISION", "REJECTEDDECISION"]
     assert events[0].payload["score"] == events[1].payload["score"]
     assert events[1].payload["reason"] == "cell_not_configured"
+
+
+def test_setup_score_filter_only_controls_skip_eligibility(monkeypatch) -> None:
+    import ftx_paper.core.live_decision as live_decision
+
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    vix = Instrument("INDIA VIX", "NSE", "VIX")
+    cell = Cell(Location.VWAP_ZONE)
+    policy = CellPolicyConfig(cell, OrderSide.BUY, ExitMode.SIGNAL)
+    monkeypatch.setattr(live_decision, "calculate_setup_score", lambda *args: (1, {"test": 1}))
+    monkeypatch.setattr(live_decision, "_configured_policies_for_cell", lambda *args: [(cell, policy)])
+
+    def run(filter_enabled: bool):
+        engine = IndependentLiveDecisionEngine(
+            version="test", config_hash="hash", capital=CAPITAL_CONFIG.initial_capital,
+            setup_score_skip_filter=filter_enabled,
+        )
+        events = ()
+        for index in range(4):
+            timestamp = datetime(2026, 1, 1, 10, 20 + index, tzinfo=timezone.utc)
+            bundle = DecisionBundle(
+                f"score-filter-{index}", "2026-01-01", timestamp.strftime("%Y-%m-%dT%H:%M"),
+                {
+                    "futures": MarketBar(instrument, timestamp, 99, 102, 98, 100, 100),
+                    "vix": MarketBar(vix, timestamp, 15, 15, 15, 15),
+                }, ("futures", "vix"),
+            )
+            events = engine.evaluate(bundle)
+        return events
+
+    enabled = run(True)
+    disabled = run(False)
+    assert enabled[0].payload["score"] == disabled[0].payload["score"] == 1
+    assert enabled[0].payload["score_factors"] == disabled[0].payload["score_factors"] == {"test": 1}
+    assert enabled[1].payload["reason"] == "setup_score_skip"
+    assert disabled[1].payload["reason"] != "setup_score_skip"
+
+
+def test_score_filter_config_is_hashed_and_snapshot_boolean_is_validated() -> None:
+    from ftx_paper.strategy.config import StrategyConfig
+
+    enabled = StrategyConfig()
+    disabled = StrategyConfig(setup_score_skip_filter=False)
+    assert enabled.config_hash != disabled.config_hash
+
+    strategy = ConfiguredLiveStrategy(capital_profile=CAPITAL_CONFIG, config=disabled)
+    snapshot = strategy.snapshot()
+    assert snapshot["config"]["setup_score_skip_filter"] is False
+    restored = ConfiguredLiveStrategy.from_snapshot(snapshot, capital_profile=CAPITAL_CONFIG)
+    assert restored.config.setup_score_skip_filter is False
+    snapshot["config"]["setup_score_skip_filter"] = 1
+    with pytest.raises(ValueError, match="setup_score_skip_filter must be a boolean"):
+        ConfiguredLiveStrategy.from_snapshot(snapshot, capital_profile=CAPITAL_CONFIG)
 
 
 def test_risk_sizer_never_exceeds_risk_budget_when_budget_is_marginal() -> None:

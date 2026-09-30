@@ -78,6 +78,7 @@ class ConfiguredLiveStrategy:
             max_lots=self.capital_context.max_lots,
             morning_entry_minutes=config.morning_entry_minutes,
             afternoon_entry_minutes=config.afternoon_entry_minutes,
+            setup_score_skip_filter=config.setup_score_skip_filter,
             prior_day_high=prior_day_high,
             prior_day_low=prior_day_low,
             expiry_dates=expiry_dates,
@@ -163,7 +164,7 @@ class ConfiguredLiveStrategy:
             raise ValueError("strategy snapshot config must be an object")
         allowed_keys = {
             "name", "version", "morning_entry_minutes", "afternoon_entry_minutes",
-            "entry_cooldown_bars", "post_exit_cooldown_bars",
+            "entry_cooldown_bars", "post_exit_cooldown_bars", "setup_score_skip_filter",
         }
         for key in raw_config:
             if not isinstance(key, str) or key not in allowed_keys:
@@ -187,6 +188,10 @@ class ConfiguredLiveStrategy:
         post_exit_cooldown_bars = cls._parse_non_negative_int(
             "post_exit_cooldown_bars", raw_config.get("post_exit_cooldown_bars", DEFAULT_CONFIG.post_exit_cooldown_bars),
         )
+        setup_score_skip_filter = cls._parse_bool(
+            "setup_score_skip_filter",
+            raw_config.get("setup_score_skip_filter", DEFAULT_CONFIG.setup_score_skip_filter),
+        )
         config = StrategyConfig(
             name=name,
             version=version,
@@ -194,6 +199,7 @@ class ConfiguredLiveStrategy:
             afternoon_entry_minutes=afternoon_entry_minutes,
             entry_cooldown_bars=entry_cooldown_bars,
             post_exit_cooldown_bars=post_exit_cooldown_bars,
+            setup_score_skip_filter=setup_score_skip_filter,
         )
         raw_limits = snapshot.get("vehicle_risk_limits", {})
         if not isinstance(raw_limits, Mapping):
@@ -326,6 +332,12 @@ class ConfiguredLiveStrategy:
     def _parse_non_negative_int(key: str, value: object) -> int:
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise ValueError(f"{key} must be a non-negative integer")
+        return value
+
+    @staticmethod
+    def _parse_bool(key: str, value: object) -> bool:
+        if not isinstance(value, bool):
+            raise ValueError(f"{key} must be a boolean")
         return value
 
     def on_bundle(self, bundle: DecisionBundle):
