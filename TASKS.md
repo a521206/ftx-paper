@@ -118,6 +118,36 @@ Focused validation after the score-factor fix:
 - Ruff passed for the changed score implementation and test; `git diff --check`
   passed.
 
+### Score parity recheck (2026-09-30)
+
+The cross-implementation fixture test passes for both score calculations and
+score tiers (4 tests passed). Both active implementations use the same
+time-neutral factor rules, and both expose `setup_score_skip_filter=True` by
+default. This validates the scoring contract on fixtures; it does not validate
+fixed-date replay outputs.
+
+Static tracing found a diagnostic context bug that can explain the earlier
+Sep 15 score difference: `_canonical_trace` loaded the preceding trading
+date's bars into `arrays` but called `run_sessions` with
+`days=[session_date]`. `collect_qualified_events` previously derived prior-day
+high/low only from the preceding entry in `days`, so this invocation supplied
+`None` prior levels to canonical score construction. Paper had its prior-day
+levels. The collector now treats `days` as the extraction target and the
+earlier entries in `arrays` as warmup context; it extracts only the target
+session while using the latest earlier array for prior-day levels. The
+diagnostic remains routed through `run_sessions` and its canonical configured
+session path. Its comparison is explicitly limited to candidate-stream
+identity and shared candidate fields; Paper decision outcomes are not compared
+because the canonical parity capture does not expose equivalent outcomes.
+
+The corrected fixed-date diagnostic has **not** been run. The configured
+`data/db/nifty_slim.duckdb` is absent, and the user instructed us to stop
+database access after an unverified copy was discovered. The attempted
+read-only copy run also reached a canonical expiry-calendar gap; no database
+was modified. Earlier fixed-date candidate score/stop differences are not
+considered verified until rerun with the user's designated canonical data
+source. Layer 4 remains unchecked and Layers 5–8 remain blocked.
+
 ### Track P11 — Coexistence validation
 
 - [ ] Run the complete holdout replay and achieve zero unexplained differences in required shared execution/settlement fields
