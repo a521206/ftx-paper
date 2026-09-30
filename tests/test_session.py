@@ -128,6 +128,42 @@ def test_replay_bars_use_nearest_unexpired_futures_contract(tmp_path):
     assert {bar.instrument.symbol for bar in futures} == {"NIFTY26SEPFUT"}
 
 
+def test_replay_input_window_matches_canonical_session_close(tmp_path):
+    store = RuntimeStore(tmp_path / "session-window")
+    store.append_market_bars(tuple(
+        MarketBar(
+            Instrument("NIFTY26SEPFUT", "NFO", "FUTURES", "2026-09-29"),
+            datetime(2026, 9, 29, hour, minute, tzinfo=ZoneInfo("Asia/Kolkata")),
+            100, 101, 99, 100,
+        )
+        for hour, minute in ((9, 14), (9, 15), (15, 10), (15, 11))
+    ), source="fixture")
+
+    bars = ReplayWorker(store)._bars("2026-09-29")
+    assert [bar.timestamp.strftime("%H:%M") for bar in bars] == ["09:15", "15:10"]
+
+
+def test_replay_marks_expired_only_futures_input_unavailable(tmp_path):
+    store = RuntimeStore(tmp_path / "expired-contract")
+    store.append_market_bars((
+        MarketBar(
+            Instrument("NIFTY26SEPFUT", "NFO", "FUTURES", "2026-09-28"),
+            datetime(2026, 9, 29, 4, 0, tzinfo=timezone.utc),
+            200, 220, 180, 205,
+        ),
+        MarketBar(
+            Instrument("NIFTY26SEPFUT", "NFO", "FUTURES", "2026-09-28"),
+            datetime(2026, 9, 30, 4, 0, tzinfo=timezone.utc),
+            201, 221, 181, 206,
+        ),
+    ), source="fixture")
+
+    worker = ReplayWorker(store)
+    assert not [bar for bar in worker._bars("2026-09-30")
+                if str(bar.instrument.instrument_type).upper() in {"FUT", "FUTURES"}]
+    assert worker._prior_day_levels("2026-09-30") == (None, None)
+
+
 def test_closed_bar_is_processed_under_session_lifecycle(tmp_path):
     store = RuntimeStore(tmp_path)
     session = RuntimeSession(store, None, [], engine=PaperEngine())

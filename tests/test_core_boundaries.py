@@ -397,20 +397,38 @@ def test_vix_lookup_uses_opening_value_and_latest_causal_bar() -> None:
     assert vix_open_and_event(bars, event) == (14.5, 15.5)
 
 
-def test_option_pcr_matches_cutoff_and_unavailable_contract() -> None:
-    call = Instrument("NIFTYCE", "NFO", "CE")
-    put = Instrument("NIFTYPE", "NFO", "PE")
+def test_option_pcr_matches_canonical_cutoff_and_nearest_weekly_atm_window() -> None:
+    call = Instrument("NIFTYCE", "NFO", "CE", "2026-01-08", 10000)
+    put = Instrument("NIFTYPE", "NFO", "PE", "2026-01-08", 10000)
+    far_call = Instrument("NIFTYFARCE", "NFO", "CE", "2026-01-08", 11000)
+    later_put = Instrument("NIFTYLATERPE", "NFO", "PE", "2026-01-15", 10000)
     future = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    spot = Instrument("NIFTY", "NSE", "INDEX")
     options = {
-        "call": MarketBar(call, datetime(2026, 1, 1, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata")), 1, 1, 1, 1, 100),
-        "put": MarketBar(put, datetime(2026, 1, 1, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata")), 1, 1, 1, 1, 250),
+        "call": MarketBar(call, datetime(2026, 1, 1, 9, 15, tzinfo=ZoneInfo("Asia/Kolkata")), 1, 1, 1, 1, 100),
+        "put": MarketBar(put, datetime(2026, 1, 1, 9, 15, tzinfo=ZoneInfo("Asia/Kolkata")), 1, 1, 1, 1, 250),
+        "far_call": MarketBar(far_call, datetime(2026, 1, 1, 9, 15, tzinfo=ZoneInfo("Asia/Kolkata")), 1, 1, 1, 1, 1000),
+        "later_put": MarketBar(later_put, datetime(2026, 1, 1, 9, 15, tzinfo=ZoneInfo("Asia/Kolkata")), 1, 1, 1, 1, 900),
+        "spot": MarketBar(spot, datetime(2026, 1, 1, 9, 15, tzinfo=ZoneInfo("Asia/Kolkata")), 1, 1, 1, 10000),
     }
-    before_cutoff = MarketBar(future, datetime(2026, 1, 1, 9, 59, tzinfo=ZoneInfo("Asia/Kolkata")), 100, 101, 99, 100)
-    at_cutoff = MarketBar(future, datetime(2026, 1, 1, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata")), 100, 101, 99, 100)
+    options.update({
+        f"intermediate_{strike}": MarketBar(
+            Instrument(f"NIFTYCE{strike}", "NFO", "CE", "2026-01-08", strike),
+            datetime(2026, 1, 1, 9, 15, tzinfo=ZoneInfo("Asia/Kolkata")),
+            1, 1, 1, 1, 0,
+        ) for strike in (10050, 10100, 10150, 10200, 10250)
+    })
+    before_cutoff = MarketBar(future, datetime(2026, 1, 1, 9, 14, tzinfo=ZoneInfo("Asia/Kolkata")), 100, 101, 99, 100)
+    at_cutoff = MarketBar(future, datetime(2026, 1, 1, 9, 15, tzinfo=ZoneInfo("Asia/Kolkata")), 100, 101, 99, 100)
 
-    assert option_pcr_at_event(options, before_cutoff) is None
-    assert option_pcr_at_event(options, at_cutoff) == 2.5
-    assert option_pcr_at_event({"put": options["put"]}, at_cutoff) is None
+    expiry_dates = ("2026-01-08", "2026-01-15")
+    assert option_pcr_at_event(options, before_cutoff, expiry_dates=expiry_dates) is None
+    assert option_pcr_at_event(options, at_cutoff, expiry_dates=expiry_dates) == 2.5
+    assert option_pcr_at_event(options, at_cutoff) is None
+    assert option_pcr_at_event({"put": options["put"]}, at_cutoff,
+                               expiry_dates=expiry_dates) is None
+    assert option_pcr_at_event({key: value for key, value in options.items() if key != "spot"},
+                               at_cutoff, expiry_dates=expiry_dates) is None
 
 
 def test_setup_policy_emits_one_explicit_order_intent() -> None:

@@ -148,6 +148,31 @@ and other persistence timestamps must never influence a decision.
 - Features and eligibility use no future bars or future supporting values.
 - Missing values use canonical defaults or canonical rejection reasons; paper
   must not invent a substitute value silently.
+- Option PCR is the exact-minute put/call volume ratio for the nearest weekly
+  expiry, using the actual ATM strike and up to five actual listed strikes on
+  each side, matching `fetch_strike_pcr_bulk`. It is unavailable when the
+  required weekly expiry, spot, or eligible option bars are missing; Paper
+  must not fall back to all expiries or all strikes. The canonical lookup
+  applies from the session start (09:15).
+- Incremental parity tooling uses the ordered coarse stages `input_context`,
+  `features_locations_transitions`, `candidates_decisions`, `risk_sizing`,
+  `orders_fills_exits_settlement`, and `portfolio_ledger`. Within each stage,
+  records retain source order and have contiguous zero-based ordinals. Candidate
+  and event identity fields compare exactly; value mappings ignore mapping-key
+  insertion order but compare every present scalar exactly. No numeric
+  tolerance is applied. Representation fields may be ignored only when named
+  explicitly by a comparator call; they must not include causal or market
+  values.
+- Every record must state unavailable fields explicitly. An unavailable value
+  is excluded from value equality and reported as `UNAVAILABLE`; it is never
+  treated as a match. Missing stage coverage is `INCOMPLETE`. Ordered identity,
+  record-count, or available-value differences are `MISMATCHED`, even if other
+  fields are unavailable. A complete trace with no differences or unavailable
+  values is `MATCHED`.
+- The injected-runner harness snapshots one input bar sequence and context,
+  gives each implementation an independent deep copy, retains the input
+  fingerprint, and compares only the requested ordered stages. It does not
+  call either strategy implementation or change normal replay behavior.
 - When VIX is unavailable, `vix_open`, `vix_at_event`, and all VIX-dependent
   derived fields are serialized as `null`/unavailable. The candidate is
   rejected with `missing_vix`; only candidate identity, timing, availability,
@@ -170,6 +195,27 @@ and other persistence timestamps must never influence a decision.
   settlements link back to the candidate/decision identity. The underlying
   date, minute, sequence, cell, event kind, and rejection reason must compare
   exactly; only the raw ID encoding may differ.
+
+The fixed-date Layer 4 diagnostic has two source-specific projection rules.
+Canonical raw `parity_capture` session/direction labels are assigned by the
+runner's capture projection; they are not fields emitted by raw event
+extraction. The adapter resolves the active configured policy at the event
+minute and uses the time-derived session plus `none` when no cell policy is
+active. Paper's event `sequence` is the one-based count of futures bars
+observed, while canonical `k` is the zero-based bar-array index. The diagnostic
+projects the Paper count to `k` for comparison only; Paper continues to pass its
+original sequence to cooldown and risk gates. The projection is covered by a
+focused test. Neither rule drops or ignores causal candidate fields.
+
+The current fixed-date canonical `parity_capture` is a raw extraction
+diagnostic, not the canonical policy decision stream. Its `reason` can describe
+an extraction filter such as `setup_score_skip`; do not compare that value as a
+decision rejection reason. The canonical decision outcome/rejection reason is
+unavailable from this projection and must be captured from the policy flow
+before Layer 4 can pass. Keep capture-filter annotations separately visible in
+diagnostics. The maintained canonical extraction path currently qualifies
+events by score before session-window and policy gates, but a capture-filter
+annotation alone does not prove a decision-level rejection event.
 
 ## Decision output contract
 

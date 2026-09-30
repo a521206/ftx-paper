@@ -25,6 +25,7 @@ from ftx_paper.config import NIFTY_LOT_SIZE
 
 IST = ZoneInfo("Asia/Kolkata")
 SESSION_OPEN_MINUTES = 9 * 60 + 15
+SESSION_CLOSE_MINUTES = 15 * 60 + 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -676,6 +677,10 @@ class ReplayWorker:
                 contracts.setdefault(expiry_date, []).append(row)
         if contracts:
             futures = contracts[min(contracts)]
+        else:
+            # Never silently fall back to an expired contract when replay
+            # lacks the preceding session's active futures input.
+            return None, None
         return (
             max(float(row["high"]) for row in futures),
             min(float(row["low"]) for row in futures),
@@ -707,16 +712,28 @@ class ReplayWorker:
                     row for row in rows
                     if str(row.get("instrument_type", "")).upper() not in {"FUT", "FUTURES"}
                 ] + selected_rows
+            else:
+                # An expired-only futures slice is unavailable input, not a
+                # valid front-contract replay. Keep supporting market bars,
+                # but do not let an expired instrument drive decisions.
+                rows = [
+                    row for row in rows
+                    if str(row.get("instrument_type", "")).upper() not in {"FUT", "FUTURES"}
+                ]
         bars = []
         for row in rows:
             instrument_type = str(row.get("instrument_type", "")).upper()
             if instrument_type not in {"FUT", "FUTURES", "INDEX", "EQ", "CE", "PE"}:
                 continue
+            timestamp = datetime.fromisoformat(str(row["minute"]))
+            minute_of_day = timestamp.astimezone(IST).hour * 60 + timestamp.astimezone(IST).minute
+            if not SESSION_OPEN_MINUTES <= minute_of_day <= SESSION_CLOSE_MINUTES:
+                continue
             bars.append(MarketBar(
                 instrument=Instrument(symbol=str(row["symbol"]), exchange=str(row["exchange"]),
                                       instrument_type=instrument_type, expiry=row.get("expiry"),
                                       strike=row.get("strike")),
-                timestamp=datetime.fromisoformat(str(row["minute"])),
+                timestamp=timestamp,
                 open=float(row["open"]), high=float(row["high"]), low=float(row["low"]), close=float(row["close"]),
                 volume=row.get("volume"), open_interest=row.get("open_interest"),
             ))

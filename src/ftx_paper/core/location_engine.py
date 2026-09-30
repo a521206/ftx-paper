@@ -135,9 +135,15 @@ def _features(prefix: tuple[MarketBar, ...], *, opening_range_bars: int, atr_win
     session = tuple(bar for bar in prefix if _ist_minute(bar) >= 555)
     if len(session) < 2:
         raise ValueError("at least two completed prefix bars are required")
-    volume = sum(float(bar.volume or 0.0) for bar in session)
+    volume = 0.0
+    weighted_typical = 0.0
+    for bar in session:
+        bar_volume = float(bar.volume or 0.0)
+        typical_price = (bar.high + bar.low + bar.close) / 3.0
+        volume += bar_volume
+        weighted_typical += typical_price * bar_volume
     if volume > 0:
-        vwap = sum(((bar.high + bar.low + bar.close) / 3.0) * float(bar.volume or 0.0) for bar in session) / volume
+        vwap = weighted_typical / volume
     else:
         # Some broker replay bars omit volume. Keep the causal feature path
         # usable with a deterministic typical-price mean in that case.

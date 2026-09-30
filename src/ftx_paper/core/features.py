@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from zoneinfo import ZoneInfo
 
 from ftx_paper.contracts import MarketBar, Role
@@ -125,12 +125,46 @@ def vix_open_and_event(
 def option_pcr_at_event(
     bars: Mapping[Role | str, MarketBar] | None,
     event: MarketBar,
+    *,
+    expiry_dates: Iterable[str] = (),
 ) -> float | None:
-    """Return exact-minute PE/CE volume PCR after the canonical 10:00 cutoff."""
-    if _ist_minute(event)[1] < 10 * 60 or not bars:
+    """Return nearest-expiry ATM +/- five-strike PE/CE volume PCR after 09:15.
+
+    The input bundle must include the same-minute spot bar and option contracts.
+    Missing spot or eligible option legs remain unavailable rather than
+    widening the strike/expiry scope.
+    """
+    if _ist_minute(event)[1] < 9 * 60 + 15 or not bars:
         return None
+    session_date = _ist_minute(event)[0]
+    spot = next((bar.close for bar in bars.values()
+                 if str(bar.instrument.instrument_type).upper() == "INDEX"
+                 and bar.instrument.symbol.upper() in {"NIFTY", "NIFTY 50"}
+                 and _ist_minute(bar) == _ist_minute(event)), None)
+    options = [bar for bar in bars.values()
+               if str(bar.instrument.instrument_type).upper() in {"CE", "PE"}
+               and bar.instrument.strike is not None
+               and bar.instrument.expiry is not None
+               and _ist_minute(bar) == _ist_minute(event)]
+    expected_expiries = sorted({str(value)[:10] for value in expiry_dates
+                                if str(value)[:10] >= session_date})
+    if spot is None or not expected_expiries:
+        return None
+    nearest_expiry = expected_expiries[0]
+    selected = [bar for bar in options if str(bar.instrument.expiry)[:10] == nearest_expiry]
+    strikes = sorted({float(bar.instrument.strike) for bar in selected})
+    if not strikes:
+        return None
+    atm = min(strikes, key=lambda strike: (abs(strike - spot), strike))
+    eligible_strikes = {atm}
+    below = sorted((strike for strike in strikes if strike < atm), reverse=True)[:5]
+    above = sorted(strike for strike in strikes if strike > atm)[:5]
+    eligible_strikes.update(below)
+    eligible_strikes.update(above)
     calls = puts = 0.0
-    for bar in bars.values():
+    for bar in selected:
+        if float(bar.instrument.strike) not in eligible_strikes:
+            continue
         kind = str(bar.instrument.instrument_type).upper()
         if kind == "CE":
             calls += float(bar.volume or 0.0)
