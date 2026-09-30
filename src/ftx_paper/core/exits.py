@@ -46,7 +46,11 @@ class ExitStateMachine:
     def __init__(self, *, trail_distance: float | None = None,
                  trail_activation_bp: float | None = None,
                  trail_distance_bp: float | None = None,
-                 close_time: time = time(15, 10)) -> None:
+                 close_time: time = time(15, 10),
+                 initial_close: float | None = None,
+                 counter_move_bars: int = 2) -> None:
+        if counter_move_bars < 1:
+            raise ValueError("counter-move bars must be positive")
         if trail_distance is not None and trail_distance <= 0:
             raise ValueError("trail distance must be positive")
         if trail_activation_bp is not None and trail_activation_bp <= 0:
@@ -62,7 +66,10 @@ class ExitStateMachine:
         self.trail_activation_bp = trail_activation_bp
         self.trail_distance_bp = trail_distance_bp
         self.close_time = close_time
-        self._closes: deque[float] = deque(maxlen=3)
+        self.counter_move_bars = counter_move_bars
+        self._closes: deque[float] = deque(maxlen=counter_move_bars + 1)
+        if initial_close is not None:
+            self._closes.append(float(initial_close))
         # Signal exits use the completed bars before the current bar for the
         # canonical volume-climax average.  Keep this causal history separate
         # from close history so replay and live evaluation share the same
@@ -91,6 +98,7 @@ class ExitStateMachine:
             "trail_activation_bp": self.trail_activation_bp,
             "trail_distance_bp": self.trail_distance_bp,
             "close_time": self.close_time.isoformat(),
+            "counter_move_bars": self.counter_move_bars,
             "closes": list(self._closes),
             "volumes": list(self._volumes),
             "max_favorable_price": self._max_favorable_price,
@@ -116,10 +124,11 @@ class ExitStateMachine:
             trail_activation_bp=snapshot.get("trail_activation_bp"),
             trail_distance_bp=snapshot.get("trail_distance_bp"),
             close_time=parsed_close_time,
+            counter_move_bars=int(snapshot.get("counter_move_bars", 2)),
         )
         closes = snapshot.get("closes", ())
-        if not isinstance(closes, (list, tuple)) or len(closes) > 3:
-            raise ValueError("exit-state snapshot closes must contain at most three prices")
+        if not isinstance(closes, (list, tuple)) or len(closes) > machine.counter_move_bars + 1:
+            raise ValueError("exit-state snapshot closes exceed the counter-move window")
         if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in closes):
             raise ValueError("exit-state snapshot closes must be numeric")
         machine._closes.extend(float(value) for value in closes)
@@ -216,10 +225,12 @@ class ExitStateMachine:
                 average_volume = sum(prior_volumes) / len(prior_volumes)
                 if average_volume > 0 and volume is not None and volume > 2.5 * average_volume:
                     return self._action(position, close, "vol_climax", client_order_id)
-            if len(self._closes) >= 3:
+            if len(self._closes) >= self.counter_move_bars + 1:
                 recent = tuple(self._closes)
-                adverse = (recent[0] > recent[1] > recent[2] if position.side is OrderSide.BUY
-                            else recent[0] < recent[1] < recent[2])
+                if position.side is OrderSide.BUY:
+                    adverse = all(recent[-index] < recent[-index - 1] for index in range(1, self.counter_move_bars + 1))
+                else:
+                    adverse = all(recent[-index] > recent[-index - 1] for index in range(1, self.counter_move_bars + 1))
                 if adverse:
                     return self._action(position, close, "counter_move", client_order_id)
         local_time = timestamp.astimezone(ZoneInfo("Asia/Kolkata")).time()

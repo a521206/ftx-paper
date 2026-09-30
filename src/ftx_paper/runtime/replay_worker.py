@@ -683,6 +683,30 @@ class ReplayWorker:
 
     def _bars(self, session_date: str) -> tuple[MarketBar, ...]:
         rows = self.store.read_market_bars(session_date)
+        futures_rows = [
+            row for row in rows
+            if str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
+        ]
+        if futures_rows:
+            session_day = date_type.fromisoformat(session_date)
+            contracts: dict[date_type, list[dict[str, Any]]] = {}
+            for row in futures_rows:
+                expiry = row.get("expiry")
+                if not expiry:
+                    continue
+                try:
+                    expiry_day = date_type.fromisoformat(str(expiry)[:10])
+                except ValueError:
+                    continue
+                if expiry_day >= session_day:
+                    contracts.setdefault(expiry_day, []).append(row)
+            if contracts:
+                selected = min(contracts)
+                selected_rows = contracts[selected]
+                rows = [
+                    row for row in rows
+                    if str(row.get("instrument_type", "")).upper() not in {"FUT", "FUTURES"}
+                ] + selected_rows
         bars = []
         for row in rows:
             instrument_type = str(row.get("instrument_type", "")).upper()

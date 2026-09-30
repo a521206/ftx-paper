@@ -341,6 +341,7 @@ class IndependentLiveDecisionEngine:
         score, score_factors = calculate_setup_score(
             selling, {"minutes_from_open": float(minutes_from_open)}, float(vix_bar.close),
             float(self._vix_open or vix_bar.close), pcr, structural_proximity,
+            score_time_window=(0, 150) if decision_session is Session.MORNING else (255, 300),
         )
         score_setup_type, score_multiplier = score_to_setup_type(score)
         sequence = len(self._futures)

@@ -155,11 +155,22 @@ def _features(prefix: tuple[MarketBar, ...], *, opening_range_bars: int, atr_win
     )
 
 
-def detect_all_locations(features: LocationFeatures, current_close: float, *, vwap_zone_pct: float = 0.25) -> tuple[Location, ...]:
+def detect_all_locations(
+    features: LocationFeatures,
+    current_close: float,
+    *,
+    vwap_zone_pct: float = 0.25,
+    vwap_zone_active: bool | None = None,
+) -> tuple[Location, ...]:
     """Return every location active on the current close in canonical order."""
     close, atr = current_close, features.atr
     found: list[Location] = []
-    if close > 0 and abs(close - features.vwap) / close * 100 <= vwap_zone_pct:
+    if (
+        vwap_zone_active is True
+        or vwap_zone_active is None
+        and close > 0
+        and abs(close - features.vwap) / close * 100 <= vwap_zone_pct
+    ):
         found.append(Location.VWAP_ZONE)
     if close > features.session_high:
         found.append(Location.NEW_HIGH)
@@ -233,10 +244,9 @@ class LocationDetector:
             return None
         features = _features(prefix, opening_range_bars=self.opening_range_bars, atr_window=self.atr_window,
                              prior_day_high=self._prior_day_high, prior_day_low=self._prior_day_low)
-        detected_locations = detect_all_locations(features, current.close, vwap_zone_pct=self.vwap_zone_pct)
         transitions: list[LocationTransition] = []
         if len(prefix) >= 2:
-            current_vwap_side = _side(current.close, features.vwap, 0.10)
+            current_vwap_side = _side(current.close, features.vwap, 0.25)
             if self._vwap_side is None:
                 self._vwap_side = current_vwap_side
             else:
@@ -247,9 +257,9 @@ class LocationDetector:
                         current_vwap_side = ReferenceSide.BELOW
                     else:
                         current_vwap_side = ReferenceSide.IN_ZONE
-                elif self._vwap_side is ReferenceSide.ABOVE and current.close <= features.vwap * 1.001:
+                elif self._vwap_side is ReferenceSide.ABOVE and current.close <= features.vwap * 1.0025:
                     current_vwap_side = ReferenceSide.IN_ZONE
-                elif self._vwap_side is ReferenceSide.BELOW and current.close >= features.vwap * 0.999:
+                elif self._vwap_side is ReferenceSide.BELOW and current.close >= features.vwap * 0.9975:
                     current_vwap_side = ReferenceSide.IN_ZONE
                 if current_vwap_side is not self._vwap_side:
                     old = self._vwap_side
@@ -257,6 +267,12 @@ class LocationDetector:
                             TransitionKind.RECLAIM if current_vwap_side is ReferenceSide.ABOVE else TransitionKind.REJECT)
                     transitions.append(LocationTransition(Location.VWAP_ZONE, kind, old, current_vwap_side))
                     self._vwap_side = current_vwap_side
+        detected_locations = detect_all_locations(
+            features,
+            current.close,
+            vwap_zone_pct=self.vwap_zone_pct,
+            vwap_zone_active=self._vwap_side is ReferenceSide.IN_ZONE,
+        )
         if len(prefix) >= 2:
             for reference, level in ((Location.PRIOR_DAY_HIGH, features.prior_day_high), (Location.PRIOR_DAY_LOW, features.prior_day_low)):
                 if level is None:

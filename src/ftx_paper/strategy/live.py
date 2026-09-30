@@ -355,8 +355,14 @@ class ConfiguredLiveStrategy:
             if order.exit_mode == "trail" else {}
         )
         self._decision_positions[order.client_order_id] = (
-                position, ExitStateMachine(**trail_kwargs, close_time=time(15, 10)),
-        )
+                position,
+                ExitStateMachine(
+                    **trail_kwargs,
+                    close_time=time(15, 10),
+                    initial_close=position.exit_reference_price or position.entry_price,
+                    counter_move_bars=1 if position.cell == "new_low" else 2,
+                ),
+            )
 
     def on_tick(self, bar: MarketBar):
         actions = []
