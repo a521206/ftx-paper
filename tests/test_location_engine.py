@@ -21,6 +21,11 @@ def test_cell_normalization_is_independent_of_input_order() -> None:
     assert Cell("or_low", "session_low", "vwap_zone").name == "vwap_zone+session_low+or_low"
 
 
+def test_cell_normalization_prunes_implied_new_extremes() -> None:
+    assert Cell("new_low", "or_low", "prior_day_low").name == "or_low+prior_day_low"
+    assert Cell("new_high", "or_high", "prior_day_high").name == "or_high+prior_day_high"
+
+
 def test_empty_cell_is_rejected() -> None:
     with pytest.raises(ValueError, match="at least one location"):
         Cell()

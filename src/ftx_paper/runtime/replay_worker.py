@@ -152,6 +152,7 @@ class ReplayWorker:
         peak_equity = initial_capital
         max_drawdown = 0.0
         available_dates = self._dates()
+        expiry_dates = self.store.read_expiry_dates()
         # This engine/strategy is private to this replay run and never shared
         # with RuntimeSession, its broker, ledger, or risk state.
         for date in dates:
@@ -174,12 +175,24 @@ class ReplayWorker:
                 "settled_orders": [],
             })
             prior_day_high, prior_day_low = self._prior_day_levels(date, available_dates)
+            bars = self._bars(date)
+            # Historical replay databases may not contain the imported expiry
+            # calendar. Infer an expiry session from the option bars themselves
+            # so adaptive stops use the same expiry widening as canonical.
+            effective_expiry_dates = set(expiry_dates)
+            if any(
+                str(bar.instrument.expiry or "")[:10] == date
+                and str(bar.instrument.instrument_type).upper() in {"CE", "PE"}
+                for bar in bars
+            ):
+                effective_expiry_dates.add(date)
             strategy = ConfiguredLiveStrategy(
                 capital_profile=self.capital_profile,
                 enabled_vehicles=vehicles,
                 portfolio=portfolio,
                 prior_day_high=prior_day_high,
                 prior_day_low=prior_day_low,
+                expiry_dates=frozenset(effective_expiry_dates),
             )
             coordinator = PaperExecutionCoordinator(strategy.portfolio, strategy.capital_context)
             engine = PaperEngine(
@@ -187,7 +200,6 @@ class ReplayWorker:
             )
             # Each date gets a fresh position/risk session while cumulative
             # capital is carried by the authoritative PortfolioState.
-            bars = self._bars(date)
             aggregator = self._aggregator(bars)
             open_trades: list[dict[str, Any]] = []
             # Synthetic is a reporting-only view of the accepted futures

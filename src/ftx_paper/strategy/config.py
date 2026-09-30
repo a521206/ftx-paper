@@ -22,8 +22,8 @@ AFTERNOON_ENTRY_MINUTES = (255, 300)
 ENTRY_COOLDOWN_BARS = 15
 POST_EXIT_COOLDOWN_BARS = 30
 # Keep the active Paper profile aligned with the canonical trail contract.
-TRAIL_ACTIVATE_BP = 10.0
-TRAIL_DISTANCE_BP = 4.0
+TRAIL_ACTIVATE_BP = 20.0
+TRAIL_DISTANCE_BP = 20.0
 
 
 class Session(StrEnum):

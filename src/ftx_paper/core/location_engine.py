@@ -70,7 +70,14 @@ class TransitionPattern:
 
 
 _ORDER = tuple(Location)
-_IMPLIED = {Location.SESSION_HIGH: Location.NEW_HIGH, Location.SESSION_LOW: Location.NEW_LOW}
+# Match the canonical cell normalization: session extremes imply new extremes,
+# and new extremes imply the corresponding opening-range level.
+_IMPLIED = {
+    Location.SESSION_HIGH: Location.NEW_HIGH,
+    Location.SESSION_LOW: Location.NEW_LOW,
+    Location.NEW_HIGH: Location.OR_HIGH,
+    Location.NEW_LOW: Location.OR_LOW,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,6 +257,7 @@ class LocationDetector:
                             TransitionKind.RECLAIM if current_vwap_side is ReferenceSide.ABOVE else TransitionKind.REJECT)
                     transitions.append(LocationTransition(Location.VWAP_ZONE, kind, old, current_vwap_side))
                     self._vwap_side = current_vwap_side
+        if len(prefix) >= 2:
             for reference, level in ((Location.PRIOR_DAY_HIGH, features.prior_day_high), (Location.PRIOR_DAY_LOW, features.prior_day_low)):
                 if level is None:
                     continue

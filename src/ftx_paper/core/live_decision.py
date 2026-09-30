@@ -409,10 +409,13 @@ class IndependentLiveDecisionEngine:
                     vehicle=vehicle,
                     open_margin_used=self.portfolio.open_margin,
                 )
-                stability = (
-                    self.capital_context.profile.stability_for(f"{decision_session.value}:{cell.name}")
-                    if self.capital_context is not None else cell_policy.stability
-                )
+                stability = cell_policy.stability
+                if self.capital_context is not None:
+                    configured_stability = self.capital_context.profile.stability_for(
+                        f"{decision_session.value}:{cell.name}"
+                    )
+                    if self.capital_context.profile.stability_policy:
+                        stability = configured_stability
                 cumulative_pnl = self.portfolio.equity - self.portfolio.initial_capital
                 peak_pnl = self.portfolio.peak_equity - self.portfolio.initial_capital
                 drawdown_scale = 1.0
