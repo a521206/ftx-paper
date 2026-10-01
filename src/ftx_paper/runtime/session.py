@@ -815,11 +815,11 @@ class RuntimeSession:
             })
 
     def stop(self) -> None:
+        self._stopping = True
         with self._lock:
             startup = self._thread
             feed = self.feed
             broker = self.broker
-            self._stopping = True
             self.store.patch_status({"state": "STOPPING", "health_state": "STOPPING", "feed_connected": False})
         feed_stopped = True
         try:
