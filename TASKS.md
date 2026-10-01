@@ -14,8 +14,8 @@ continue to coexist independently.
 - [x] Layer 3: feature, location, and transition parity
 - [x] Layer 4: candidate-stream parity
 - [x] Layer 5: risk and sizing parity for candidates reaching the sizing stage
-- [ ] Layer 6: order, fill, exit, and settlement parity
-- [ ] Layer 7: portfolio and ledger parity
+- [x] Layer 6: order, fill, exit, and settlement parity
+- [x] Layer 7: portfolio and ledger parity
 - [ ] Layer 8: fixed-input end-to-end replay report
 
 Work stops at the first unresolved mismatch or missing source input. Never
@@ -73,3 +73,35 @@ Validation:
 - [ ] Run the complete holdout replay and achieve zero unexplained differences in required shared execution and settlement fields
 - [ ] Obtain explicit approval for any remaining intentional differences
 - [ ] Record the coexistence-symmetry result, configuration hashes, fixtures, and holdout artifacts
+
+### Layer 6 Status
+
+Layer 6 is complete for the fixed replay execution scope. The read-only
+canonical/Paper comparator matches the one shared execution candidate on Sep 3,
+Sep 15, and Sep 29, including order intent, quantity, fill quantity and price,
+entry and exit timestamps, exit reason, and settlement status. Candidates that
+did not reach execution are excluded as not applicable. Order/fill status labels
+and settlement result payloads are outside this replay parity contract; no
+execution rejection was exercised by these dates.
+
+Validation:
+
+- `.venv\Scripts\python.exe -m pytest tests\test_compare_candidate_replay.py -q` — 5 passed
+- `.venv\Scripts\ruff.exe check scripts\ftx\compare_candidate_replay.py tests\test_compare_candidate_replay.py` — passed
+- `git diff --check` — passed
+- `.venv\Scripts\python.exe scripts\ftx\compare_candidate_replay.py` — Layer 6 matched on all three fixed dates
+
+### Layer 7 Status
+
+Layer 7 is complete for the fixed replay portfolio and ledger scope. Daily P&L,
+realized P&L, ending equity, ending directional exposure, normalized drawdown
+percentage, and stage-scoped rejection counts match on Sep 3, Sep 15, and Sep
+29, 2026. Paper drawdown is normalized from its absolute amount using peak
+equity; early policy rejections remain outside the ledger rejection-count scope.
+
+Validation:
+
+- `.venv\Scripts\python.exe -m pytest tests\test_compare_candidate_replay.py -q` — 7 passed
+- `.venv\Scripts\ruff.exe check scripts\ftx\compare_candidate_replay.py tests\test_compare_candidate_replay.py` — passed
+- `git diff --check` — passed
+- `.venv\Scripts\python.exe scripts\ftx\compare_candidate_replay.py` — Layer 7 matched on all three fixed dates
