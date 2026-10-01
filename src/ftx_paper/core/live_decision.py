@@ -488,6 +488,7 @@ class IndependentLiveDecisionEngine:
                     "scoped_risk_lot_ceiling": scoped_risk_lot_ceiling,
                 })
                 vehicle_candidate = {**candidate, "vehicle": vehicle,
+                                     "strategy_request": self._vehicle_sizers[vehicle].config.lot_size,
                                      "requested_quantity": quantity_before_stability,
                                      "final_quantity": quantity,
                                      "score_multiplier": sizing_decision.score_multiplier,
