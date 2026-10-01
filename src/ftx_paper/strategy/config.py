@@ -101,7 +101,6 @@ class StrategyConfig:
     afternoon_entry_minutes: tuple[int, int] = AFTERNOON_ENTRY_MINUTES
     entry_cooldown_bars: int = ENTRY_COOLDOWN_BARS
     post_exit_cooldown_bars: int = POST_EXIT_COOLDOWN_BARS
-    setup_score_skip_filter: bool = True
 
     def as_dict(self) -> dict[str, object]:
         return asdict(self)

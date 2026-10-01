@@ -16,7 +16,7 @@ from .sizing import SizingPipeline, SizingPipelineInput
 from .risk_state import RiskGateState
 from .portfolio import PortfolioState
 from .adaptive_stop import adaptive_stop_bp, stop_price
-from .scoring import SCORE_WEAK, calculate_setup_score, compute_selling_structure, score_to_setup_type
+from .scoring import calculate_setup_score, compute_selling_structure, score_to_setup_type
 from ftx_paper.capital_context import CapitalRuntimeContext
 from ftx_paper.strategy.config import (
     AFTERNOON_CELL_POLICIES,
@@ -139,12 +139,11 @@ class IndependentLiveDecisionEngine:
     direction, and cooldown logic.  It has no historical-pipeline imports.
     """
 
-    def __init__(self, *, version: str, config_hash: str, capital: float, portfolio: PortfolioState | None = None, max_daily_loss: float = 0.05, max_net_directional_lots: float = 8.0, risk_per_trade: float = 0.01, max_lots: int = 3, entry_cooldown_bars: int = 15, post_exit_cooldown_bars: int = 30, prior_day_high: float | None = None, prior_day_low: float | None = None, morning_entry_minutes: tuple[int, int] = MORNING_ENTRY_MINUTES, afternoon_entry_minutes: tuple[int, int] = AFTERNOON_ENTRY_MINUTES, transition_patterns: tuple[TransitionPattern, ...] = (), expiry_dates: frozenset[str] = frozenset(), risk_gate: RiskGateState | None = None, enabled_vehicles: tuple[str, ...] = ("futures", "synthetic"), vehicle: str | None = None, vehicle_risk_limits: Mapping[str, VehicleRiskLimits] | None = None, capital_context: CapitalRuntimeContext | None = None, setup_score_skip_filter: bool = True) -> None:
+    def __init__(self, *, version: str, config_hash: str, capital: float, portfolio: PortfolioState | None = None, max_daily_loss: float = 0.05, max_net_directional_lots: float = 8.0, risk_per_trade: float = 0.01, max_lots: int = 3, entry_cooldown_bars: int = 15, post_exit_cooldown_bars: int = 30, prior_day_high: float | None = None, prior_day_low: float | None = None, morning_entry_minutes: tuple[int, int] = MORNING_ENTRY_MINUTES, afternoon_entry_minutes: tuple[int, int] = AFTERNOON_ENTRY_MINUTES, transition_patterns: tuple[TransitionPattern, ...] = (), expiry_dates: frozenset[str] = frozenset(), risk_gate: RiskGateState | None = None, enabled_vehicles: tuple[str, ...] = ("futures", "synthetic"), vehicle: str | None = None, vehicle_risk_limits: Mapping[str, VehicleRiskLimits] | None = None, capital_context: CapitalRuntimeContext | None = None) -> None:
         self.version, self.config_hash = version, config_hash
         self.portfolio = portfolio or PortfolioState(capital)
         self.capital = self.portfolio.initial_capital
         self.capital_context = capital_context
-        self.setup_score_skip_filter = setup_score_skip_filter
         if vehicle is not None:
             enabled_vehicles = (str(vehicle).lower(),)
         self.enabled_vehicles = tuple(dict.fromkeys(str(item).lower() for item in enabled_vehicles))
@@ -262,8 +261,7 @@ class IndependentLiveDecisionEngine:
                 self.risk_gate.reset_segment()
             self._decision_segment = decision_segment
             self._decision_session = decision_session
-        current_pcr = _option_pcr(bundle, self.expiry_dates)
-        pcr = current_pcr
+        pcr = _option_pcr(bundle, self.expiry_dates)
         base = {"decision_at": decision_at.isoformat(), "bundle_id": bundle.bundle_id,
                 "strategy_version": self.version, "config_hash": self.config_hash,
                 "required_input_availability": {r: r not in bundle.missing_roles for r in bundle.required_roles}}
@@ -337,12 +335,6 @@ class IndependentLiveDecisionEngine:
         configured = _configured_policies_for_cell(
             self._cell_policies, decision_session, location_snapshot.cell,
         )
-        round_level = round(current / 50) * 50
-        structural_proximity = (
-            (self.prior_day_low is not None and abs(current - self.prior_day_low) <= 15)
-            or (self.prior_day_high is not None and abs(current - self.prior_day_high) <= 15)
-            or abs(current - round_level) <= 15
-        )
         selling = compute_selling_structure(
             prior, futures, vix_open=float(self._vix_open),
             vix_at_event=float(vix_bar.close),
@@ -351,10 +343,9 @@ class IndependentLiveDecisionEngine:
         minutes_from_open = ist_decision_at.hour * 60 + ist_decision_at.minute - (9 * 60 + 15)
         score, score_factors = calculate_setup_score(
             selling, {"minutes_from_open": float(minutes_from_open)}, float(vix_bar.close),
-            float(self._vix_open), pcr, structural_proximity,
+            float(self._vix_open), pcr, False,
         )
         score_setup_type, score_multiplier = score_to_setup_type(score)
-        score_skip = self.setup_score_skip_filter and score < SCORE_WEAK
         sequence = len(self._futures)
         events = []
         policies = configured or [(location_snapshot.cell, None)]
@@ -378,14 +369,14 @@ class IndependentLiveDecisionEngine:
                                           for item in location_snapshot.transitions])
             events.append(LiveDecision("CANDIDATEDECISION", candidate))
             reason = None
-            if decision_session is Session.OUTSIDE:
+            if cell_policy is None:
+                reason = "cell_not_configured"
+            elif selling.selling_type == "grinding":
+                reason = "grinding_candidate_blocked"
+            elif decision_session is Session.OUTSIDE:
                 reason = "outside_session_window"
             elif not session_selected:
                 reason = "session_not_selected"
-            elif cell_policy is None:
-                reason = "cell_not_configured"
-            elif score_skip:
-                reason = "setup_score_skip"
             elif not transition_patterns_allow(location_snapshot, cell_policy.transition_patterns or self.transition_patterns):
                 reason = "transition_policy_mismatch"
             elif vix_bar.close <= 0:

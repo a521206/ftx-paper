@@ -1067,20 +1067,31 @@ def test_live_decision_engine_persists_score_and_quality_bucket() -> None:
     assert events[1].payload["reason"] == "cell_not_configured"
 
 
-def test_setup_score_filter_only_controls_skip_eligibility(monkeypatch) -> None:
+def test_grinding_candidates_are_blocked_without_score_filter(monkeypatch) -> None:
     import ftx_paper.core.live_decision as live_decision
+    from ftx_paper.core.scoring import SellingStructure
 
     instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
     vix = Instrument("INDIA VIX", "NSE", "VIX")
     cell = Cell(Location.VWAP_ZONE)
     policy = CellPolicyConfig(cell, OrderSide.BUY, ExitMode.SIGNAL)
-    monkeypatch.setattr(live_decision, "calculate_setup_score", lambda *args: (1, {"test": 1}))
+    monkeypatch.setattr(
+        live_decision,
+        "calculate_setup_score",
+        lambda *args: (1, {"test": 1}),
+    )
+    monkeypatch.setattr(
+        live_decision,
+        "compute_selling_structure",
+        lambda *args, **kwargs: SellingStructure(
+            0, 0.0, 0.0, False, 0.0, 0.0, 0.0, 0, "grinding",
+        ),
+    )
     monkeypatch.setattr(live_decision, "_configured_policies_for_cell", lambda *args: [(cell, policy)])
 
-    def run(filter_enabled: bool):
+    def run():
         engine = IndependentLiveDecisionEngine(
             version="test", config_hash="hash", capital=CAPITAL_CONFIG.initial_capital,
-            setup_score_skip_filter=filter_enabled,
         )
         events = ()
         for index in range(4):
@@ -1095,30 +1106,10 @@ def test_setup_score_filter_only_controls_skip_eligibility(monkeypatch) -> None:
             events = engine.evaluate(bundle)
         return events
 
-    enabled = run(True)
-    disabled = run(False)
-    assert enabled[0].payload["score"] == disabled[0].payload["score"] == 1
-    assert enabled[0].payload["score_factors"] == disabled[0].payload["score_factors"] == {"test": 1}
-    assert enabled[1].payload["reason"] == "setup_score_skip"
-    assert disabled[1].payload["reason"] != "setup_score_skip"
-
-
-def test_score_filter_config_is_hashed_and_snapshot_boolean_is_validated() -> None:
-    from ftx_paper.strategy.config import StrategyConfig
-
-    enabled = StrategyConfig()
-    disabled = StrategyConfig(setup_score_skip_filter=False)
-    assert enabled.config_hash != disabled.config_hash
-
-    strategy = ConfiguredLiveStrategy(capital_profile=CAPITAL_CONFIG, config=disabled)
-    snapshot = strategy.snapshot()
-    assert snapshot["config"]["setup_score_skip_filter"] is False
-    restored = ConfiguredLiveStrategy.from_snapshot(snapshot, capital_profile=CAPITAL_CONFIG)
-    assert restored.config.setup_score_skip_filter is False
-    snapshot["config"]["setup_score_skip_filter"] = 1
-    with pytest.raises(ValueError, match="setup_score_skip_filter must be a boolean"):
-        ConfiguredLiveStrategy.from_snapshot(snapshot, capital_profile=CAPITAL_CONFIG)
-
+    events = run()
+    assert events[0].payload["score"] == 1
+    assert events[0].payload["score_factors"] == {"test": 1}
+    assert events[1].payload["reason"] == "grinding_candidate_blocked"
 
 def test_risk_sizer_never_exceeds_risk_budget_when_budget_is_marginal() -> None:
     sizer = RiskEngine()

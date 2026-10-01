@@ -103,8 +103,7 @@ def compute_selling_structure(
     vix_open: float,
     vix_at_event: float,
 ) -> SellingStructure:
-    """Build the same nine-factor selling inputs used by canonical FTX."""
-    current_range = current.high - current.low
+    """Build selling diagnostics used by the canonical FTX score."""
     all_prior = list(prior_bars)
     bars = all_prior[-10:]
     if len(bars) < 3:
@@ -135,6 +134,7 @@ def compute_selling_structure(
         and sum(float(bar.volume or 0.0) for bar in bars[-3:])
         < sum(float(bar.volume or 0.0) for bar in bars[-6:-3])
     )
+    current_range = current.high - current.low
     wick_rejection = (current.close - current.low) / current_range if current_range > 0 else 0.5
     event_time = current.timestamp.astimezone(IST).strftime("%H:%M")
     delta_divergence = _synthetic_delta_divergence(bars, event_time=event_time)
@@ -163,7 +163,11 @@ def calculate_setup_score(
     structural_proximity: bool,
     score_time_window: tuple[int, int] | None = None,
 ) -> tuple[int, dict[str, bool | None]]:
-    """Calculate the canonical 0-9 setup score from local paper inputs."""
+    """Calculate the canonical 0-8 setup score from local paper inputs.
+
+    ``structural_proximity`` is retained as a compatibility argument but is
+    intentionally not a score factor.
+    """
     factors = {
         "climactic_selling": selling.consec_down >= CONSEC_DOWN_THRESH,
         "panic_descent": selling.descent_speed_bp > DESCENT_SPEED_THRESH,
@@ -171,7 +175,6 @@ def calculate_setup_score(
         "volume_drying": selling.vol_drying,
         "rejection_wick": selling.wick_rejection >= WICK_RATIO_THRESH,
         "delta_divergence": selling.delta_divergence < DELTA_DIVERGENCE_THRESH,
-        "structural_level": structural_proximity,
         "pcr_extreme": None if pcr is None else pcr > PCR_EXTREME,
     }
     vix_intraday_change = (vix_at_event - vix_open) / vix_open * 100 if vix_open > 0 else 0.0

@@ -209,12 +209,13 @@ focused test. Neither rule drops or ignores causal candidate fields.
 
 The current fixed-date canonical `parity_capture` is a raw extraction
 diagnostic, not the canonical policy decision stream. Its `reason` can describe
-an extraction filter such as `setup_score_skip`; do not compare that value as a
-decision rejection reason. The canonical decision outcome/rejection reason is
+an extraction filter; do not compare that value as a decision rejection reason.
+The canonical decision outcome/rejection reason is
 unavailable from this projection and must be captured from the policy flow
 before Layer 4 can pass. Keep capture-filter annotations separately visible in
-diagnostics. The maintained canonical extraction path currently qualifies
-events by score before session-window and policy gates, but a capture-filter
+diagnostics. The maintained canonical extraction path retains low-score
+candidates; grinding candidates are blocked as a distinct score-stage
+rejection before later session-window and policy gates. A capture-filter
 annotation alone does not prove a decision-level rejection event.
 
 ## Decision output contract
