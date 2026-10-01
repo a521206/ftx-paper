@@ -295,6 +295,15 @@ class IndependentLiveDecisionEngine:
         if vix_bar is None:
             decision_id = sha256(f"{bundle.bundle_id}:missing_vix".encode()).hexdigest()[:24]
             return (LiveDecision("REJECTEDDECISION", {**base, "decision_id": decision_id, "cell": "NONE", "direction": "NONE", "setup_type": "Skip", "outcome": "policy rejection", "reason": "missing_vix", "required_input_availability": {**base["required_input_availability"], "vix": False}, "feature_values": {}}),)
+        if self._vix_open is None:
+            decision_id = sha256(f"{bundle.bundle_id}:missing_vix_open".encode()).hexdigest()[:24]
+            return (LiveDecision("REJECTEDDECISION", {
+                **base, "decision_id": decision_id, "cell": "NONE", "direction": "NONE",
+                "setup_type": "Skip", "outcome": "policy rejection", "reason": "missing_vix",
+                "required_input_availability": {
+                    **base["required_input_availability"], "vix_open": False,
+                }, "feature_values": {},
+            }),)
         futures = bundle.bars[MarketRole.FUTURES]
         self._futures.append(futures)
         if len(self._futures) < 3:
@@ -312,6 +321,7 @@ class IndependentLiveDecisionEngine:
         stop_basis = adaptive_stop_bp(
             prior, float(vix_bar.close),
             is_expiry_day=bundle.trading_date in self.expiry_dates,
+            current_close=current,
         )
         feature_values = {"vwap": vwap, "session_high": session_high, "session_low": session_low,
                           "opening_range_high": or_high, "opening_range_low": or_low,
@@ -334,14 +344,14 @@ class IndependentLiveDecisionEngine:
             or abs(current - round_level) <= 15
         )
         selling = compute_selling_structure(
-            prior, futures, vix_open=float(self._vix_open or vix_bar.close),
+            prior, futures, vix_open=float(self._vix_open),
             vix_at_event=float(vix_bar.close),
         )
         ist_decision_at = decision_at.astimezone(ZoneInfo("Asia/Kolkata"))
         minutes_from_open = ist_decision_at.hour * 60 + ist_decision_at.minute - (9 * 60 + 15)
         score, score_factors = calculate_setup_score(
             selling, {"minutes_from_open": float(minutes_from_open)}, float(vix_bar.close),
-            float(self._vix_open or vix_bar.close), pcr, structural_proximity,
+            float(self._vix_open), pcr, structural_proximity,
         )
         score_setup_type, score_multiplier = score_to_setup_type(score)
         score_skip = self.setup_score_skip_filter and score < SCORE_WEAK

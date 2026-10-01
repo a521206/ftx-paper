@@ -308,6 +308,29 @@ class RuntimeStore:
             rows = connection.execute("SELECT date FROM expiry_dates ORDER BY date").fetchall()
         return frozenset(str(row[0]) for row in rows)
 
+    def replace_expiry_dates(self, expiry_dates: Iterable[str], *, source: str) -> bool:
+        """Replace the imported expiry reference calendar without touching replay state."""
+        if self._read_only:
+            raise RuntimeError("cannot update expiry calendar through a read-only store")
+        if not source.strip():
+            raise ValueError("expiry calendar source must be non-empty")
+        dates = sorted({date.fromisoformat(str(value)).isoformat() for value in expiry_dates})
+        if not dates:
+            raise ValueError("expiry calendar must not be empty")
+        with self._connect() as connection:
+            existing = connection.execute(
+                "SELECT date, source FROM expiry_dates ORDER BY date",
+            ).fetchall()
+            if existing == [(value, source) for value in dates]:
+                return False
+            copied_at = datetime.now(timezone.utc).isoformat()
+            connection.execute("DELETE FROM expiry_dates")
+            connection.executemany(
+                "INSERT INTO expiry_dates (date, source, copied_at) VALUES (?, ?, ?)",
+                ((value, source, copied_at) for value in dates),
+            )
+        return True
+
     def append_market_bars(self, bars: Iterable[MarketBar], *, source: str) -> None:
         """Persist normalized historical or live bars in the runtime database."""
         now = self._now()

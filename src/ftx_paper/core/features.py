@@ -114,7 +114,11 @@ def vix_open_and_event(
         (bar for bar in bars if _ist_minute(bar)[0] == date),
         key=lambda bar: _ist_minute(bar)[1],
     )
-    vix_bars = [bar for bar in same_day if str(bar.instrument.instrument_type).upper() == "VIX"]
+    vix_bars = [
+        bar for bar in same_day
+        if str(bar.instrument.instrument_type).upper() == "VIX"
+        or bar.instrument.symbol.upper().replace(" ", "") == "INDIAVIX"
+    ]
     if not vix_bars:
         return None, None
     opening = next((bar for bar in vix_bars if _ist_minute(bar)[1] >= 555), vix_bars[0])

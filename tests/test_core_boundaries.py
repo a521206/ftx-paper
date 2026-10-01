@@ -230,6 +230,18 @@ def test_p6_stop_and_quantity_golden_fixture() -> None:
     assert decision.quantity == expected["quantity"]
 
 
+def test_adaptive_stop_uses_event_close_with_prior_bar_ranges() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    bars = (
+        MarketBar(instrument, datetime(2026, 1, 1, 4, 0, tzinfo=timezone.utc), 20200, 20210, 20190, 20200),
+        MarketBar(instrument, datetime(2026, 1, 1, 4, 1, tzinfo=timezone.utc), 20000, 20010, 19990, 20000),
+    )
+
+    # ATR uses the completed pre-event ranges; canonical normalizes by the
+    # current event bar close rather than the preceding close.
+    assert adaptive_stop_bp(bars, 20.0, current_close=20000.0) == 25.0
+
+
 def test_p0_behavioral_fixture_captures_capital_margin_and_downward_lots() -> None:
     fixture = json.loads(
         (Path(__file__).parent / "fixtures" / "p0_behavioral_contract.json").read_text()
@@ -395,6 +407,44 @@ def test_vix_lookup_uses_opening_value_and_latest_causal_bar() -> None:
     event = MarketBar(Instrument("NIFTYFUT", "NFO", "FUTURES"), datetime(2026, 1, 1, 10, 1, tzinfo=ZoneInfo("Asia/Kolkata")), 100, 101, 99, 100)
 
     assert vix_open_and_event(bars, event) == (14.5, 15.5)
+
+
+def test_vix_lookup_recognizes_replay_index_instrument() -> None:
+    vix = Instrument("INDIAVIX", "NSE", "INDEX")
+    bars = (
+        MarketBar(vix, datetime(2026, 1, 1, 9, 15, tzinfo=ZoneInfo("Asia/Kolkata")), 10, 11, 9, 10.5),
+        MarketBar(vix, datetime(2026, 1, 1, 9, 16, tzinfo=ZoneInfo("Asia/Kolkata")), 11, 12, 10, 11.5),
+    )
+    event = MarketBar(
+        Instrument("NIFTYFUT", "NFO", "FUTURES"),
+        datetime(2026, 1, 1, 9, 16, tzinfo=ZoneInfo("Asia/Kolkata")),
+        100, 101, 99, 100,
+    )
+
+    assert vix_open_and_event(bars, event) == (10.5, 11.5)
+
+
+def test_live_decision_rejects_missing_vix_open_instead_of_using_event_value(monkeypatch) -> None:
+    import ftx_paper.core.live_decision as live_decision
+
+    monkeypatch.setattr(live_decision, "vix_open_and_event", lambda *_: (None, None))
+    timestamp = datetime(2026, 1, 1, 10, 20, tzinfo=ZoneInfo("Asia/Kolkata"))
+    bundle = DecisionBundle(
+        "missing-vix-open", "2026-01-01", timestamp.isoformat(),
+        {
+            "futures": MarketBar(Instrument("NIFTYFUT", "NFO", "FUTURES"), timestamp, 99, 102, 98, 100),
+            "vix": MarketBar(Instrument("INDIA VIX", "NSE", "VIX"), timestamp, 15, 15, 15, 15),
+        }, ("futures", "vix"),
+    )
+
+    events = IndependentLiveDecisionEngine(
+        version="test", config_hash="hash", capital=CAPITAL_CONFIG.initial_capital,
+    ).evaluate(bundle)
+
+    assert len(events) == 1
+    assert events[0].event_type == "REJECTEDDECISION"
+    assert events[0].payload["reason"] == "missing_vix"
+    assert events[0].payload["required_input_availability"]["vix_open"] is False
 
 
 def test_option_pcr_matches_canonical_cutoff_and_nearest_weekly_atm_window() -> None:

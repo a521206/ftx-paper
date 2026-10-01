@@ -14,14 +14,15 @@ EXPIRY_STOP_MULTIPLIER = 1.5
 
 
 def adaptive_stop_bp(
-    bars_before: Sequence[MarketBar], vix_at_event: float, *, is_expiry_day: bool = False,
+    bars_before: Sequence[MarketBar], vix_at_event: float, *,
+    is_expiry_day: bool = False, current_close: float | None = None,
 ) -> float:
     """Return the bounded ATR/VIX stop; expiry widening is post-clamp."""
     if len(bars_before) < 2:
         stop = STOP_MIN_BP
     else:
         recent = tuple(bars_before[-10:])
-        last_close = float(bars_before[-1].close)
+        last_close = float(current_close if current_close is not None else bars_before[-1].close)
         if last_close <= 0:
             stop = STOP_MIN_BP
         else:

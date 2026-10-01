@@ -37,6 +37,20 @@ def test_runtime_store_clears_replay_runs_for_requested_date(tmp_path):
     assert [run["run_id"] for run in store.read_replay_runs()] == ["old-jan-6"]
 
 
+def test_runtime_store_replaces_expiry_calendar_without_touching_replay_runs(tmp_path):
+    store = RuntimeStore(tmp_path)
+    store.create_replay_run("existing-run", {"session_date": "2026-09-03"})
+
+    assert store.replace_expiry_dates(
+        ("2026-09-08", "2026-09-15"), source="canonical_weekly_expiry_dates",
+    ) is True
+    assert store.read_expiry_dates() == frozenset({"2026-09-08", "2026-09-15"})
+    assert store.read_replay_run("existing-run") is not None
+    assert store.replace_expiry_dates(
+        ("2026-09-08", "2026-09-15"), source="canonical_weekly_expiry_dates",
+    ) is False
+
+
 def test_runtime_store_replay_summaries_omit_event_payloads(tmp_path):
     store = RuntimeStore(tmp_path)
     store.create_replay_run("summary-run", {"session_date": "2026-01-05"})

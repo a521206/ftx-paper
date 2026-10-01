@@ -115,7 +115,9 @@ class RiskEngine:
         limits = self.vehicle_limits[normalized_vehicle]
         stop_bp = None
         if bars_before is not None and vix is not None:
-            stop_bp = adaptive_stop_bp(bars_before, vix, is_expiry_day=is_expiry_day)
+            stop_bp = adaptive_stop_bp(
+                bars_before, vix, is_expiry_day=is_expiry_day, current_close=entry,
+            )
             distance = abs(entry) * stop_bp / 10000.0
         elif stop is not None:
             distance = abs(entry - stop)
