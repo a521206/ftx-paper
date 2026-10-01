@@ -10,11 +10,12 @@ def error_payload(code: str, message: str) -> dict[str, dict[str, str]]:
 def openapi_document() -> dict[str, Any]:
     decision_event_schema = {
         "type": "object",
-        "required": ["event_type", "category", "payload", "created_at"],
+        "required": ["event_id", "event_type", "category", "payload", "created_at"],
         "properties": {
+            "event_id": {"type": "integer", "description": "Stable event identifier used for pagination"},
             "event_type": {
                 "type": "string",
-                "enum": ["CANDIDATEDECISION", "REJECTEDDECISION", "ACCEPTEDDECISION"],
+                "enum": ["CANDIDATEDECISION", "REJECTEDDECISION", "ACCEPTEDDECISION", "EXITDECISION"],
             },
             "category": {"type": "string", "enum": ["decision"]},
             "payload": {
@@ -34,12 +35,25 @@ def openapi_document() -> dict[str, Any]:
             "/api/v1/runtime": {"get": {"responses": {"200": {"description": "Runtime status; interrupted sessions recover to STOPPED"}}}},
             "/api/v1/diagnostics": {"get": {"responses": {"200": {"description": "Cached runtime event and rejection counts"}}}},
             "/api/v1/events": {"get": {"responses": {"200": {"description": "Runtime events"}}}},
-            "/api/v1/decisions": {"get": {"responses": {"200": {
-                "description": "Strategy decisions with optional risk and execution outcomes",
+            "/api/v1/decisions": {"get": {
+                "parameters": [
+                    {"name": "date", "in": "query", "schema": {"type": "string", "format": "date"}, "description": "IST session date; defaults to today"},
+                    {"name": "session", "in": "query", "schema": {"type": "string", "enum": ["Pre", "Morning", "Mid", "Afternoon", "Post"]}},
+                    {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50}},
+                    {"name": "before", "in": "query", "schema": {"type": "integer", "minimum": 1}, "description": "Event cursor from the prior page"},
+                ],
+                "responses": {"200": {
+                "description": "Full-day monitoring summary and a cursor-paginated page of recent decisions",
                 "content": {"application/json": {"schema": {
                     "type": "object",
-                    "required": ["decisions"],
-                    "properties": {"decisions": {"type": "array", "items": decision_event_schema}},
+                    "required": ["date", "summary", "decisions", "has_more", "next_cursor"],
+                    "properties": {
+                        "date": {"type": "string", "format": "date"},
+                        "summary": {"type": "object", "description": "Complete totals and session buckets for the date"},
+                        "decisions": {"type": "array", "items": decision_event_schema},
+                        "has_more": {"type": "boolean"},
+                        "next_cursor": {"type": "string", "nullable": True},
+                    },
                 }}},
             }}}},
             "/api/v1/logs": {"get": {"responses": {"200": {"description": "Runtime logs"}}}},

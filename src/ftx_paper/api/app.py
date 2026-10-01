@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from flask import Flask, jsonify, request
 from typing import Any
@@ -201,13 +202,33 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
 
     @app.get("/api/v1/decisions")
     def decisions():
-        selected_date = request.args.get("date")
-        if selected_date:
-            try:
-                datetime.strptime(selected_date, "%Y-%m-%d").date()
-            except ValueError:
-                return jsonify({"error": {"code": "invalid_date", "message": "date must be YYYY-MM-DD"}}), 400
-        decision_events = store.read_decision_events(session_date=selected_date, limit=1000)
+        selected_date = request.args.get("date") or datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
+        try:
+            parsed_date = datetime.strptime(selected_date, "%Y-%m-%d").date()
+        except ValueError:
+            return jsonify({"error": {"code": "invalid_date", "message": "date must be YYYY-MM-DD"}}), 400
+        if parsed_date.isoformat() != selected_date:
+            return jsonify({"error": {"code": "invalid_date", "message": "date must be YYYY-MM-DD"}}), 400
+        try:
+            limit = int(request.args.get("limit", "50"))
+            before_id = int(request.args["before"]) if request.args.get("before") else None
+        except ValueError:
+            return jsonify(error_payload("invalid_pagination", "limit and before must be integers")), 400
+        if not 1 <= limit <= 100:
+            return jsonify(error_payload("invalid_limit", "limit must be between 1 and 100")), 400
+        if before_id is not None and before_id < 1:
+            return jsonify(error_payload("invalid_cursor", "before must be a positive event cursor")), 400
+        selected_session = request.args.get("session")
+        if selected_session not in {None, "", "Pre", "Morning", "Mid", "Afternoon", "Post"}:
+            return jsonify(error_payload("invalid_session", "session must be Pre, Morning, Mid, Afternoon, or Post")), 400
+
+        summary = store.read_decision_summary(selected_date)
+        decision_events = store.read_decision_events(
+            session_date=selected_date, limit=limit + 1, before_id=before_id,
+            session_name=selected_session or None,
+        )
+        has_more = len(decision_events) > limit
+        decision_events = decision_events[:limit]
         decision_ids = {
             str(event["payload"]["decision_id"])
             for event in decision_events if event.get("payload", {}).get("decision_id")
@@ -251,9 +272,19 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
                 payload["execution_status"] = "replayed"
             return {**event, "category": "decision", "payload": payload}
 
-        decision_events = [enrich(event) for event in decision_events]
-        decision_events.sort(key=lambda event: event["payload"]["decision_at"], reverse=True)
-        return jsonify(json_safe({"decisions": decision_events}))
+        enriched_events = []
+        for event in decision_events:
+            cursor_id = event.pop("_cursor_id")
+            enriched_events.append({**enrich(event), "event_id": cursor_id})
+        next_cursor = str(enriched_events[-1]["event_id"]) if has_more and enriched_events else None
+        enriched_events.sort(key=lambda event: event["payload"]["decision_at"], reverse=True)
+        return jsonify(json_safe({
+            "date": selected_date,
+            "summary": summary,
+            "decisions": enriched_events,
+            "has_more": has_more,
+            "next_cursor": next_cursor,
+        }))
 
     @app.get("/api/v1/logs")
     def logs():

@@ -154,6 +154,8 @@ class RuntimeStore:
                     ON runtime_events(event_type);
                 CREATE INDEX IF NOT EXISTS ix_runtime_events_decision_id
                     ON runtime_events(json_extract(payload, '$.decision_id'));
+                CREATE INDEX IF NOT EXISTS ix_runtime_events_decision_date
+                    ON runtime_events(substr(json_extract(payload, '$.decision_at'), 1, 10));
                 CREATE TABLE IF NOT EXISTS replay_runs (
                     run_id TEXT PRIMARY KEY,
                     status TEXT NOT NULL,
@@ -620,7 +622,59 @@ class RuntimeStore:
             "by_instrument": {str(kind): int(count) for kind, count in instrument_rows},
         }
 
-    def read_decision_events(self, session_date: str | None = None, limit: int = 1000) -> list[dict[str, Any]]:
+    def read_decision_summary(self, session_date: str) -> dict[str, dict[str, int]]:
+        """Aggregate a complete session day without decoding event payloads."""
+        event_types = tuple(sorted(DECISION_EVENT_TYPES))
+        event_placeholders = ", ".join("?" for _ in event_types)
+        executed_types = ("FILL", "EXECUTEDDECISION")
+        executed_placeholders = ", ".join("?" for _ in executed_types)
+        sql = (
+            "SELECT event_type, substr(json_extract(payload, '$.decision_at'), 12, 5), COUNT(*), "
+            "SUM(CASE WHEN EXISTS (SELECT 1 FROM runtime_events lifecycle "
+            "WHERE lifecycle.event_type IN (" + executed_placeholders + ") "
+            "AND json_extract(lifecycle.payload, '$.decision_id') = "
+            "json_extract(decision.payload, '$.decision_id')) THEN 1 ELSE 0 END) "
+            "FROM runtime_events decision "
+            f"WHERE event_type IN ({event_placeholders}) "
+            "AND substr(json_extract(payload, '$.decision_at'), 1, 10) = ? "
+            "AND (json_extract(payload, '$.decision_source') IS NULL "
+            "OR lower(json_extract(payload, '$.decision_source')) <> 'replay') "
+            "GROUP BY event_type, substr(json_extract(payload, '$.decision_at'), 12, 5)"
+        )
+        with self._connect() as connection:
+            rows = connection.execute(sql, (*executed_types, *event_types, session_date)).fetchall()
+
+        sessions = {
+            name: {"detections": 0, "candidates": 0, "accepted": 0, "rejected": 0, "executed": 0}
+            for name in ("Pre", "Morning", "Mid", "Afternoon", "Post")
+        }
+        totals = {"detections": 0, "candidates": 0, "accepted": 0, "rejected": 0, "executed": 0}
+        for event_type, minute, count, executed in rows:
+            if not minute:
+                continue
+            session_minute = int(minute[:2]) * 60 + int(minute[3:5])
+            session_name = (
+                "Pre" if session_minute < 615 else
+                "Morning" if session_minute < 675 else
+                "Mid" if session_minute < 810 else
+                "Afternoon" if session_minute < 855 else "Post"
+            )
+            stats = sessions[session_name]
+            amount = int(count)
+            stats["detections"] += amount
+            stats["candidates"] += amount if "CANDIDATE" in event_type else 0
+            stats["accepted"] += amount if event_type == "ACCEPTEDDECISION" else 0
+            stats["rejected"] += amount if event_type == "REJECTEDDECISION" else 0
+            stats["executed"] += int(executed or 0)
+        for stats in sessions.values():
+            for key in totals:
+                totals[key] += stats[key]
+        return {"totals": totals, "sessions": sessions}
+
+    def read_decision_events(
+        self, session_date: str | None = None, limit: int = 50, *,
+        before_id: int | None = None, session_name: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Read decision events on their own, independent of the general event stream.
 
         ``session_date`` filters on the IST calendar date of ``decision_at``. Decision
@@ -632,7 +686,7 @@ class RuntimeStore:
         event_types = tuple(sorted(DECISION_EVENT_TYPES))
         placeholders = ", ".join("?" for _ in event_types)
         sql = (
-            "SELECT event_type, payload, created_at FROM runtime_events "
+            "SELECT id, event_type, payload, created_at FROM runtime_events "
             f"WHERE event_type IN ({placeholders}) "
             "AND json_extract(payload, '$.decision_at') <> ''"
             " AND (json_extract(payload, '$.decision_source') IS NULL "
@@ -642,11 +696,31 @@ class RuntimeStore:
         if session_date:
             sql += " AND substr(json_extract(payload, '$.decision_at'), 1, 10) = ?"
             params.append(session_date)
+        if session_name:
+            session_ranges = {
+                "Pre": (None, "10:15"), "Morning": ("10:15", "11:15"),
+                "Mid": ("11:15", "13:30"), "Afternoon": ("13:30", "14:15"),
+                "Post": ("14:15", None),
+            }
+            lower, upper = session_ranges[session_name]
+            time_expr = "substr(json_extract(payload, '$.decision_at'), 12, 5)"
+            if lower:
+                sql += f" AND {time_expr} >= ?"
+                params.append(lower)
+            if upper:
+                sql += f" AND {time_expr} < ?"
+                params.append(upper)
+        if before_id is not None:
+            sql += " AND id < ?"
+            params.append(before_id)
         sql += " ORDER BY id DESC LIMIT ?"
         params.append(limit)
-        with sqlite3.connect(self.database) as connection:
+        with self._connect() as connection:
             rows = connection.execute(sql, params).fetchall()
-        return self._events_from_rows(rows)
+        events = self._events_from_rows([row[1:] for row in rows])
+        for event, row in zip(events, rows):
+            event["_cursor_id"] = int(row[0])
+        return events
 
     def read_decision_lifecycle_events(self, decision_ids: Iterable[str]) -> list[dict[str, Any]]:
         """Read execution and risk events for the given decision ids."""

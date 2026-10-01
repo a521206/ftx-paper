@@ -1071,47 +1071,15 @@
       selectedDecisionSession = null;
     }
 
-    function decisionRecord(raw) {
-      const payload = raw?.payload && typeof raw.payload === 'object' ? raw.payload : {};
-      const eventType = String(raw?.event_type || payload.event_type || '').toUpperCase();
-      const decisionTime = payload.decision_at;
-      const sessionTime = decisionTime;
-      const source = String(payload.decision_source || '').toLowerCase();
-      const executionStatus = String(payload.execution_status || '').toLowerCase();
-      const outcome = String(source === 'replay' ? 'replayed' : (executionStatus || payload.outcome || (
-        eventType === 'ACCEPTEDDECISION' ? 'accepted' :
-        eventType === 'REJECTEDDECISION' ? 'rejected' :
-        eventType === 'FILL' ? 'filled' : ''
-      ))).toLowerCase();
-      return { payload, eventType, decisionTime, sessionTime, outcome, source, executionStatus };
-    }
-
-    function decisionSession(raw) {
-      return session(decisionRecord(raw).sessionTime);
-    }
-
-    function decisionStats(rows, sessionName) {
-      const matching = rows.filter((raw) => decisionSession(raw) === sessionName);
-      const stats = { detections: matching.length, candidates: 0, replayed: 0, executed: 0, accepted: 0, rejected: 0 };
-      matching.forEach((raw) => {
-        const item = decisionRecord(raw);
-        const isCandidate = item.eventType.includes('CANDIDATE') || item.outcome === 'candidate';
-        const isReplayed = item.source === 'replay' || item.outcome === 'replayed';
-        const isExecuted = item.executionStatus === 'filled' || item.executionStatus === 'executed' || item.outcome === 'filled' || item.outcome === 'executed';
-        const isAccepted = item.eventType === 'ACCEPTEDDECISION' || item.outcome === 'accepted';
-        const isRejected = item.eventType === 'REJECTEDDECISION' || item.outcome.includes('rejection') || item.outcome === 'rejected';
-        if (isCandidate) stats.candidates += 1;
-        if (isReplayed) stats.replayed += 1;
-        if (isExecuted) stats.executed += 1;
-        if (isAccepted && !isReplayed) stats.accepted += 1;
-        if (isRejected) stats.rejected += 1;
-      });
-      return stats;
+    function decisionStats(summary, sessionName) {
+      return sessionName ? (summary.sessions?.[sessionName] || {}) : (summary.totals || {});
     }
 
     let refreshTimer = null;
     let refreshDelayMs = 5000;
     let refreshInFlight = false;
+    let sharedRefreshInFlight = false;
+    let sharedData = { runtime: {}, broker: {} };
     const replayDetails = new Map();
     let latestData = null;
     let replaySelectionInFlight = false;
@@ -1317,13 +1285,6 @@
           </details>`; }
         )
         .join('');
-    }
-
-    function filteredDecisionRows(rows) {
-      if (!selectedDecisionSession) {
-        selectedDecisionSession = rows.length ? decisionSession(rows[0]) : 'Post';
-      }
-      return rows.filter((raw) => decisionSession(raw) === selectedDecisionSession);
     }
 
     function replayEvents(run) {
@@ -1747,14 +1708,15 @@
           ${decisions(decisionRows.slice(0, 10))}
         </div>`;
       } else if (page === 'decisions') {
-        const visibleDecisionRows = filteredDecisionRows(decisionRows);
-        const selectedStats = decisionStats(decisionRows, selectedDecisionSession);
+        const visibleDecisionRows = decisionRows;
+        const summary = data.decisions.summary || {};
+        const selectedStats = decisionStats(summary, selectedDecisionSession);
         body = `<div class="card">
-          <h2>Decision review</h2>
+          <h2>Decision activity · ${esc(data.decisions.date || decisionDate)}</h2>
           <div class="session-grid">
             ${decisionSessions
               .map((x) => {
-                const stats = decisionStats(decisionRows, x[0]);
+                const stats = decisionStats(summary, x[0]);
                 const active = stats.detections > 0;
                 return `<a class="session session-filter" href="/decisions?session=${encodeURIComponent(x[0])}&date=${encodeURIComponent(decisionDate)}"${selectedDecisionSession === x[0] ? ' aria-current="page"' : ''}>
                   <strong>${x[0]}</strong>
@@ -1767,19 +1729,19 @@
           </div>
           <div class="review-summary">
             ${[
-              [selectedDecisionSession, 'selected'],
+              [selectedDecisionSession || 'Today', selectedDecisionSession ? 'selected session' : 'selected day'],
               [selectedStats.detections, 'detections'],
               [selectedStats.candidates, 'candidates'],
-              [selectedStats.replayed, 'replayed'],
               [selectedStats.executed, 'executed'],
-              [selectedStats.accepted, 'live accepted'],
+              [selectedStats.accepted, 'accepted'],
               [selectedStats.rejected, 'rejected'],
             ].map((x) => `<span class="badge"><strong>${esc(x[0])}</strong> ${x[1]}</span>`).join('')}
           </div>
         </div>
         <div class="card">
-          <div class="section-head"><h2>Decision rows</h2><span class="label">Showing ${visibleDecisionRows.length} of ${decisionRows.length}</span></div>
+          <div class="section-head"><h2>Recent decisions</h2><span class="label">${data.decisions.has_more ? `Latest ${visibleDecisionRows.length}` : `${visibleDecisionRows.length} recent`}</span></div>
           ${decisions(visibleDecisionRows)}
+          ${data.decisions.has_more ? '<button id="load-more-decisions" class="secondary">Load older decisions</button>' : ''}
         </div>`;
       } else if (page === 'capital') {
         body = `<div class="card">
@@ -1827,6 +1789,23 @@
     }
 
     function wire() {
+      document.getElementById('load-more-decisions')?.addEventListener('click', async (event) => {
+        const button = event.currentTarget;
+        if (!latestData?.decisions?.next_cursor) return;
+        button.disabled = true;
+        try {
+          const query = new URLSearchParams({ date: latestData.decisions.date || decisionDate, before: latestData.decisions.next_cursor, limit: '50' });
+          if (selectedDecisionSession) query.set('session', selectedDecisionSession);
+          const next = await get(`/api/v1/decisions?${query.toString()}`);
+          latestData.decisions.decisions.push(...next.decisions);
+          latestData.decisions.has_more = next.has_more;
+          latestData.decisions.next_cursor = next.next_cursor;
+          render(latestData);
+        } catch (e) {
+          flash(e.message);
+          button.disabled = false;
+        }
+      });
       document.getElementById('connect')?.addEventListener('click', async () => {
         try {
           const result = await get('/api/v1/broker/zerodha/login');
@@ -1878,18 +1857,29 @@
 
     }
 
+    async function refreshSharedData() {
+      if (sharedRefreshInFlight) return;
+      sharedRefreshInFlight = true;
+      const entries = await Promise.allSettled([
+        get('/api/v1/health'),
+        get('/api/v1/runtime'),
+        get('/api/v1/broker/zerodha/status'),
+      ]);
+      const [health, runtime, broker] = entries;
+      document.getElementById('health').innerHTML = health.status === 'fulfilled' && health.value.status === 'pass'
+        ? '<span class="dot good"></span>Healthy'
+        : '<span class="dot bad"></span>API unavailable';
+      if (runtime.status === 'fulfilled') sharedData.runtime = runtime.value;
+      if (broker.status === 'fulfilled') sharedData.broker = broker.value;
+      if (latestData) render({ ...latestData, ...sharedData });
+      sharedRefreshInFlight = false;
+    }
+
     async function refresh() {
       if (refreshInFlight) return;
       refreshInFlight = true;
+      void refreshSharedData();
       try {
-        // Keep the shell status live, but only load the data rendered by the
-        // active page. Some of these endpoints read large event/replay stores;
-        // fetching them for every tab made navigation feel needlessly slow.
-        const requests = {
-          health: '/api/v1/health',
-          runtime: '/api/v1/runtime',
-          broker: '/api/v1/broker/zerodha/status',
-        };
         const pageRequests = {
           dashboard: {
             capital: '/api/v1/capital',
@@ -1897,7 +1887,7 @@
             decisions: '/api/v1/decisions',
           },
           decisions: {
-            decisions: `/api/v1/decisions?date=${encodeURIComponent(decisionDate)}`,
+            decisions: `/api/v1/decisions?${new URLSearchParams({ date: decisionDate, limit: '50', ...(selectedDecisionSession ? { session: selectedDecisionSession } : {}) }).toString()}`,
           },
           positions: { positions: '/api/v1/positions' },
           trades: { trades: '/api/v1/trades' },
@@ -1910,12 +1900,16 @@
         }[page] || {};
 
         const responseEntries = await Promise.all(
-          Object.entries({ ...requests, ...pageRequests }).map(async ([key, path]) => [key, await get(path)])
+          Object.entries(pageRequests).map(async ([key, path]) => [key, await get(path)])
         );
         const responseData = Object.fromEntries(responseEntries);
-        const health = responseData.health;
-        const runtime = responseData.runtime;
-        const broker = responseData.broker;
+        if (page === 'decisions' && latestData?.decisions?.date === responseData.decisions?.date) {
+          const previous = latestData.decisions;
+          const seen = new Set((responseData.decisions.decisions || []).map((row) => row.event_id));
+          responseData.decisions.decisions.push(...(previous.decisions || []).filter((row) => !seen.has(row.event_id)));
+          responseData.decisions.has_more = previous.has_more;
+          responseData.decisions.next_cursor = previous.next_cursor;
+        }
         const capital = responseData.capital || {};
         const positions = responseData.positions || { positions: [] };
         const trades = responseData.trades || { trades: [] };
@@ -1924,15 +1918,13 @@
         const replays = responseData.replays || { runs: [] };
         const replayDates = responseData.replayDates || { dates: [] };
 
-        document.getElementById('health').innerHTML = '<span class="dot good"></span>Healthy';
         render({
-          runtime,
+          ...sharedData,
           capital,
           positions,
           trades,
           decisions: decisionsData,
           events,
-          broker,
           replays,
           replayDates: replayDates.dates || [],
         });
@@ -1940,7 +1932,6 @@
         refreshDelayMs = 5000;
         scheduleRefresh(refreshDelayMs);
       } catch (e) {
-        document.getElementById('health').innerHTML = '<span class="dot bad"></span>API unavailable';
         if (e.status === 429) {
           refreshDelayMs = Math.min(60000, refreshDelayMs * 2);
           flash(`API rate limited; retrying in ${Math.ceil(refreshDelayMs / 1000)}s`);
