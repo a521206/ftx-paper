@@ -104,9 +104,9 @@ def compute_selling_structure(
     vix_at_event: float,
 ) -> SellingStructure:
     """Build the same nine-factor selling inputs used by canonical FTX."""
-    lookback = 10
+    current_range = current.high - current.low
     all_prior = list(prior_bars)
-    bars = all_prior[-lookback:]
+    bars = all_prior[-10:]
     if len(bars) < 3:
         return SellingStructure(0, 0.0, 0.0, False, 0.0, 0.0, 0.0, 0, "grinding")
 
@@ -120,21 +120,13 @@ def compute_selling_structure(
             break
     recent_high = max(bar.close for bar in bars)
     total_drop = recent_high - current.close
-    descent_speed_bp = (
-        total_drop / current.close * 10000 / len(bars)
-        if current.close > 0
-        else 0.0
-    )
+    descent_speed_bp = total_drop / current.close * 10000 / len(bars) if current.close > 0 else 0.0
 
     vol_climax = 0.0
     first_index = len(all_prior) - len(bars)
     for index, bar in enumerate(bars, start=first_index):
         reference = all_prior[max(0, index - 5):index]
-        average = (
-            sum(float(item.volume or 0.0) for item in reference) / len(reference)
-            if reference
-            else float(bar.volume or 0.0)
-        )
+        average = sum(float(item.volume or 0.0) for item in reference) / len(reference) if reference else float(bar.volume or 0.0)
         if average > 0:
             vol_climax = max(vol_climax, float(bar.volume or 0.0) / average)
 
@@ -143,19 +135,10 @@ def compute_selling_structure(
         and sum(float(bar.volume or 0.0) for bar in bars[-3:])
         < sum(float(bar.volume or 0.0) for bar in bars[-6:-3])
     )
-    current_range = current.high - current.low
-    wick_rejection = (
-        (current.close - current.low) / current_range
-        if current_range > 0
-        else 0.5
-    )
+    wick_rejection = (current.close - current.low) / current_range if current_range > 0 else 0.5
     event_time = current.timestamp.astimezone(IST).strftime("%H:%M")
     delta_divergence = _synthetic_delta_divergence(bars, event_time=event_time)
-    vix_trend_pct = (
-        (vix_at_event - vix_open) / vix_open * 100
-        if vix_open > 0
-        else 0.0
-    )
+    vix_trend_pct = (vix_at_event - vix_open) / vix_open * 100 if vix_open > 0 else 0.0
     climax_score = sum((vol_climax >= CLIMAX_VOL_THRESH, vol_drying, delta_divergence < DELTA_DIVERGENCE_THRESH))
     selling_type = "climactic" if climax_score >= 2 else "grinding"
     return SellingStructure(
