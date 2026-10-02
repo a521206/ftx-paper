@@ -12,8 +12,9 @@ from ftx_paper.core import CompletedBarAggregator, DecisionBundle, ExitStateMach
 from ftx_paper.execution import PaperExecutionCoordinator
 from ftx_paper.core.location_engine import Cell, Location
 from ftx_paper.core.live_decision import _configured_policies_for_cell
+from ftx_paper.core.admission import admission_result
 from ftx_paper.core.scoring import _synthetic_delta_divergence
-from ftx_paper.strategy.config import CellPolicyConfig, ExitMode, Session
+from ftx_paper.strategy.config import Session
 from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.strategy import ConfiguredLiveStrategy
 from ftx_paper.capital_config import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE as CAPITAL_CONFIG
@@ -1067,49 +1068,19 @@ def test_live_decision_engine_persists_score_and_quality_bucket() -> None:
     assert events[1].payload["reason"] == "cell_not_configured"
 
 
-def test_grinding_candidates_are_blocked_without_score_filter(monkeypatch) -> None:
-    import ftx_paper.core.live_decision as live_decision
-    from ftx_paper.core.scoring import SellingStructure
-
-    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
-    vix = Instrument("INDIA VIX", "NSE", "VIX")
-    cell = Cell(Location.VWAP_ZONE)
-    policy = CellPolicyConfig(cell, OrderSide.BUY, ExitMode.SIGNAL)
-    monkeypatch.setattr(
-        live_decision,
-        "calculate_setup_score",
-        lambda *args: (1, {"test": 1}),
-    )
-    monkeypatch.setattr(
-        live_decision,
-        "compute_selling_structure",
-        lambda *args, **kwargs: SellingStructure(
-            0, 0.0, 0.0, False, 0.0, 0.0, 0.0, 0, "grinding",
-        ),
-    )
-    monkeypatch.setattr(live_decision, "_configured_policies_for_cell", lambda *args: [(cell, policy)])
-
-    def run():
-        engine = IndependentLiveDecisionEngine(
-            version="test", config_hash="hash", capital=CAPITAL_CONFIG.initial_capital,
-        )
-        events = ()
-        for index in range(4):
-            timestamp = datetime(2026, 1, 1, 10, 20 + index, tzinfo=timezone.utc)
-            bundle = DecisionBundle(
-                f"score-filter-{index}", "2026-01-01", timestamp.strftime("%Y-%m-%dT%H:%M"),
-                {
-                    "futures": MarketBar(instrument, timestamp, 99, 102, 98, 100, 100),
-                    "vix": MarketBar(vix, timestamp, 15, 15, 15, 15),
-                }, ("futures", "vix"),
-            )
-            events = engine.evaluate(bundle)
-        return events
-
-    events = run()
-    assert events[0].payload["score"] == 1
-    assert events[0].payload["score_factors"] == {"test": 1}
-    assert events[1].payload["reason"] == "grinding_candidate_blocked"
+def test_admission_contract_replaces_grinding_score_filter() -> None:
+    features = {
+        "climactic_selling": False,
+        "panic_descent": False,
+        "volume_drying": True,
+        "pcr_extreme": False,
+        "vix_spike": False,
+        "volume_climax_prior": True,
+        "prior_midpoint_reclaim": False,
+    }
+    assert admission_result(features, "trend_continuation") == (True, None)
+    rejected, reason = admission_result({**features, "volume_climax_prior": False}, "trend_continuation")
+    assert not rejected and reason == "tr_confirmation_count"
 
 def test_risk_sizer_never_exceeds_risk_budget_when_budget_is_marginal() -> None:
     sizer = RiskEngine()

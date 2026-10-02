@@ -120,6 +120,12 @@ The no-op baseline and the enabled-policy branch are compared as separate
 canonical research configurations. A research-only policy becomes part of
 Paper parity only after an explicit configuration change and approval.
 
+The maintained admission path does not use grinding classification, setup-score
+thresholds, composite exhaustion, or selling diagnostics as candidate filters.
+Mean-reversion and trend-continuation admission predicates are evaluated from
+the causal accepted-gate feature set; legacy score and selling fields may remain
+in artifacts for compatibility and diagnostics only.
+
 ## Input contract
 
 Each decision minute is evaluated from exactly one completed futures bar and a

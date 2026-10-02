@@ -16,7 +16,7 @@ from .sizing import SizingPipeline, SizingPipelineInput
 from .risk_state import RiskGateState
 from .portfolio import PortfolioState
 from .adaptive_stop import adaptive_stop_bp, stop_price
-from .scoring import calculate_setup_score, compute_selling_structure, score_to_setup_type
+from .admission import admission_result, build_admission_features
 from ftx_paper.capital_context import CapitalRuntimeContext
 from ftx_paper.strategy.config import (
     AFTERNOON_CELL_POLICIES,
@@ -335,17 +335,12 @@ class IndependentLiveDecisionEngine:
         configured = _configured_policies_for_cell(
             self._cell_policies, decision_session, location_snapshot.cell,
         )
-        selling = compute_selling_structure(
-            prior, futures, vix_open=float(self._vix_open),
+        score_factors = build_admission_features(
+            prior, futures, pcr=pcr, vix_open=float(self._vix_open),
             vix_at_event=float(vix_bar.close),
         )
-        ist_decision_at = decision_at.astimezone(ZoneInfo("Asia/Kolkata"))
-        minutes_from_open = ist_decision_at.hour * 60 + ist_decision_at.minute - (9 * 60 + 15)
-        score, score_factors = calculate_setup_score(
-            selling, {"minutes_from_open": float(minutes_from_open)}, float(vix_bar.close),
-            float(self._vix_open), pcr, False,
-        )
-        score_setup_type, score_multiplier = score_to_setup_type(score)
+        score = sum(value is True for value in score_factors.values())
+        score_setup_type, score_multiplier = "Accepted", 1.0
         sequence = len(self._futures)
         events = []
         policies = configured or [(location_snapshot.cell, None)]
@@ -371,15 +366,21 @@ class IndependentLiveDecisionEngine:
             reason = None
             if cell_policy is None:
                 reason = "cell_not_configured"
-            elif selling.selling_type == "grinding":
-                reason = "grinding_candidate_blocked"
             elif decision_session is Session.OUTSIDE:
                 reason = "outside_session_window"
             elif not session_selected:
                 reason = "session_not_selected"
-            elif not transition_patterns_allow(location_snapshot, cell_policy.transition_patterns or self.transition_patterns):
+            elif cell_policy is not None:
+                admitted, admission_reason = admission_result(
+                    score_factors, cell_policy.hypothesis.value,
+                )
+                if not admitted:
+                    reason = admission_reason or "admission_rejected"
+            if reason is None and cell_policy is not None and not transition_patterns_allow(
+                location_snapshot, cell_policy.transition_patterns or self.transition_patterns,
+            ):
                 reason = "transition_policy_mismatch"
-            elif vix_bar.close <= 0:
+            if reason is None and vix_bar.close <= 0:
                 reason = "vix_gate"
             if reason:
                 events.append(LiveDecision(
