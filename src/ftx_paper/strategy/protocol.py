@@ -4,10 +4,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
-from .bundles import DecisionBundle
-from .live_decision import LiveDecision
-from .decision_context import DecisionContext
-from .execution_events import ExecutionNotification
+from ftx_paper.market.bundles import DecisionBundle
+from .decision import LiveDecision
+from ftx_paper.domain.decision_context import DecisionContext
+from ftx_paper.execution.events import ExecutionNotification
 
 
 @dataclass(frozen=True, slots=True)

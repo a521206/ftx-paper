@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import pytest
 
 from ftx_paper.contracts import Instrument, OrderIntent, OrderRole, OrderSide
-from ftx_paper.core import (
+from ftx_paper.domain import (
     AccountAggregate, CapitalRuntimeContext, DecisionContext, PortfolioState,
     RESEARCH_CAPITAL_PROFILE,
 )

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import time
 from ftx_paper.contracts import MarketBar, OrderIntent, OrderRole, OrderSide
-from .features import LiveFeatures
+from ftx_paper.market.features import LiveFeatures
 
 
 @dataclass(frozen=True, slots=True)

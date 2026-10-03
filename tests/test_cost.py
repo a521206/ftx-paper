@@ -1,4 +1,4 @@
-from ftx_paper.core.cost import futures_cost, synthetic_futures_cost
+from ftx_paper.execution.cost import futures_cost, synthetic_futures_cost
 
 
 def test_futures_cost_matches_canonical_round_trip() -> None:

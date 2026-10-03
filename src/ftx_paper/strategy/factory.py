@@ -6,7 +6,7 @@ from collections.abc import Callable
 from typing import Protocol
 
 from ftx_paper.domain.capital import RESEARCH_CAPITAL_PROFILE, ResearchCapitalProfile
-from ftx_paper.core.strategy import Strategy
+from .protocol import Strategy
 
 from .live import ConfiguredLiveStrategy
 

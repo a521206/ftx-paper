@@ -7,7 +7,7 @@ from threading import RLock
 
 from ftx_paper.contracts import OrderIntent, OrderRole, OrderSide
 
-from .capital_context import CapitalRuntimeContext
+from .capital import CapitalRuntimeContext
 from .decision_context import (
     CapitalSnapshot, DecisionContext, ExposureSnapshot, MarginSnapshot,
     PendingOrderView, PositionView,

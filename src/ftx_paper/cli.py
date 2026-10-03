@@ -14,7 +14,7 @@ from ftx_paper.runtime import ProcessAlreadyRunningError, RuntimeSession
 from ftx_paper.runtime.store import RuntimeStore
 from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.strategy import ConfiguredStrategyFactory
-from ftx_paper.core import PaperEngine
+from ftx_paper.runtime.engine import PaperEngine
 from ftx_paper.ui import create_ui_app
 from ftx_paper.broker.zerodha import ZerodhaAuth
 

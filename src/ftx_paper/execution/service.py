@@ -5,7 +5,8 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from ftx_paper.contracts import OrderIntent
-from ftx_paper.core import AccountAggregate, ExecutionNotification
+from ftx_paper.domain import AccountAggregate
+from ftx_paper.execution.events import ExecutionNotification
 
 from .coordinator import PaperExecutionCoordinator
 

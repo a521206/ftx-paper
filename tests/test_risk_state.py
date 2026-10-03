@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ftx_paper.core.risk_state import RiskGateState
+from ftx_paper.strategy.risk_state import RiskGateState
 
 
 def test_net_directional_exposure_is_signed_and_persists_across_segments() -> None:

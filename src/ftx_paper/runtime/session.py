@@ -15,11 +15,13 @@ from ftx_paper.contracts import (
     Instrument, MarketBar, MarketRole, OptionRole, OptionType, OrderRole, OrderSide, normalize_exchange_timestamp, parse_role,
     role_to_key,
 )
-from ftx_paper.core import AggregatorConfig, CompletedBarAggregator, InstrumentKey, PaperEngine
-from ftx_paper.core import AccountAggregate, ExecutionNotification
-from ftx_paper.core.strategy import Strategy
-from ftx_paper.core.cost import futures_cost
-from ftx_paper.core.settlement import ExitValidationError, validate_exit_order
+from ftx_paper.market import AggregatorConfig, CompletedBarAggregator, InstrumentKey
+from ftx_paper.domain import AccountAggregate
+from ftx_paper.execution.events import ExecutionNotification
+from ftx_paper.strategy.protocol import Strategy
+from ftx_paper.execution.cost import futures_cost
+from ftx_paper.execution.settlement import ExitValidationError, validate_exit_order
+from .engine import PaperEngine
 from ftx_paper.execution import ExecutionService, PaperExecutionCoordinator
 from .events import is_decision_event, serialize_datetime
 

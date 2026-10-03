@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Mapping
 
 if TYPE_CHECKING:
-    from ftx_paper.core.capital_context import CapitalRuntimeContext
+    from ftx_paper.domain.capital import CapitalRuntimeContext
 
 
 @dataclass

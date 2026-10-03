@@ -4,11 +4,11 @@ from dataclasses import dataclass
 from typing import cast
 
 from ftx_paper.contracts import MarketBar, OrderIntent
-from .bundles import DecisionBundle
-from .strategy import Strategy, StrategyMetadata
-from .live_decision import LiveDecision
-from .decision_context import DecisionContext
-from .execution_events import ExecutionNotification
+from ftx_paper.market.bundles import DecisionBundle
+from ftx_paper.strategy.protocol import Strategy, StrategyMetadata
+from ftx_paper.strategy.decision import LiveDecision
+from ftx_paper.domain.decision_context import DecisionContext
+from ftx_paper.execution.events import ExecutionNotification
 
 
 @dataclass(frozen=True, slots=True)

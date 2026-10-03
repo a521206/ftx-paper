@@ -7,7 +7,7 @@ import math
 from ftx_paper.contracts import OrderIntent, OrderSide
 from ftx_paper.contracts.decision_artifacts import FuturesExecutionPlan, SyntheticSettlement
 from ftx_paper.config import NIFTY_LOT_SIZE
-from ftx_paper.core.cost import synthetic_futures_cost
+from .cost import synthetic_futures_cost
 
 
 def settle_synthetic_plan(

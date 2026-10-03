@@ -7,11 +7,11 @@ import pytest
 from ftx_paper.broker import Fill, PaperBroker
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderIntent, OrderRole, OrderSide
 from ftx_paper.runtime.store import _json_safe
-from ftx_paper.core import DecisionBundle, EngineResult, PaperEngine
-from ftx_paper.core import CompletedBarAggregator
+from ftx_paper.market import DecisionBundle, CompletedBarAggregator
+from ftx_paper.runtime.engine import EngineResult, PaperEngine
 from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.runtime import RuntimeSession, RuntimeStore
-from ftx_paper.core.capital_config import ResearchCapitalProfile
+from ftx_paper.domain.capital import ResearchCapitalProfile
 from ftx_paper.strategy import ConfiguredLiveStrategy
 import ftx_paper.broker.zerodha as zerodha
 

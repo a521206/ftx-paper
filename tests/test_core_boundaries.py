@@ -8,16 +8,25 @@ import pytest
 
 from ftx_paper.broker import PaperBroker
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderIntent, OrderRole, OrderSide, parse_role, role_to_key, select_synthetic_quote
-from ftx_paper.core import CompletedBarAggregator, DecisionBundle, ExitStateMachine, IndependentLiveDecisionEngine, LiveFeatureCalculator, PaperEngine, PortfolioState, PositionState, RiskAssessment, RiskConfig, RiskDecision, RiskGateState, RiskEngine, SizingPipeline, SizingPipelineInput, SetupPolicy, adaptive_stop_bp, option_pcr_at_event, vix_open_and_event
+from ftx_paper.market import CompletedBarAggregator, DecisionBundle, LiveFeatureCalculator, option_pcr_at_event, vix_open_and_event
+from ftx_paper.strategy import ConfiguredLiveStrategy
+from ftx_paper.strategy.exits import ExitStateMachine, PositionState
+from ftx_paper.strategy.decision import IndependentLiveDecisionEngine
+from ftx_paper.strategy.risk import RiskAssessment, RiskConfig, RiskDecision, RiskEngine
+from ftx_paper.strategy.risk_state import RiskGateState
+from ftx_paper.strategy.sizing import SizingPipeline, SizingPipelineInput
+from ftx_paper.strategy.policy import SetupPolicy
+from ftx_paper.strategy.adaptive_stop import adaptive_stop_bp
+from ftx_paper.domain import PortfolioState
+from ftx_paper.runtime.engine import PaperEngine
 from ftx_paper.execution import PaperExecutionCoordinator
-from ftx_paper.core.location_engine import Cell, Location
-from ftx_paper.core.live_decision import _configured_policies_for_cell
-from ftx_paper.core.admission import admission_result
-from ftx_paper.core.scoring import _synthetic_delta_divergence
+from ftx_paper.market.location import Cell, Location
+from ftx_paper.strategy.decision import _configured_policies_for_cell
+from ftx_paper.strategy.admission import admission_result
+from ftx_paper.strategy.scoring import _synthetic_delta_divergence
 from ftx_paper.strategy.config import Session
 from ftx_paper.runtime.replay_worker import ReplayWorker
-from ftx_paper.strategy import ConfiguredLiveStrategy
-from ftx_paper.core.capital_config import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE as CAPITAL_CONFIG
+from ftx_paper.domain.capital import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE as CAPITAL_CONFIG
 
 
 def test_delta_divergence_uses_signed_volume_from_actual_ohlc() -> None:
@@ -75,8 +84,7 @@ def test_paper_portfolio_lifecycle_is_idempotent_and_restorable() -> None:
     portfolio = PortfolioState(2_500_000)
     portfolio.gate_snapshot = {"revision": 4}
     portfolio.quote_provenance = {"entry": "same_minute"}
-    from ftx_paper.core.capital_config import ResearchCapitalProfile, VehicleLimits
-    from ftx_paper.core.capital_context import CapitalRuntimeContext
+    from ftx_paper.domain.capital import ResearchCapitalProfile, VehicleLimits, CapitalRuntimeContext
     custom_context = CapitalRuntimeContext(ResearchCapitalProfile(
         vehicle_limits=(
             ("futures", VehicleLimits(3, 120_000.0)),
@@ -426,7 +434,7 @@ def test_vix_lookup_recognizes_replay_index_instrument() -> None:
 
 
 def test_live_decision_rejects_missing_vix_open_instead_of_using_event_value(monkeypatch) -> None:
-    import ftx_paper.core.live_decision as live_decision
+    import ftx_paper.strategy.decision as live_decision
 
     monkeypatch.setattr(live_decision, "vix_open_and_event", lambda *_: (None, None))
     timestamp = datetime(2026, 1, 1, 10, 20, tzinfo=ZoneInfo("Asia/Kolkata"))
@@ -1179,7 +1187,7 @@ def test_paper_engine_preserves_live_decision_domain_values_at_boundary() -> Non
 
     class Strategy:
         def on_bundle(self, bundle):
-            from ftx_paper.core import LiveDecision
+            from ftx_paper.strategy.decision import LiveDecision
 
             return (LiveDecision("WARMUP", {
                 "decision_at": decision_at,
@@ -1198,7 +1206,7 @@ def test_paper_engine_preserves_live_decision_domain_values_at_boundary() -> Non
 
 
 def test_paper_engine_suppresses_rejected_decisions_by_default_with_opt_in() -> None:
-    from ftx_paper.core import LiveDecision
+    from ftx_paper.strategy.decision import LiveDecision
 
     class Strategy:
         def on_bundle(self, bundle):

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ftx_paper.core.capital_context import CapitalRuntimeContext
-from ftx_paper.core.risk import RiskAssessment
+from ftx_paper.domain.capital import CapitalRuntimeContext
+from .risk import RiskAssessment
 
 
 @dataclass(frozen=True, slots=True)

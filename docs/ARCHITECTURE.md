@@ -25,9 +25,9 @@ adapter; API and CLI code use this facade rather than selecting a concrete
 infrastructure implementation. It is the intentional exception to the
 otherwise strict infrastructure boundary.
 
-Strategy policy configuration lives in `ftx_paper.core.strategy_config`.
-`ftx_paper.strategy.config` is retained only as an import compatibility shim,
-so core decision code does not depend on the concrete strategy package.
+Strategy policy configuration and decision policy live in
+`ftx_paper.strategy`; market normalization and decision-clock processing live
+in `ftx_paper.market`.
 
 ## Pipeline Alignment Checkpoint
 
@@ -38,10 +38,8 @@ This alignment is recorded by Paper commit `31782a4` (`Align active paper
 strategy with pipeline`).
 
 The canonical portfolio aggregate lives in `ftx_paper.domain.portfolio`.
-`ftx_paper.core.portfolio` remains an import compatibility shim. Capital limits
-and the immutable runtime capital context are exposed through
-`ftx_paper.domain.capital` (with their existing core implementations retained
-as compatibility modules); they are business policy shared by sizing,
+Capital limits and the immutable runtime capital context are exposed through
+`ftx_paper.domain.capital`; they are business policy shared by sizing,
 execution, strategy, and runtime code.
 
 Runtime composition creates one `PortfolioState` and one
@@ -73,8 +71,6 @@ Replay state transitions and contract/event writes use the persistence rules in
 the SQLite adapter. Callers must not assume that a runtime state mutation and
 its corresponding SQLite write form one rollbackable transaction.
 
-`domain/`, `core/`, `contracts/`, and `strategy/` are business packages and are
-covered by the same infrastructure-import checks. `core/` remains the home of
-the existing decision pipeline during migration; new shared aggregates should
-be added under `domain/` and old core imports should be retained only as
-compatibility shims.
+`domain/`, `contracts/`, `strategy/`, `market/`, and `execution/` are business
+packages covered by the same infrastructure-import checks. Runtime orchestration
+belongs in `runtime/`; new code must not reintroduce a shared `core/` package.

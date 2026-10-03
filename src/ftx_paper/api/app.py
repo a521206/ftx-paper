@@ -11,7 +11,7 @@ from ftx_paper.runtime import ProcessAlreadyRunningError, RuntimeSession
 from ftx_paper.runtime.store import RuntimeStore
 from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.application.runtime_operations import RuntimeOperations
-from ftx_paper.core.capital_config import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
+from ftx_paper.domain.capital import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
 from ftx_paper.runtime.events import (
     EXECUTION_EVENT_TYPES, RISK_EVENT_TYPES, DecisionTimestampError,
 )

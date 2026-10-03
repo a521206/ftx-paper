@@ -2,7 +2,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from ftx_paper.contracts.decision_artifacts import FuturesExecutionPlan, TradePlan
-from ftx_paper.core.settlement import settle_synthetic_plan
+from ftx_paper.execution.settlement import settle_synthetic_plan
 
 
 AT = datetime(2026, 1, 5, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata"))

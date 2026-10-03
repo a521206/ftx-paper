@@ -9,7 +9,7 @@ def _imports(path: Path) -> str:
 
 
 def test_domain_and_application_do_not_import_sqlite():
-    for package in ("application", "core", "contracts", "strategy"):
+    for package in ("application", "domain", "contracts", "strategy", "market", "execution", "runtime"):
         text = _imports(ROOT / package)
         assert "import sqlite3" not in text
         assert "from sqlite3" not in text
@@ -30,7 +30,7 @@ def test_sqlite_imports_are_confined_to_sqlite_infrastructure():
 
 def test_sql_statements_are_confined_to_sqlite_infrastructure():
     sql_markers = ("SELECT ", "INSERT ", "UPDATE ", "DELETE ", "CREATE TABLE")
-    for package in ("api", "runtime", "application", "domain", "ports", "core", "contracts", "strategy"):
+    for package in ("api", "runtime", "application", "domain", "ports", "contracts", "strategy", "market", "execution"):
         text = _imports(ROOT / package)
         assert not any(marker in text for marker in sql_markers), package
 
