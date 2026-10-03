@@ -161,11 +161,16 @@ class ExitStateMachine:
         machine._trail_active = trail_active
         for name in ("bars_held", "mae_bp", "mfe_bp"):
             value = snapshot.get(name, 0)
-            if (name == "bars_held" and (not isinstance(value, int) or isinstance(value, bool))) or (
-                name != "bars_held" and (isinstance(value, bool) or not isinstance(value, (int, float)))
-            ) or (isinstance(value, (int, float)) and (value < 0 or not math.isfinite(value))):
-                raise ValueError(f"exit-state snapshot {name} is invalid")
-            setattr(machine, f"_{name}", int(value) if name == "bars_held" else float(value))
+            if name == "bars_held":
+                if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                    raise ValueError(f"exit-state snapshot {name} is invalid")
+                machine._bars_held = value
+            else:
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise ValueError(f"exit-state snapshot {name} is invalid")
+                if value < 0 or not math.isfinite(value):
+                    raise ValueError(f"exit-state snapshot {name} is invalid")
+                setattr(machine, f"_{name}", float(value))
         return machine
 
 
