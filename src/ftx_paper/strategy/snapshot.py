@@ -142,9 +142,10 @@ def restore_strategy(cls, snapshot: Mapping[str, object], *, capital_profile):
         raw_exit_state = raw_position.get("exit_state")
         if not isinstance(raw_position_data, Mapping) or not isinstance(raw_exit_state, Mapping):
             raise ValueError("strategy snapshot decision position is incomplete")
-        strategy._decision_positions[order_id] = (
-            _position_from_snapshot(raw_position_data), ExitStateMachine.from_snapshot(raw_exit_state),
-        )
+        position = _position_from_snapshot(raw_position_data)
+        if position.entry_order_id != order_id:
+            raise ValueError("strategy snapshot position key does not match entry_order_id")
+        strategy._decision_positions[order_id] = (position, ExitStateMachine.from_snapshot(raw_exit_state))
     raw_pending = snapshot.get("pending_exits", {})
     if not isinstance(raw_pending, Mapping):
         raise ValueError("strategy snapshot pending_exits must be an object")

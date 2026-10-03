@@ -141,13 +141,15 @@ class ExitStateMachine:
         closes = snapshot.get("closes", ())
         if not isinstance(closes, (list, tuple)) or len(closes) > machine.counter_move_bars + 1:
             raise ValueError("exit-state snapshot closes exceed the counter-move window")
-        if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in closes):
+        if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
+               for value in closes):
             raise ValueError("exit-state snapshot closes must be numeric")
         machine._closes.extend(float(value) for value in closes)
         volumes = snapshot.get("volumes", ())
         if not isinstance(volumes, (list, tuple)) or len(volumes) > 10:
             raise ValueError("exit-state snapshot volumes must contain at most ten values")
-        if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in volumes):
+        if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
+               for value in volumes):
             raise ValueError("exit-state snapshot volumes must be numeric")
         machine._volumes.extend(float(value) for value in volumes)
         machine._max_favorable_price = _optional_number(
@@ -159,7 +161,9 @@ class ExitStateMachine:
         machine._trail_active = trail_active
         for name in ("bars_held", "mae_bp", "mfe_bp"):
             value = snapshot.get(name, 0)
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+            if (name == "bars_held" and (not isinstance(value, int) or isinstance(value, bool))) or (
+                name != "bars_held" and (isinstance(value, bool) or not isinstance(value, (int, float)))
+            ) or (isinstance(value, (int, float)) and (value < 0 or not math.isfinite(value))):
                 raise ValueError(f"exit-state snapshot {name} is invalid")
             setattr(machine, f"_{name}", int(value) if name == "bars_held" else float(value))
         return machine

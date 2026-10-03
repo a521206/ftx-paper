@@ -63,6 +63,27 @@ class PaperPosition:
     synthetic_legs: tuple[str, str] | None = None
     synthetic_entry_prices: tuple[float, float] | None = None
 
+    def __post_init__(self) -> None:
+        if not self.entry_order_id or not self.instrument:
+            raise ValueError("invalid paper position identity")
+        if self.vehicle not in {"futures", "synthetic"} or self.quantity <= 0:
+            raise ValueError("invalid paper position execution fields")
+        if not isfinite(self.entry_price):
+            raise ValueError("paper position entry price must be finite")
+        if self.cell is not None and not self.cell:
+            raise ValueError("paper position cell must be non-empty")
+        if self.vehicle == "synthetic":
+            if self.synthetic_legs is None or len(self.synthetic_legs) != 2:
+                raise ValueError("synthetic paper position requires two legs")
+            if self.synthetic_entry_prices is None or len(self.synthetic_entry_prices) != 2:
+                raise ValueError("synthetic paper position requires two entry prices")
+        elif self.synthetic_legs is not None or self.synthetic_entry_prices is not None:
+            raise ValueError("futures paper position cannot contain synthetic fields")
+        if self.synthetic_entry_prices is not None and any(
+            not isfinite(value) for value in self.synthetic_entry_prices
+        ):
+            raise ValueError("synthetic entry prices must be finite")
+
 
 class SettlementResult(TypedDict):
     entry_order_id: str
@@ -299,7 +320,12 @@ class PortfolioState:
             if not isinstance(value, Mapping):
                 raise ValueError("portfolio snapshot reservation is invalid")
             try:
-                portfolio.reservations[str(key)] = MarginReservation(**dict(value))
+                if not isinstance(key, str):
+                    raise ValueError("reservation key is invalid")
+                reservation = MarginReservation(**dict(value))
+                if reservation.order_id != key:
+                    raise ValueError("reservation key does not match order_id")
+                portfolio.reservations[key] = reservation
             except (TypeError, ValueError) as exc:
                 raise ValueError("portfolio snapshot reservation is invalid") from exc
         raw = snapshot.get("scoped_risk_buffers", {})
@@ -315,7 +341,12 @@ class PortfolioState:
             if not isinstance(values, Mapping):
                 raise ValueError("portfolio snapshot scoped risk reservation is invalid")
             try:
-                portfolio.scoped_risk_reservations[str(order_id)] = ScopedRiskReservation(**dict(values))
+                if not isinstance(order_id, str):
+                    raise ValueError("scoped risk reservation key is invalid")
+                reservation = ScopedRiskReservation(**dict(values))
+                if reservation.order_id != order_id:
+                    raise ValueError("scoped risk reservation key does not match order_id")
+                portfolio.scoped_risk_reservations[order_id] = reservation
             except (TypeError, ValueError) as exc:
                 raise ValueError("portfolio snapshot scoped risk reservation is invalid") from exc
         raw = snapshot.get("positions", {})
@@ -342,8 +373,13 @@ class PortfolioState:
                     _as_float(prices[1], "synthetic entry price"),
                 )
             try:
+                if not isinstance(key, str):
+                    raise ValueError("position key is invalid")
                 data["side"] = OrderSide(data["side"])
-                portfolio.positions[str(key)] = PaperPosition(**data)
+                position = PaperPosition(**data)
+                if position.entry_order_id != key:
+                    raise ValueError("position key does not match entry_order_id")
+                portfolio.positions[key] = position
             except (KeyError, TypeError, ValueError) as exc:
                 raise ValueError("portfolio snapshot position is invalid") from exc
         raw = snapshot.get("pending_orders", {})
