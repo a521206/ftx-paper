@@ -7,9 +7,10 @@ from zoneinfo import ZoneInfo
 from flask import Flask, jsonify, redirect, request
 from typing import Any
 
-from ftx_paper.runtime import ProcessAlreadyRunningError, RuntimeController, RuntimeSession
+from ftx_paper.runtime import ProcessAlreadyRunningError, RuntimeSession
 from ftx_paper.runtime.store import RuntimeStore
 from ftx_paper.runtime.replay_worker import ReplayWorker
+from ftx_paper.application.runtime_operations import RuntimeOperations
 from ftx_paper.core.capital_config import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
 from ftx_paper.runtime.events import (
     EXECUTION_EVENT_TYPES, RISK_EVENT_TYPES, DecisionTimestampError,
@@ -19,16 +20,17 @@ from .schemas import error_payload, openapi_document
 
 
 def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token: str | None = None,
-               controller: RuntimeController | None = None, session: RuntimeSession | None = None,
+               controller: Any | None = None, session: RuntimeSession | None = None,
                replay_worker: ReplayWorker | None = None,
-               capital_profile: ResearchCapitalProfile | None = None) -> Flask:
+               capital_profile: ResearchCapitalProfile | None = None,
+               runtime_operations: RuntimeOperations | None = None) -> Flask:
     app = Flask(__name__)
     store.recover_interrupted()
     session = session or RuntimeSession(store, zerodha_auth, [])
-    controller = controller or RuntimeController(store, session)
     replay_worker = replay_worker or ReplayWorker(
         store, capital_profile=capital_profile or RESEARCH_CAPITAL_PROFILE,
     )
+    operations = runtime_operations or RuntimeOperations(session, replay_worker, controller)
 
     def json_safe(value: Any) -> Any:
         if isinstance(value, datetime):
@@ -100,7 +102,7 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             return jsonify(error_payload("no_data", "no market data for session_date")), 404
         payload["session_date"] = parsed_date
         try:
-            run_id = replay_worker.submit(payload)
+            run_id = operations.submit_replay(payload)
         except RuntimeError as exc:
             return jsonify(error_payload("replay_queue_full", str(exc))), 409
         return jsonify(store.read_replay_run(run_id)), 202
@@ -120,7 +122,7 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
 
     @app.post("/api/v1/replay/<run_id>/cancel")
     def cancel_replay(run_id: str):
-        if not replay_worker.cancel(run_id):
+        if not operations.cancel_replay(run_id):
             return jsonify(error_payload("not_cancellable", "replay cannot be cancelled")), 409
         return jsonify(json_safe(store.read_replay_run(run_id)))
 
@@ -145,7 +147,7 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             return jsonify({"error": {"code": "invalid_request_token", "message": str(exc)}}), 400
         except Exception as exc:  # broker errors are not safe to expose as 500 details
             return jsonify({"error": {"code": "broker_auth_failed", "message": str(exc)}}), 502
-        controller.request_start()
+        operations.request_start()
         return jsonify({"provider": "zerodha", "authenticated": True}), 200
 
     @app.get("/zerodha/callback")
@@ -161,7 +163,7 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             return f"Zerodha login failed: {exc}", 400
         except Exception:
             return "Zerodha token exchange failed. Check the API logs.", 502
-        controller.request_start()
+        operations.request_start()
         dashboard_url = os.getenv("FTX_UI_BASE_URL", "http://127.0.0.1:8502/")
         return redirect(dashboard_url)
 
@@ -183,7 +185,7 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
 
     @app.post("/api/v1/runtime/<command>")
     def runtime_command(command: str):
-        actions = {"start": controller.request_start, "stop": controller.request_stop, "restart": controller.request_restart}
+        actions = {"start": operations.request_start, "stop": operations.request_stop, "restart": operations.request_restart}
         action = actions.get(command)
         if action is None:
             return jsonify({"error": {"code": "unknown_command", "message": command}}), 404
@@ -301,8 +303,7 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
     @app.get("/api/v1/capital")
     def capital():
         status = store.read_status()
-        strategy = getattr(getattr(session, "engine", None), "strategy", None)
-        portfolio = getattr(strategy, "portfolio", None)
+        portfolio = session.portfolio
         if portfolio is not None:
             values = portfolio.capital_snapshot()
             return jsonify({**values, "capital": values["current_equity"], "currency": "INR"})

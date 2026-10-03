@@ -191,18 +191,15 @@ class ReplayWorker:
                 for bar in bars
             ):
                 effective_expiry_dates.add(date)
+            capital_context = CapitalRuntimeContext(self.capital_profile, environment="replay")
             strategy = self.strategy_factory.create(
                 enabled_vehicles=vehicles,
                 portfolio=portfolio,
+                capital_context=capital_context,
                 prior_day_high=prior_day_high,
                 prior_day_low=prior_day_low,
                 expiry_dates=frozenset(effective_expiry_dates),
             )
-            strategy_portfolio = getattr(strategy, "portfolio", None)
-            capital_context = getattr(strategy, "capital_context", None)
-            if not isinstance(strategy_portfolio, PortfolioState) or not isinstance(capital_context, CapitalRuntimeContext):
-                raise TypeError("strategy factory must provide a portfolio and capital_context")
-            portfolio = strategy_portfolio
             last_portfolio = portfolio
             last_strategy_metadata = strategy.metadata
             coordinator = PaperExecutionCoordinator(portfolio, capital_context)

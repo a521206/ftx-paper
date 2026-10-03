@@ -6,11 +6,13 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from ftx_paper.api import create_app
+from ftx_paper.application import RuntimeOperations
 from ftx_paper.config import PaperConfig
 from ftx_paper.domain.capital import CapitalRuntimeContext, RESEARCH_CAPITAL_PROFILE
 from ftx_paper.domain.portfolio import PortfolioState
 from ftx_paper.runtime import ProcessAlreadyRunningError, RuntimeSession
 from ftx_paper.runtime.store import RuntimeStore
+from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.strategy import ConfiguredStrategyFactory
 from ftx_paper.core import PaperEngine
 from ftx_paper.ui import create_ui_app
@@ -82,7 +84,12 @@ def api_main() -> None:
                 capital_context=capital_context,
             )),
         )
-        create_app(store, zerodha_auth=auth, session=session, capital_profile=capital_profile).run(host=config.host, port=config.port, debug=False, use_reloader=False)
+        replay_worker = ReplayWorker(store, capital_profile=capital_profile)
+        operations = RuntimeOperations(session, replay_worker)
+        create_app(
+            store, zerodha_auth=auth, session=session, capital_profile=capital_profile,
+            replay_worker=replay_worker, runtime_operations=operations,
+        ).run(host=config.host, port=config.port, debug=False, use_reloader=False)
     finally:
         try:
             if session is not None:

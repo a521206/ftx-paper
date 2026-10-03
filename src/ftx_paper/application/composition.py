@@ -13,6 +13,7 @@ from .process_market_bar import ProcessMarketBar
 from .query_decisions import QueryDecisions
 from .recover_runtime import RecoverRuntime
 from .run_replay import RunReplay
+from .runtime_operations import RuntimeOperations
 from .start_runtime import StartRuntime
 from .stop_runtime import StopRuntime
 
@@ -25,6 +26,7 @@ class Application:
     run_replay: RunReplay
     query_decisions: QueryDecisions
     recover_runtime: RecoverRuntime
+    runtime: RuntimeOperations | None = None
 
 
 def build_application(database_path: str | Path, strategy, replay_worker) -> Application:

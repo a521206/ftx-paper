@@ -64,15 +64,18 @@ class RuntimeSession:
         self.capital_profile = capital_profile
         self.engine = engine or PaperEngine()
         self._restore_strategy_state()
-        strategy = getattr(self.engine, "strategy", None)
-        # Runtime owns the shared account aggregate. The fallback keeps older
-        # custom engines working while callers migrate to explicit injection.
-        self.portfolio = portfolio if portfolio is not None else getattr(strategy, "portfolio", None)
-        self.capital_context = (
-            capital_context
-            if capital_context is not None
-            else getattr(strategy, "capital_context", None)
+        self.portfolio = portfolio or PortfolioState(self.capital_profile.initial_capital)
+        self.capital_context = capital_context or CapitalRuntimeContext(
+            self.capital_profile, environment="live",
         )
+        # The session is the account owner; strategies receive the same objects
+        # rather than being queried as an alternate source of runtime state.
+        strategy = getattr(self.engine, "strategy", None)
+        if strategy is not None:
+            if hasattr(strategy, "portfolio"):
+                strategy.portfolio = self.portfolio
+            if hasattr(strategy, "capital_context"):
+                strategy.capital_context = self.capital_context
         self.account = (
             AccountAggregate(self.portfolio, self.capital_context)
             if self.portfolio is not None and self.capital_context is not None else None

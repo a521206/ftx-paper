@@ -23,6 +23,7 @@ from ftx_paper.core.strategy import StrategyMetadata
 from ftx_paper.core import ExitStateMachine, PositionState, VehicleRiskLimits
 from ftx_paper.contracts import OrderSide
 from ftx_paper.core import DecisionBundle, IndependentLiveDecisionEngine
+from .snapshot import snapshot_strategy
 
 
 class ConfiguredLiveStrategy:
@@ -106,29 +107,7 @@ class ConfiguredLiveStrategy:
         return StrategyMetadata(self.name, self.version, config_hash)
 
     def snapshot(self) -> Mapping[str, object]:
-        decision_positions = {
-            order_id: {"position": self._position_snapshot(position), "exit_state": exits.snapshot()}
-            for order_id, (position, exits) in self._decision_positions.items()
-        }
-        return {
-            "schema_version": 1,
-            "enabled_vehicles": list(self.enabled_vehicles),
-            "capital": {
-                "initial_capital": self.capital_profile.initial_capital,
-                "max_daily_loss": self.capital_profile.max_daily_loss,
-                "max_net_directional_lots": self.capital_profile.max_net_directional_lots,
-                "risk_per_trade": self.capital_profile.risk_per_trade,
-                "max_lots": self.capital_profile.max_lots,
-                "cell_session_risk_buffer_fraction": self.capital_profile.cell_session_risk_buffer_fraction,
-            },
-            "config": self.config.as_dict(),
-            "risk_gate": self._decision_engine.risk_snapshot(),
-            "portfolio": self.portfolio.snapshot(),
-            "decision_positions": decision_positions,
-            "pending_exits": dict(self._pending_exits),
-            "vehicle_risk_limits": {k: {"max_quantity": v.max_quantity, "margin_per_lot": v.margin_per_lot}
-                                    for k, v in self.vehicle_risk_limits.items()},
-        }
+        return snapshot_strategy(self)
 
     @classmethod
     def from_snapshot(cls, snapshot: Mapping[str, object], *, capital_profile: ResearchCapitalProfile) -> "ConfiguredLiveStrategy":
