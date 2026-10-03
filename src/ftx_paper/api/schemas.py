@@ -65,7 +65,10 @@ def openapi_document() -> dict[str, Any]:
                 "post": {"responses": {"202": {"description": "Replay queued"}, "400": {"description": "Invalid request"}}},
             },
             "/api/v1/replay/dates": {"get": {"responses": {"200": {"description": "Available replay dates"}}}},
+            "/api/v1/replay/inputs": {"get": {"parameters": [{"name": "date", "in": "query", "required": True, "schema": {"type": "string", "format": "date"}}], "responses": {"200": {"description": "Deterministic replay input manifest"}}}},
             "/api/v1/replay/{run_id}": {"get": {"parameters": [{"name": "run_id", "in": "path", "required": True, "schema": {"type": "string"}}], "responses": {"200": {"description": "Replay run"}, "404": {"description": "Not found"}}}},
+            "/api/v1/replay/{run_id}/trace": {"get": {"parameters": [{"name": "run_id", "in": "path", "required": True, "schema": {"type": "string"}}], "responses": {"200": {"description": "Causal feature, location, and transition trace"}}}},
+            "/api/v1/replay/{run_id}/events": {"get": {"parameters": [{"name": "run_id", "in": "path", "required": True, "schema": {"type": "string"}}, {"name": "offset", "in": "query", "schema": {"type": "integer", "minimum": 0}}, {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 10000}}], "responses": {"200": {"description": "Paginated replay events"}}}},
             "/api/v1/replay/{run_id}/cancel": {"post": {"parameters": [{"name": "run_id", "in": "path", "required": True, "schema": {"type": "string"}}], "responses": {"200": {"description": "Replay cancelled"}, "409": {"description": "Replay cannot be cancelled"}}}},
         },
     }

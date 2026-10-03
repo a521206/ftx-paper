@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
 from datetime import date as date_type, datetime
+import hashlib
+import json
 from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread
 from typing import Any
@@ -95,6 +97,51 @@ class ReplayWorker:
             raise RuntimeError("replay queue is full") from None
         return run_id
 
+    def input_manifest(self, session_date: str) -> dict[str, Any]:
+        """Return the deterministic, API-safe inputs used by a replay date."""
+        rows = self.store.read_market_bars(session_date)
+        bars = self._bars(session_date)
+        by_instrument: dict[str, int] = {}
+        for row in rows:
+            key = ":".join(str(row.get(field) or "").upper() for field in ("exchange", "symbol", "instrument_type"))
+            if key:
+                by_instrument[key] = by_instrument.get(key, 0) + 1
+        vix_rows = [row for row in rows if str(row.get("symbol", "")).upper() in {"INDIA VIX", "INDIAVIX"}]
+        option_rows = [row for row in rows if str(row.get("instrument_type", "")).upper() in {"CE", "PE"}]
+        option_minutes = {str(row.get("minute")) for row in option_rows}
+        futures_minutes = {
+            str(row.get("minute")) for row in rows
+            if str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
+        }
+        payload = {
+            "available_date": session_date,
+            "date": session_date,
+            "session_date": session_date,
+            "bar_count": len(bars),
+            "raw_bar_count": len(rows),
+            "per_instrument_counts": dict(sorted(by_instrument.items())),
+            "availability": {
+                "vix": bool(vix_rows),
+                "pcr": bool(option_rows and option_minutes.intersection(futures_minutes)),
+            },
+            "expiry_calendar": sorted(str(item) for item in self.store.read_expiry_dates()),
+            "session_configuration": {
+                "timezone": "Asia/Kolkata",
+                "open": "09:15",
+                "close": "15:10",
+                "morning_entry_minutes": list(MORNING_ENTRY_MINUTES),
+                "afternoon_entry_minutes": list(AFTERNOON_ENTRY_MINUTES),
+                "aggregator": {"required_roles": ["futures"], "deadline_seconds": 0},
+            },
+        }
+        fingerprint_source = {**payload, "rows": sorted(
+            (dict(row) for row in rows),
+            key=lambda row: (str(row.get("minute")), str(row.get("exchange")), str(row.get("symbol"))),
+        )}
+        canonical = json.dumps(fingerprint_source, sort_keys=True, separators=(",", ":"), default=str).encode()
+        payload["input_fingerprint"] = hashlib.sha256(canonical).hexdigest()
+        return payload
+
     def cancel(self, run_id: str) -> bool:
         run = self.store.read_replay_run(run_id)
         if run is None or run["status"] in {"completed", "failed", "cancelled", "rejected"}:
@@ -150,6 +197,7 @@ class ReplayWorker:
             raise ValueError("emit_rejected_decisions must be a boolean")
         dates = [session_date]
         all_events: list[dict[str, Any]] = []
+        trace: list[dict[str, Any]] = []
         diagnostic_trades: list[dict[str, Any]] = []
         bars_seen = 0
         initial_capital = self.capital_profile.initial_capital
@@ -338,6 +386,17 @@ class ReplayWorker:
                 bars_seen += 1
                 result_events = [{**event, "source": "replay", "session_date": date} for event in result.events]
                 all_events.extend(result_events)
+                for event in result_events:
+                    if "feature_values" not in event and "locations" not in event and "transitions" not in event:
+                        continue
+                    trace.append({
+                        "date": date,
+                        "timestamp": event.get("decision_at") or futures_bar.timestamp.isoformat(),
+                        "bar_index": bars_seen,
+                        "features": event.get("feature_values", {}),
+                        "locations": event.get("locations", []),
+                        "transitions": event.get("transitions", []),
+                    })
                 for order in result.orders:
                     all_events.append({"event_type": "ORDER_INTENT",
                                        "decision_id": order.client_order_id.rsplit(":", 1)[0],
@@ -529,6 +588,34 @@ class ReplayWorker:
             })
         if last_strategy_metadata is None:
             raise RuntimeError("replay completed without a strategy session")
+        input_manifest = self.input_manifest(session_date)
+        metadata = {
+            "api_version": "1.1",
+            "strategy_version": last_strategy_metadata.version,
+            "configuration_hash": last_strategy_metadata.config_hash,
+            "input_fingerprint": input_manifest["input_fingerprint"],
+            "requested_parameters": {
+                "session_date": session_date,
+                "vehicles": list(vehicles),
+                "emit_rejected_decisions": emit_rejected_decisions,
+            },
+        }
+        normalized_decisions = []
+        for event in all_events:
+            if not str(event.get("event_type", "")).endswith("DECISION"):
+                continue
+            normalized = self._normalize_decision(event)
+            decision_id = event.get("decision_id")
+            linked = [item for item in all_events if decision_id and item.get("decision_id") == decision_id]
+            execution_events = [item for item in linked if str(item.get("event_type", "")) in {
+                "ORDER_INTENT", "ORDER_AUTHORIZED", "FILL", "EXECUTEDDECISION", "ORDER_SUPPRESSED",
+            }]
+            normalized["execution"].update({
+                "event_types": [str(item.get("event_type")) for item in execution_events],
+                "client_order_id": next((item.get("client_order_id") for item in execution_events
+                                          if item.get("client_order_id")), None),
+            })
+            normalized_decisions.append(normalized)
         return {
             "result_schema_version": 2,
             "source": "replay",
@@ -536,6 +623,7 @@ class ReplayWorker:
             "vehicle_semantics": "shared_portfolio_directional_and_margin",
             "strategy": {"name": last_strategy_metadata.name, "version": last_strategy_metadata.version,
                          "config_hash": last_strategy_metadata.config_hash},
+            "metadata": metadata,
             "configuration": {"initial_capital": initial_capital,
                                "max_daily_loss": self.capital_profile.max_daily_loss,
                                "max_net_directional_lots": self.capital_profile.max_net_directional_lots,
@@ -545,6 +633,10 @@ class ReplayWorker:
             "bars_seen": bars_seen,
             "events": all_events,
             "decisions": [event for event in all_events if str(event.get("event_type", "")).endswith("DECISION")],
+            "decision_trace_schema_version": 1,
+            "decision_trace": normalized_decisions,
+            "trace_schema_version": 1,
+            "trace": trace,
             "first_divergent_stage": None,
             # Diagnostic-only trades live inside the replay run result. They
             # are never written to runtime_events, the broker ledger, or the
@@ -565,6 +657,33 @@ class ReplayWorker:
                 "score_max": max(scores) if scores else None,
                 "score_average": sum(scores) / len(scores) if scores else None,
             },
+        }
+
+    @staticmethod
+    def _normalize_decision(event: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(event)
+        event_type = str(payload.get("event_type", ""))
+        return {
+            "candidate_identity": payload.get("candidate_id") or payload.get("decision_id"),
+            "decision_id": payload.get("decision_id"),
+            "decision_stage": event_type.lower().removesuffix("decision"),
+            "outcome": payload.get("outcome") or ("accepted" if event_type == "ACCEPTEDDECISION" else "rejected" if event_type == "REJECTEDDECISION" else event_type.lower()),
+            "rejection_reason": payload.get("reason"),
+            "risk": {
+                key: payload.get(key) for key in ("stop_basis", "risk_per_trade", "risk_amount", "quantity", "score_multiplier")
+                if payload.get(key) is not None
+            },
+            "sizing": {
+                key: payload.get(key) for key in ("quantity", "max_lots", "lot_size", "entry_price")
+                if payload.get(key) is not None
+            },
+            "execution": {
+                key: payload.get(key) for key in ("vehicle", "client_order_id", "execution_status", "execution_event_type")
+                if payload.get(key) is not None
+            },
+            "date": payload.get("session_date"),
+            "timestamp": payload.get("decision_at"),
+            "bar_index": payload.get("sequence"),
         }
 
     @staticmethod

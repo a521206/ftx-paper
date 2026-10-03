@@ -115,10 +115,71 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
     def replay_dates():
         return jsonify({"dates": store.read_market_dates()})
 
+    @app.get("/api/v1/replay/inputs")
+    def replay_inputs():
+        session_date = request.args.get("date", "")
+        try:
+            parsed = datetime.strptime(session_date, "%Y-%m-%d").date().isoformat()
+        except ValueError:
+            return jsonify(error_payload("invalid_date", "date must be YYYY-MM-DD")), 400
+        if parsed != session_date:
+            return jsonify(error_payload("invalid_date", "date must be YYYY-MM-DD")), 400
+        if session_date not in store.read_market_dates():
+            return jsonify(error_payload("no_data", "no market data for session_date")), 404
+        return jsonify(json_safe(replay_worker.input_manifest(session_date)))
+
     @app.get("/api/v1/replay/<run_id>")
     def replay_detail(run_id: str):
         run = store.read_replay_run(run_id)
-        return jsonify(json_safe(run)) if run is not None else (jsonify(error_payload("not_found", "replay not found")), 404)
+        if run is None:
+            return jsonify(error_payload("not_found", "replay not found")), 404
+        result_raw = run.get("result")
+        result: dict[str, Any] = result_raw if isinstance(result_raw, dict) else {}
+        run["replay_metadata"] = {
+            "run_id": run_id,
+            "status": run.get("status"),
+            "request": run.get("request"),
+            "result_schema_version": result.get("result_schema_version"),
+            "strategy": result.get("strategy"),
+            "configuration": result.get("configuration"),
+            "metadata": result.get("metadata", {}),
+        }
+        return jsonify(json_safe(run))
+
+    @app.get("/api/v1/replay/<run_id>/trace")
+    def replay_trace(run_id: str):
+        run = store.read_replay_run(run_id)
+        if run is None:
+            return jsonify(error_payload("not_found", "replay not found")), 404
+        result_raw = run.get("result")
+        result: dict[str, Any] = result_raw if isinstance(result_raw, dict) else {}
+        return jsonify(json_safe({"run_id": run_id, "metadata": result.get("metadata", {}),
+                                  "schema_version": result.get("trace_schema_version", 1),
+                                  "trace": result.get("trace", [])}))
+
+    @app.get("/api/v1/replay/<run_id>/events")
+    def replay_events(run_id: str):
+        run = store.read_replay_run(run_id)
+        if run is None:
+            return jsonify(error_payload("not_found", "replay not found")), 404
+        result_raw = run.get("result")
+        result: dict[str, Any] = result_raw if isinstance(result_raw, dict) else {}
+        events = list(result.get("events", []))
+        try:
+            offset = max(0, int(request.args.get("offset", 0)))
+            limit = min(10_000, max(1, int(request.args.get("limit", 1_000))))
+        except ValueError:
+            return jsonify(error_payload("invalid_request", "offset and limit must be integers")), 400
+        return jsonify(json_safe({
+            "run_id": run_id,
+            "metadata": result.get("metadata", {}),
+            "offset": offset,
+            "limit": limit,
+            "total": len(events),
+            "events": events[offset:offset + limit],
+            "has_more": offset + limit < len(events),
+            "next_offset": offset + limit if offset + limit < len(events) else None,
+        }))
 
     @app.post("/api/v1/replay/<run_id>/cancel")
     def cancel_replay(run_id: str):
