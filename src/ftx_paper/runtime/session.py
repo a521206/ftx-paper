@@ -77,6 +77,7 @@ class RuntimeSession:
         self._lock = threading.RLock()
         self._stopping = False
         self._started = threading.Event()
+        self._market_wait = threading.Event()
         self._aggregator: CompletedBarAggregator | None = None
         self._last_execution_fill: LastExecutionFill | None = None
         self._feed_lease_id: str | None = None
@@ -100,7 +101,7 @@ class RuntimeSession:
     def start(self) -> None:
         with self._lock:
             state = self.store.read_status().get("state")
-            if state in {"STARTING", "RUNNING"} and self._feed_lease_id is not None:
+            if state in {"STARTING", "RUNNING", "WAITING_FOR_MARKET", "WAITING_FOR_AUTH"} and self._feed_lease_id is not None:
                 return
             self._assert_flat_startup()
             # Claim this before launching the worker. This closes the race where
@@ -110,6 +111,7 @@ class RuntimeSession:
                 self._feed_lease_id = self.store.acquire_process_lease(self.LIVE_FEED_LEASE)
             self._stopping = False
             self._started.clear()
+            self._market_wait.clear()
             self.store.patch_status({"state": "STARTING", "health_state": "STARTING",
                                      "feed_connected": False, "feed_health": None,
                                      "error": None, "started_at": datetime.now(timezone.utc).isoformat(),
@@ -164,26 +166,11 @@ class RuntimeSession:
                 self.broker = ZerodhaBroker(client)
             backfill = load_startup_backfill(client, resolved)
             self.store.append_market_bars(backfill, source="historical_backfill")
-            if not is_nse_market_open(self.market_clock()):
-                if self.broker is not None:
-                    self.broker.close()
-                self.store.patch_status({
-                    "state": "WAITING_FOR_MARKET",
-                    "health_state": "WAITING",
-                    "phase": "BACKFILL",
-                    "execution_enabled": False,
-                    "feed_connected": False,
-                    "feed_health": {
-                        "connected": False,
-                        "market_open": False,
-                        "message": "NSE/NFO market closed; historical backfill completed",
-                    },
-                })
-                self._release_feed_lease()
-                self._started.set()
+            access_token = self._wait_for_session_readiness(is_nse_market_open)
+            if access_token is None:
                 return
             normalize = self.normalize_payload or self._make_normalizer(resolved)
-            socket = create_kite_socket(self.auth.api_key, self.auth.access_token())
+            socket = create_kite_socket(self.auth.api_key, access_token)
             feed_type = self.feed_factory or ZerodhaFeed
             self.feed = feed_type(
                 socket, [int(item["instrument_token"]) for item in resolved], normalize,
@@ -217,6 +204,36 @@ class RuntimeSession:
                                      "feed_connected": False, "error": str(exc)})
             self._release_feed_lease()
             self._started.set()
+
+    def _wait_for_session_readiness(self, is_market_open: Callable[[datetime | None], bool]) -> str | None:
+        """Wait without opening a feed until today's token and market are ready."""
+        while not self._stopping:
+            access_token = self.auth.access_token()
+            market_open = is_market_open(self.market_clock())
+            if access_token is not None and market_open:
+                return access_token
+
+            authenticated = access_token is not None
+            self.store.patch_status({
+                "state": "WAITING_FOR_MARKET" if authenticated else "WAITING_FOR_AUTH",
+                "health_state": "WAITING",
+                "phase": "BACKFILL" if authenticated else "AUTH",
+                "execution_enabled": False,
+                "feed_connected": False,
+                "feed_health": {
+                    "connected": False,
+                    "market_open": market_open,
+                    "message": (
+                        "NSE/NFO market closed; waiting for the next session"
+                        if authenticated else
+                        "Zerodha login required for the current trading day"
+                    ),
+                },
+            })
+            self._started.set()
+            self._market_wait.wait(timeout=30)
+            self._market_wait.clear()
+        return None
 
     def _assert_flat_startup(self) -> None:
         portfolio = self.portfolio
@@ -816,6 +833,7 @@ class RuntimeSession:
 
     def stop(self) -> None:
         self._stopping = True
+        self._market_wait.set()
         with self._lock:
             startup = self._thread
             feed = self.feed

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, redirect, request
 from typing import Any
 
 from ftx_paper.runtime import ProcessAlreadyRunningError, RuntimeController, RuntimeSession, RuntimeStore
@@ -160,7 +161,8 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
         except Exception:
             return "Zerodha token exchange failed. Check the API logs.", 502
         controller.request_start()
-        return "Zerodha connected successfully. You may close this window and refresh the dashboard.", 200
+        dashboard_url = os.getenv("FTX_UI_BASE_URL", "http://127.0.0.1:8502/")
+        return redirect(dashboard_url)
 
     @app.get("/api/v1/broker/zerodha/status")
     def zerodha_status():
