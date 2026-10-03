@@ -10,11 +10,12 @@ from zoneinfo import ZoneInfo
 
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderRole, OrderSide, Role, SyntheticFutureQuote, synthetic_future_quote
 from ftx_paper.core.capital_config import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
-from ftx_paper.core import AggregatorConfig, Cell, CompletedBarAggregator, InstrumentKey, PaperEngine, PortfolioState
+from ftx_paper.core.capital_context import CapitalRuntimeContext
+from ftx_paper.core import AggregatorConfig, AccountAggregate, Cell, CompletedBarAggregator, ExecutionNotification, InstrumentKey, PaperEngine, PortfolioState
 from ftx_paper.core.cost import futures_cost, synthetic_futures_cost
 from ftx_paper.execution import PaperExecutionCoordinator
 from ftx_paper.core.settlement import ExitValidationError, validate_exit_order
-from ftx_paper.strategy import ConfiguredLiveStrategy
+from ftx_paper.strategy import ConfiguredStrategyFactory, StrategyFactory
 from ftx_paper.core.strategy_config import (
     AFTERNOON_ENTRY_MINUTES,
     MORNING_ENTRY_MINUTES,
@@ -50,9 +51,11 @@ def _execution_cost(trade: dict[str, Any]) -> float:
 class ReplayWorker:
     """Bounded in-process replay queue with a fresh engine per job."""
 
-    def __init__(self, store: Any, *, capital_profile: ResearchCapitalProfile = RESEARCH_CAPITAL_PROFILE, max_queue_size: int = 8) -> None:
+    def __init__(self, store: Any, *, capital_profile: ResearchCapitalProfile = RESEARCH_CAPITAL_PROFILE,
+                 max_queue_size: int = 8, strategy_factory: StrategyFactory | None = None) -> None:
         self.store = store
         self.capital_profile = capital_profile
+        self.strategy_factory = strategy_factory or ConfiguredStrategyFactory(capital_profile=capital_profile)
         self._queue: Queue[tuple[str, dict[str, Any], Event]] = Queue(maxsize=max_queue_size)
         self._lock = Lock()
         self._cancel: dict[str, Event] = {}
@@ -151,6 +154,8 @@ class ReplayWorker:
         current_equity = initial_capital
         peak_equity = initial_capital
         max_drawdown = 0.0
+        last_portfolio: PortfolioState | None = None
+        last_strategy_metadata = None
         available_dates = self._dates()
         expiry_dates = self.store.read_expiry_dates()
         # This engine/strategy is private to this replay run and never shared
@@ -186,15 +191,22 @@ class ReplayWorker:
                 for bar in bars
             ):
                 effective_expiry_dates.add(date)
-            strategy = ConfiguredLiveStrategy(
-                capital_profile=self.capital_profile,
+            strategy = self.strategy_factory.create(
                 enabled_vehicles=vehicles,
                 portfolio=portfolio,
                 prior_day_high=prior_day_high,
                 prior_day_low=prior_day_low,
                 expiry_dates=frozenset(effective_expiry_dates),
             )
-            coordinator = PaperExecutionCoordinator(strategy.portfolio, strategy.capital_context)
+            strategy_portfolio = getattr(strategy, "portfolio", None)
+            capital_context = getattr(strategy, "capital_context", None)
+            if not isinstance(strategy_portfolio, PortfolioState) or not isinstance(capital_context, CapitalRuntimeContext):
+                raise TypeError("strategy factory must provide a portfolio and capital_context")
+            portfolio = strategy_portfolio
+            last_portfolio = portfolio
+            last_strategy_metadata = strategy.metadata
+            coordinator = PaperExecutionCoordinator(portfolio, capital_context)
+            account = AccountAggregate(portfolio, capital_context)
             engine = PaperEngine(
                 strategy, emit_rejected_decisions=emit_rejected_decisions,
             )
@@ -303,6 +315,11 @@ class ReplayWorker:
                         coordinator.fill(action.intent, price=exit_price,
                                          timestamp=futures_bar.timestamp.isoformat(),
                                          cost=_execution_cost(open_trade))
+                    engine.on_execution_event(ExecutionNotification(
+                        event_type="FILLED", client_order_id=action.intent.client_order_id,
+                        status="FILLED", quantity=action.intent.quantity,
+                        filled_quantity=action.intent.quantity, price=exit_price,
+                    ))
                     engine.settle_exit(action.intent.client_order_id, filled=True)
                     if realized is not None:
                         engine.record_exit(cell=realized.cell.name, reason=action.reason,
@@ -310,10 +327,15 @@ class ReplayWorker:
                                            date=date, vehicle=action.intent.vehicle,
                                            direction="long" if action.intent.side.value == "SELL" else "short",
                                            quantity=action.intent.quantity)
-                        current_equity = strategy.portfolio.equity
-                        peak_equity = strategy.portfolio.peak_equity
+                        current_equity = portfolio.equity
+                        peak_equity = portfolio.peak_equity
                         max_drawdown = min(max_drawdown, current_equity - peak_equity)
-                result = engine.on_bundle(bundle)
+                try:
+                    result = engine.on_bundle(bundle, context=account.context(as_of=futures_bar.timestamp))
+                except TypeError as exc:
+                    if "context" not in str(exc):
+                        raise
+                    result = engine.on_bundle(bundle)
                 bars_seen += 1
                 result_events = [{**event, "source": "replay", "session_date": date} for event in result.events]
                 all_events.extend(result_events)
@@ -333,6 +355,18 @@ class ReplayWorker:
                                        "timestamp": futures_bar.timestamp.isoformat(), "source": "replay",
                                        "session_date": date, "execution_allowed": False})
                     if order.role is OrderRole.ENTRY:
+                        if order.vehicle == "futures":
+                            try:
+                                account.authorize_and_reserve(order)
+                            except ValueError as exc:
+                                all_events.append({"event_type": "RISK_REJECTED",
+                                                   "decision_id": order.client_order_id,
+                                                   "reason": str(exc), "source": "replay", "session_date": date})
+                                continue
+                            all_events.append({"event_type": "ORDER_AUTHORIZED",
+                                               "decision_id": order.client_order_id,
+                                               "account_revision": account.revision,
+                                               "source": "replay", "session_date": date})
                         entry_quote = synthetic_future_quote(
                             quote_selection_bar, option_bars,
                             symbols=(order.synthetic_legs[0].symbol, order.synthetic_legs[1].symbol)
@@ -363,7 +397,12 @@ class ReplayWorker:
                                               reference_price=futures_bar.close)
                         if order.vehicle == "futures":
                             coordinator.fill(order, price=fill_price,
-                                             timestamp=futures_bar.timestamp.isoformat())
+                                              timestamp=futures_bar.timestamp.isoformat())
+                        engine.on_execution_event(ExecutionNotification(
+                            event_type="FILLED", client_order_id=order.client_order_id,
+                            status="FILLED", quantity=order.quantity,
+                            filled_quantity=order.quantity, price=fill_price,
+                        ))
                         open_trades.append({"entry_order_id": order.client_order_id,
                                             "instrument": order.instrument.symbol,
                                             "side": order.side.value, "quantity": order.quantity,
@@ -441,8 +480,8 @@ class ReplayWorker:
                                            date=date, vehicle=order.vehicle,
                                            direction="long" if order.side.value == "SELL" else "short",
                                            quantity=order.quantity)
-                        current_equity = strategy.portfolio.equity
-                        peak_equity = strategy.portfolio.peak_equity
+                        current_equity = portfolio.equity
+                        peak_equity = portfolio.peak_equity
                         max_drawdown = min(max_drawdown, current_equity - peak_equity)
             # Preserve open positions as mark-to-market/open replay results.
             diagnostic_trades.extend({**trade, "status": "open"} for trade in open_trades)
@@ -466,6 +505,8 @@ class ReplayWorker:
             row["net_pnl_rs"] += float(trade.get("net_pnl_rs") or 0.0)
             row["daily_pnl"] += float(trade.get("net_pnl_rs") or 0.0)
         if ledger_by_date:
+            if last_portfolio is None or last_strategy_metadata is None:
+                raise RuntimeError("replay completed without a strategy session")
             final_date = max(ledger_by_date)
             final_row = ledger_by_date[final_date]
             final_row.update({
@@ -479,20 +520,23 @@ class ReplayWorker:
                 ) if normalized_trades else 0.0,
                 "reservations": {
                     order_id: asdict(reservation)
-                    for order_id, reservation in strategy.portfolio.reservations.items()
+                    for order_id, reservation in portfolio.reservations.items()
                 },
                 "directional_exposure": sum(
                     position.quantity * (1 if position.side is OrderSide.BUY else -1)
-                    for position in strategy.portfolio.positions.values()
+                    for position in portfolio.positions.values()
                 ),
                 "rejection_counts": {},
             })
+        if last_strategy_metadata is None:
+            raise RuntimeError("replay completed without a strategy session")
         return {
             "result_schema_version": 2,
             "source": "replay",
             "vehicles": list(vehicles),
             "vehicle_semantics": "shared_portfolio_directional_and_margin",
-            "strategy": {"name": ConfiguredLiveStrategy.name, "version": ConfiguredLiveStrategy.version},
+            "strategy": {"name": last_strategy_metadata.name, "version": last_strategy_metadata.version,
+                         "config_hash": last_strategy_metadata.config_hash},
             "configuration": {"initial_capital": initial_capital,
                                "max_daily_loss": self.capital_profile.max_daily_loss,
                                "max_net_directional_lots": self.capital_profile.max_net_directional_lots,

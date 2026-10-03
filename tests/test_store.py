@@ -93,6 +93,20 @@ def test_runtime_store_preserves_warmup_event_payload(tmp_path):
     }
 
 
+def test_runtime_store_persists_order_before_external_dispatch(tmp_path):
+    store = RuntimeStore(tmp_path)
+    assert store.create_order_lifecycle(
+        "order-1", {"client_order_id": "order-1", "quantity": 2},
+    ) is True
+    assert store.create_order_lifecycle(
+        "order-1", {"client_order_id": "order-1", "quantity": 2},
+    ) is False
+
+    assert store.update_order_lifecycle("order-1", state="SUBMITTING") is True
+    assert store.read_order_lifecycle("order-1")["state"] == "SUBMITTING"
+    assert store.read_in_flight_orders()[0]["client_order_id"] == "order-1"
+
+
 def test_runtime_store_persists_contract_changes_once(tmp_path):
     store = RuntimeStore(tmp_path)
     contract = {

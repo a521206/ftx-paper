@@ -10,7 +10,7 @@ from ftx_paper.config import PaperConfig
 from ftx_paper.core.capital_config import RESEARCH_CAPITAL_PROFILE
 from ftx_paper.runtime import ProcessAlreadyRunningError, RuntimeSession
 from ftx_paper.runtime.store import RuntimeStore
-from ftx_paper.strategy import ConfiguredLiveStrategy
+from ftx_paper.strategy import ConfiguredStrategyFactory
 from ftx_paper.core import PaperEngine
 from ftx_paper.ui import create_ui_app
 from ftx_paper.broker.zerodha import ZerodhaAuth
@@ -52,6 +52,7 @@ def api_main() -> None:
     config = PaperConfig.from_env()
     configure_logging(config.runtime_dir)
     capital_profile = RESEARCH_CAPITAL_PROFILE
+    strategy_factory = ConfiguredStrategyFactory(capital_profile=capital_profile)
     store = RuntimeStore(config.runtime_dir)
     try:
         instance_id = store.acquire_process_lease("api")
@@ -70,7 +71,7 @@ def api_main() -> None:
             auth,
             list(raw.get("instruments", ())),
             capital_profile=capital_profile,
-            engine=PaperEngine(ConfiguredLiveStrategy(capital_profile=capital_profile, expiry_dates=store.read_expiry_dates())),
+            engine=PaperEngine(strategy_factory.create(expiry_dates=store.read_expiry_dates())),
         )
         create_app(store, zerodha_auth=auth, session=session, capital_profile=capital_profile).run(host=config.host, port=config.port, debug=False, use_reloader=False)
     finally:

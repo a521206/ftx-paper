@@ -6,6 +6,8 @@ from datetime import datetime, time
 from ftx_paper.contracts import Instrument, MarketBar, OptionType, OrderIntent
 from ftx_paper.core.capital_config import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
 from ftx_paper.core.capital_context import CapitalRuntimeContext
+from ftx_paper.core.decision_context import DecisionContext
+from ftx_paper.core.execution_events import ExecutionNotification
 
 from ftx_paper.core.strategy_config import (
     AFTERNOON_ENTRY_MINUTES,
@@ -336,6 +338,17 @@ class ConfiguredLiveStrategy:
 
     def on_bundle(self, bundle: DecisionBundle):
         return self._decision_engine.evaluate(bundle)
+
+    def evaluate(self, bundle: DecisionBundle, context: DecisionContext):
+        """Evaluate with a common account snapshot while retaining signal state."""
+        return self._decision_engine.evaluate(bundle)
+
+    def on_execution_event(self, event: ExecutionNotification) -> None:
+        """Receive common execution outcomes without owning account state."""
+        if event.event_type in {"REJECTED", "CANCELLED", "ERROR"}:
+            pending = self._pending_exits.pop(event.client_order_id, None)
+            if pending is not None:
+                self.settle_exit(event.client_order_id, filled=False)
 
     def register_entry(self, order: OrderIntent, *, fill_price: float | None = None,
                        entry_fill_time: datetime | str | None = None,

@@ -6,6 +6,8 @@ from typing import Protocol
 
 from .bundles import DecisionBundle
 from .live_decision import LiveDecision
+from .decision_context import DecisionContext
+from .execution_events import ExecutionNotification
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,5 +30,11 @@ class Strategy(Protocol):
     def metadata(self) -> StrategyMetadata: ...
 
     def on_bundle(self, bundle: DecisionBundle) -> tuple[LiveDecision, ...]: ...
+
+    def evaluate(
+        self, bundle: DecisionBundle, context: DecisionContext,
+    ) -> tuple[LiveDecision, ...]: ...
+
+    def on_execution_event(self, event: ExecutionNotification) -> None: ...
 
     def snapshot(self) -> Mapping[str, object]: ...

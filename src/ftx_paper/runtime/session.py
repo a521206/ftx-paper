@@ -15,10 +15,11 @@ from ftx_paper.contracts import (
     role_to_key,
 )
 from ftx_paper.core import AggregatorConfig, CompletedBarAggregator, InstrumentKey, PaperEngine
+from ftx_paper.core import AccountAggregate, ExecutionNotification
 from ftx_paper.core.strategy import Strategy
 from ftx_paper.core.cost import futures_cost
 from ftx_paper.core.settlement import ExitValidationError, validate_exit_order
-from ftx_paper.execution import PaperExecutionCoordinator
+from ftx_paper.execution import ExecutionService, PaperExecutionCoordinator
 from .events import is_decision_event, serialize_datetime
 
 
@@ -63,9 +64,18 @@ class RuntimeSession:
         strategy = getattr(self.engine, "strategy", None)
         portfolio = getattr(strategy, "portfolio", None)
         self.portfolio = portfolio
+        capital_context = getattr(strategy, "capital_context", None)
+        self.account = (
+            AccountAggregate(portfolio, capital_context)
+            if portfolio is not None and capital_context is not None else None
+        )
         self.coordinator = (
-            PaperExecutionCoordinator(portfolio, getattr(strategy, "capital_context", None))
+            PaperExecutionCoordinator(portfolio, capital_context)
             if portfolio is not None else None
+        )
+        self.execution = ExecutionService(
+            self.account, self.coordinator, self.store,
+            notify=getattr(self.engine, "on_execution_event", None),
         )
         self.feed_factory, self.broker_factory = feed_factory, broker_factory
         self.client_factory, self.normalize_payload = client_factory, normalize_payload
@@ -318,7 +328,16 @@ class RuntimeSession:
     def _process_bundle_for_source(self, bundle, *, source: str, engine: PaperEngine) -> None:
         """Persist a bundle result, with live execution kept behind the source gate."""
         active_engine = engine
-        result = active_engine.on_bundle(bundle)
+        context = self.account.context() if source == "live" and self.account is not None else None
+        if context is None:
+            result = active_engine.on_bundle(bundle)
+        else:
+            try:
+                result = active_engine.on_bundle(bundle, context=context)
+            except TypeError as exc:
+                if "context" not in str(exc):
+                    raise
+                result = active_engine.on_bundle(bundle)
         decision_at = _bundle_timestamp(bundle.trading_date, bundle.minute)
         timestamp = serialize_datetime(decision_at)
         for event in result.events:
@@ -340,6 +359,22 @@ class RuntimeSession:
         }, f"strategy_evaluation:{source}:{bundle.bundle_id}", timestamp=timestamp)
         for order in result.orders:
             order_decision_id = order.client_order_id.rsplit(":", 1)[0]
+            if source == "live":
+                create_order = getattr(self.store, "create_order_lifecycle", None)
+                if callable(create_order):
+                    create_order(
+                        order.client_order_id,
+                        {
+                            "client_order_id": order.client_order_id,
+                            "instrument": order.instrument.symbol,
+                            "exchange": order.instrument.exchange,
+                            "side": order.side.value,
+                            "quantity": order.quantity,
+                            "role": order.role.value,
+                            "vehicle": order.vehicle,
+                            "entry_order_id": order.entry_order_id,
+                        },
+                    )
             self.store.append_event("ORDER_INTENT", {
                 "decision_id": order_decision_id,
                 "client_order_id": order.client_order_id,
@@ -419,7 +454,15 @@ class RuntimeSession:
             )
             return False
         if self.coordinator is not None:
-            self.coordinator.submit(order)
+            try:
+                self.execution.authorize(order, payload=context, timestamp=timestamp)
+            except ValueError as exc:
+                self.store.append_event(
+                    "RISK_REJECTED",
+                    {**context, "outcome": "risk_rejected", "reason": str(exc)},
+                    f"risk_rejected:{order.client_order_id}", timestamp=timestamp,
+                )
+                return False
             self._persist_strategy_state()
         entry_order_id = order.entry_order_id
         if order.role is OrderRole.EXIT:
@@ -471,9 +514,14 @@ class RuntimeSession:
                                     f"execution_error:submit:{order.client_order_id}", timestamp=timestamp)
             cancel_reservation()
             return False
+        update_order = getattr(self.store, "update_order_lifecycle", None)
         try:
+            if callable(update_order):
+                update_order(order.client_order_id, state="SUBMITTING")
             ack = self.broker.submit(order)
         except Exception as exc:
+            if callable(update_order):
+                update_order(order.client_order_id, state="REJECTED")
             self.store.append_event("EXECUTION_ERROR", {**context,
                                                          "outcome": "execution_error",
                                                          "phase": "submit",
@@ -487,6 +535,8 @@ class RuntimeSession:
                                                "broker_order_id": ack.broker_order_id,
                                                "status": ack.status,
                                                "outcome": "acknowledged"}, f"order_ack:{ack.client_order_id}", timestamp=timestamp)
+        if callable(update_order):
+            update_order(order.client_order_id, state="ACKNOWLEDGED", broker_order_id=ack.broker_order_id)
         try:
             poll_fills = getattr(self.broker, "poll_fills", None)
             if callable(poll_fills):
@@ -650,8 +700,18 @@ class RuntimeSession:
                                                    }}
                                                    if order.role is OrderRole.ENTRY and position is not None
                                                    else {}
-                                               ))}, f"fill:{fill.client_order_id}", timestamp=timestamp)
+                                                       ))}, f"fill:{fill.client_order_id}", timestamp=timestamp)
+            if callable(update_order):
+                update_order(order.client_order_id, state="FILLED", broker_order_id=ack.broker_order_id)
+            self.execution.publish(ExecutionNotification(
+                event_type="FILLED", client_order_id=fill.client_order_id,
+                status="FILLED", quantity=order.quantity,
+                filled_quantity=fill.quantity, price=fill.price,
+                broker_order_id=ack.broker_order_id,
+            ))
         else:
+            if callable(update_order):
+                update_order(order.client_order_id, state="REJECTED", broker_order_id=ack.broker_order_id)
             self.store.append_event("ORDER_UNFILLED", {**context,
                                                         "broker_order_id": ack.broker_order_id,
                                                         "status": ack.status,

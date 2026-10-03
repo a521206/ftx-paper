@@ -1,3 +1,4 @@
 from .coordinator import PaperExecutionCoordinator
+from .service import ExecutionService
 
-__all__ = ["PaperExecutionCoordinator"]
+__all__ = ["ExecutionService", "PaperExecutionCoordinator"]

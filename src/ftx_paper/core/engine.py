@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import cast
 
 from ftx_paper.contracts import MarketBar, OrderIntent
 from .bundles import DecisionBundle
 from .strategy import Strategy, StrategyMetadata
+from .live_decision import LiveDecision
+from .decision_context import DecisionContext
+from .execution_events import ExecutionNotification
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,13 +37,18 @@ class PaperEngine:
         if callable(reset):
             reset()
 
-    def on_bundle(self, bundle: DecisionBundle) -> EngineResult:
+    def on_bundle(self, bundle: DecisionBundle, context: DecisionContext | None = None) -> EngineResult:
         """Evaluate one synchronized minute, then hand orders to execution."""
         self.bars_seen += len(bundle.bars)
         if self.strategy is None or not hasattr(self.strategy, "on_bundle"):
             return EngineResult(events=({"bundle_id": bundle.bundle_id, "minute": bundle.minute,
                                          "bundle_complete": bundle.complete},))
-        decisions = self.strategy.on_bundle(bundle)
+        evaluate = getattr(self.strategy, "evaluate", None)
+        decisions = cast(
+            tuple[LiveDecision, ...],
+            evaluate(bundle, context) if callable(evaluate) and context is not None
+            else self.strategy.on_bundle(bundle),
+        )
         orders = tuple(order for item in decisions if (order := item.order) is not None)
         events = tuple(
             {"event_type": item.event_type, **dict(item.payload)}
@@ -48,6 +57,11 @@ class PaperEngine:
             or item.event_type not in {"REJECTEDDECISION", "SIZING_REJECTED"}
         )
         return EngineResult(orders=orders, events=events)
+
+    def on_execution_event(self, event: ExecutionNotification) -> None:
+        handler = getattr(self.strategy, "on_execution_event", None)
+        if callable(handler):
+            handler(event)
 
     def record_exit(self, **kwargs: object) -> None:
         """Forward a settled exit to strategies that maintain risk-gate state."""

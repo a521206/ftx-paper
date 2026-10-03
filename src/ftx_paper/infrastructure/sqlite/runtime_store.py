@@ -175,6 +175,14 @@ class SqliteRuntimeStore:
                     selected_at TEXT NOT NULL,
                     PRIMARY KEY (exchange, underlying, role)
                 );
+                CREATE TABLE IF NOT EXISTS runtime_orders (
+                    client_order_id TEXT PRIMARY KEY,
+                    state TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    account_revision INTEGER,
+                    broker_order_id TEXT,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
             connection.execute(
@@ -442,6 +450,55 @@ class SqliteRuntimeStore:
             self._event_counts_cache = None
         return inserted
 
+    def create_order_lifecycle(self, client_order_id: str, payload: dict[str, Any], *, state: str = "PROPOSED",
+                               account_revision: int | None = None) -> bool:
+        """Durably register an order before any external broker call."""
+        with sqlite3.connect(self.database) as connection:
+            cursor = connection.execute(
+                "INSERT OR IGNORE INTO runtime_orders(client_order_id, state, payload, account_revision, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (str(client_order_id), str(state),
+                 json.dumps(_json_safe(payload, path="order payload")), account_revision, self._now()),
+            )
+        return cursor.rowcount == 1
+
+    def update_order_lifecycle(self, client_order_id: str, *, state: str,
+                               broker_order_id: str | None = None,
+                               account_revision: int | None = None) -> bool:
+        with sqlite3.connect(self.database) as connection:
+            cursor = connection.execute(
+                "UPDATE runtime_orders SET state=?, broker_order_id=COALESCE(?, broker_order_id), "
+                "account_revision=COALESCE(?, account_revision), updated_at=? WHERE client_order_id=?",
+                (str(state), broker_order_id, account_revision, self._now(), str(client_order_id)),
+            )
+        return cursor.rowcount == 1
+
+    def read_order_lifecycle(self, client_order_id: str) -> dict[str, Any] | None:
+        with sqlite3.connect(self.database) as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                "SELECT * FROM runtime_orders WHERE client_order_id=?", (str(client_order_id),)
+            ).fetchone()
+        if row is None:
+            return None
+        value = dict(row)
+        value["payload"] = json.loads(value["payload"])
+        return value
+
+    def read_in_flight_orders(self) -> list[dict[str, Any]]:
+        with sqlite3.connect(self.database) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                "SELECT * FROM runtime_orders WHERE state IN ('AUTHORIZED', 'SUBMITTING', 'ACKNOWLEDGED', 'PARTIALLY_FILLED') "
+                "ORDER BY updated_at"
+            ).fetchall()
+        result = []
+        for row in rows:
+            value = dict(row)
+            value["payload"] = json.loads(value["payload"])
+            result.append(value)
+        return result
+
     def clear_replay_events(self, session_date: str) -> int:
         """Remove only startup-replay audit rows for one trading date."""
         with sqlite3.connect(self.database) as connection:
@@ -585,6 +642,12 @@ class SqliteRuntimeStore:
             "feed_connected": False,
             "recovered_from": previous_state,
         })
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "UPDATE runtime_orders SET state='RECONCILIATION_REQUIRED', updated_at=? "
+                "WHERE state IN ('AUTHORIZED', 'SUBMITTING', 'ACKNOWLEDGED', 'PARTIALLY_FILLED')",
+                (self._now(),),
+            )
         self.append_event(
             "RUNTIME_RECOVERY",
             {"previous_state": previous_state, "resulting_state": "STOPPED"},
