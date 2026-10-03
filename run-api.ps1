@@ -48,8 +48,8 @@ $paperHome = if ($env:FTX_PAPER_HOME) { $env:FTX_PAPER_HOME } else { Join-Path $
 $env:FTX_PAPER_HOME = $paperHome
 $env:FTX_WEB_HOST = $HostAddress
 $env:FTX_WEB_PORT = [string]$Port
-if (-not $env:FTX_PAPER_RUNTIME_DIR) { $env:FTX_PAPER_RUNTIME_DIR = Join-Path $paperHome "runtime" }
-if (-not $env:FTX_PAPER_AUTH_DB) { $env:FTX_PAPER_AUTH_DB = Join-Path $paperHome "auth\auth.sqlite3" }
+$env:FTX_PAPER_RUNTIME_DIR = Join-Path $paperHome "runtime"
+$env:FTX_PAPER_AUTH_DB = Join-Path $paperHome "auth\auth.sqlite3"
 if ($ConfigPath) { $env:FTX_PAPER_CONFIG_PATH = $ConfigPath }
 
 & $venvPython -c "from ftx_paper.cli import api_main; api_main()"

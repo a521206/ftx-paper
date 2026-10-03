@@ -50,7 +50,7 @@ $paperHome = if ($env:FTX_PAPER_HOME) { $env:FTX_PAPER_HOME } else { Join-Path $
 $env:FTX_PAPER_HOME = $paperHome
 $env:FTX_API_BASE_URL = $ApiBaseUrl
 $env:FTX_UI_PORT = [string]$Port
-if (-not $env:FTX_PAPER_RUNTIME_DIR) { $env:FTX_PAPER_RUNTIME_DIR = Join-Path $paperHome "runtime" }
+$env:FTX_PAPER_RUNTIME_DIR = Join-Path $paperHome "runtime"
 
 & $venvPython -c "from ftx_paper.cli import ui_main; ui_main()"
 exit $LASTEXITCODE
