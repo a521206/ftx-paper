@@ -17,7 +17,7 @@ from ftx_paper.core.scoring import _synthetic_delta_divergence
 from ftx_paper.strategy.config import Session
 from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.strategy import ConfiguredLiveStrategy
-from ftx_paper.capital_config import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE as CAPITAL_CONFIG
+from ftx_paper.core.capital_config import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE as CAPITAL_CONFIG
 
 
 def test_delta_divergence_uses_signed_volume_from_actual_ohlc() -> None:
@@ -75,8 +75,8 @@ def test_paper_portfolio_lifecycle_is_idempotent_and_restorable() -> None:
     portfolio = PortfolioState(2_500_000)
     portfolio.gate_snapshot = {"revision": 4}
     portfolio.quote_provenance = {"entry": "same_minute"}
-    from ftx_paper.capital_config import ResearchCapitalProfile, VehicleLimits
-    from ftx_paper.capital_context import CapitalRuntimeContext
+    from ftx_paper.core.capital_config import ResearchCapitalProfile, VehicleLimits
+    from ftx_paper.core.capital_context import CapitalRuntimeContext
     custom_context = CapitalRuntimeContext(ResearchCapitalProfile(
         vehicle_limits=(
             ("futures", VehicleLimits(3, 120_000.0)),

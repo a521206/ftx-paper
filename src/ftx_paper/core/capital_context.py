@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ftx_paper.capital_config import ResearchCapitalProfile
+from ftx_paper.core.capital_config import ResearchCapitalProfile
 
 
 @dataclass(frozen=True, slots=True)

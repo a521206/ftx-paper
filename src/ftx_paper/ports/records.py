@@ -5,9 +5,6 @@ These records deliberately do not model SQLite rows or API schemas.
 
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Mapping
-
-from ftx_paper.contracts import MarketBar
 
 
 @dataclass(frozen=True, slots=True)

@@ -17,8 +17,8 @@ from .risk_state import RiskGateState
 from .portfolio import PortfolioState
 from .adaptive_stop import adaptive_stop_bp, stop_price
 from .admission import admission_result, build_admission_features
-from ftx_paper.capital_context import CapitalRuntimeContext
-from ftx_paper.strategy.config import (
+from ftx_paper.core.capital_context import CapitalRuntimeContext
+from ftx_paper.core.strategy_config import (
     AFTERNOON_CELL_POLICIES,
     AFTERNOON_ENTRY_MINUTES,
     MORNING_CELL_POLICIES,

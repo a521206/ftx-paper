@@ -7,7 +7,8 @@ The main dependency direction is:
 ```text
 core / contracts / strategy -> no infrastructure-specific code
 application -> core / contracts + ports
-runtime -> core / contracts + broker + runtime store facade
+execution -> core / contracts
+runtime -> core / contracts + broker + execution + runtime store facade
 api -> runtime + runtime store facade
 infrastructure.sqlite -> ports + core / contracts
 ```
@@ -19,9 +20,18 @@ than routing every request through an application use case.
 SQLite connections, SQL statements, filesystem database paths, and database row
 mapping live in `ftx_paper.infrastructure.sqlite`. Application code can use
 typed records and repository protocols from `ftx_paper.ports`. The
-`ftx_paper.runtime.store` module is a compatibility facade for the runtime's
-existing `SqliteRuntimeStore` callers; it is the intentional exception to the
+`ftx_paper.runtime.store` module is the runtime-facing facade for the SQLite
+adapter; API and CLI code use this facade rather than selecting a concrete
+infrastructure implementation. It is the intentional exception to the
 otherwise strict infrastructure boundary.
+
+Strategy policy configuration lives in `ftx_paper.core.strategy_config`.
+`ftx_paper.strategy.config` is retained only as an import compatibility shim,
+so core decision code does not depend on the concrete strategy package.
+
+Capital limits and the immutable runtime capital context live in
+`ftx_paper.core.capital_config` and `ftx_paper.core.capital_context`; they are
+business policy shared by sizing, execution, strategy, and runtime code.
 
 Application use cases that use a unit of work obtain a fresh product for each
 operation. A unit of work commits only when the application explicitly calls
@@ -45,5 +55,6 @@ Replay state transitions and contract/event writes use the persistence rules in
 the SQLite adapter. Callers must not assume that a runtime state mutation and
 its corresponding SQLite write form one rollbackable transaction.
 
-`core/`, `contracts/`, and `strategy/` are existing business packages and are
-covered by the same infrastructure-import checks as `domain/`.
+`core/`, `contracts/`, and `strategy/` are business packages and are covered by
+the same infrastructure-import checks. There is no separate `domain` package;
+the domain model is currently organized across `contracts` and `core`.

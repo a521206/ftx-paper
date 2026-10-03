@@ -9,7 +9,7 @@ def _imports(path: Path) -> str:
 
 
 def test_domain_and_application_do_not_import_sqlite():
-    for package in ("domain", "application", "core", "contracts", "strategy"):
+    for package in ("application", "core", "contracts", "strategy"):
         text = _imports(ROOT / package)
         assert "import sqlite3" not in text
         assert "from sqlite3" not in text

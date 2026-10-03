@@ -3,7 +3,7 @@ from datetime import date, datetime, timezone
 from ftx_paper.infrastructure.sqlite.mappers import (
     auth_token_from_row, contract_from_row, event_from_row, replay_run_from_row,
 )
-from ftx_paper.ports.records import AuthToken, RuntimeContract, StoredEvent
+from ftx_paper.ports.records import AuthToken, StoredEvent
 
 
 def test_event_row_maps_to_typed_record():

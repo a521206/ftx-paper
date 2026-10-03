@@ -11,7 +11,7 @@ from ftx_paper.core import DecisionBundle, EngineResult, PaperEngine
 from ftx_paper.core import CompletedBarAggregator
 from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.runtime import RuntimeSession, RuntimeStore
-from ftx_paper.capital_config import ResearchCapitalProfile
+from ftx_paper.core.capital_config import ResearchCapitalProfile
 from ftx_paper.strategy import ConfiguredLiveStrategy
 import ftx_paper.broker.zerodha as zerodha
 

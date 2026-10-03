@@ -75,7 +75,7 @@ class SqliteRuntimeStore:
         self.initialize()
 
     @classmethod
-    def open_read_only(cls, runtime_dir: str | Path) -> RuntimeStore:
+    def open_read_only(cls, runtime_dir: str | Path) -> SqliteRuntimeStore:
         """Open an existing runtime without creating directories or schema."""
         instance = cls.__new__(cls)
         instance.root = Path(runtime_dir)

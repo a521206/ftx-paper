@@ -8,9 +8,9 @@ from flask import Flask, jsonify, redirect, request
 from typing import Any
 
 from ftx_paper.runtime import ProcessAlreadyRunningError, RuntimeController, RuntimeSession
-from ftx_paper.infrastructure.sqlite.runtime_store import SqliteRuntimeStore
+from ftx_paper.runtime.store import RuntimeStore
 from ftx_paper.runtime.replay_worker import ReplayWorker
-from ftx_paper.capital_config import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
+from ftx_paper.core.capital_config import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
 from ftx_paper.runtime.events import (
     EXECUTION_EVENT_TYPES, RISK_EVENT_TYPES, DecisionTimestampError,
 )
@@ -18,7 +18,7 @@ from ftx_paper.runtime.events import serialize_datetime
 from .schemas import error_payload, openapi_document
 
 
-def create_app(store: SqliteRuntimeStore, zerodha_auth: Any | None = None, auth_token: str | None = None,
+def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token: str | None = None,
                controller: RuntimeController | None = None, session: RuntimeSession | None = None,
                replay_worker: ReplayWorker | None = None,
                capital_profile: ResearchCapitalProfile | None = None) -> Flask:

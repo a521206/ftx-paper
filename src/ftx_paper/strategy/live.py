@@ -4,10 +4,10 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, time
 
 from ftx_paper.contracts import Instrument, MarketBar, OptionType, OrderIntent
-from ftx_paper.capital_config import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
-from ftx_paper.capital_context import CapitalRuntimeContext
+from ftx_paper.core.capital_config import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
+from ftx_paper.core.capital_context import CapitalRuntimeContext
 
-from .config import (
+from ftx_paper.core.strategy_config import (
     AFTERNOON_ENTRY_MINUTES,
     DEFAULT_CONFIG,
     MORNING_ENTRY_MINUTES,

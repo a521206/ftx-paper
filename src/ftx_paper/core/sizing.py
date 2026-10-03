@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ftx_paper.capital_context import CapitalRuntimeContext
+from ftx_paper.core.capital_context import CapitalRuntimeContext
 from ftx_paper.core.risk import RiskAssessment
 
 

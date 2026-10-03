@@ -4,8 +4,6 @@ New application code should depend on ports and a unit of work. This facade is
 kept temporarily for existing runtime/API callers during the migration.
 """
 
-from pathlib import Path
-
 from ftx_paper.infrastructure.sqlite.runtime_store import (
     ProcessAlreadyRunningError,
     SqliteRuntimeStore as _SqliteRuntimeStore,
@@ -13,8 +11,8 @@ from ftx_paper.infrastructure.sqlite.runtime_store import (
 )
 
 
-# Kept as an import compatibility alias for integrations that still import the
-# historical module path. Production code imports the adapter directly.
+# Keep the adapter behind the runtime-facing facade so API and CLI code do not
+# select a persistence implementation themselves.
 RuntimeStore = _SqliteRuntimeStore
 
 __all__ = ["ProcessAlreadyRunningError", "RuntimeStore", "_json_safe"]

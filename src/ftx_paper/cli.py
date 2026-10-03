@@ -7,9 +7,9 @@ from pathlib import Path
 
 from ftx_paper.api import create_app
 from ftx_paper.config import PaperConfig
-from ftx_paper.capital_config import RESEARCH_CAPITAL_PROFILE
+from ftx_paper.core.capital_config import RESEARCH_CAPITAL_PROFILE
 from ftx_paper.runtime import ProcessAlreadyRunningError, RuntimeSession
-from ftx_paper.infrastructure.sqlite.runtime_store import SqliteRuntimeStore
+from ftx_paper.runtime.store import RuntimeStore
 from ftx_paper.strategy import ConfiguredLiveStrategy
 from ftx_paper.core import PaperEngine
 from ftx_paper.ui import create_ui_app
@@ -52,7 +52,7 @@ def api_main() -> None:
     config = PaperConfig.from_env()
     configure_logging(config.runtime_dir)
     capital_profile = RESEARCH_CAPITAL_PROFILE
-    store = SqliteRuntimeStore(config.runtime_dir)
+    store = RuntimeStore(config.runtime_dir)
     try:
         instance_id = store.acquire_process_lease("api")
     except ProcessAlreadyRunningError as exc:
@@ -83,7 +83,7 @@ def api_main() -> None:
 
 def ui_main() -> None:
     config = PaperConfig.from_env()
-    store = SqliteRuntimeStore(config.runtime_dir)
+    store = RuntimeStore(config.runtime_dir)
     try:
         instance_id = store.acquire_process_lease("ui")
     except ProcessAlreadyRunningError as exc:

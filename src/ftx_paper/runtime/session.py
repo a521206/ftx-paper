@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Callable, NotRequired, TypedDict, cast
 from zoneinfo import ZoneInfo
 
 from ftx_paper.broker import Broker, Fill, PaperBroker
-from ftx_paper.capital_config import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
+from ftx_paper.core.capital_config import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
 from ftx_paper.contracts import (
     Instrument, MarketBar, MarketRole, OptionRole, OptionType, OrderRole, OrderSide, normalize_exchange_timestamp, parse_role,
     role_to_key,

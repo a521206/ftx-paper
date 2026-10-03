@@ -4,8 +4,8 @@ from __future__ import annotations
 from ftx_paper.contracts import OrderIntent, OrderRole
 from ftx_paper.core.portfolio import PortfolioState
 from ftx_paper.core.portfolio import PaperPosition
-from ftx_paper.capital_config import ResearchCapitalProfile
-from ftx_paper.capital_context import CapitalRuntimeContext
+from ftx_paper.core.capital_config import ResearchCapitalProfile
+from ftx_paper.core.capital_context import CapitalRuntimeContext
 
 
 class PaperExecutionCoordinator:

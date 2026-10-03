@@ -9,13 +9,13 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderRole, OrderSide, Role, SyntheticFutureQuote, synthetic_future_quote
-from ftx_paper.capital_config import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
+from ftx_paper.core.capital_config import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
 from ftx_paper.core import AggregatorConfig, Cell, CompletedBarAggregator, InstrumentKey, PaperEngine, PortfolioState
 from ftx_paper.core.cost import futures_cost, synthetic_futures_cost
 from ftx_paper.execution import PaperExecutionCoordinator
 from ftx_paper.core.settlement import ExitValidationError, validate_exit_order
 from ftx_paper.strategy import ConfiguredLiveStrategy
-from ftx_paper.strategy.config import (
+from ftx_paper.core.strategy_config import (
     AFTERNOON_ENTRY_MINUTES,
     MORNING_ENTRY_MINUTES,
 )
