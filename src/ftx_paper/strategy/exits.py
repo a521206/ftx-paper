@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
+from typing import cast
 from ftx_paper.contracts import Instrument, OrderIntent, OrderRole, OrderSide
 
 
@@ -120,11 +121,11 @@ class ExitStateMachine:
         except ValueError as exc:
             raise ValueError("exit-state snapshot close_time is invalid") from exc
         machine = cls(
-            trail_distance=snapshot.get("trail_distance"),
-            trail_activation_bp=snapshot.get("trail_activation_bp"),
-            trail_distance_bp=snapshot.get("trail_distance_bp"),
+            trail_distance=cast(float | None, snapshot.get("trail_distance")),
+            trail_activation_bp=cast(float | None, snapshot.get("trail_activation_bp")),
+            trail_distance_bp=cast(float | None, snapshot.get("trail_distance_bp")),
             close_time=parsed_close_time,
-            counter_move_bars=int(snapshot.get("counter_move_bars", 2)),
+            counter_move_bars=int(cast(int, snapshot.get("counter_move_bars", 2))),
         )
         closes = snapshot.get("closes", ())
         if not isinstance(closes, (list, tuple)) or len(closes) > machine.counter_move_bars + 1:

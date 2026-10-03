@@ -9,6 +9,7 @@ from ftx_paper.strategy.protocol import Strategy, StrategyMetadata
 from ftx_paper.strategy.decision import LiveDecision
 from ftx_paper.domain.decision_context import DecisionContext
 from ftx_paper.execution.events import ExecutionNotification
+from ftx_paper.strategy.exits import ExitAction
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,10 +75,11 @@ class PaperEngine:
         if callable(handler):
             handler(**kwargs)
 
-    def on_tick(self, bar: MarketBar):
+    def on_tick(self, bar: MarketBar) -> tuple[ExitAction, ...]:
         """Forward a live tick to the strategy's protective exit state."""
         on_tick = getattr(self.strategy, "on_tick", None)
-        return on_tick(bar) if callable(on_tick) else ()
+        result = on_tick(bar) if callable(on_tick) else ()
+        return cast(tuple[ExitAction, ...], result) if result else ()
 
     def register_entry(self, order: OrderIntent, *, fill_price: float | None = None,
                        entry_fill_time=None, reference_price: float | None = None) -> None:
@@ -96,9 +98,10 @@ class PaperEngine:
                         raise
                     register(order, fill_price=fill_price)
 
-    def on_closed_bar(self, bar: MarketBar):
+    def on_closed_bar(self, bar: MarketBar) -> tuple[ExitAction, ...]:
         handler = getattr(self.strategy, "on_closed_bar", None)
-        return handler(bar) if callable(handler) else ()
+        result = handler(bar) if callable(handler) else ()
+        return cast(tuple[ExitAction, ...], result) if result else ()
 
     def settle_exit(self, exit_order_id: str, *, filled: bool) -> None:
         handler = getattr(self.strategy, "settle_exit", None)

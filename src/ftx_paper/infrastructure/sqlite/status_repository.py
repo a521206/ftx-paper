@@ -21,5 +21,6 @@ class SqliteStatusRepository:
 
     def patch(self, updates):
         current = self.get()
-        current.update(updates)
-        self.update(current)
+        payload = dict(current.payload)
+        payload.update(updates)
+        self.update(payload)

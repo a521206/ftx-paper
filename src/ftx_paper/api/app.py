@@ -7,7 +7,8 @@ from zoneinfo import ZoneInfo
 from flask import Flask, jsonify, redirect, request
 from typing import Any
 
-from ftx_paper.runtime import ProcessAlreadyRunningError, RuntimeSession
+from ftx_paper.infrastructure.sqlite.runtime_store import ProcessAlreadyRunningError
+from ftx_paper.runtime.session import RuntimeSession
 from ftx_paper.runtime.store import RuntimeStore
 from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.application.runtime_operations import RuntimeOperations
@@ -40,6 +41,26 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
         if isinstance(value, (list, tuple)):
             return [json_safe(item) for item in value]
         return value
+
+    def replay_metadata(run: dict[str, Any]) -> dict[str, Any]:
+        result = run.get("result")
+        result = result if isinstance(result, dict) else {}
+        return {
+            "run_id": run.get("run_id"),
+            "status": run.get("status"),
+            "request": run.get("request"),
+            "result_schema_version": result.get("result_schema_version"),
+            "strategy": result.get("strategy"),
+            "configuration": result.get("configuration"),
+            "metadata": result.get("metadata", {}),
+        }
+
+    def incomplete_replay_response(run: dict[str, Any]):
+        return jsonify({
+            "run_id": run.get("run_id"),
+            "status": run.get("status"),
+            "replay_metadata": replay_metadata(run),
+        }), 202
 
     @app.errorhandler(DecisionTimestampError)
     def invalid_decision_timestamp(error: DecisionTimestampError):
@@ -105,7 +126,11 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             run_id = operations.submit_replay(payload)
         except RuntimeError as exc:
             return jsonify(error_payload("replay_queue_full", str(exc))), 409
-        return jsonify(store.read_replay_run(run_id)), 202
+        queued = store.read_replay_run(run_id)
+        if queued is None:
+            return jsonify(error_payload("not_found", "replay not found")), 404
+        queued["replay_metadata"] = replay_metadata(queued)
+        return jsonify(json_safe(queued)), 202
 
     @app.get("/api/v1/replay")
     def list_replays():
@@ -133,17 +158,19 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
         run = store.read_replay_run(run_id)
         if run is None:
             return jsonify(error_payload("not_found", "replay not found")), 404
-        result_raw = run.get("result")
-        result: dict[str, Any] = result_raw if isinstance(result_raw, dict) else {}
-        run["replay_metadata"] = {
-            "run_id": run_id,
-            "status": run.get("status"),
-            "request": run.get("request"),
-            "result_schema_version": result.get("result_schema_version"),
-            "strategy": result.get("strategy"),
-            "configuration": result.get("configuration"),
-            "metadata": result.get("metadata", {}),
-        }
+        result = run.get("result")
+        if isinstance(result, dict):
+            include = {item.strip() for item in request.args.get("include", "").split(",") if item.strip()}
+            invalid = include - {"events", "trace"}
+            if invalid:
+                return jsonify(error_payload("invalid_request", "include supports events and trace only")), 400
+            result = dict(result)
+            if "events" not in include:
+                result.pop("events", None)
+            if "trace" not in include:
+                result.pop("trace", None)
+            run["result"] = result
+        run["replay_metadata"] = replay_metadata(run)
         return jsonify(json_safe(run))
 
     @app.get("/api/v1/replay/<run_id>/trace")
@@ -151,6 +178,8 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
         run = store.read_replay_run(run_id)
         if run is None:
             return jsonify(error_payload("not_found", "replay not found")), 404
+        if run.get("status") not in {"completed", "failed", "cancelled"}:
+            return incomplete_replay_response(run)
         result_raw = run.get("result")
         result: dict[str, Any] = result_raw if isinstance(result_raw, dict) else {}
         return jsonify(json_safe({"run_id": run_id, "metadata": result.get("metadata", {}),
@@ -162,6 +191,8 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
         run = store.read_replay_run(run_id)
         if run is None:
             return jsonify(error_payload("not_found", "replay not found")), 404
+        if run.get("status") not in {"completed", "failed", "cancelled"}:
+            return incomplete_replay_response(run)
         result_raw = run.get("result")
         result: dict[str, Any] = result_raw if isinstance(result_raw, dict) else {}
         events = list(result.get("events", []))
@@ -246,7 +277,11 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
 
     @app.post("/api/v1/runtime/<command>")
     def runtime_command(command: str):
-        actions = {"start": operations.request_start, "stop": operations.request_stop, "restart": operations.request_restart}
+        actions: dict[str, Any] = {
+            "start": operations.request_start,
+            "stop": operations.request_stop,
+            "restart": operations.request_restart,
+        }
         action = actions.get(command)
         if action is None:
             return jsonify({"error": {"code": "unknown_command", "message": command}}), 404
@@ -364,7 +399,7 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
     @app.get("/api/v1/capital")
     def capital():
         status = store.read_status()
-        portfolio = session.portfolio
+        portfolio = session.portfolio if session is not None else None
         if portfolio is not None:
             values = portfolio.capital_snapshot()
             return jsonify({**values, "capital": values["current_equity"], "currency": "INR"})

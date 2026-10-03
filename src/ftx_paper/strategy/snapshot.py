@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping, Sequence
 from datetime import datetime
+from typing import cast
 
 from ftx_paper.contracts import Instrument, OptionType, OrderSide
 from ftx_paper.domain.portfolio import PortfolioState
@@ -151,7 +152,16 @@ def _instrument_from_snapshot(raw: Mapping[str, object]) -> Instrument:
     option_type = raw.get("option_type")
     if option_type is not None and not isinstance(option_type, str):
         raise ValueError("strategy snapshot option_type is invalid")
-    return Instrument(raw["symbol"], raw["exchange"], raw["instrument_type"], raw.get("expiry"), raw.get("strike"), OptionType(option_type) if option_type is not None else None)
+    expiry = raw.get("expiry")
+    strike = raw.get("strike")
+    if expiry is not None and not isinstance(expiry, str):
+        raise ValueError("strategy snapshot expiry is invalid")
+    if strike is not None and (isinstance(strike, bool) or not isinstance(strike, (int, float))):
+        raise ValueError("strategy snapshot strike is invalid")
+    return Instrument(cast(str, raw["symbol"]), cast(str, raw["exchange"]),
+                      cast(str, raw["instrument_type"]), expiry,
+                      float(strike) if strike is not None else None,
+                      OptionType(option_type) if option_type is not None else None)
 
 
 def _position_from_snapshot(raw: Mapping[str, object]) -> PositionState:
@@ -180,14 +190,21 @@ def _position_from_snapshot(raw: Mapping[str, object]) -> PositionState:
     entry_order_id = raw.get("entry_order_id")
     if entry_order_id is not None and not isinstance(entry_order_id, str):
         raise ValueError("strategy snapshot entry_order_id is invalid")
+    cell = raw.get("cell")
+    if cell is not None and not isinstance(cell, str):
+        raise ValueError("strategy snapshot cell is invalid")
+    for field_name in ("entry_price", "stop_price", "quantity"):
+        value = raw[field_name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"strategy snapshot {field_name} is invalid")
     return PositionState(
         _instrument_from_snapshot(instrument_raw), float(raw["entry_price"]), float(raw["stop_price"]),
-        int(raw["quantity"]), OrderSide(raw["side"]), cell=raw.get("cell"),
+        int(raw["quantity"]), OrderSide(raw["side"]), cell=cell,
         exit_mode=str(raw.get("exit_mode", "signal")), entry_fill_time=entry_fill_time,
-        exit_reference_price=float(raw["exit_reference_price"]) if raw.get("exit_reference_price") is not None else None,
-        target_price=float(raw["target_price"]) if raw.get("target_price") is not None else None,
+        exit_reference_price=float(cast(float, raw["exit_reference_price"])) if isinstance(raw.get("exit_reference_price"), (int, float)) else None,
+        target_price=float(cast(float, raw["target_price"])) if isinstance(raw.get("target_price"), (int, float)) else None,
         vehicle=vehicle, synthetic_legs=legs,
-        entry_bar=int(raw["entry_bar"]) if raw.get("entry_bar") is not None else None,
+        entry_bar=int(cast(int, raw["entry_bar"])) if isinstance(raw.get("entry_bar"), int) else None,
         entry_order_id=entry_order_id,
     )
 

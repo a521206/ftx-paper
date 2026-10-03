@@ -4,7 +4,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from math import isfinite
-from typing import Mapping
+from typing import Any, Mapping, cast
 
 from ftx_paper.config import NIFTY_LOT_SIZE
 from ftx_paper.contracts import OrderIntent, OrderRole, OrderSide
@@ -166,7 +166,8 @@ class PortfolioState:
         self.reserve_entry(order, margin_per_lot=margin_per_lot)
         position = PaperPosition(order.client_order_id, order.instrument.symbol, order.side, int(order.quantity),
                                  float(price), str(order.vehicle), order.cell, timestamp,
-                                 tuple(leg.symbol for leg in order.synthetic_legs) if order.synthetic_legs else None,
+                                  (order.synthetic_legs[0].symbol, order.synthetic_legs[1].symbol)
+                                  if order.synthetic_legs and len(order.synthetic_legs) == 2 else None,
                                  synthetic_entry_prices)
         self.positions[order.client_order_id] = position
         self.pending_orders[order.client_order_id] = "filled"
@@ -197,7 +198,7 @@ class PortfolioState:
         self.daily_baseline = self.equity
         self.state_revision += 1
 
-    def settle_exit(self, order: OrderIntent, *, price: float, cost: float = 0.0) -> dict[str, float] | None:
+    def settle_exit(self, order: OrderIntent, *, price: float, cost: float = 0.0) -> dict[str, float | str] | None:
         if order.client_order_id in self.settled_orders:
             return None
         entry_id = order.entry_order_id
@@ -259,10 +260,10 @@ class PortfolioState:
         assert isinstance(capital, Mapping)
         portfolio = cls(float(capital["initial_capital"]))
         portfolio.equity = float(capital.get("current_equity", portfolio.initial_capital))
-        portfolio.peak_equity = float(snapshot.get("peak_equity", portfolio.equity))
-        portfolio.daily_baseline = float(snapshot.get("daily_baseline", portfolio.equity))
-        portfolio.realized_pnl = float(capital.get("realized_pnl", 0.0))
-        portfolio.total_costs = float(snapshot.get("total_costs", 0.0))
+        portfolio.peak_equity = float(cast(Any, snapshot.get("peak_equity", portfolio.equity)))
+        portfolio.daily_baseline = float(cast(Any, snapshot.get("daily_baseline", portfolio.equity)))
+        portfolio.realized_pnl = float(cast(Any, capital.get("realized_pnl", 0.0)))
+        portfolio.total_costs = float(cast(Any, snapshot.get("total_costs", 0.0)))
         raw = snapshot.get("reservations", {})
         if isinstance(raw, Mapping):
             portfolio.reservations = {
@@ -285,8 +286,9 @@ class PortfolioState:
             portfolio.positions = {str(k): PaperPosition(**{**dict(v), "side": OrderSide(dict(v)["side"])}) for k, v in raw.items() if isinstance(v, Mapping)}
         raw = snapshot.get("pending_orders", {})
         portfolio.pending_orders = dict(raw) if isinstance(raw, Mapping) else {}
-        portfolio.settled_orders = {str(v) for v in snapshot.get("settled_orders", [])}
-        portfolio.state_revision = int(snapshot.get("state_revision", 0))
+        settled = snapshot.get("settled_orders", [])
+        portfolio.settled_orders = {str(v) for v in settled} if isinstance(settled, (list, tuple, set)) else set()
+        portfolio.state_revision = int(cast(Any, snapshot.get("state_revision", 0)))
         raw = snapshot.get("gates", {})
         portfolio.gate_snapshot = dict(raw) if isinstance(raw, Mapping) else {}
         raw = snapshot.get("quote_provenance", {})

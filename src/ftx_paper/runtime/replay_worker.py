@@ -6,7 +6,7 @@ import hashlib
 import json
 from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -19,6 +19,7 @@ from ftx_paper.runtime.engine import PaperEngine
 from ftx_paper.execution.cost import futures_cost, synthetic_futures_cost
 from ftx_paper.execution import PaperExecutionCoordinator
 from ftx_paper.execution.settlement import ExitValidationError, validate_exit_order
+from ftx_paper.strategy.exits import ExitAction
 from ftx_paper.strategy import ConfiguredStrategyFactory, StrategyFactory
 from ftx_paper.strategy.config import (
     AFTERNOON_ENTRY_MINUTES,
@@ -291,7 +292,7 @@ class ReplayWorker:
                     )
                     if quote is not None:
                         last_quotes[trade["entry_order_id"]] = quote
-                exit_actions = engine.on_closed_bar(futures_bar)
+                exit_actions = cast(tuple[ExitAction, ...], engine.on_closed_bar(futures_bar))
                 for action in exit_actions:
                     try:
                         open_trade = self._matching_trade(open_trades, action.intent)
@@ -565,6 +566,7 @@ class ReplayWorker:
         if ledger_by_date:
             if last_portfolio is None or last_strategy_metadata is None:
                 raise RuntimeError("replay completed without a strategy session")
+            portfolio = last_portfolio
             final_date = max(ledger_by_date)
             final_row = ledger_by_date[final_date]
             final_row.update({
