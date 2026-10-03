@@ -48,6 +48,29 @@ def test_comparator_only_ignores_explicit_representation_fields():
     assert compare_stage(left, right, stage="input", ignored_value_fields=("implementation_id",)).status == "MATCHED"
 
 
+def test_stage_trace_rejects_duplicate_identities():
+    with pytest.raises(ValueError, match="identities must be unique"):
+        StageTrace("features", (
+            TraceRecord("features", 0, {"minute": "09:15"}, {"vwap": 100.0}),
+            TraceRecord("features", 1, {"minute": "09:15"}, {"vwap": 100.0}),
+        ))
+
+
+def test_harness_rejects_duplicate_or_out_of_order_requested_stages():
+    with pytest.raises(ValueError, match="unique and ordered"):
+        run_harness([], {}, input_fingerprint="fixture-sha",
+                    canonical_runner=lambda *_: (), paper_runner=lambda *_: (),
+                    stages=("input", "input"))
+
+    def reversed_runner(_bars, _context):
+        return (trace("features"), trace("input"))
+
+    with pytest.raises(ValueError, match="out of requested order"):
+        run_harness([], {}, input_fingerprint="fixture-sha",
+                    canonical_runner=reversed_runner, paper_runner=lambda *_: (),
+                    stages=("input", "features"))
+
+
 def test_harness_passes_same_bars_and_context_to_independent_runners():
     seen = []
     source = [{"close": 100.0}]

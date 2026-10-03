@@ -42,6 +42,12 @@ class TraceRecord:
     values: Mapping[str, Any]
     unavailable_fields: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        if not self.stage:
+            raise ValueError("trace record stage must be non-empty")
+        if self.ordinal < 0:
+            raise ValueError("trace record ordinal must be non-negative")
+
 
 @dataclass(frozen=True, slots=True)
 class StageTrace:
@@ -57,6 +63,9 @@ class StageTrace:
             raise ValueError("record stage must match containing stage")
         if tuple(record.ordinal for record in self.records) != tuple(range(len(self.records))):
             raise ValueError("record ordinals must be contiguous and ordered from zero")
+        for index, record in enumerate(self.records):
+            if any(record.identity == earlier.identity for earlier in self.records[:index]):
+                raise ValueError("trace record identities must be unique and ordered")
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +158,20 @@ def run_harness(
     Adapters are called independently and receive identical bar/context objects;
     the harness never imports or dispatches to either strategy implementation.
     """
+    requested_stages = tuple(stages)
+    if len(set(requested_stages)) != len(requested_stages):
+        raise ValueError("requested parity stages must be unique and ordered")
+
+    def validate_runner_order(traces: tuple[StageTrace, ...]) -> None:
+        positions = {stage: index for index, stage in enumerate(requested_stages)}
+        returned_positions = []
+        for trace in traces:
+            if trace.stage not in positions:
+                raise ValueError("runner returned an unrequested stage trace")
+            returned_positions.append(positions[trace.stage])
+        if returned_positions != sorted(returned_positions):
+            raise ValueError("runner returned stage traces out of requested order")
+
     # Independent deep copies prevent one adapter from changing the inputs the
     # other receives while keeping each side's input content identical.
     bars = tuple(input_bars)
@@ -156,12 +179,14 @@ def run_harness(
     canonical_bars, canonical_context = deepcopy(bars), deepcopy(context)
     canonical_input = deepcopy((canonical_bars, canonical_context))
     canonical = tuple(canonical_runner(canonical_bars, canonical_context))
+    validate_runner_order(canonical)
     if (canonical_bars, canonical_context) != canonical_input:
         raise ValueError("canonical runner mutated parity inputs")
 
     paper_bars, paper_context = deepcopy(bars), deepcopy(context)
     paper_input = deepcopy((paper_bars, paper_context))
     paper = tuple(paper_runner(paper_bars, paper_context))
+    validate_runner_order(paper)
     if (paper_bars, paper_context) != paper_input:
         raise ValueError("paper runner mutated parity inputs")
     c_by_stage = {trace.stage: trace for trace in canonical}
@@ -169,7 +194,7 @@ def run_harness(
     if len(c_by_stage) != len(canonical) or len(p_by_stage) != len(paper):
         raise ValueError("runner returned duplicate stage traces")
     comparisons = tuple(compare_stage(c_by_stage.get(stage), p_by_stage.get(stage), stage=stage)
-                        for stage in stages)
+                        for stage in requested_stages)
     return HarnessResult(input_fingerprint, canonical, paper, comparisons)
 
 

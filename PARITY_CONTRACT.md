@@ -197,12 +197,13 @@ and other persistence timestamps must never influence a decision.
   ```
 
   Candidate and accepted events share the same candidate identity. Rejected
-  events add their exact rejection reason. Orders, fills, exits, and
+  events add their normalized rejection reason. Orders, fills, exits, and
   settlements link back to the candidate/decision identity. The underlying
-  date, minute, sequence, cell, event kind, and rejection reason must compare
-  exactly; only the raw ID encoding may differ.
+  date, minute, sequence, cell, event kind, and normalized rejection reason
+  must compare exactly; only raw ID encoding and explicitly diagnostic reason
+  detail may differ.
 
-The fixed-date Layer 4 diagnostic has two source-specific projection rules.
+The fixed-date Layer 4 diagnostic has three source-specific projection rules.
 Canonical raw `parity_capture` session/direction labels are assigned by the
 runner's capture projection; they are not fields emitted by raw event
 extraction. The adapter resolves the active configured policy at the event
@@ -216,13 +217,28 @@ focused test. Neither rule drops or ignores causal candidate fields.
 The current fixed-date canonical `parity_capture` is a raw extraction
 diagnostic, not the canonical policy decision stream. Its `reason` can describe
 an extraction filter; do not compare that value as a decision rejection reason.
-The canonical decision outcome/rejection reason is
-unavailable from this projection and must be captured from the policy flow
-before Layer 4 can pass. Keep capture-filter annotations separately visible in
-diagnostics. The maintained canonical extraction path retains low-score
-candidates; grinding candidates are blocked as a distinct score-stage
-rejection before later session-window and policy gates. A capture-filter
-annotation alone does not prove a decision-level rejection event.
+The active-policy replay projection uses the native policy-flow terminal where
+available and keeps capture-filter annotations separately visible. A
+capture-filter annotation alone does not prove a decision-level rejection event.
+
+Layer 4's comparable population is the active-policy candidate population: a
+candidate is included only when exactly one configured policy is active for its
+cell at the event time. Raw candidates outside every configured session window,
+or without an active policy owner, remain visible in the report but are
+`NOT_APPLICABLE` to decision, risk, sizing, and execution parity. This prevents
+canonical raw extraction candidates from being compared with Paper's
+transition-driven decision events as if they were the same population.
+
+Producer order and causal order are reported separately. Causal alignment uses
+`(session_date, normalized_bar_index, cell)`; Paper's one-based observed
+sequence is projected to the canonical zero-based index for comparison only.
+Source-order differences remain diagnostic and are never hidden by sorting.
+
+Policy rejection reasons compare at the coarsest shared contract level:
+`mr_admission_rejected` and `tr_admission_rejected` are equivalent to their
+Paper predicate-specific admission reasons. The raw detailed Paper reason
+remains diagnostic and is not used to claim a causal mismatch when the
+normalized policy-stage reason matches.
 
 ## Decision output contract
 

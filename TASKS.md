@@ -1,107 +1,33 @@
 # FTX Paper Task List
 
-P0, P9, and the minimal P10 contract are complete for their documented scope.
-Completed work is removed from this active task list; detailed contracts remain
-in `PARITY_CONTRACT.md`. The canonical FTX and `ftx-paper` implementations
-continue to coexist independently.
+The canonical FTX and `ftx-paper` implementations continue to coexist
+independently. Parity claims must be revalidated against the current repository
+state and fixed replay inputs before being marked complete.
 
 ## Open Parity And Coexistence Work
 
 ### Incremental Canonical/Paper Replay Parity Harness
 
-- [x] Layer 1: normalized ordered stage trace contract, comparator, deterministic harness, and focused validation
-- [x] Layer 2: input and session-context parity
-- [x] Layer 3: feature, location, and transition parity
-- [x] Layer 4: candidate-stream parity
-- [x] Layer 5: risk and sizing parity for candidates reaching the sizing stage
-- [x] Layer 6: order, fill, exit, and settlement parity
-- [x] Layer 7: portfolio and ledger parity
+- [x] Layer 1: normalized ordered stage-trace contract, comparator, deterministic harness, and focused validation
+- [x] Layer 2: fixed replay inputs and session-context parity
+- [x] Layer 3: feature, location, transition, and signal-context parity
+- [x] Layer 4: candidate populations and identity parity for active-policy candidates
+- [ ] Layer 5: risk and sizing parity for candidates reaching those stages
+- [ ] Layer 6: order, fill, exit, and settlement parity for candidates reaching execution
+- [ ] Layer 7: portfolio and ledger parity
 - [ ] Layer 8: fixed-input end-to-end replay report
 
-Work stops at the first unresolved mismatch or missing source input. Never
-change canonical behavior or frozen baselines to make Paper appear aligned.
+Work stops at the first unexplained mismatch or missing source input. Never
+change canonical behavior, frozen baselines, runtime stores, or research
+artifacts to make Paper appear aligned.
 
-### Layer 4 Status
-
-Layer 4 candidate parity is complete for the three available full replay dates:
-Sep 3, Sep 15, and Sep 29, 2026. Read-only comparisons report matching input,
-feature, location, transition, candidate identity, count, and shared-field
-results:
-
-- Sep 3: 354 candidates on each side
-- Sep 15: 354 candidates on each side
-- Sep 29: 267 candidates on each side
-
-The Paper expiry calendar was synchronized with the configured canonical
-calendar (417 dates), and the input diagnostic now reports matching PCR values
-and normalized fingerprints on all three dates.
-
-Decision-outcome parity is outside the current diagnostic scope because the
-canonical raw capture does not expose equivalent policy outcomes or rejection
-reasons. This is an explicit limitation, not an unexplained mismatch. No
-canonical behavior, frozen baseline, replay state, or research artifact was
-changed by the parity validation.
-
-### Layer 4 Validation
-
-- `.venv\Scripts\python.exe -m pytest ftx-paper\tests\test_store.py ftx-paper\tests\test_core_boundaries.py ftx-paper\tests\test_parity_trace.py ftx-paper\tests\test_session.py tests\test_compare_candidate_replay.py tests\test_scoring_parity.py -q` — 106 passed
-- `.venv\Scripts\python.exe scripts/ftx/compare_replay_inputs.py` — read-only; inputs matched on all three dates
-- `.venv\Scripts\python.exe scripts/ftx/compare_candidate_replay.py` — read-only; candidate stage matched on all three dates
-- `.venv\Scripts\ruff.exe check ftx-paper\src\ftx_paper\runtime\store.py ftx-paper\src\ftx_paper\core\features.py ftx-paper\src\ftx_paper\core\adaptive_stop.py ftx-paper\src\ftx_paper\core\live_decision.py ftx-paper\src\ftx_paper\core\risk.py ftx-paper\tests\test_store.py ftx-paper\tests\test_core_boundaries.py scripts\ftx\compare_candidate_replay.py tests\test_compare_candidate_replay.py` — passed
-- `git diff --check` — passed
-
-### Layer 5 Status
-
-Layer 5 is complete for the documented sizing-stage scope. Candidates rejected
-before the sizing engine are `capital_risk_not_applicable`; they are not counted
-as missing risk diagnostics. The three available replay dates each contain one
-candidate that reached sizing, and risk ceiling, strategy request, effective
-quantity, and common sizing stages matched on all three. No capital-risk
-rejections occurred in the compared sizing-stage population.
-
-Layer 5 does not claim parity for pre-sizing thesis or policy gates, or for
-capital-risk rejection diagnostics that were not exercised by the fixed dates.
-
-Validation:
-
-- `.venv\Scripts\python.exe -m pytest tests\test_compare_candidate_replay.py ftx-paper\tests\test_core_boundaries.py ftx-paper\tests\test_session.py -q` — 90 passed
-- `.venv\Scripts\ruff.exe check scripts\ftx\compare_candidate_replay.py tests\test_compare_candidate_replay.py ftx-paper\src\ftx_paper\core\live_decision.py` — passed
-- `.venv\Scripts\python.exe scripts\ftx\compare_candidate_replay.py` — read-only; sizing-stage parity matched on all three dates
+Layer 4 scope and normalization rules are defined in `PARITY_CONTRACT.md`.
+The fixed-date report matched active-policy populations at 3/3, 2/2, and 1/1
+for Sep 3, Sep 15, and Sep 29. Layers 5-8 remain `NOT_APPLICABLE` because no
+active-policy candidate reached sizing.
 
 ### Track P11: Coexistence Validation
 
 - [ ] Run the complete holdout replay and achieve zero unexplained differences in required shared execution and settlement fields
 - [ ] Obtain explicit approval for any remaining intentional differences
 - [ ] Record the coexistence-symmetry result, configuration hashes, fixtures, and holdout artifacts
-
-### Layer 6 Status
-
-Layer 6 is complete for the fixed replay execution scope. The read-only
-canonical/Paper comparator matches the one shared execution candidate on Sep 3,
-Sep 15, and Sep 29, including order intent, quantity, fill quantity and price,
-entry and exit timestamps, exit reason, and settlement status. Candidates that
-did not reach execution are excluded as not applicable. Order/fill status labels
-and settlement result payloads are outside this replay parity contract; no
-execution rejection was exercised by these dates.
-
-Validation:
-
-- `.venv\Scripts\python.exe -m pytest tests\test_compare_candidate_replay.py -q` — 5 passed
-- `.venv\Scripts\ruff.exe check scripts\ftx\compare_candidate_replay.py tests\test_compare_candidate_replay.py` — passed
-- `git diff --check` — passed
-- `.venv\Scripts\python.exe scripts\ftx\compare_candidate_replay.py` — Layer 6 matched on all three fixed dates
-
-### Layer 7 Status
-
-Layer 7 is complete for the fixed replay portfolio and ledger scope. Daily P&L,
-realized P&L, ending equity, ending directional exposure, normalized drawdown
-percentage, and stage-scoped rejection counts match on Sep 3, Sep 15, and Sep
-29, 2026. Paper drawdown is normalized from its absolute amount using peak
-equity; early policy rejections remain outside the ledger rejection-count scope.
-
-Validation:
-
-- `.venv\Scripts\python.exe -m pytest tests\test_compare_candidate_replay.py -q` — 7 passed
-- `.venv\Scripts\ruff.exe check scripts\ftx\compare_candidate_replay.py tests\test_compare_candidate_replay.py` — passed
-- `git diff --check` — passed
-- `.venv\Scripts\python.exe scripts\ftx\compare_candidate_replay.py` — Layer 7 matched on all three fixed dates
