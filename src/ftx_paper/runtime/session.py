@@ -20,7 +20,6 @@ from ftx_paper.core.cost import futures_cost
 from ftx_paper.core.settlement import ExitValidationError, validate_exit_order
 from ftx_paper.execution import PaperExecutionCoordinator
 from .events import is_decision_event, serialize_datetime
-from .store import RuntimeStore
 
 
 logger = logging.getLogger("ftx-paper")
@@ -51,7 +50,7 @@ class RuntimeSession:
 
     LIVE_FEED_LEASE = "zerodha-live-feed"
 
-    def __init__(self, store: RuntimeStore, auth: Any, specifications: list[dict[str, object]],
+    def __init__(self, store: Any, auth: Any, specifications: list[dict[str, object]],
                  *, engine: PaperEngine | None = None,
                  capital_profile: ResearchCapitalProfile = RESEARCH_CAPITAL_PROFILE,
                  feed_factory: Callable[..., Any] | None = None, broker_factory: Callable[[Any], Broker] | None = None,

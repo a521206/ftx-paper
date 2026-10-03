@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import sqlite3
 import json
 import os
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
+
+from ftx_paper.ports.records import AuthToken
 
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -15,10 +16,14 @@ IST = ZoneInfo("Asia/Kolkata")
 class ZerodhaAuth:
     """Token persistence and Kite session exchange, isolated from the engine."""
 
-    def __init__(self, token_db: str | Path, api_key: str, api_secret: str) -> None:
+    def __init__(self, token_db: str | Path, api_key: str, api_secret: str, token_repository=None) -> None:
         self.token_db = Path(token_db)
         self.api_key = api_key
         self.api_secret = api_secret
+        if token_repository is None:
+            from ftx_paper.infrastructure.sqlite.auth_token_repository import SqliteTokenRepository
+            token_repository = SqliteTokenRepository(self.token_db)
+        self.token_repository = token_repository
 
     def _client(self) -> Any:
         try:
@@ -45,20 +50,14 @@ class ZerodhaAuth:
         token = str(session.get("access_token", "")).strip()
         if not token:
             raise RuntimeError("Zerodha did not return an access token")
-        self.token_db.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.token_db) as db:
-            db.execute("CREATE TABLE IF NOT EXISTS auth_tokens (provider TEXT PRIMARY KEY, token_date TEXT NOT NULL, access_token TEXT NOT NULL)")
-            db.execute("INSERT INTO auth_tokens VALUES ('zerodha', ?, ?) ON CONFLICT(provider) DO UPDATE SET token_date=excluded.token_date, access_token=excluded.access_token", (datetime.now(IST).date().isoformat(), token))
+        self.token_repository.save(AuthToken("zerodha", datetime.now(IST).date(), token))
 
     def access_token(self) -> str | None:
-        if not self.token_db.exists():
-            return None
-        with sqlite3.connect(self.token_db) as db:
-            row = db.execute("SELECT token_date, access_token FROM auth_tokens WHERE provider='zerodha'").fetchone()
-        return str(row[1]) if row and row[0] == datetime.now(IST).date().isoformat() and row[1] else None
+        stored = self.token_repository.get_valid("zerodha", datetime.now(IST).date())
+        return stored.access_token if stored is not None else None
 
     @classmethod
-    def from_config_path(cls, path: str | Path) -> "ZerodhaAuth":
+    def from_config_path(cls, path: str | Path, *, token_db: str | Path | None = None) -> "ZerodhaAuth":
         """Build auth from standalone config without consulting NiftyZoning."""
         config_path = Path(path)
         values: dict[str, str] = {}
@@ -72,7 +71,7 @@ class ZerodhaAuth:
         api_secret = os.getenv("KITE_API_SECRET", values.get("api_secret", "")).strip()
         if not api_key or not api_secret:
             raise ValueError("Missing Zerodha configuration: api_key, api_secret")
-        token_db = os.getenv("FTX_PAPER_AUTH_DB", values.get("auth_db", "auth.sqlite3"))
-        if not Path(token_db).is_absolute():
-            token_db = str(config_path.parent / token_db)
-        return cls(token_db, api_key, api_secret)
+        resolved_token_db = token_db or os.getenv("FTX_PAPER_AUTH_DB", values.get("auth_db", "auth.sqlite3"))
+        if not Path(resolved_token_db).is_absolute():
+            resolved_token_db = str(config_path.parent / resolved_token_db)
+        return cls(resolved_token_db, api_key, api_secret)

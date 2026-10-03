@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from .store import RuntimeStore
+from typing import Any
 from .session import RuntimeSession
 
 
 class RuntimeController:
     """Serialized lifecycle boundary used by the API."""
 
-    def __init__(self, store: RuntimeStore, session: RuntimeSession) -> None:
+    def __init__(self, store: Any, session: RuntimeSession) -> None:
         self.store, self.session = store, session
 
     def request_start(self) -> None:

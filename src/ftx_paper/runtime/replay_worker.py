@@ -14,7 +14,6 @@ from ftx_paper.core import AggregatorConfig, Cell, CompletedBarAggregator, Instr
 from ftx_paper.core.cost import futures_cost, synthetic_futures_cost
 from ftx_paper.execution import PaperExecutionCoordinator
 from ftx_paper.core.settlement import ExitValidationError, validate_exit_order
-from ftx_paper.runtime.store import RuntimeStore
 from ftx_paper.strategy import ConfiguredLiveStrategy
 from ftx_paper.strategy.config import (
     AFTERNOON_ENTRY_MINUTES,
@@ -51,7 +50,7 @@ def _execution_cost(trade: dict[str, Any]) -> float:
 class ReplayWorker:
     """Bounded in-process replay queue with a fresh engine per job."""
 
-    def __init__(self, store: RuntimeStore, *, capital_profile: ResearchCapitalProfile = RESEARCH_CAPITAL_PROFILE, max_queue_size: int = 8) -> None:
+    def __init__(self, store: Any, *, capital_profile: ResearchCapitalProfile = RESEARCH_CAPITAL_PROFILE, max_queue_size: int = 8) -> None:
         self.store = store
         self.capital_profile = capital_profile
         self._queue: Queue[tuple[str, dict[str, Any], Event]] = Queue(maxsize=max_queue_size)

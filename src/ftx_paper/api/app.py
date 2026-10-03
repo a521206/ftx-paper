@@ -7,7 +7,8 @@ from zoneinfo import ZoneInfo
 from flask import Flask, jsonify, redirect, request
 from typing import Any
 
-from ftx_paper.runtime import ProcessAlreadyRunningError, RuntimeController, RuntimeSession, RuntimeStore
+from ftx_paper.runtime import ProcessAlreadyRunningError, RuntimeController, RuntimeSession
+from ftx_paper.infrastructure.sqlite.runtime_store import SqliteRuntimeStore
 from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.capital_config import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
 from ftx_paper.runtime.events import (
@@ -17,7 +18,7 @@ from ftx_paper.runtime.events import serialize_datetime
 from .schemas import error_payload, openapi_document
 
 
-def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token: str | None = None,
+def create_app(store: SqliteRuntimeStore, zerodha_auth: Any | None = None, auth_token: str | None = None,
                controller: RuntimeController | None = None, session: RuntimeSession | None = None,
                replay_worker: ReplayWorker | None = None,
                capital_profile: ResearchCapitalProfile | None = None) -> Flask:
@@ -53,7 +54,7 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
 
     @app.before_request
     def authenticate():
-        if auth_token is None or request.endpoint == "health":
+        if request.endpoint == "health" or (auth_token is None and request.remote_addr in {"127.0.0.1", "::1"}):
             return None
         header = request.headers.get("Authorization", "")
         if not header.startswith("Bearer ") or header[7:].strip() != auth_token:
