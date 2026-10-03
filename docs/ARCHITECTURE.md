@@ -29,6 +29,14 @@ Strategy policy configuration lives in `ftx_paper.core.strategy_config`.
 `ftx_paper.strategy.config` is retained only as an import compatibility shim,
 so core decision code does not depend on the concrete strategy package.
 
+## Pipeline Alignment Checkpoint
+
+The active Paper strategy was aligned on 2026-10-03 against pipeline commits
+`233a1ce0` (morning R1 policy), `1fa30fbd` and `09fb711c` (afternoon R2
+policy), and `6d958a3d` (09:15-11:15 and 13:15-14:15 session windows).
+This alignment is recorded by Paper commit `31782a4` (`Align active paper
+strategy with pipeline`).
+
 Capital limits and the immutable runtime capital context live in
 `ftx_paper.core.capital_config` and `ftx_paper.core.capital_context`; they are
 business policy shared by sizing, execution, strategy, and runtime code.
