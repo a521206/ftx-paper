@@ -6,7 +6,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $packageRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$venvPython = Join-Path (Split-Path -Parent $packageRoot) ".venv\Scripts\python.exe"
+$venvPython = Join-Path $packageRoot ".venv\Scripts\python.exe"
 
 if (-not (Test-Path -LiteralPath $venvPython)) {
     throw "Python virtual environment not found: $venvPython"
@@ -46,9 +46,11 @@ function Stop-ExistingUiProcess {
 Stop-ExistingUiProcess -PythonPath $venvPython
 
 $env:PYTHONPATH = Join-Path $packageRoot "src"
+$paperHome = if ($env:FTX_PAPER_HOME) { $env:FTX_PAPER_HOME } else { Join-Path $env:LOCALAPPDATA "ftx-paper" }
+$env:FTX_PAPER_HOME = $paperHome
 $env:FTX_API_BASE_URL = $ApiBaseUrl
 $env:FTX_UI_PORT = [string]$Port
-$env:FTX_PAPER_RUNTIME_DIR = Join-Path $packageRoot "data\runtime\ftx-paper"
+if (-not $env:FTX_PAPER_RUNTIME_DIR) { $env:FTX_PAPER_RUNTIME_DIR = Join-Path $paperHome "runtime" }
 
 & $venvPython -c "from ftx_paper.cli import ui_main; ui_main()"
 exit $LASTEXITCODE
