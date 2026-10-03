@@ -10,9 +10,10 @@ from typing import Any, cast
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderRole, OrderSide, Role, SyntheticFutureQuote, synthetic_future_quote
+from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderRole, OrderSide, Role, SyntheticFutureQuote, role_to_key, synthetic_future_quote
 from ftx_paper.domain.capital import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE, CapitalRuntimeContext
-from ftx_paper.market import AggregatorConfig, Cell, CompletedBarAggregator, InstrumentKey
+from ftx_paper.market import AggregatorConfig, Cell, CompletedBarAggregator, InstrumentKey, LocationDetector
+from ftx_paper.market.features import option_pcr_at_event, vix_open_and_event
 from ftx_paper.domain import AccountAggregate, PortfolioState
 from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.runtime.engine import PaperEngine
@@ -235,6 +236,7 @@ class ReplayWorker:
         dates = [session_date]
         all_events: list[dict[str, Any]] = []
         trace: list[dict[str, Any]] = []
+        unavailable_fields: set[str] = set()
         diagnostic_trades: list[dict[str, Any]] = []
         bars_seen = 0
         initial_capital = self.capital_profile.initial_capital
@@ -297,6 +299,10 @@ class ReplayWorker:
             # Each date gets a fresh position/risk session while cumulative
             # capital is carried by the authoritative PortfolioState.
             aggregator = self._aggregator(bars)
+            trace_detector = LocationDetector()
+            trace_detector.reset(prior_day_high=prior_day_high, prior_day_low=prior_day_low)
+            trace_vix_history: list[MarketBar] = []
+            trace_vix_open: float | None = None
             open_trades: list[dict[str, Any]] = []
             # Synthetic is a reporting-only view of the accepted futures
             # decision.  Keep its diagnostic lifecycle separate so it cannot
@@ -310,6 +316,51 @@ class ReplayWorker:
                 if bundle is None:
                     continue
                 futures_bar = bundle.bars[MarketRole.FUTURES]
+                trace_snapshot = trace_detector.observe(futures_bar)
+                trace_features: dict[str, Any] = {}
+                trace_locations: list[str] = []
+                trace_transitions: list[dict[str, str]] = []
+                trace_unavailable: list[str] = []
+                current_vix = bundle.bars.get(MarketRole.VIX) or (
+                    bundle.supporting_inputs or {}
+                ).get("bars", {}).get(MarketRole.VIX)
+                if current_vix is not None:
+                    trace_vix_history.append(current_vix)
+                    opening, _ = vix_open_and_event(tuple(trace_vix_history), current_vix)
+                    if opening is not None:
+                        trace_vix_open = opening
+                if trace_snapshot is not None:
+                    trace_features = {
+                        "vwap": trace_snapshot.features.vwap,
+                        "session_high": trace_snapshot.features.session_high,
+                        "session_low": trace_snapshot.features.session_low,
+                        "opening_range_high": trace_snapshot.features.opening_range_high,
+                        "opening_range_low": trace_snapshot.features.opening_range_low,
+                        "atr": trace_snapshot.features.atr,
+                        "prior_day_high": trace_snapshot.features.prior_day_high,
+                        "prior_day_low": trace_snapshot.features.prior_day_low,
+                        "vix": current_vix.close if current_vix is not None else None,
+                        "vix_open": trace_vix_open,
+                        "pcr": self._bundle_pcr(bundle, effective_expiry_dates),
+                    }
+                    trace_locations = [item.value for item in trace_snapshot.locations]
+                    trace_transitions = [
+                        {"reference": item.reference.value, "kind": item.kind.value,
+                         "from": item.from_side.value, "to": item.to_side.value}
+                        for item in trace_snapshot.transitions
+                    ]
+                    trace_unavailable = [key for key, value in trace_features.items() if value is None]
+                    unavailable_fields.update(trace_unavailable)
+                trace_bar_index = bars_seen + 1
+                trace.append({
+                    "date": date,
+                    "bar_index": trace_bar_index,
+                    "timestamp": futures_bar.timestamp.isoformat(),
+                    "features": trace_features,
+                    "locations": trace_locations,
+                    "transitions": trace_transitions,
+                    "unavailable_fields": trace_unavailable,
+                })
                 # Synthetic contract selection is anchored to the spot/index
                 # level, matching the Paper entry contract rule. Futures is
                 # still the decision and exit-state instrument.
@@ -445,17 +496,6 @@ class ReplayWorker:
                 bars_seen += 1
                 result_events = [{**event, "source": "replay", "session_date": date} for event in result.events]
                 all_events.extend(result_events)
-                for event in result_events:
-                    if "feature_values" not in event and "locations" not in event and "transitions" not in event:
-                        continue
-                    trace.append({
-                        "date": date,
-                        "timestamp": event.get("decision_at") or futures_bar.timestamp.isoformat(),
-                        "bar_index": bars_seen,
-                        "features": event.get("feature_values", {}),
-                        "locations": event.get("locations", []),
-                        "transitions": event.get("transitions", []),
-                    })
                 for order in result.orders:
                     all_events.append({"event_type": "ORDER_INTENT",
                                        "decision_id": order.client_order_id.rsplit(":", 1)[0],
@@ -714,7 +754,9 @@ class ReplayWorker:
             "decision_trace_schema_version": 1,
             "decision_trace": normalized_decisions,
             "trace_schema_version": 1,
+            "trace_bar_index_base": 1,
             "trace": trace,
+            "unavailable_fields": sorted(unavailable_fields),
             "first_divergent_stage": None,
             # Diagnostic-only trades live inside the replay run result. They
             # are never written to runtime_events, the broker ledger, or the
@@ -881,6 +923,21 @@ class ReplayWorker:
     def _dates(self) -> list[str]:
         return self.store.read_market_dates()
 
+    @staticmethod
+    def _bundle_pcr(bundle: Any, expiry_dates: Any) -> float | None:
+        supporting = bundle.supporting_inputs or {}
+        bars = supporting.get("bars", {})
+        sources = supporting.get("sources", {})
+        if not isinstance(bars, dict):
+            return None
+        if isinstance(sources, dict):
+            bars = {
+                key: bar for key, bar in bars.items()
+                if sources.get(role_to_key(key) if isinstance(key, (MarketRole, OptionRole)) else str(key), "same_minute") == "same_minute"
+            }
+        futures = bundle.bars.get(MarketRole.FUTURES)
+        return option_pcr_at_event(bars, futures, expiry_dates=expiry_dates) if futures is not None else None
+
     def _prior_day_levels(
         self, session_date: str, available_dates: list[str] | None = None,
     ) -> tuple[float | None, float | None]:
@@ -903,6 +960,16 @@ class ReplayWorker:
         if not futures:
             return None, None
         prior_date = date_type.fromisoformat(prior[-1])
+        target_rows = self.store.read_market_bars(session_date)
+        target_expiries = sorted({
+            str(row["expiry"])[:10] for row in target_rows
+            if str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
+            and row.get("expiry") and str(row["expiry"])[:10] >= session_date
+        })
+        if target_expiries:
+            matching = [row for row in futures if str(row.get("expiry", ""))[:10] == target_expiries[0]]
+            if matching:
+                futures = matching
         contracts: dict[date_type, list[dict[str, Any]]] = {}
         for row in futures:
             expiry = row.get("expiry")
@@ -920,10 +987,18 @@ class ReplayWorker:
             # Never silently fall back to an expired contract when replay
             # lacks the preceding session's active futures input.
             return None, None
-        return (
-            max(float(row["high"]) for row in futures),
-            min(float(row["low"]) for row in futures),
-        )
+        session_futures = []
+        for row in futures:
+            try:
+                timestamp = datetime.fromisoformat(str(row["minute"])).astimezone(IST)
+                minute = timestamp.hour * 60 + timestamp.minute
+            except (KeyError, ValueError):
+                continue
+            if SESSION_OPEN_MINUTES <= minute <= SESSION_CLOSE_MINUTES:
+                session_futures.append(row)
+        if not session_futures:
+            return None, None
+        return max(float(row["high"]) for row in session_futures), min(float(row["low"]) for row in session_futures)
 
     def _bars(self, session_date: str) -> tuple[MarketBar, ...]:
         rows = self.store.read_market_bars(session_date)

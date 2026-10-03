@@ -111,7 +111,7 @@ class Cell:
 
 @dataclass(frozen=True, slots=True)
 class LocationFeatures:
-    vwap: float
+    vwap: float | None
     session_high: float
     session_low: float
     atr: float
@@ -142,12 +142,7 @@ def _features(prefix: tuple[MarketBar, ...], *, opening_range_bars: int, atr_win
         typical_price = (bar.high + bar.low + bar.close) / 3.0
         volume += bar_volume
         weighted_typical += typical_price * bar_volume
-    if volume > 0:
-        vwap = weighted_typical / volume
-    else:
-        # Some broker replay bars omit volume. Keep the causal feature path
-        # usable with a deterministic typical-price mean in that case.
-        vwap = sum((bar.high + bar.low + bar.close) / 3.0 for bar in session) / len(session)
+    vwap = weighted_typical / volume if volume > 0 else None
     ranges = [bar.high - bar.low for bar in session]
     atr = sum(ranges[-atr_window:]) / len(ranges[-atr_window:])
     opening = session[:opening_range_bars]
@@ -171,7 +166,7 @@ def detect_all_locations(
     """Return every location active on the current close in canonical order."""
     close, atr = current_close, features.atr
     found: list[Location] = []
-    if (
+    if features.vwap is not None and (
         vwap_zone_active is True
         or vwap_zone_active is None
         and close > 0
@@ -251,7 +246,7 @@ class LocationDetector:
         features = _features(prefix, opening_range_bars=self.opening_range_bars, atr_window=self.atr_window,
                              prior_day_high=self._prior_day_high, prior_day_low=self._prior_day_low)
         transitions: list[LocationTransition] = []
-        if len(prefix) >= 2:
+        if len(prefix) >= 2 and features.vwap is not None:
             current_vwap_side = _side(current.close, features.vwap, 0.25)
             if self._vwap_side is None:
                 self._vwap_side = current_vwap_side
@@ -298,7 +293,10 @@ class LocationDetector:
                     transitions.append(LocationTransition(reference, kind, stable, pending))
                     self._prior_stable[reference] = pending
         cell = Cell(*detected_locations) if detected_locations else None
-        canonical_locations = cell.ordered_locations if cell is not None else ()
+        # Keep every raw match in canonical order for the Layer 3 trace. Cell
+        # normalization remains policy-facing and may intentionally prune
+        # implied extremes.
+        canonical_locations = tuple(detected_locations)
         snapshot = LocationSnapshot(features, canonical_locations, cell, tuple(transitions))
         self._bars.append(current)
         return snapshot

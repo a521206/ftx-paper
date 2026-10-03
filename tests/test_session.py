@@ -87,6 +87,34 @@ def test_replay_seeds_prior_day_futures_levels(tmp_path):
     assert worker._prior_day_levels("2026-01-02") == (110.0, 90.0)
 
 
+def test_replay_trace_has_one_causal_record_per_futures_bar(tmp_path):
+    store = RuntimeStore(tmp_path / "trace")
+    instrument = Instrument("NIFTY26JANFUT", "NFO", "FUTURES", "2026-01-29")
+    bars = tuple(
+        MarketBar(
+            instrument,
+            datetime(2026, 1, 2, 3, 45 + index, tzinfo=timezone.utc),
+            100 + index, 101 + index, 99 + index, 100 + index,
+            10,
+        )
+        for index in range(3)
+    )
+    store.append_market_bars(bars, source="fixture")
+    worker = ReplayWorker(store)
+
+    result = worker._execute({"session_date": "2026-01-02", "vehicles": ["futures"]}, Event())
+    trace = result["trace"]
+
+    assert result["trace_bar_index_base"] == 1
+    assert len(trace) == 3
+    assert len({(item["date"], item["bar_index"]) for item in trace}) == 3
+    assert trace[0]["features"] == {}
+    assert trace[1]["features"] == {}
+    assert trace[2]["features"]["session_high"] == 102.0
+    assert trace[2]["locations"] == ["session_high"]
+    assert trace[0]["transitions"] == []
+
+
 def test_replay_prior_day_levels_use_nearest_unexpired_futures_contract(tmp_path):
     store = RuntimeStore(tmp_path / "rollover-context")
     store.append_market_bars((
