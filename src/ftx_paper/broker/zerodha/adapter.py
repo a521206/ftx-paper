@@ -9,6 +9,8 @@ import threading
 import time
 from zoneinfo import ZoneInfo
 
+from requests import exceptions as requests_exceptions
+
 from ftx_paper.broker.protocol import Fill
 from ftx_paper.contracts import (
     Instrument, MarketBar, MarketRole, OptionType, OrderAck, OrderIntent, OrderSide, Role,
@@ -20,6 +22,9 @@ IST = ZoneInfo("Asia/Kolkata")
 HISTORICAL_REQUEST_INTERVAL_SECONDS = 0.5
 HISTORICAL_RATE_LIMIT_RETRIES = 3
 HISTORICAL_RATE_LIMIT_BACKOFF_SECONDS = 1.0
+HISTORICAL_TRANSPORT_RETRIES = 3
+HISTORICAL_TRANSPORT_BACKOFF_SECONDS = 1.0
+HISTORICAL_MAX_RETRY_AFTER_SECONDS = 60.0
 _historical_rate_limit_lock = threading.Lock()
 _next_historical_request_at = 0.0
 logger = logging.getLogger(__name__)
@@ -232,9 +237,19 @@ def _retry_after_seconds(exc: Exception) -> float | None:
         return None
     value = headers.get("Retry-After") or headers.get("retry-after")
     try:
-        return max(0.0, float(value)) if value is not None else None
+        return min(HISTORICAL_MAX_RETRY_AFTER_SECONDS, max(0.0, float(value))) if value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _historical_retry_delay(exc: Exception, attempt: int) -> float | None:
+    """Return a bounded retry delay for recoverable historical-data failures."""
+    if _is_rate_limit_error(exc):
+        retry_after = _retry_after_seconds(exc)
+        return retry_after if retry_after is not None else HISTORICAL_RATE_LIMIT_BACKOFF_SECONDS * (2**attempt)
+    if isinstance(exc, (requests_exceptions.ConnectionError, requests_exceptions.Timeout)):
+        return HISTORICAL_TRANSPORT_BACKOFF_SECONDS * (2**attempt)
+    return None
 
 
 def classify_runtime_roles(instruments: list[ZerodhaInstrument]) -> RuntimeRoles:
@@ -267,7 +282,8 @@ def load_startup_backfill(client: Any, instruments: list[ZerodhaInstrument], *, 
         if _is_index_symbol(item["symbol"]):
             instrument_type = "INDEX"
         rows = None
-        for attempt in range(HISTORICAL_RATE_LIMIT_RETRIES + 1):
+        max_retries = max(HISTORICAL_RATE_LIMIT_RETRIES, HISTORICAL_TRANSPORT_RETRIES)
+        for attempt in range(max_retries + 1):
             _reserve_historical_request_slot()
             try:
                 rows = client.historical_data(
@@ -276,16 +292,23 @@ def load_startup_backfill(client: Any, instruments: list[ZerodhaInstrument], *, 
                 )
                 break
             except Exception as exc:
-                if not _is_rate_limit_error(exc) or attempt >= HISTORICAL_RATE_LIMIT_RETRIES:
+                retry_delay = _historical_retry_delay(exc, attempt)
+                retry_limit = (
+                    HISTORICAL_RATE_LIMIT_RETRIES
+                    if _is_rate_limit_error(exc)
+                    else HISTORICAL_TRANSPORT_RETRIES
+                )
+                if retry_delay is None or attempt >= retry_limit:
                     if _is_rate_limit_error(exc):
                         raise RuntimeError(
                             "Zerodha historical API rate limit exceeded after bounded retries"
                         ) from exc
                     raise
-                delay = _retry_after_seconds(exc)
-                if delay is None:
-                    delay = HISTORICAL_RATE_LIMIT_BACKOFF_SECONDS * (2**attempt)
-                time.sleep(delay)
+                logger.warning(
+                    "Transient Zerodha historical-data failure for %s; retrying in %.1fs (%d/%d): %s",
+                    item["symbol"], retry_delay, attempt + 1, retry_limit, exc,
+                )
+                time.sleep(retry_delay)
         for row in rows or ():
             timestamp = row.get("date")
             parsed = normalize_exchange_timestamp(timestamp)

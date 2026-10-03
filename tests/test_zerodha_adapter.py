@@ -2,8 +2,13 @@ from datetime import date, datetime, timedelta, timezone
 import logging
 
 import pytest
+from requests import exceptions as requests_exceptions
 
-from ftx_paper.broker.zerodha.adapter import discover_option_surface_contracts, resolve_instruments
+from ftx_paper.broker.zerodha.adapter import (
+    discover_option_surface_contracts,
+    load_startup_backfill,
+    resolve_instruments,
+)
 from ftx_paper.runtime import RuntimeStore
 
 
@@ -88,3 +93,35 @@ def test_resolve_instruments_uses_persisted_underlying_contract(tmp_path):
     )
 
     assert result[0]["symbol"] == "NIFTY26OCTFUT"
+
+
+def test_load_startup_backfill_retries_transient_connection_reset(monkeypatch):
+    attempts = 0
+
+    class Client:
+        def historical_data(self, *_args, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                raise requests_exceptions.ConnectionError("remote reset")
+            return []
+
+    monkeypatch.setattr(
+        "ftx_paper.broker.zerodha.adapter.time.sleep", lambda _seconds: None,
+    )
+    monkeypatch.setattr(
+        "ftx_paper.broker.zerodha.adapter._reserve_historical_request_slot",
+        lambda: None,
+    )
+
+    result = load_startup_backfill(Client(), [{
+        "instrument_token": 1,
+        "exchange": "NSE",
+        "symbol": "NIFTY",
+        "tradingsymbol": "NIFTY",
+        "instrument_type": "INDEX",
+        "role": None,
+    }])
+
+    assert result == ()
+    assert attempts == 3

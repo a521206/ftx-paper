@@ -10,7 +10,7 @@ requires-python = ">=3.14"
 dependencies = ["flask>=3.0", "tzdata>=2024.1"]
 
 [project.optional-dependencies]
-zerodha = ["kiteconnect>=5", "websockets>=13"]
+zerodha = ["kiteconnect>=5", "websockets>=13", "requests>=2.31"]
 
 [project.scripts]
 ftx-paper-api = "ftx_paper.cli:api_main"
