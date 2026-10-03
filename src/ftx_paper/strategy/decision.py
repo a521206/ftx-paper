@@ -10,7 +10,10 @@ from ftx_paper.config import NIFTY_LOT_SIZE
 from ftx_paper.contracts import MarketBar, MarketRole, OptionRole, OrderIntent, OrderRole, Role, synthetic_future_quote, role_to_key
 from ftx_paper.execution.cost import FUTURES_RTD_COST_PER_LOT
 from ftx_paper.market.features import option_pcr_at_event, vix_open_and_event
-from ftx_paper.market.location import Cell, LocationDetector, TransitionPattern, transition_patterns_allow
+from ftx_paper.market.location import (
+    Cell, Location, LocationDetector, TransitionKind, TransitionPattern,
+    transition_patterns_allow,
+)
 from .risk import RiskConfig, RiskEngine, VehicleRiskLimits
 from .sizing import SizingPipeline, SizingPipelineInput
 from .risk_state import RiskGateState
@@ -327,13 +330,22 @@ class IndependentLiveDecisionEngine:
                           "prior_day_low": features.prior_day_low,
                           "vix": vix_bar.close, "vix_open": self._vix_open,
                           "pcr": pcr}
-        if location_snapshot.cell is None:
+        cell = location_snapshot.cell
+        if cell is None and any(
+            transition.reference is Location.VWAP_ZONE
+            and transition.kind in {TransitionKind.RECLAIM, TransitionKind.REJECT}
+            for transition in location_snapshot.transitions
+        ):
+            # Canonical emits a VWAP candidate for a reclaim/reject even when
+            # the current close is no longer inside the VWAP zone.
+            cell = Cell(Location.VWAP_ZONE)
+        if cell is None:
             return ()
         # Policy cells are canonical simultaneous-location composites. Paper
         # must require the detected composite to match exactly; subset
         # matching would accept session_high+or_high when VWAP is also active.
         configured = _configured_policies_for_cell(
-            self._cell_policies, decision_session, location_snapshot.cell,
+            self._cell_policies, decision_session, cell,
         )
         score_factors = build_admission_features(
             prior, futures, pcr=pcr, vix_open=float(self._vix_open),
@@ -343,7 +355,7 @@ class IndependentLiveDecisionEngine:
         score_setup_type, score_multiplier = "Accepted", 1.0
         sequence = len(self._futures)
         events = []
-        policies = configured or [(location_snapshot.cell, None)]
+        policies = configured or [(cell, None)]
         session_selected = self._session_selected(decision_session)
         for cell, cell_policy in policies:
             direction = cell_policy.direction.value.lower() if cell_policy is not None else "NONE"
