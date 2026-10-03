@@ -1,8 +1,27 @@
-# ftx-paper deployment and upgrades
+# ftx-paper Deployment
 
-`ftx-paper` is deployed independently of NiftyZoning. Install it into its own
+`ftx-paper` is deployed independently of NiftyZoning. Install it in its own
 virtual environment and run the API and UI as separate processes. The API owns
 one in-process `RuntimeSession`; do not launch a separate market process.
+
+## Installation
+
+Install the base package for the API and UI:
+
+```text
+pip install ftx-paper
+```
+
+Install the optional Zerodha dependencies when using the live Zerodha feed or
+login flow:
+
+```text
+pip install "ftx-paper[zerodha]"
+```
+
+The package exposes `ftx-paper-api` and `ftx-paper-ui` entry points. The local
+PowerShell wrappers (`run-api.ps1` and `run-ui.ps1`) instead use the repository
+`.venv` and source tree, and are intended for local Windows startup.
 
 ## Configuration
 
@@ -20,10 +39,15 @@ FTX_UI_PORT=8502
 ```
 
 Keep `FTX_PAPER_HOME`, the runtime directory, and the auth database on
-persistent storage. Never place broker secrets in source control.
-
-For local setup, copy `.env.example` into your service environment and change
+persistent storage. Never place broker secrets in source control. For local
+setup, copy `.env.example` into the service environment and change
 `FTX_PAPER_AUTH_DB` to a writable persistent location.
+
+The supported deployment is loopback-only. The API intentionally permits
+loopback requests without a bearer token, and the UI is presentation-only and
+calls the API directly. Remote access, application-level API tokens, and
+browser-managed credentials are outside the current deployment model; do not
+bind the API to a public interface.
 
 ## Processes
 
@@ -32,25 +56,23 @@ ftx-paper-api     # REST API and runtime orchestration
 ftx-paper-ui      # presentation-only dashboard
 ```
 
-The API starts and stops the in-process session directly. An interrupted
-session is returned to `STOPPED` automatically; the interruption is retained
-in the audit log. Deploy one API instance per runtime state directory.
+Deploy one API instance per runtime state directory. The process lease prevents
+multiple API instances from owning the same runtime directory. An interrupted
+session is returned to `STOPPED` on the next API startup and the interruption is
+retained in the audit log.
 
-For local Windows startup, run `.\run-api.ps1` for the API and `.\run-ui.ps1` for the dashboard. The API defaults to port 8501 and the UI to port 8502. Override ports with `-Port`; override the UI API target with `-ApiBaseUrl`.
+For local Windows startup, run `./run-api.ps1` for the API and `./run-ui.ps1`
+for the dashboard. The API defaults to port 8501 and the UI to port 8502.
+Override ports with `-Port`; override the UI API target with `-ApiBaseUrl`.
 
-## Upgrade procedure
+## Upgrade Procedure
 
 1. Stop the runtime session and confirm it has reached `STOPPED`.
 2. Back up the runtime and auth SQLite databases.
-3. Install the new `ftx-paper` wheel in the package environment.
+3. Install the new wheel in the package environment, including the `zerodha` extra when required.
 4. Start the API and verify `/api/v1/health` and `/api/v1/openapi.json`.
-5. Start the runtime session and optionally inspect recovery/audit events.
+5. Start the runtime session and inspect recovery or audit events if the previous process was interrupted.
 6. Start the UI and verify runtime, capital, positions, trades, and events.
 
 Rollback uses the previous wheel against the backed-up runtime data. Do not
 delete or recreate the runtime database during an upgrade.
-# Deployment
-
-Run `ftx-paper-api`. The API process contains the live paper runtime; deploy
-one instance per runtime state directory. Zerodha credentials and instrument
-configuration must be available to that process.

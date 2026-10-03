@@ -1,32 +1,49 @@
-# Dependency Boundaries
+# Architecture
 
-The dependency direction is:
+## Dependency Boundaries
+
+The main dependency direction is:
 
 ```text
-domain -> nothing infrastructure-specific
-application -> domain + ports
-runtime -> application + ports
-infrastructure -> domain + ports
-api -> application
+core / contracts / strategy -> no infrastructure-specific code
+application -> core / contracts + ports
+runtime -> core / contracts + broker + runtime store facade
+api -> runtime + runtime store facade
+infrastructure.sqlite -> ports + core / contracts
 ```
 
-SQLite, SQL statements, filesystem database paths, and database row types are
-confined to `ftx_paper.infrastructure.sqlite`. Application code exchanges
-typed records and repository protocols from `ftx_paper.ports`.
+`application.composition` is the wiring boundary that selects the SQLite
+adapters. The API currently calls runtime and store services directly rather
+than routing every request through an application use case.
 
-Each API request, feed callback, and replay job obtains a fresh
-`UnitOfWorkFactory()` product. A unit of work commits only when the application
-explicitly calls `commit`; exceptions roll back and the connection is always
-closed. Nested transactions are not supported. Network calls stay outside
-write transactions.
+SQLite connections, SQL statements, filesystem database paths, and database row
+mapping live in `ftx_paper.infrastructure.sqlite`. Application code can use
+typed records and repository protocols from `ftx_paper.ports`. The
+`ftx_paper.runtime.store` module is a compatibility facade for the runtime's
+existing `SqliteRuntimeStore` callers; it is the intentional exception to the
+otherwise strict infrastructure boundary.
 
-Engine, portfolio, and broker mutations cannot be rolled back by SQLite. The
-runtime persists a committed checkpoint before advancing in-memory state; a
-commit failure stops processing and recovery reconstructs state from the last
-checkpoint. Contract replacement and its `CONTRACT_CHANGED` event remain one
-atomic operation. Status patching uses a database transaction, not only an
-instance-local lock. Replay transitions are compare-and-set operations, so
-terminal states cannot be overwritten by racing workers.
+Application use cases that use a unit of work obtain a fresh product for each
+operation. A unit of work commits only when the application explicitly calls
+`commit`; exceptions roll back and the connection is always closed. Nested
+transactions are not supported.
+
+The current runtime and API also use `SqliteRuntimeStore` directly. Store
+operations use short-lived SQLite connections, and status read/modify/write
+patches are serialized by an `RLock` within one store instance. The process
+lease prevents two API processes from owning the same runtime directory, but
+the status lock is not a cross-process compare-and-set mechanism.
+
+Engine, portfolio, and broker mutations are in memory and are not rolled back
+by SQLite. Runtime processing persists events and status after state changes;
+there is no full engine/portfolio checkpoint today. If the process is
+interrupted, startup recovery marks an in-progress runtime `STOPPED`, records a
+`RUNTIME_RECOVERY` audit event, and does not reconstruct the in-memory engine.
+Paper trading has no external positions to reconcile during this recovery.
+
+Replay state transitions and contract/event writes use the persistence rules in
+the SQLite adapter. Callers must not assume that a runtime state mutation and
+its corresponding SQLite write form one rollbackable transaction.
 
 `core/`, `contracts/`, and `strategy/` are existing business packages and are
 covered by the same infrastructure-import checks as `domain/`.
