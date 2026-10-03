@@ -24,7 +24,8 @@ class PaperConfig:
 
     @classmethod
     def from_env(cls) -> "PaperConfig":
-        home = _path("FTX_PAPER_HOME", Path.home() / ".ftx-paper")
+        local_app_data = Path(os.getenv("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+        home = _path("FTX_PAPER_HOME", local_app_data / "ftx-paper")
         runtime_dir = _path("FTX_PAPER_RUNTIME_DIR", home / "runtime")
         return cls(
             home=home,
