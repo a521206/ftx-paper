@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Protocol
 
-from ftx_paper.core.capital_config import RESEARCH_CAPITAL_PROFILE, ResearchCapitalProfile
+from ftx_paper.domain.capital import RESEARCH_CAPITAL_PROFILE, ResearchCapitalProfile
 from ftx_paper.core.strategy import Strategy
 
 from .live import ConfiguredLiveStrategy

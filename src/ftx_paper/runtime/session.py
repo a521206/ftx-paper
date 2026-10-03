@@ -9,7 +9,8 @@ from typing import TYPE_CHECKING, Any, Callable, NotRequired, TypedDict, cast
 from zoneinfo import ZoneInfo
 
 from ftx_paper.broker import Broker, Fill, PaperBroker
-from ftx_paper.core.capital_config import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
+from ftx_paper.domain.capital import CapitalRuntimeContext, ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
+from ftx_paper.domain.portfolio import PortfolioState
 from ftx_paper.contracts import (
     Instrument, MarketBar, MarketRole, OptionRole, OptionType, OrderRole, OrderSide, normalize_exchange_timestamp, parse_role,
     role_to_key,
@@ -54,6 +55,8 @@ class RuntimeSession:
     def __init__(self, store: Any, auth: Any, specifications: list[dict[str, object]],
                  *, engine: PaperEngine | None = None,
                  capital_profile: ResearchCapitalProfile = RESEARCH_CAPITAL_PROFILE,
+                 portfolio: PortfolioState | None = None,
+                 capital_context: CapitalRuntimeContext | None = None,
                  feed_factory: Callable[..., Any] | None = None, broker_factory: Callable[[Any], Broker] | None = None,
                  client_factory: Callable[[], Any] | None = None, normalize_payload: Callable[..., Any] | None = None,
                  market_clock: Callable[[], datetime] | None = None) -> None:
@@ -62,16 +65,21 @@ class RuntimeSession:
         self.engine = engine or PaperEngine()
         self._restore_strategy_state()
         strategy = getattr(self.engine, "strategy", None)
-        portfolio = getattr(strategy, "portfolio", None)
-        self.portfolio = portfolio
-        capital_context = getattr(strategy, "capital_context", None)
+        # Runtime owns the shared account aggregate. The fallback keeps older
+        # custom engines working while callers migrate to explicit injection.
+        self.portfolio = portfolio if portfolio is not None else getattr(strategy, "portfolio", None)
+        self.capital_context = (
+            capital_context
+            if capital_context is not None
+            else getattr(strategy, "capital_context", None)
+        )
         self.account = (
-            AccountAggregate(portfolio, capital_context)
-            if portfolio is not None and capital_context is not None else None
+            AccountAggregate(self.portfolio, self.capital_context)
+            if self.portfolio is not None and self.capital_context is not None else None
         )
         self.coordinator = (
-            PaperExecutionCoordinator(portfolio, capital_context)
-            if portfolio is not None else None
+            PaperExecutionCoordinator(self.portfolio, self.capital_context)
+            if self.portfolio is not None else None
         )
         self.execution = ExecutionService(
             self.account, self.coordinator, self.store,

@@ -4,8 +4,8 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, time
 
 from ftx_paper.contracts import Instrument, MarketBar, OptionType, OrderIntent
-from ftx_paper.core.capital_config import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
-from ftx_paper.core.capital_context import CapitalRuntimeContext
+from ftx_paper.domain.capital import CapitalRuntimeContext, RESEARCH_CAPITAL_PROFILE, ResearchCapitalProfile
+from ftx_paper.domain.portfolio import PortfolioState
 from ftx_paper.core.decision_context import DecisionContext
 from ftx_paper.core.execution_events import ExecutionNotification
 
@@ -22,7 +22,7 @@ from ftx_paper.core.strategy_config import (
 from ftx_paper.core.strategy import StrategyMetadata
 from ftx_paper.core import ExitStateMachine, PositionState, VehicleRiskLimits
 from ftx_paper.contracts import OrderSide
-from ftx_paper.core import DecisionBundle, IndependentLiveDecisionEngine, PortfolioState
+from ftx_paper.core import DecisionBundle, IndependentLiveDecisionEngine
 
 
 class ConfiguredLiveStrategy:
@@ -52,6 +52,7 @@ class ConfiguredLiveStrategy:
         vehicle: str | None = None,
         vehicle_risk_limits: Mapping[str, VehicleRiskLimits] | None = None,
         portfolio: PortfolioState | None = None,
+        capital_context: CapitalRuntimeContext | None = None,
     ) -> None:
         self.config = config
         self._decision_positions: dict[str, tuple[PositionState, ExitStateMachine]] = {}
@@ -64,7 +65,9 @@ class ConfiguredLiveStrategy:
         self.enabled_vehicles = tuple(dict.fromkeys(str(item).lower() for item in enabled_vehicles))
         if "futures" not in self.enabled_vehicles:
             raise ValueError("synthetic is reporting-only; futures must be enabled")
-        self.capital_context = CapitalRuntimeContext(self.capital_profile, environment="live")
+        self.capital_context = capital_context or CapitalRuntimeContext(self.capital_profile, environment="live")
+        if self.capital_context.profile != self.capital_profile:
+            raise ValueError("capital_context profile must match capital_profile")
         self.vehicle_risk_limits = {str(k).lower(): v for k, v in (vehicle_risk_limits or {}).items()}
         if not self.enabled_vehicles or any(item not in {"futures", "synthetic"} for item in self.enabled_vehicles):
             raise ValueError("enabled_vehicles must contain 'futures' and/or 'synthetic'")

@@ -7,7 +7,8 @@ from pathlib import Path
 
 from ftx_paper.api import create_app
 from ftx_paper.config import PaperConfig
-from ftx_paper.core.capital_config import RESEARCH_CAPITAL_PROFILE
+from ftx_paper.domain.capital import CapitalRuntimeContext, RESEARCH_CAPITAL_PROFILE
+from ftx_paper.domain.portfolio import PortfolioState
 from ftx_paper.runtime import ProcessAlreadyRunningError, RuntimeSession
 from ftx_paper.runtime.store import RuntimeStore
 from ftx_paper.strategy import ConfiguredStrategyFactory
@@ -52,6 +53,8 @@ def api_main() -> None:
     config = PaperConfig.from_env()
     configure_logging(config.runtime_dir)
     capital_profile = RESEARCH_CAPITAL_PROFILE
+    portfolio = PortfolioState(capital_profile.initial_capital)
+    capital_context = CapitalRuntimeContext(capital_profile, environment="live")
     strategy_factory = ConfiguredStrategyFactory(capital_profile=capital_profile)
     store = RuntimeStore(config.runtime_dir)
     try:
@@ -71,7 +74,13 @@ def api_main() -> None:
             auth,
             list(raw.get("instruments", ())),
             capital_profile=capital_profile,
-            engine=PaperEngine(strategy_factory.create(expiry_dates=store.read_expiry_dates())),
+            portfolio=portfolio,
+            capital_context=capital_context,
+            engine=PaperEngine(strategy_factory.create(
+                expiry_dates=store.read_expiry_dates(),
+                portfolio=portfolio,
+                capital_context=capital_context,
+            )),
         )
         create_app(store, zerodha_auth=auth, session=session, capital_profile=capital_profile).run(host=config.host, port=config.port, debug=False, use_reloader=False)
     finally:

@@ -5,10 +5,10 @@
 The main dependency direction is:
 
 ```text
-core / contracts / strategy -> no infrastructure-specific code
-application -> core / contracts + ports
-execution -> core / contracts
-runtime -> core / contracts + broker + execution + runtime store facade
+domain / contracts / strategy -> no infrastructure-specific code
+application -> domain / contracts + ports
+execution -> domain / contracts
+runtime -> domain / contracts + broker + execution + runtime store facade
 api -> runtime + runtime store facade
 infrastructure.sqlite -> ports + core / contracts
 ```
@@ -37,9 +37,19 @@ policy), and `6d958a3d` (09:15-11:15 and 13:15-14:15 session windows).
 This alignment is recorded by Paper commit `31782a4` (`Align active paper
 strategy with pipeline`).
 
-Capital limits and the immutable runtime capital context live in
-`ftx_paper.core.capital_config` and `ftx_paper.core.capital_context`; they are
-business policy shared by sizing, execution, strategy, and runtime code.
+The canonical portfolio aggregate lives in `ftx_paper.domain.portfolio`.
+`ftx_paper.core.portfolio` remains an import compatibility shim. Capital limits
+and the immutable runtime capital context are exposed through
+`ftx_paper.domain.capital` (with their existing core implementations retained
+as compatibility modules); they are business policy shared by sizing,
+execution, strategy, and runtime code.
+
+Runtime composition creates one `PortfolioState` and one
+`CapitalRuntimeContext`, then injects both into the strategy and execution
+coordinator. A strategy may use the aggregate to evaluate decisions, but it
+does not create or select the account state. This keeps portfolio, capital,
+margin, and execution behavior centralized while allowing the strategy factory
+to replace decision policy.
 
 Application use cases that use a unit of work obtain a fresh product for each
 operation. A unit of work commits only when the application explicitly calls
@@ -63,6 +73,8 @@ Replay state transitions and contract/event writes use the persistence rules in
 the SQLite adapter. Callers must not assume that a runtime state mutation and
 its corresponding SQLite write form one rollbackable transaction.
 
-`core/`, `contracts/`, and `strategy/` are business packages and are covered by
-the same infrastructure-import checks. There is no separate `domain` package;
-the domain model is currently organized across `contracts` and `core`.
+`domain/`, `core/`, `contracts/`, and `strategy/` are business packages and are
+covered by the same infrastructure-import checks. `core/` remains the home of
+the existing decision pipeline during migration; new shared aggregates should
+be added under `domain/` and old core imports should be retained only as
+compatibility shims.
