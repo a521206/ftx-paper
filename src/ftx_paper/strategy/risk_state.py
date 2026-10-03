@@ -207,7 +207,14 @@ class RiskGateState:
         for name in fields:
             if name in snapshot:
                 value = snapshot[name]
-                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                if name != "max_net_directional_lots" and (
+                    not isinstance(value, int) or isinstance(value, bool)
+                ):
+                    raise ValueError(f"risk-gate snapshot {name} is invalid")
+                if name == "max_net_directional_lots" and (
+                    isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value)
+                ):
                     raise ValueError(f"risk-gate snapshot {name} is invalid")
                 setattr(self, name, type(getattr(self, name))(value))
         raw_cells = snapshot.get("cells", {})
