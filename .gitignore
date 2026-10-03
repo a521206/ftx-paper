@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+runtime.sqlite3
+*.sqlite3
+config/zerodha.json
+.env
+.env.*
+!\.env.example

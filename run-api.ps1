@@ -46,8 +46,8 @@ Stop-ExistingApiProcess -PythonPath $venvPython
 $env:PYTHONPATH = Join-Path $packageRoot "src"
 $env:FTX_WEB_HOST = $HostAddress
 $env:FTX_WEB_PORT = [string]$Port
-$env:FTX_PAPER_RUNTIME_DIR = Join-Path (Split-Path -Parent $packageRoot) "data\runtime\ftx-paper"
-$env:FTX_PAPER_AUTH_DB = Join-Path (Split-Path -Parent $packageRoot) "data\runtime\zerodha\auth.sqlite3"
+$env:FTX_PAPER_RUNTIME_DIR = Join-Path $packageRoot "data\runtime\ftx-paper"
+$env:FTX_PAPER_AUTH_DB = Join-Path $packageRoot "data\runtime\zerodha\auth.sqlite3"
 if ($ConfigPath) { $env:FTX_PAPER_CONFIG_PATH = $ConfigPath }
 
 & $venvPython -c "from ftx_paper.cli import api_main; api_main()"

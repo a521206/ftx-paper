@@ -7,7 +7,7 @@ name = "ftx-paper"
 version = "0.1.0"
 description = "Standalone FTX live paper-trading runtime and operator API"
 requires-python = ">=3.14"
-dependencies = ["flask>=3.0"]
+dependencies = ["flask>=3.0", "tzdata>=2024.1"]
 
 [project.optional-dependencies]
 zerodha = ["kiteconnect>=5", "websockets>=13"]
