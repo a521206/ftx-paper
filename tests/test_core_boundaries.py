@@ -504,10 +504,9 @@ def test_risk_sizer_enforces_drawdown_and_lot_sizing() -> None:
 def test_replay_trade_session_classification_matches_canonical_windows() -> None:
     assert ReplayWorker._session_for_minutes(60) == "morning"
     assert ReplayWorker._session_for_minutes(119) == "morning"
-    assert ReplayWorker._session_for_minutes(120) == "morning"
-    assert ReplayWorker._session_for_minutes(149) == "morning"
-    assert ReplayWorker._session_for_minutes(150) == "unknown"
-    assert ReplayWorker._session_for_minutes(255) == "afternoon"
+    assert ReplayWorker._session_for_minutes(120) == "unknown"
+    assert ReplayWorker._session_for_minutes(239) == "unknown"
+    assert ReplayWorker._session_for_minutes(240) == "afternoon"
     assert ReplayWorker._session_for_minutes(299) == "afternoon"
     assert ReplayWorker._session_for_minutes(300) == "unknown"
 

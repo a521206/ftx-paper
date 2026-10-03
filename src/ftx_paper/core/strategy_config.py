@@ -15,9 +15,9 @@ if TYPE_CHECKING:
     from ftx_paper.core.location_engine import TransitionPattern
 
 STRATEGY_NAME = "ftx-paper-research"
-STRATEGY_VERSION = "0.3.0-pipeline-research-aligned"
-MORNING_ENTRY_MINUTES = (0, 150)
-AFTERNOON_ENTRY_MINUTES = (255, 300)
+STRATEGY_VERSION = "0.4.0-pipeline-research-aligned"
+MORNING_ENTRY_MINUTES = (0, 120)
+AFTERNOON_ENTRY_MINUTES = (240, 300)
 ENTRY_COOLDOWN_BARS = 0
 POST_EXIT_COOLDOWN_BARS = 2
 TRAIL_ACTIVATE_BP = 20.0
@@ -69,18 +69,16 @@ class CellPolicyConfig:
 
 
 MORNING_CELL_POLICIES = (
-    CellPolicyConfig(Cell(Location.NEW_LOW), OrderSide.BUY, ExitMode.SIGNAL, 0.5, hypothesis=TradeHypothesis.MEAN_REVERSION),
-    CellPolicyConfig(Cell(Location.VWAP_ZONE, Location.NEW_HIGH, Location.PRIOR_DAY_HIGH), OrderSide.BUY, ExitMode.TRAIL),
-    CellPolicyConfig(Cell(Location.VWAP_ZONE, Location.OR_HIGH, Location.PRIOR_DAY_LOW), OrderSide.BUY, ExitMode.TRAIL),
     CellPolicyConfig(Cell(Location.VWAP_ZONE, Location.OR_LOW, Location.PRIOR_DAY_HIGH), OrderSide.SELL, ExitMode.TRAIL),
-    CellPolicyConfig(Cell(Location.PRIOR_DAY_HIGH), OrderSide.SELL, ExitMode.TRAIL, hypothesis=TradeHypothesis.MEAN_REVERSION),
-    CellPolicyConfig(Cell(Location.PRIOR_DAY_LOW), OrderSide.BUY, ExitMode.TRAIL, hypothesis=TradeHypothesis.MEAN_REVERSION),
+    CellPolicyConfig(Cell(Location.VWAP_ZONE, Location.OR_HIGH, Location.PRIOR_DAY_LOW), OrderSide.BUY, ExitMode.TRAIL),
+    CellPolicyConfig(Cell(Location.SESSION_HIGH, Location.OR_HIGH, Location.PRIOR_DAY_LOW), OrderSide.SELL, ExitMode.SIGNAL, hypothesis=TradeHypothesis.MEAN_REVERSION),
+    CellPolicyConfig(Cell(Location.VWAP_ZONE, Location.SESSION_LOW, Location.OR_LOW, Location.PRIOR_DAY_LOW), OrderSide.SELL, ExitMode.TRAIL),
+    CellPolicyConfig(Cell(Location.VWAP_ZONE, Location.SESSION_HIGH, Location.PRIOR_DAY_LOW), OrderSide.BUY, ExitMode.SIGNAL),
 )
 AFTERNOON_CELL_POLICIES = (
     CellPolicyConfig(Cell(Location.VWAP_ZONE, Location.OR_LOW, Location.PRIOR_DAY_HIGH), OrderSide.SELL, ExitMode.TRAIL),
     CellPolicyConfig(Cell(Location.VWAP_ZONE, Location.PRIOR_DAY_HIGH), OrderSide.SELL, ExitMode.TRAIL, hypothesis=TradeHypothesis.MEAN_REVERSION),
-    CellPolicyConfig(Cell(Location.VWAP_ZONE, Location.PRIOR_DAY_LOW), OrderSide.BUY, ExitMode.TRAIL, 0.5, hypothesis=TradeHypothesis.MEAN_REVERSION),
-    CellPolicyConfig(Cell(Location.OR_LOW, Location.PRIOR_DAY_LOW), OrderSide.BUY, ExitMode.TRAIL, 0.5, hypothesis=TradeHypothesis.MEAN_REVERSION),
+    CellPolicyConfig(Cell(Location.OR_LOW, Location.PRIOR_DAY_LOW), OrderSide.BUY, ExitMode.TRAIL, hypothesis=TradeHypothesis.MEAN_REVERSION),
 )
 SESSION_POLICIES = (
     (Session.MORNING, MORNING_CELL_POLICIES),
