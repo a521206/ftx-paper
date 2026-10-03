@@ -68,7 +68,7 @@ class CompletedBarAggregator:
 
     def __init__(
         self,
-        role_by_instrument: Mapping[InstrumentKey, Role],
+        role_by_instrument: Mapping[InstrumentKey | tuple[str, str], Role],
         config: AggregatorConfig | None = None,
         *,
         required_roles: Iterable[Role] | None = None,
@@ -77,7 +77,7 @@ class CompletedBarAggregator:
         # Accept tuple keys temporarily at this boundary for old callers;
         # internal state always uses the named identity type.
         self._roles = {
-            key if isinstance(key, InstrumentKey) else InstrumentKey(*key): parse_role(role)
+            key if isinstance(key, InstrumentKey) else InstrumentKey(key[0], key[1]): parse_role(role)
             for key, role in role_by_instrument.items()
         }
         if config is not None and (required_roles is not None or deadline_seconds is not None):

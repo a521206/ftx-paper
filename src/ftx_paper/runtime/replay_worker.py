@@ -102,13 +102,39 @@ class ReplayWorker:
         """Return the deterministic, API-safe inputs used by a replay date."""
         rows = self.store.read_market_bars(session_date)
         bars = self._bars(session_date)
+        replay_rows = [
+            {
+                "symbol": bar.instrument.symbol,
+                "exchange": bar.instrument.exchange,
+                "minute": bar.timestamp.isoformat(),
+                "open": bar.open,
+                "high": bar.high,
+                "low": bar.low,
+                "close": bar.close,
+                "volume": bar.volume,
+                "open_interest": bar.open_interest,
+                "instrument_type": bar.instrument.instrument_type,
+                "expiry": bar.instrument.expiry,
+                "strike": bar.instrument.strike,
+                "option_type": bar.instrument.option_type,
+            }
+            for bar in bars
+        ]
+        strategy_rows = [
+            row for row in replay_rows
+            if str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES", "INDEX"}
+            and (
+                str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
+                or str(row.get("symbol", "")).upper() in {"NIFTY", "NIFTY 50", "INDIA VIX", "INDIAVIX"}
+            )
+        ]
         by_instrument: dict[str, int] = {}
-        for row in rows:
+        for row in strategy_rows:
             key = ":".join(str(row.get(field) or "").upper() for field in ("exchange", "symbol", "instrument_type"))
             if key:
                 by_instrument[key] = by_instrument.get(key, 0) + 1
-        vix_rows = [row for row in rows if str(row.get("symbol", "")).upper() in {"INDIA VIX", "INDIAVIX"}]
-        option_rows = [row for row in rows if str(row.get("instrument_type", "")).upper() in {"CE", "PE"}]
+        vix_rows = [row for row in replay_rows if str(row.get("symbol", "")).upper() in {"INDIA VIX", "INDIAVIX"}]
+        option_rows = [row for row in replay_rows if str(row.get("instrument_type", "")).upper() in {"CE", "PE"}]
         option_minutes = {str(row.get("minute")) for row in option_rows}
         futures_minutes = {
             str(row.get("minute")) for row in rows
@@ -118,14 +144,21 @@ class ReplayWorker:
             "available_date": session_date,
             "date": session_date,
             "session_date": session_date,
-            "bar_count": len(bars),
+            "bar_count": len(strategy_rows),
             "raw_bar_count": len(rows),
+            "supporting_bar_count": len(bars) - len(strategy_rows),
             "per_instrument_counts": dict(sorted(by_instrument.items())),
             "availability": {
                 "vix": bool(vix_rows),
                 "pcr": bool(option_rows and option_minutes.intersection(futures_minutes)),
             },
-            "expiry_calendar": sorted(str(item) for item in self.store.read_expiry_dates()),
+            "expiry_calendar": sorted({
+                str(item)[:10] for item in self.store.read_expiry_dates()
+                if str(item)[:10] >= session_date
+            } | {
+                str(row["expiry"])[:10] for row in option_rows
+                if row.get("expiry") and str(row["expiry"])[:10] >= session_date
+            }),
             "session_configuration": {
                 "timezone": "Asia/Kolkata",
                 "open": "09:15",
@@ -136,8 +169,11 @@ class ReplayWorker:
             },
         }
         fingerprint_source = {**payload, "rows": sorted(
-            (dict(row) for row in rows),
-            key=lambda row: (str(row.get("minute")), str(row.get("exchange")), str(row.get("symbol"))),
+            strategy_rows,
+            key=lambda row: tuple(str(row.get(field) or "") for field in (
+                "minute", "exchange", "symbol", "instrument_type", "expiry", "strike", "option_type",
+                "open", "high", "low", "close", "volume", "open_interest",
+            )),
         )}
         canonical = json.dumps(fingerprint_source, sort_keys=True, separators=(",", ":"), default=str).encode()
         payload["input_fingerprint"] = hashlib.sha256(canonical).hexdigest()
@@ -308,6 +344,9 @@ class ReplayWorker:
                     if exit_quote is None and action.intent.vehicle == "synthetic":
                         all_events.append({"event_type": "EXECUTION_ERROR", "decision_id": action.intent.client_order_id,
                                            "reason": "missing_synthetic_future_quote", "source": "replay", "session_date": date})
+                        all_events.append({"event_type": "ORDER_UNFILLED", "decision_id": action.intent.client_order_id,
+                                           "vehicle": action.intent.vehicle, "timestamp": futures_bar.timestamp.isoformat(),
+                                           "source": "replay", "session_date": date, "reason": "missing_synthetic_future_quote"})
                         engine.settle_exit(action.intent.client_order_id, filled=False)
                         continue
                     # Futures exits fill at the canonical protective trigger
@@ -327,6 +366,15 @@ class ReplayWorker:
                         exit_event.update({"synthetic_future_price": exit_quote.price, "ce_strike": exit_quote.strike,
                                            "ce_exit_price": exit_quote.ce.close, "pe_exit_price": exit_quote.pe.close})
                     all_events.append(exit_event)
+                    all_events.append({"event_type": "ORDER_INTENT", "decision_id": action.intent.client_order_id,
+                                       "client_order_id": action.intent.client_order_id,
+                                       "vehicle": action.intent.vehicle, "direction": "long" if action.intent.side is OrderSide.SELL else "short",
+                                       "quantity": action.intent.quantity, "entry_bar": action.intent.entry_bar,
+                                       "decision_at": futures_bar.timestamp.isoformat(), "source": "replay", "session_date": date})
+                    all_events.append({"event_type": "ORDER_ACK", "decision_id": action.intent.client_order_id,
+                                       "client_order_id": action.intent.client_order_id, "vehicle": action.intent.vehicle,
+                                       "timestamp": futures_bar.timestamp.isoformat(), "source": "replay",
+                                       "session_date": date, "status": "ACKNOWLEDGED"})
                     realized = self._settle_trade(open_trades, diagnostic_trades, action.intent, futures_bar,
                                                   exit_quote, action.reason, exit_price=exit_price,
                                                   trade=open_trade)
@@ -363,6 +411,16 @@ class ReplayWorker:
                         coordinator.fill(action.intent, price=exit_price,
                                          timestamp=futures_bar.timestamp.isoformat(),
                                          cost=_execution_cost(open_trade))
+                    all_events.append({"event_type": "FILL", "decision_id": action.intent.client_order_id,
+                                       "client_order_id": action.intent.client_order_id,
+                                       "fill_timestamp": futures_bar.timestamp.isoformat(), "price": exit_price,
+                                       "quantity": action.intent.quantity, "vehicle": action.intent.vehicle,
+                                       "source": "replay", "session_date": date})
+                    all_events.append({"event_type": "EXECUTEDDECISION", "decision_id": action.intent.client_order_id,
+                                       "client_order_id": action.intent.client_order_id,
+                                       "fill_timestamp": futures_bar.timestamp.isoformat(), "price": exit_price,
+                                       "quantity": action.intent.quantity, "vehicle": action.intent.vehicle,
+                                       "source": "replay", "session_date": date, "status": "FILLED"})
                     engine.on_execution_event(ExecutionNotification(
                         event_type="FILLED", client_order_id=action.intent.client_order_id,
                         status="FILLED", quantity=action.intent.quantity,
@@ -409,10 +467,6 @@ class ReplayWorker:
                                        "entry_bar": order.entry_bar, "decision_at": futures_bar.timestamp.isoformat(),
                                        "source": "replay",
                                        "session_date": date})
-                    all_events.append({"event_type": "ORDER_SUPPRESSED", "decision_id": order.client_order_id,
-                                       "vehicle": order.vehicle,
-                                       "timestamp": futures_bar.timestamp.isoformat(), "source": "replay",
-                                       "session_date": date, "execution_allowed": False})
                     if order.role is OrderRole.ENTRY:
                         if order.vehicle == "futures":
                             try:
@@ -421,11 +475,19 @@ class ReplayWorker:
                                 all_events.append({"event_type": "RISK_REJECTED",
                                                    "decision_id": order.client_order_id,
                                                    "reason": str(exc), "source": "replay", "session_date": date})
+                                all_events.append({"event_type": "ORDER_SUPPRESSED", "decision_id": order.client_order_id,
+                                                   "vehicle": order.vehicle, "timestamp": futures_bar.timestamp.isoformat(),
+                                                   "source": "replay", "session_date": date, "execution_allowed": False,
+                                                   "reason": str(exc)})
                                 continue
                             all_events.append({"event_type": "ORDER_AUTHORIZED",
                                                "decision_id": order.client_order_id,
                                                "account_revision": account.revision,
-                                               "source": "replay", "session_date": date})
+                                                "source": "replay", "session_date": date})
+                        all_events.append({"event_type": "ORDER_ACK", "decision_id": order.client_order_id,
+                                           "client_order_id": order.client_order_id, "vehicle": order.vehicle,
+                                           "timestamp": futures_bar.timestamp.isoformat(), "source": "replay",
+                                           "session_date": date, "status": "ACKNOWLEDGED"})
                         entry_quote = synthetic_future_quote(
                             quote_selection_bar, option_bars,
                             symbols=(order.synthetic_legs[0].symbol, order.synthetic_legs[1].symbol)
@@ -435,6 +497,9 @@ class ReplayWorker:
                             all_events.append({"event_type": "EXECUTION_ERROR", "decision_id": order.client_order_id,
                                                "vehicle": order.vehicle,
                                                "reason": "missing_synthetic_future_quote", "source": "replay", "session_date": date})
+                            all_events.append({"event_type": "ORDER_UNFILLED", "decision_id": order.client_order_id,
+                                               "vehicle": order.vehicle, "timestamp": futures_bar.timestamp.isoformat(),
+                                               "source": "replay", "session_date": date, "reason": "missing_synthetic_future_quote"})
                             continue
                         fill_price = entry_quote.price if entry_quote is not None else futures_bar.close
                         for event in reversed(all_events):
@@ -450,7 +515,11 @@ class ReplayWorker:
                                            "fill_timestamp": futures_bar.timestamp.isoformat(),
                                            "price": fill_price, "quantity": order.quantity,
                                            "vehicle": order.vehicle, "source": "replay",
-                                           "session_date": date})
+                                            "session_date": date})
+                        all_events.append({"event_type": "EXECUTEDDECISION", "decision_id": order.client_order_id,
+                                           "client_order_id": order.client_order_id, "fill_timestamp": futures_bar.timestamp.isoformat(),
+                                           "price": fill_price, "quantity": order.quantity, "vehicle": order.vehicle,
+                                           "source": "replay", "session_date": date, "status": "FILLED"})
                         engine.register_entry(order, fill_price=fill_price,
                                               entry_fill_time=futures_bar.timestamp,
                                               reference_price=futures_bar.close)
@@ -590,12 +659,17 @@ class ReplayWorker:
             })
         if last_strategy_metadata is None:
             raise RuntimeError("replay completed without a strategy session")
+        directional_exposure = sum(
+            position.quantity * (1 if position.side is OrderSide.BUY else -1)
+            for position in (last_portfolio.positions.values() if last_portfolio is not None else ())
+        )
         input_manifest = self.input_manifest(session_date)
         metadata = {
             "api_version": "1.1",
             "strategy_version": last_strategy_metadata.version,
             "configuration_hash": last_strategy_metadata.config_hash,
             "input_fingerprint": input_manifest["input_fingerprint"],
+            "directional_exposure": directional_exposure,
             "requested_parameters": {
                 "session_date": session_date,
                 "vehicles": list(vehicles),
@@ -610,7 +684,8 @@ class ReplayWorker:
             decision_id = event.get("decision_id")
             linked = [item for item in all_events if decision_id and item.get("decision_id") == decision_id]
             execution_events = [item for item in linked if str(item.get("event_type", "")) in {
-                "ORDER_INTENT", "ORDER_AUTHORIZED", "FILL", "EXECUTEDDECISION", "ORDER_SUPPRESSED",
+                "ORDER_INTENT", "ORDER_AUTHORIZED", "ORDER_ACK", "FILL", "EXECUTEDDECISION",
+                "ORDER_UNFILLED", "ORDER_SUPPRESSED", "RISK_REJECTED",
             }]
             normalized["execution"].update({
                 "event_types": [str(item.get("event_type")) for item in execution_events],
@@ -633,6 +708,7 @@ class ReplayWorker:
                                "max_lots": self.capital_profile.max_lots,
                                "lot_size": NIFTY_LOT_SIZE},
             "bars_seen": bars_seen,
+            "directional_exposure": directional_exposure,
             "events": all_events,
             "decisions": [event for event in all_events if str(event.get("event_type", "")).endswith("DECISION")],
             "decision_trace_schema_version": 1,

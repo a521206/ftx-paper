@@ -9,7 +9,8 @@ trading-date boundary.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import TYPE_CHECKING, Mapping, cast
+import math
+from typing import TYPE_CHECKING, Mapping
 
 if TYPE_CHECKING:
     from ftx_paper.domain.capital import CapitalRuntimeContext
@@ -44,14 +45,14 @@ class RiskGateState:
         """Build mutable gate state from the immutable capital contract."""
         return cls(
             max_net_directional_lots=context.max_net_directional_lots,
-            thesis_cooldown_bars=int(cast(int, overrides.get("thesis_cooldown_bars", 0))),
-            entry_cooldown_bars=int(cast(int, overrides.get("entry_cooldown_bars", 15))),
-            max_consecutive_stops=int(cast(int, overrides.get("max_consecutive_stops", 2))),
-            max_daily_entries=int(cast(int, overrides.get("max_daily_entries", 2))),
-            cell_cooldown_bars=int(cast(int, overrides.get("cell_cooldown_bars", 30))),
-            net_directional_lots=float(cast(float, overrides.get("net_directional_lots", 0.0))),
-            trading_date=cast(str | None, overrides.get("trading_date")),
-            cells=cast(dict[str, CellGateState], overrides.get("cells", {})),
+            thesis_cooldown_bars=_override_int(overrides, "thesis_cooldown_bars", 0),
+            entry_cooldown_bars=_override_int(overrides, "entry_cooldown_bars", 15),
+            max_consecutive_stops=_override_int(overrides, "max_consecutive_stops", 2),
+            max_daily_entries=_override_int(overrides, "max_daily_entries", 2),
+            cell_cooldown_bars=_override_int(overrides, "cell_cooldown_bars", 30),
+            net_directional_lots=_override_float(overrides, "net_directional_lots", 0.0),
+            trading_date=_override_date(overrides.get("trading_date")),
+            cells=_override_cells(overrides.get("cells", {})),
         )
 
     def _new_day(self, date: str | None) -> None:
@@ -213,23 +214,58 @@ class RiskGateState:
         if not isinstance(raw_cells, Mapping):
             raise ValueError("risk-gate snapshot cells must be an object")
         raw_net_directional_lots = snapshot.get("net_directional_lots", 0.0)
-        if isinstance(raw_net_directional_lots, bool) or not isinstance(raw_net_directional_lots, (int, float)):
+        if (isinstance(raw_net_directional_lots, bool) or not isinstance(raw_net_directional_lots, (int, float))
+                or not math.isfinite(raw_net_directional_lots)):
             raise ValueError("risk-gate snapshot net_directional_lots is invalid")
         self.net_directional_lots = float(raw_net_directional_lots)
         raw_date = snapshot.get("trading_date")
-        self.trading_date = str(raw_date) if raw_date is not None else None
+        if raw_date is not None and not isinstance(raw_date, str):
+            raise ValueError("risk-gate snapshot trading_date is invalid")
+        self.trading_date = raw_date
         self.cells = {}
         for cell, values in raw_cells.items():
             if not isinstance(values, Mapping):
-                continue
-            state = CellGateState(**dict(values))
+                raise ValueError("risk-gate snapshot cell must be an object")
+            try:
+                state = CellGateState(**dict(values))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("risk-gate snapshot cell is invalid") from exc
             if version == 1:
                 # Old snapshots held 30-minute segment timers. They are not
                 # compatible with the current bar-based entry/exit cooldowns.
                 state.last_entry_bar = None
                 state.locked_until_bar = 0
                 state.cooldown_until_bar = 0
-            self.cells[str(cell)] = state
+            if not isinstance(cell, str):
+                raise ValueError("risk-gate snapshot cell name is invalid")
+            self.cells[cell] = state
+
+
+def _override_int(values: dict[str, object], name: str, default: int) -> int:
+    value = values.get(name, default)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"risk-gate override {name} is invalid")
+    return value
+
+
+def _override_float(values: dict[str, object], name: str, default: float) -> float:
+    value = values.get(name, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"risk-gate override {name} is invalid")
+    return float(value)
+
+
+def _override_date(value: object) -> str | None:
+    if value is not None and not isinstance(value, str):
+        raise ValueError("risk-gate override trading_date is invalid")
+    return value
+
+
+def _override_cells(value: object) -> dict[str, CellGateState]:
+    if not isinstance(value, dict) or any(not isinstance(key, str) or not isinstance(item, CellGateState)
+                                          for key, item in value.items()):
+        raise ValueError("risk-gate override cells are invalid")
+    return dict(value)
 
 
 __all__ = ["CellGateState", "RiskGateState"]

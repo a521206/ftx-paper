@@ -4,7 +4,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from math import isfinite
-from typing import Any, Mapping, cast
+from typing import Any, Mapping, TypedDict
 
 from ftx_paper.config import NIFTY_LOT_SIZE
 from ftx_paper.contracts import OrderIntent, OrderRole, OrderSide
@@ -20,6 +20,19 @@ class MarginReservation:
     risk_allowance: float = 0.0
     reserved_risk: float = 0.0
 
+    def __post_init__(self) -> None:
+        if not self.order_id or self.vehicle not in {"futures", "synthetic"}:
+            raise ValueError("invalid margin reservation identity")
+        if self.quantity <= 0 or not _finite_non_negative(self.amount):
+            raise ValueError("invalid margin reservation amount")
+        if not self.risk_scope and (self.risk_allowance != 0.0 or self.reserved_risk != 0.0):
+            raise ValueError("risk reservation requires a scope")
+        if self.risk_scope and (
+            not _finite_non_negative(self.risk_allowance)
+            or not _finite_non_negative(self.reserved_risk)
+        ):
+            raise ValueError("invalid reserved risk")
+
 
 @dataclass(frozen=True, slots=True)
 class ScopedRiskReservation:
@@ -27,6 +40,14 @@ class ScopedRiskReservation:
     scope: str
     allowance: float
     amount: float
+
+    def __post_init__(self) -> None:
+        if not self.order_id or not self.scope:
+            raise ValueError("invalid scoped risk reservation identity")
+        if not _finite_non_negative(self.allowance) or not _finite_non_negative(self.amount):
+            raise ValueError("invalid scoped risk reservation amount")
+        if self.amount > self.allowance:
+            raise ValueError("scoped risk reservation exceeds allowance")
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +62,13 @@ class PaperPosition:
     entry_timestamp: str | None = None
     synthetic_legs: tuple[str, str] | None = None
     synthetic_entry_prices: tuple[float, float] | None = None
+
+
+class SettlementResult(TypedDict):
+    entry_order_id: str
+    gross_pnl: float
+    costs: float
+    net_pnl: float
 
 
 @dataclass
@@ -198,7 +226,7 @@ class PortfolioState:
         self.daily_baseline = self.equity
         self.state_revision += 1
 
-    def settle_exit(self, order: OrderIntent, *, price: float, cost: float = 0.0) -> dict[str, float | str] | None:
+    def settle_exit(self, order: OrderIntent, *, price: float, cost: float = 0.0) -> SettlementResult | None:
         if order.client_order_id in self.settled_orders:
             return None
         entry_id = order.entry_order_id
@@ -258,41 +286,89 @@ class PortfolioState:
             raise ValueError("unsupported portfolio snapshot schema")
         capital = snapshot["capital"]
         assert isinstance(capital, Mapping)
-        portfolio = cls(float(capital["initial_capital"]))
-        portfolio.equity = float(capital.get("current_equity", portfolio.initial_capital))
-        portfolio.peak_equity = float(cast(Any, snapshot.get("peak_equity", portfolio.equity)))
-        portfolio.daily_baseline = float(cast(Any, snapshot.get("daily_baseline", portfolio.equity)))
-        portfolio.realized_pnl = float(cast(Any, capital.get("realized_pnl", 0.0)))
-        portfolio.total_costs = float(cast(Any, snapshot.get("total_costs", 0.0)))
+        portfolio = cls(_as_float(capital.get("initial_capital"), "initial_capital"))
+        portfolio.equity = _as_float(capital.get("current_equity", portfolio.initial_capital), "current_equity")
+        portfolio.peak_equity = _as_float(snapshot.get("peak_equity", portfolio.equity), "peak_equity")
+        portfolio.daily_baseline = _as_float(snapshot.get("daily_baseline", portfolio.equity), "daily_baseline")
+        portfolio.realized_pnl = _as_float(capital.get("realized_pnl", 0.0), "realized_pnl")
+        portfolio.total_costs = _as_float(snapshot.get("total_costs", 0.0), "total_costs")
         raw = snapshot.get("reservations", {})
-        if isinstance(raw, Mapping):
-            portfolio.reservations = {
-                str(k): MarginReservation(**dict(v))
-                for k, v in raw.items() if isinstance(v, Mapping)
-            }
+        if not isinstance(raw, Mapping):
+            raise ValueError("portfolio snapshot reservations must be an object")
+        for key, value in raw.items():
+            if not isinstance(value, Mapping):
+                raise ValueError("portfolio snapshot reservation is invalid")
+            try:
+                portfolio.reservations[str(key)] = MarginReservation(**dict(value))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("portfolio snapshot reservation is invalid") from exc
         raw = snapshot.get("scoped_risk_buffers", {})
-        if isinstance(raw, Mapping):
-            portfolio.scoped_risk_buffers = {
-                str(scope): float(balance) for scope, balance in raw.items()
-            }
+        if not isinstance(raw, Mapping):
+            raise ValueError("portfolio snapshot scoped risk buffers must be an object")
+        portfolio.scoped_risk_buffers = {
+            str(scope): _as_float(balance, "scoped risk buffer") for scope, balance in raw.items()
+        }
         raw = snapshot.get("scoped_risk_reservations", {})
-        if isinstance(raw, Mapping):
-            portfolio.scoped_risk_reservations = {
-                str(order_id): ScopedRiskReservation(**dict(values))
-                for order_id, values in raw.items() if isinstance(values, Mapping)
-            }
+        if not isinstance(raw, Mapping):
+            raise ValueError("portfolio snapshot scoped risk reservations must be an object")
+        for order_id, values in raw.items():
+            if not isinstance(values, Mapping):
+                raise ValueError("portfolio snapshot scoped risk reservation is invalid")
+            try:
+                portfolio.scoped_risk_reservations[str(order_id)] = ScopedRiskReservation(**dict(values))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("portfolio snapshot scoped risk reservation is invalid") from exc
         raw = snapshot.get("positions", {})
-        if isinstance(raw, Mapping):
-            portfolio.positions = {str(k): PaperPosition(**{**dict(v), "side": OrderSide(dict(v)["side"])}) for k, v in raw.items() if isinstance(v, Mapping)}
+        if not isinstance(raw, Mapping):
+            raise ValueError("portfolio snapshot positions must be an object")
+        for key, value in raw.items():
+            if not isinstance(value, Mapping):
+                raise ValueError("portfolio snapshot position is invalid")
+            data = dict(value)
+            legs = data.get("synthetic_legs")
+            if (legs is not None and (isinstance(legs, (str, bytes, bytearray))
+                    or not isinstance(legs, (list, tuple)) or len(legs) != 2
+                    or any(not isinstance(item, str) or not item for item in legs))):
+                raise ValueError("portfolio snapshot synthetic legs are invalid")
+            if legs is not None:
+                data["synthetic_legs"] = (legs[0], legs[1])
+            prices = data.get("synthetic_entry_prices")
+            if prices is not None:
+                if (isinstance(prices, (str, bytes, bytearray)) or not isinstance(prices, (list, tuple))
+                        or len(prices) != 2):
+                    raise ValueError("portfolio snapshot synthetic entry prices are invalid")
+                data["synthetic_entry_prices"] = (
+                    _as_float(prices[0], "synthetic entry price"),
+                    _as_float(prices[1], "synthetic entry price"),
+                )
+            try:
+                data["side"] = OrderSide(data["side"])
+                portfolio.positions[str(key)] = PaperPosition(**data)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError("portfolio snapshot position is invalid") from exc
         raw = snapshot.get("pending_orders", {})
-        portfolio.pending_orders = dict(raw) if isinstance(raw, Mapping) else {}
+        if not isinstance(raw, Mapping) or any(
+            not isinstance(key, str) or not isinstance(value, str) for key, value in raw.items()
+        ):
+            raise ValueError("portfolio snapshot pending_orders are invalid")
+        portfolio.pending_orders = dict(raw)
         settled = snapshot.get("settled_orders", [])
-        portfolio.settled_orders = {str(v) for v in settled} if isinstance(settled, (list, tuple, set)) else set()
-        portfolio.state_revision = int(cast(Any, snapshot.get("state_revision", 0)))
+        if (isinstance(settled, (str, bytes, bytearray)) or not isinstance(settled, (list, tuple, set))
+                or any(not isinstance(value, str) for value in settled)):
+            raise ValueError("portfolio snapshot settled_orders are invalid")
+        portfolio.settled_orders = set(settled)
+        revision = snapshot.get("state_revision", 0)
+        if not isinstance(revision, int) or isinstance(revision, bool):
+            raise ValueError("portfolio snapshot state_revision is invalid")
+        portfolio.state_revision = revision
         raw = snapshot.get("gates", {})
-        portfolio.gate_snapshot = dict(raw) if isinstance(raw, Mapping) else {}
+        if not isinstance(raw, Mapping):
+            raise ValueError("portfolio snapshot gates must be an object")
+        portfolio.gate_snapshot = dict(raw)
         raw = snapshot.get("quote_provenance", {})
-        portfolio.quote_provenance = dict(raw) if isinstance(raw, Mapping) else {}
+        if not isinstance(raw, Mapping):
+            raise ValueError("portfolio snapshot quote_provenance must be an object")
+        portfolio.quote_provenance = dict(raw)
         valid_in_flight_states = {"submitted", "reserved"}
         if not all(
             order_id in portfolio.positions
@@ -307,4 +383,14 @@ class PortfolioState:
             raise ValueError("portfolio snapshot margin is inconsistent")
         return portfolio
 
-__all__ = ["MarginReservation", "PaperPosition", "PortfolioState"]
+__all__ = ["MarginReservation", "PaperPosition", "PortfolioState", "SettlementResult"]
+
+
+def _as_float(value: object, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value):
+        raise ValueError(f"portfolio snapshot {name} is invalid")
+    return float(value)
+
+
+def _finite_non_negative(value: float) -> bool:
+    return isfinite(value) and value >= 0

@@ -156,7 +156,7 @@ def option_pcr_at_event(
         return None
     nearest_expiry = expected_expiries[0]
     selected = [bar for bar in options if str(bar.instrument.expiry)[:10] == nearest_expiry]
-    strikes = sorted({float(bar.instrument.strike) for bar in selected})
+    strikes = sorted({strike for bar in selected if (strike := _strike_value(bar.instrument.strike)) is not None})
     if not strikes:
         return None
     atm = min(strikes, key=lambda strike: (abs(strike - spot), strike))
@@ -167,7 +167,8 @@ def option_pcr_at_event(
     eligible_strikes.update(above)
     calls = puts = 0.0
     for bar in selected:
-        if float(bar.instrument.strike) not in eligible_strikes:
+        strike = _strike_value(bar.instrument.strike)
+        if strike is None or strike not in eligible_strikes:
             continue
         kind = str(bar.instrument.instrument_type).upper()
         if kind == "CE":
@@ -175,6 +176,10 @@ def option_pcr_at_event(
         elif kind == "PE":
             puts += float(bar.volume or 0.0)
     return puts / calls if calls > 0 else None
+
+
+def _strike_value(value: float | None) -> float | None:
+    return float(value) if value is not None else None
 
 
 __all__ = ["LiveFeatureCalculator", "LiveFeatures", "option_pcr_at_event", "vix_open_and_event"]

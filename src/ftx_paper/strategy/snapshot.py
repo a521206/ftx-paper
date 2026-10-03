@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping, Sequence
 from datetime import datetime
-from typing import cast
+import math
 
 from ftx_paper.contracts import Instrument, OptionType, OrderSide
 from ftx_paper.domain.portfolio import PortfolioState
@@ -59,7 +59,9 @@ def restore_strategy(cls, snapshot: Mapping[str, object], *, capital_profile):
     raw_vehicles = snapshot.get("enabled_vehicles", (snapshot.get("vehicle", "futures"),))
     if isinstance(raw_vehicles, str) or not isinstance(raw_vehicles, Sequence):
         raise ValueError("snapshot enabled_vehicles must be a sequence")
-    enabled_vehicles = tuple(str(item).lower() for item in raw_vehicles)
+    if any(not isinstance(item, str) for item in raw_vehicles):
+        raise ValueError("snapshot enabled_vehicles must contain strings")
+    enabled_vehicles = tuple(item.lower() for item in raw_vehicles)
     if not enabled_vehicles or any(item not in {"futures", "synthetic"} for item in enabled_vehicles):
         raise ValueError("snapshot enabled_vehicles must contain 'futures' and/or 'synthetic'")
 
@@ -80,7 +82,10 @@ def restore_strategy(cls, snapshot: Mapping[str, object], *, capital_profile):
                 f"configured={configured}, snapshot={persisted}"
             )
     persisted_buffer = raw_capital.get("cell_session_risk_buffer_fraction")
-    if persisted_buffer is not None and float(persisted_buffer) != capital_profile.cell_session_risk_buffer_fraction:
+    if (persisted_buffer is not None and (
+            isinstance(persisted_buffer, bool) or not isinstance(persisted_buffer, (int, float))
+            or not math.isfinite(persisted_buffer)
+            or float(persisted_buffer) != capital_profile.cell_session_risk_buffer_fraction)):
         raise ValueError("capital config does not match strategy snapshot for cell_session_risk_buffer_fraction")
 
     raw_config = snapshot.get("config", {})
@@ -117,6 +122,8 @@ def restore_strategy(cls, snapshot: Mapping[str, object], *, capital_profile):
             raise ValueError(f"invalid vehicle risk limits for {key!r}") from exc
 
     raw_portfolio = snapshot.get("portfolio")
+    if raw_portfolio is not None and not isinstance(raw_portfolio, Mapping):
+        raise ValueError("strategy snapshot portfolio must be an object")
     portfolio = PortfolioState.from_snapshot(raw_portfolio) if isinstance(raw_portfolio, Mapping) else None
     strategy = cls(config=config, capital_profile=capital_profile, enabled_vehicles=enabled_vehicles,
                    vehicle_risk_limits=limits, portfolio=portfolio)
@@ -141,7 +148,9 @@ def restore_strategy(cls, snapshot: Mapping[str, object], *, capital_profile):
     raw_pending = snapshot.get("pending_exits", {})
     if not isinstance(raw_pending, Mapping):
         raise ValueError("strategy snapshot pending_exits must be an object")
-    strategy._pending_exits = {str(key): str(value) for key, value in raw_pending.items()}
+    if any(not isinstance(key, str) or not isinstance(value, str) for key, value in raw_pending.items()):
+        raise ValueError("strategy snapshot pending_exits must contain strings")
+    strategy._pending_exits = dict(raw_pending)
     return strategy
 
 
@@ -156,10 +165,14 @@ def _instrument_from_snapshot(raw: Mapping[str, object]) -> Instrument:
     strike = raw.get("strike")
     if expiry is not None and not isinstance(expiry, str):
         raise ValueError("strategy snapshot expiry is invalid")
-    if strike is not None and (isinstance(strike, bool) or not isinstance(strike, (int, float))):
+    if (strike is not None and (isinstance(strike, bool) or not isinstance(strike, (int, float))
+            or not math.isfinite(strike))):
         raise ValueError("strategy snapshot strike is invalid")
-    return Instrument(cast(str, raw["symbol"]), cast(str, raw["exchange"]),
-                      cast(str, raw["instrument_type"]), expiry,
+    symbol = raw["symbol"]
+    exchange = raw["exchange"]
+    instrument_type = raw["instrument_type"]
+    assert isinstance(symbol, str) and isinstance(exchange, str) and isinstance(instrument_type, str)
+    return Instrument(symbol, exchange, instrument_type, expiry,
                       float(strike) if strike is not None else None,
                       OptionType(option_type) if option_type is not None else None)
 
@@ -187,24 +200,33 @@ def _position_from_snapshot(raw: Mapping[str, object]) -> PositionState:
     vehicle = raw.get("vehicle", "futures")
     if not isinstance(vehicle, str) or vehicle not in {"futures", "synthetic"}:
         raise ValueError("strategy snapshot position vehicle is invalid")
+    if vehicle == "synthetic":
+        if legs is None or {leg.instrument_type.upper() for leg in legs} != {"CE", "PE"}:
+            raise ValueError("synthetic strategy snapshot position must contain CE and PE legs")
+        if (legs[0].expiry, legs[0].strike) != (legs[1].expiry, legs[1].strike):
+            raise ValueError("synthetic strategy snapshot legs must share expiry and strike")
+    elif legs is not None:
+        raise ValueError("futures strategy snapshot position cannot contain synthetic legs")
+    exit_mode = raw.get("exit_mode", "signal")
+    if not isinstance(exit_mode, str):
+        raise ValueError("strategy snapshot exit_mode is invalid")
     entry_order_id = raw.get("entry_order_id")
     if entry_order_id is not None and not isinstance(entry_order_id, str):
         raise ValueError("strategy snapshot entry_order_id is invalid")
     cell = raw.get("cell")
     if cell is not None and not isinstance(cell, str):
         raise ValueError("strategy snapshot cell is invalid")
-    for field_name in ("entry_price", "stop_price", "quantity"):
-        value = raw[field_name]
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError(f"strategy snapshot {field_name} is invalid")
+    entry_price = _finite_number("entry_price", raw["entry_price"])
+    stop_price = _finite_number("stop_price", raw["stop_price"])
+    quantity = _positive_int("quantity", raw["quantity"])
     return PositionState(
-        _instrument_from_snapshot(instrument_raw), float(raw["entry_price"]), float(raw["stop_price"]),
-        int(raw["quantity"]), OrderSide(raw["side"]), cell=cell,
-        exit_mode=str(raw.get("exit_mode", "signal")), entry_fill_time=entry_fill_time,
-        exit_reference_price=float(cast(float, raw["exit_reference_price"])) if isinstance(raw.get("exit_reference_price"), (int, float)) else None,
-        target_price=float(cast(float, raw["target_price"])) if isinstance(raw.get("target_price"), (int, float)) else None,
+        _instrument_from_snapshot(instrument_raw), entry_price, stop_price,
+        quantity, OrderSide(raw["side"]), cell=cell,
+        exit_mode=exit_mode, entry_fill_time=entry_fill_time,
+         exit_reference_price=_optional_number(raw.get("exit_reference_price")),
+         target_price=_optional_number(raw.get("target_price")),
         vehicle=vehicle, synthetic_legs=legs,
-        entry_bar=int(cast(int, raw["entry_bar"])) if isinstance(raw.get("entry_bar"), int) else None,
+         entry_bar=_optional_int(raw.get("entry_bar")),
         entry_order_id=entry_order_id,
     )
 
@@ -220,4 +242,28 @@ def _parse_minute_pair(key: str, value: object) -> tuple[int, int]:
 def _parse_non_negative_int(key: str, value: object) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise ValueError(f"{key} must be a non-negative integer")
+    return value
+
+
+def _finite_number(key: str, value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise ValueError(f"strategy snapshot {key} is invalid")
+    return float(value)
+
+
+def _positive_int(key: str, value: object) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError(f"strategy snapshot {key} is invalid")
+    return value
+
+
+def _optional_number(value: object) -> float | None:
+    return _finite_number("optional numeric field", value) if value is not None else None
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError("strategy snapshot entry_bar is invalid")
     return value

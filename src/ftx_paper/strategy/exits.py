@@ -5,8 +5,16 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
-from typing import cast
+import math
 from ftx_paper.contracts import Instrument, OrderIntent, OrderRole, OrderSide
+
+
+def _optional_number(value: object, name: str) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise ValueError(f"exit-state snapshot {name} must be finite numeric")
+    return float(value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,12 +128,15 @@ class ExitStateMachine:
             parsed_close_time = time.fromisoformat(close_time)
         except ValueError as exc:
             raise ValueError("exit-state snapshot close_time is invalid") from exc
+        counter_move_bars = snapshot.get("counter_move_bars", 2)
+        if not isinstance(counter_move_bars, int) or isinstance(counter_move_bars, bool) or counter_move_bars < 1:
+            raise ValueError("exit-state snapshot counter_move_bars is invalid")
         machine = cls(
-            trail_distance=cast(float | None, snapshot.get("trail_distance")),
-            trail_activation_bp=cast(float | None, snapshot.get("trail_activation_bp")),
-            trail_distance_bp=cast(float | None, snapshot.get("trail_distance_bp")),
+            trail_distance=_optional_number(snapshot.get("trail_distance"), "trail_distance"),
+            trail_activation_bp=_optional_number(snapshot.get("trail_activation_bp"), "trail_activation_bp"),
+            trail_distance_bp=_optional_number(snapshot.get("trail_distance_bp"), "trail_distance_bp"),
             close_time=parsed_close_time,
-            counter_move_bars=int(cast(int, snapshot.get("counter_move_bars", 2))),
+            counter_move_bars=counter_move_bars,
         )
         closes = snapshot.get("closes", ())
         if not isinstance(closes, (list, tuple)) or len(closes) > machine.counter_move_bars + 1:
@@ -139,10 +150,9 @@ class ExitStateMachine:
         if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in volumes):
             raise ValueError("exit-state snapshot volumes must be numeric")
         machine._volumes.extend(float(value) for value in volumes)
-        maximum = snapshot.get("max_favorable_price")
-        if maximum is not None and (isinstance(maximum, bool) or not isinstance(maximum, (int, float))):
-            raise ValueError("exit-state snapshot max_favorable_price must be numeric")
-        machine._max_favorable_price = float(maximum) if maximum is not None else None
+        machine._max_favorable_price = _optional_number(
+            snapshot.get("max_favorable_price"), "max_favorable_price",
+        )
         trail_active = snapshot.get("trail_active", False)
         if not isinstance(trail_active, bool):
             raise ValueError("exit-state snapshot trail_active must be boolean")
@@ -153,6 +163,7 @@ class ExitStateMachine:
                 raise ValueError(f"exit-state snapshot {name} is invalid")
             setattr(machine, f"_{name}", int(value) if name == "bars_held" else float(value))
         return machine
+
 
     def evaluate(self, position: PositionState, *, timestamp: datetime, high: float, low: float,
                  close: float, client_order_id: str, include_signal: bool = True,

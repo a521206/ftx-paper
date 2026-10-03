@@ -1,16 +1,18 @@
 """SQLite unit-of-work shell used by repository adapters."""
 
 import sqlite3
+from collections.abc import Callable
 from typing import Any
 
+from ftx_paper.ports.repositories import EventRepository, MarketBarRepository, ReplayRepository, RuntimeStatusRepository
 from ftx_paper.ports.unit_of_work import UnitOfWork
 
 
 class SqliteUnitOfWork:
-    events: Any
-    market_bars: Any
-    replay_runs: Any
-    status: Any
+    events: EventRepository
+    market_bars: MarketBarRepository
+    replay_runs: ReplayRepository
+    status: RuntimeStatusRepository
 
     def __init__(self, connection: sqlite3.Connection, repositories: dict[str, object] | None = None) -> None:
         self.connection = connection
@@ -37,7 +39,7 @@ class SqliteUnitOfWork:
 
 
 class SqliteUnitOfWorkFactory:
-    def __init__(self, database, repository_factory):
+    def __init__(self, database: Any, repository_factory: Callable[[sqlite3.Connection], dict[str, object]]) -> None:
         self.database = database
         self.repository_factory = repository_factory
 

@@ -47,10 +47,19 @@ def build_authoritative_payload(
         event, date_from=date_from, date_to=date_to, sessions=session_values,
         vehicles=vehicle_values,
     )]
-    ordered = sorted(scoped, key=lambda event: (
-        _event_date(event), str(event.get("payload", event).get("sequence", "")),
-        str(event.get("payload", event).get("decision_at", event.get("created_at", ""))),
-    ))
+    def event_order(event: Mapping[str, Any]) -> tuple[Any, ...]:
+        payload = event.get("payload", event)
+        raw_sequence = payload.get("sequence")
+        sequence = int(raw_sequence) if str(raw_sequence).lstrip("-").isdigit() else 2**31
+        return (
+            _event_date(event), sequence,
+            str(payload.get("decision_at", event.get("created_at", ""))),
+            str(payload.get("decision_id", "")),
+            str(event.get("event_type", "")).upper(),
+            json.dumps(payload, sort_keys=True, default=str, separators=(",", ":")),
+        )
+
+    ordered = sorted(scoped, key=event_order)
     candidates: list[dict[str, Any]] = []
     decisions: list[dict[str, Any]] = []
     trades: list[dict[str, Any]] = []

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from ftx_paper.contracts import OrderIntent, OrderRole
-from ftx_paper.domain.portfolio import PortfolioState, PaperPosition
+from ftx_paper.domain.portfolio import PortfolioState, PaperPosition, SettlementResult
 from ftx_paper.domain.capital import ResearchCapitalProfile, CapitalRuntimeContext
 
 
@@ -20,7 +20,8 @@ class PaperExecutionCoordinator:
             )
 
     def fill(self, order: OrderIntent, *, price: float, timestamp: str | None = None,
-             synthetic_entry_prices=None, cost: float = 0.0) -> PaperPosition | dict[str, float] | None:
+             synthetic_entry_prices: tuple[float, float] | None = None,
+             cost: float = 0.0) -> PaperPosition | SettlementResult | None:
         self._require_futures(order)
         if order.role is OrderRole.ENTRY:
             return self.portfolio.fill_entry(

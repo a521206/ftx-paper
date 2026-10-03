@@ -6,7 +6,7 @@ import sqlite3
 import threading
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 from collections.abc import Iterable
@@ -23,6 +23,19 @@ from ftx_paper.runtime.events import (
     parse_decision_at,
     serialize_datetime,
 )
+
+
+class DecisionSummary(TypedDict):
+    detections: int
+    candidates: int
+    accepted: int
+    rejected: int
+    executed: int
+
+
+class DecisionSummaryReport(TypedDict):
+    totals: DecisionSummary
+    sessions: dict[str, DecisionSummary]
 
 
 class ProcessAlreadyRunningError(RuntimeError):
@@ -201,6 +214,15 @@ class SqliteRuntimeStore:
                 "UPDATE market_bars SET open_interest = 0.0 "
                 "WHERE upper(instrument_type) IN ('FUT', 'FUTURES') AND open_interest IS NULL"
             )
+            # Historical option rows are also the authoritative expiry source
+            # when an external calendar has not been imported yet.
+            connection.execute(
+                "INSERT OR IGNORE INTO expiry_dates(date, source, copied_at) "
+                "SELECT DISTINCT expiry, 'market_bars', ? FROM market_bars "
+                "WHERE upper(instrument_type) IN ('CE', 'PE') "
+                "AND expiry IS NOT NULL AND expiry <> ''",
+                (datetime.now(timezone.utc).isoformat(),),
+            )
         self.compact_replay_runs()
 
     def compact_replay_runs(self) -> int:
@@ -377,6 +399,14 @@ class SqliteRuntimeStore:
             connection.executemany(
                 "INSERT OR IGNORE INTO market_dates(date) VALUES (?)",
                 ((session_date,) for session_date in {row[2][:10] for row in rows}),
+            )
+            connection.executemany(
+                "INSERT OR IGNORE INTO expiry_dates(date, source, copied_at) VALUES (?, ?, ?)",
+                (
+                    (str(row[10])[:10], source, now)
+                    for row in rows
+                    if str(row[9]).upper() in {"CE", "PE"} and row[10]
+                ),
             )
 
     def read_market_bars(self, session_date: str) -> list[dict[str, Any]]:
@@ -697,7 +727,7 @@ class SqliteRuntimeStore:
             "by_instrument": {str(kind): int(count) for kind, count in instrument_rows},
         }
 
-    def read_decision_summary(self, session_date: str) -> dict[str, dict[str, int]]:
+    def read_decision_summary(self, session_date: str) -> DecisionSummaryReport:
         """Aggregate a complete session day without decoding event payloads."""
         event_types = tuple(sorted(DECISION_EVENT_TYPES))
         event_placeholders = ", ".join("?" for _ in event_types)
@@ -719,11 +749,13 @@ class SqliteRuntimeStore:
         with self._connect() as connection:
             rows = connection.execute(sql, (*executed_types, *event_types, session_date)).fetchall()
 
-        sessions = {
+        sessions: dict[str, DecisionSummary] = {
             name: {"detections": 0, "candidates": 0, "accepted": 0, "rejected": 0, "executed": 0}
             for name in ("Pre", "Morning", "Mid", "Afternoon", "Post")
         }
-        totals = {"detections": 0, "candidates": 0, "accepted": 0, "rejected": 0, "executed": 0}
+        totals: DecisionSummary = {
+            "detections": 0, "candidates": 0, "accepted": 0, "rejected": 0, "executed": 0,
+        }
         for event_type, minute, count, executed in rows:
             if not minute:
                 continue

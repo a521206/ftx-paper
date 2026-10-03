@@ -11,7 +11,7 @@ from .capital import (
     ResearchCapitalProfile,
     VehicleLimits,
 )
-from .portfolio import MarginReservation, PaperPosition, PortfolioState
+from .portfolio import MarginReservation, PaperPosition, PortfolioState, SettlementResult
 from .account import AccountAggregate
 from .decision_context import (
     CapitalSnapshot, DecisionContext, ExposureSnapshot, MarginSnapshot,
@@ -27,6 +27,7 @@ __all__ = [
     "MarginReservation",
     "PaperPosition",
     "PortfolioState",
+    "SettlementResult",
     "RESEARCH_CAPITAL_PROFILE",
     "ResearchCapitalProfile",
     "VehicleLimits",

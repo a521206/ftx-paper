@@ -10,7 +10,8 @@ from ftx_paper.application import RuntimeOperations
 from ftx_paper.config import PaperConfig
 from ftx_paper.domain.capital import CapitalRuntimeContext, RESEARCH_CAPITAL_PROFILE
 from ftx_paper.domain.portfolio import PortfolioState
-from ftx_paper.runtime import ProcessAlreadyRunningError, RuntimeSession
+from ftx_paper.infrastructure.sqlite.runtime_store import ProcessAlreadyRunningError
+from ftx_paper.runtime.session import RuntimeSession
 from ftx_paper.runtime.store import RuntimeStore
 from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.strategy import ConfiguredStrategyFactory
@@ -70,11 +71,17 @@ def api_main() -> None:
         except ValueError:
             auth = None
         import json
-        raw = json.loads(config.zerodha_config.read_text(encoding="utf-8")) if config.zerodha_config.exists() else {}
+        raw_value = json.loads(config.zerodha_config.read_text(encoding="utf-8")) if config.zerodha_config.exists() else {}
+        if not isinstance(raw_value, dict):
+            raise ValueError("Zerodha configuration must be a JSON object")
+        raw = raw_value
+        instruments_value = raw.get("instruments", ())
+        if not isinstance(instruments_value, list) or any(not isinstance(item, dict) for item in instruments_value):
+            raise ValueError("Zerodha instruments must be a list of objects")
         session = RuntimeSession(
             store,
             auth,
-            list(raw.get("instruments", ())),
+            instruments_value,
             capital_profile=capital_profile,
             portfolio=portfolio,
             capital_context=capital_context,

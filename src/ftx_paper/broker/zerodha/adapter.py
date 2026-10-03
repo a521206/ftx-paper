@@ -13,8 +13,8 @@ from requests import exceptions as requests_exceptions
 
 from ftx_paper.broker.protocol import Fill
 from ftx_paper.contracts import (
-    Instrument, MarketBar, MarketRole, OptionType, OrderAck, OrderIntent, OrderSide, Role,
-    normalize_exchange_timestamp, parse_role,
+    Instrument, MarketBar, MarketRole, OptionRole, OptionType, OrderAck, OrderIntent, OrderSide, Role,
+    normalize_exchange_timestamp, parse_role, role_to_key,
 )
 
 KITE_EXCHANGE_MAP = {"NSE_INDEX": "NSE", "BSE_INDEX": "BSE"}
@@ -130,6 +130,8 @@ def resolve_instruments(
         exchange = str(spec.get("exchange", "")).strip()
         symbol = str(spec.get("tradingsymbol", "")).strip()
         raw_role = spec.get("role")
+        if raw_role is not None and not isinstance(raw_role, (str, MarketRole, OptionRole)):
+            raise ValueError("Zerodha instrument role must be a string or role")
         role = parse_role(raw_role) if raw_role is not None else None
         kite_exchange = KITE_EXCHANGE_MAP.get(exchange, exchange)
         is_nfo_futures = role is MarketRole.FUTURES and kite_exchange == "NFO"
@@ -144,9 +146,11 @@ def resolve_instruments(
         if is_nfo_futures:
             if not underlying:
                 underlying = _futures_underlying(symbol, match)
+            if underlying is None or today is None:
+                raise ValueError("futures instruments require an underlying")
             stored = (
                 contract_store.read_runtime_contract(
-                    exchange=exchange, underlying=underlying, role=role.value,
+                    exchange=exchange, underlying=underlying, role=role_to_key(role) if role is not None else "futures",
                 ) if contract_store is not None and underlying else None
             )
             stored_symbol = str(stored.get("tradingsymbol", "")) if stored else ""
@@ -161,7 +165,7 @@ def resolve_instruments(
                 if contract_store is not None:
                     contract_store.record_runtime_contract({
                         "exchange": exchange, "underlying": underlying,
-                        "role": role.value, "tradingsymbol": match["tradingsymbol"],
+                         "role": role_to_key(role) if role is not None else "futures", "tradingsymbol": match["tradingsymbol"],
                         "instrument_token": match["instrument_token"],
                         "expiry": _instrument_expiry(match["expiry"]).isoformat(),
                     })
@@ -208,7 +212,11 @@ def discover_option_surface_contracts(
         if parsed_expiry.isoformat() != selected_expiry or key in seen:
             continue
         seen.add(key)
-        discovered.append({**dict(row), "exchange": "NFO", "symbol": symbol, "role": None})
+        discovered.append(ZerodhaInstrument(
+            instrument_token=int(row["instrument_token"]), exchange="NFO", symbol=symbol,
+            tradingsymbol=symbol, instrument_type=str(row["instrument_type"]), role=None,
+            expiry=parsed_expiry, strike=float(row["strike"]), name=str(row.get("name", "")),
+        ))
     return discovered
 
 
@@ -259,7 +267,8 @@ def classify_runtime_roles(instruments: list[ZerodhaInstrument]) -> RuntimeRoles
     for item in instruments:
         symbol = str(item.get("symbol", "")).upper()
         exchange = str(item.get("exchange", ""))
-        role = parse_role(item.get("role")) if item.get("role") is not None else None
+        raw_role = item.get("role")
+        role = parse_role(raw_role) if isinstance(raw_role, (str, MarketRole, OptionRole)) else None
         if role is MarketRole.VIX or symbol in {"INDIA VIX", "INDIAVIX"}:
             vix = item
         elif role is MarketRole.FUTURES or (exchange == "NFO" and symbol.endswith("FUT")):

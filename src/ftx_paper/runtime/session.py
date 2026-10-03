@@ -10,9 +10,9 @@ from zoneinfo import ZoneInfo
 
 from ftx_paper.broker import Broker, Fill, PaperBroker
 from ftx_paper.domain.capital import CapitalRuntimeContext, ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
-from ftx_paper.domain.portfolio import PortfolioState
+from ftx_paper.domain.portfolio import PaperPosition, PortfolioState
 from ftx_paper.contracts import (
-    Instrument, MarketBar, MarketRole, OptionRole, OptionType, OrderRole, OrderSide, normalize_exchange_timestamp, parse_role,
+    Instrument, MarketBar, MarketRole, OptionRole, OptionType, OrderRole, OrderSide, Role, normalize_exchange_timestamp, parse_role,
     role_to_key,
 )
 from ftx_paper.market import AggregatorConfig, CompletedBarAggregator, InstrumentKey
@@ -170,7 +170,7 @@ class RuntimeSession:
                 InstrumentKey(str(roles.futures["exchange"]), str(roles.futures["symbol"])): MarketRole.FUTURES,
                 InstrumentKey(str(roles.vix["exchange"]), str(roles.vix["symbol"])): MarketRole.VIX,
             }
-            role_map = {
+            role_map: dict[InstrumentKey | tuple[str, str], Role] = {
                 InstrumentKey(str(item["exchange"]), str(item["symbol"])): inferred_roles.get(
                     InstrumentKey(str(item["exchange"]), str(item["symbol"])),
                     (OptionRole(str(item["symbol"])) if str(item.get("instrument_type", "")).upper() in {"CE", "PE"}
@@ -215,7 +215,9 @@ class RuntimeSession:
                                          "phase": "LIVE", "execution_enabled": True})
                 health_snapshot = getattr(self.feed, "health_snapshot", None)
                 if callable(health_snapshot):
-                    self.on_feed_health(health_snapshot())
+                    snapshot = health_snapshot()
+                    if isinstance(snapshot, Mapping):
+                        self.on_feed_health(dict(snapshot))
                 self._started.set()
         except Exception as exc:
             self._replaying = False
@@ -642,7 +644,6 @@ class RuntimeSession:
                 "quantity": fill.quantity,
             }
             cost = 0.0
-            position = None
             if order.role is OrderRole.EXIT:
                 cost = futures_cost(fill.quantity)
             register_entry = getattr(self.engine, "register_entry", None)
@@ -674,10 +675,13 @@ class RuntimeSession:
                     return False
             if order.role is OrderRole.ENTRY and self.coordinator is not None:
                 try:
-                    position = self.coordinator.fill(
+                    fill_result = self.coordinator.fill(
                         order, price=execution_price, timestamp=timestamp,
                         synthetic_entry_prices=None,
                     )
+                    if not isinstance(fill_result, PaperPosition):
+                        raise TypeError("entry coordinator fill did not return a position")
+                    position = fill_result
                 except Exception as exc:
                     compensated = compensate_fills(fills, ack.broker_order_id)
                     if compensated:
@@ -735,7 +739,7 @@ class RuntimeSession:
             return False
         if order.role is OrderRole.EXIT and self.coordinator is not None:
             settlement = self.coordinator.fill(order, price=execution_price, timestamp=timestamp, cost=cost)
-            if settlement is not None:
+            if isinstance(settlement, dict) and self._last_execution_fill is not None:
                 self._last_execution_fill["realized_pnl"] = settlement["net_pnl"]
         self._persist_strategy_state()
         return bool(fill)

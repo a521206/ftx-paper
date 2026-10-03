@@ -56,9 +56,14 @@ def settle_synthetic_plan(
 def _positive_pair(values: Mapping[str, object] | None) -> dict[str, float] | None:
     if values is None:
         return None
+    ce_raw, pe_raw = values.get("ce"), values.get("pe")
+    if isinstance(ce_raw, bool) or not isinstance(ce_raw, (int, float, str)):
+        return None
+    if isinstance(pe_raw, bool) or not isinstance(pe_raw, (int, float, str)):
+        return None
     try:
-        ce, pe = float(values["ce"]), float(values["pe"])
-    except (KeyError, TypeError, ValueError):
+        ce, pe = float(ce_raw), float(pe_raw)
+    except ValueError:
         return None
     if not math.isfinite(ce) or not math.isfinite(pe) or ce <= 0 or pe <= 0:
         return None
@@ -72,9 +77,12 @@ def _provenance(values: Mapping[str, object] | None) -> object:
 def _valid_contract(contract: Mapping[str, object] | None) -> bool:
     if contract is None or not contract.get("expiry"):
         return False
+    strike = contract.get("strike")
+    if isinstance(strike, bool) or not isinstance(strike, (int, float, str)):
+        return False
     try:
-        return float(contract["strike"]) > 0
-    except (KeyError, TypeError, ValueError):
+        return float(strike) > 0
+    except ValueError:
         return False
 
 

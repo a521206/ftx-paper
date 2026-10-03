@@ -362,6 +362,7 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
                     "FILL": "filled",
                     "ORDER_UNFILLED": "unfilled",
                     "EXECUTION_ERROR": "execution_error",
+                    "RISK_REJECTED": "risk_rejected",
                 }.get(execution_type, "unknown")
                 payload["execution_status"] = status
                 payload["execution_event_type"] = execution_type

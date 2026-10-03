@@ -272,7 +272,8 @@ class AsyncZerodhaSocket:
                 self._state = SocketState.FAILED
         if worker_alive:
             frames = sys._current_frames()
-            frame = frames.get(thread.ident) if thread is not None else None
+            thread_id = thread.ident if thread is not None else None
+            frame = frames.get(thread_id) if thread_id is not None else None
             stack = "".join(traceback.format_stack(frame)) if frame is not None else "<stack unavailable>"
             logger.error(
                 "Zerodha WebSocket worker did not stop within 5 seconds; current stack:\n%s",
