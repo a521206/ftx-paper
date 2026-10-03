@@ -180,15 +180,12 @@ def detect_all_locations(
         found.append(Location.VWAP_ZONE)
     if close > features.session_high:
         found.append(Location.NEW_HIGH)
+    if close < features.session_low:
+        found.append(Location.NEW_LOW)
     session_range = features.session_high - features.session_low
     percentile = (close - features.session_low) / session_range if session_range > 0 else 0.5
     if percentile <= 0.10:
-        # A fresh low is canonicalized as the session-low cell.  Keeping both
-        # labels here makes the Cell normalizer choose the wrong policy when a
-        # bar first breaks the prior prefix low.
         found.append(Location.SESSION_LOW)
-    elif close < features.session_low:
-        found.append(Location.NEW_LOW)
     if percentile >= 0.90:
         found.append(Location.SESSION_HIGH)
     if features.opening_range_complete and features.opening_range_high is not None and close >= features.opening_range_high - 0.25 * atr:

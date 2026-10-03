@@ -29,6 +29,25 @@ def test_cell_normalization_prunes_implied_new_extremes() -> None:
     assert Cell("new_high", "or_high", "prior_day_high").name == "or_high+prior_day_high"
 
 
+def test_new_low_precedes_session_low_when_close_breaks_developing_low() -> None:
+    features = LocationFeatures(
+        vwap=89.0,
+        session_high=110.0,
+        session_low=90.0,
+        atr=4.0,
+        opening_range_high=None,
+        opening_range_low=None,
+        opening_range_complete=False,
+        prior_day_high=None,
+        prior_day_low=None,
+    )
+
+    locations = detect_all_locations(features, 89.0)
+
+    assert locations == (Location.VWAP_ZONE, Location.NEW_LOW, Location.SESSION_LOW)
+    assert Cell(*locations).name == "vwap_zone+new_low"
+
+
 def test_empty_cell_is_rejected() -> None:
     with pytest.raises(ValueError, match="at least one location"):
         Cell()
