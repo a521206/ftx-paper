@@ -100,16 +100,19 @@ class SqliteRuntimeStore:
             raise FileNotFoundError(f"runtime database not found: {instance.database}")
         return instance
 
-    def _connect(self, *, timeout: float = 10) -> sqlite3.Connection:
+    def _connect(self, *, timeout: float = 30) -> sqlite3.Connection:
         if self._read_only:
             uri = f"file:{self.database.resolve().as_posix()}?mode=ro"
-            return sqlite3.connect(uri, uri=True, timeout=timeout)
-        return sqlite3.connect(self.database, timeout=timeout)
+            connection = sqlite3.connect(uri, uri=True, timeout=timeout)
+        else:
+            connection = sqlite3.connect(self.database, timeout=timeout)
+        connection.execute(f"PRAGMA busy_timeout = {int(timeout * 1000)}")
+        return connection
 
     def initialize(self) -> None:
         """Create the runtime directory and schema for a writable store."""
         self.root.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.database) as connection:
+        with self._connect() as connection:
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS runtime_status (
@@ -227,7 +230,7 @@ class SqliteRuntimeStore:
 
     def compact_replay_runs(self) -> int:
         """Remove legacy all-date and duplicate replay snapshots."""
-        with sqlite3.connect(self.database) as connection:
+        with self._connect() as connection:
             cursor = connection.execute(
                 """
                 DELETE FROM replay_runs
@@ -253,7 +256,7 @@ class SqliteRuntimeStore:
         pid = os.getpid()
         instance_id = str(uuid4())
         started_at = datetime.now(timezone.utc).isoformat()
-        with sqlite3.connect(self.database, timeout=10) as connection:
+        with self._connect(timeout=10) as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT pid FROM process_leases WHERE service = ?", (service,)
@@ -275,7 +278,7 @@ class SqliteRuntimeStore:
 
     def release_process_lease(self, service: str, instance_id: str) -> None:
         """Release only the lease owned by this process instance."""
-        with sqlite3.connect(self.database, timeout=10) as connection:
+        with self._connect(timeout=10) as connection:
             connection.execute(
                 "DELETE FROM process_leases WHERE service = ? AND pid = ? AND instance_id = ?",
                 (service, os.getpid(), instance_id),
@@ -336,7 +339,7 @@ class SqliteRuntimeStore:
 
     def read_expiry_dates(self) -> frozenset[str]:
         """Return the one-time imported weekly expiry calendar."""
-        with sqlite3.connect(self.database) as connection:
+        with self._connect() as connection:
             rows = connection.execute("SELECT date FROM expiry_dates ORDER BY date").fetchall()
         return frozenset(str(row[0]) for row in rows)
 
@@ -385,7 +388,7 @@ class SqliteRuntimeStore:
             ))
         if not rows:
             return
-        with sqlite3.connect(self.database) as connection:
+        with self._connect() as connection:
             connection.executemany(
                 """
                 INSERT OR REPLACE INTO market_bars
@@ -411,7 +414,7 @@ class SqliteRuntimeStore:
 
     def read_market_bars(self, session_date: str) -> list[dict[str, Any]]:
         """Read one IST trading session of normalized bars for export."""
-        with sqlite3.connect(self.database) as connection:
+        with self._connect() as connection:
             connection.row_factory = sqlite3.Row
             rows = connection.execute(
                 """
@@ -427,7 +430,7 @@ class SqliteRuntimeStore:
         return [dict(row) for row in rows]
 
     def read_market_dates(self) -> list[str]:
-        with sqlite3.connect(self.database) as connection:
+        with self._connect() as connection:
             rows = connection.execute("SELECT date FROM market_dates ORDER BY date").fetchall()
         return [str(row[0]) for row in rows]
 
@@ -470,7 +473,7 @@ class SqliteRuntimeStore:
         # ``timestamp`` is retained as a source-compatibility argument only;
         # it must never become the persistence timestamp or decision time.
         event_timestamp = datetime.now(timezone.utc).isoformat()
-        with sqlite3.connect(self.database) as connection:
+        with self._connect() as connection:
             cursor = connection.execute(
                 "INSERT OR IGNORE INTO runtime_events(event_type, payload, created_at, idempotency_key) VALUES (?, ?, ?, ?)",
                 (event_type, json.dumps(_json_safe(payload, path=f"event {event_type} payload")), event_timestamp, idempotency_key),
@@ -483,7 +486,7 @@ class SqliteRuntimeStore:
     def create_order_lifecycle(self, client_order_id: str, payload: dict[str, Any], *, state: str = "PROPOSED",
                                account_revision: int | None = None) -> bool:
         """Durably register an order before any external broker call."""
-        with sqlite3.connect(self.database) as connection:
+        with self._connect() as connection:
             cursor = connection.execute(
                 "INSERT OR IGNORE INTO runtime_orders(client_order_id, state, payload, account_revision, updated_at) "
                 "VALUES (?, ?, ?, ?, ?)",
@@ -495,7 +498,7 @@ class SqliteRuntimeStore:
     def update_order_lifecycle(self, client_order_id: str, *, state: str,
                                broker_order_id: str | None = None,
                                account_revision: int | None = None) -> bool:
-        with sqlite3.connect(self.database) as connection:
+        with self._connect() as connection:
             cursor = connection.execute(
                 "UPDATE runtime_orders SET state=?, broker_order_id=COALESCE(?, broker_order_id), "
                 "account_revision=COALESCE(?, account_revision), updated_at=? WHERE client_order_id=?",
@@ -504,7 +507,7 @@ class SqliteRuntimeStore:
         return cursor.rowcount == 1
 
     def read_order_lifecycle(self, client_order_id: str) -> dict[str, Any] | None:
-        with sqlite3.connect(self.database) as connection:
+        with self._connect() as connection:
             connection.row_factory = sqlite3.Row
             row = connection.execute(
                 "SELECT * FROM runtime_orders WHERE client_order_id=?", (str(client_order_id),)
@@ -516,7 +519,7 @@ class SqliteRuntimeStore:
         return value
 
     def read_in_flight_orders(self) -> list[dict[str, Any]]:
-        with sqlite3.connect(self.database) as connection:
+        with self._connect() as connection:
             connection.row_factory = sqlite3.Row
             rows = connection.execute(
                 "SELECT * FROM runtime_orders WHERE state IN ('AUTHORIZED', 'SUBMITTING', 'ACKNOWLEDGED', 'PARTIALLY_FILLED') "
@@ -531,7 +534,7 @@ class SqliteRuntimeStore:
 
     def clear_replay_events(self, session_date: str) -> int:
         """Remove only startup-replay audit rows for one trading date."""
-        with sqlite3.connect(self.database) as connection:
+        with self._connect() as connection:
             cursor = connection.execute(
                 "DELETE FROM runtime_events WHERE json_extract(payload, '$.decision_source') = 'replay' "
                 "AND json_extract(payload, '$.session_date') = ?",
@@ -543,7 +546,7 @@ class SqliteRuntimeStore:
 
     def create_replay_run(self, run_id: str, request: dict[str, Any]) -> dict[str, Any]:
         now = self._now()
-        with sqlite3.connect(self.database) as connection:
+        with self._connect() as connection:
             connection.execute(
                 "INSERT INTO replay_runs(run_id, status, request, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
                 (run_id, "queued", json.dumps(_json_safe(request, path="replay request")), now, now),
@@ -552,7 +555,7 @@ class SqliteRuntimeStore:
 
     def update_replay_run(self, run_id: str, *, status: str, result: dict[str, Any] | None = None,
                           error: str | None = None) -> None:
-        with sqlite3.connect(self.database) as connection:
+        with self._connect() as connection:
             connection.execute(
                 "UPDATE replay_runs SET status=?, result=COALESCE(?, result), error=?, updated_at=? WHERE run_id=?",
                 (status, json.dumps(_json_safe(result, path="replay result")) if result is not None else None,
@@ -562,7 +565,7 @@ class SqliteRuntimeStore:
     def transition_replay_run(self, run_id: str, *, expected_status: str, status: str,
                               result: dict[str, Any] | None = None, error: str | None = None) -> bool:
         """Guard replay state changes so racing workers cannot overwrite terminal state."""
-        with sqlite3.connect(self.database) as connection:
+        with self._connect() as connection:
             cursor = connection.execute(
                 "UPDATE replay_runs SET status=?, result=COALESCE(?, result), error=?, updated_at=? "
                 "WHERE run_id=? AND status=?",
@@ -572,7 +575,7 @@ class SqliteRuntimeStore:
             return cursor.rowcount == 1
 
     def read_replay_run(self, run_id: str) -> dict[str, Any] | None:
-        with sqlite3.connect(self.database) as connection:
+        with self._connect() as connection:
             connection.row_factory = sqlite3.Row
             row = connection.execute("SELECT * FROM replay_runs WHERE run_id=?", (run_id,)).fetchone()
         if row is None:
@@ -583,13 +586,13 @@ class SqliteRuntimeStore:
         return value
 
     def read_replay_runs(self, limit: int = 100) -> list[dict[str, Any]]:
-        with sqlite3.connect(self.database) as connection:
+        with self._connect() as connection:
             ids = connection.execute("SELECT run_id FROM replay_runs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
         return [run for row in ids if (run := self.read_replay_run(str(row[0]))) is not None]
 
     def read_replay_run_summaries(self, limit: int = 100) -> list[dict[str, Any]]:
         """Read the newest stored replay for each requested trading day."""
-        with sqlite3.connect(self.database) as connection:
+        with self._connect() as connection:
             connection.row_factory = sqlite3.Row
             rows = connection.execute(
                 """
@@ -627,7 +630,7 @@ class SqliteRuntimeStore:
         normalized = str(session_date).strip()[:10]
         if not normalized:
             return None
-        with sqlite3.connect(self.database) as connection:
+        with self._connect() as connection:
             row = connection.execute(
                 """
                 SELECT run_id FROM replay_runs
@@ -640,7 +643,7 @@ class SqliteRuntimeStore:
 
     def clear_replay_runs(self) -> int:
         """Delete diagnostic replay history without touching live runtime data."""
-        with sqlite3.connect(self.database) as connection:
+        with self._connect() as connection:
             cursor = connection.execute("DELETE FROM replay_runs")
             deleted = cursor.rowcount
         return deleted
@@ -650,7 +653,7 @@ class SqliteRuntimeStore:
         normalized = str(session_date).strip()[:10]
         if not normalized:
             return 0
-        with sqlite3.connect(self.database) as connection:
+        with self._connect() as connection:
             cursor = connection.execute(
                 "DELETE FROM replay_runs "
                 "WHERE substr(json_extract(request, '$.session_date'), 1, 10) = ?",
@@ -672,7 +675,7 @@ class SqliteRuntimeStore:
             "feed_connected": False,
             "recovered_from": previous_state,
         })
-        with sqlite3.connect(self.database) as connection:
+        with self._connect() as connection:
             connection.execute(
                 "UPDATE runtime_orders SET state='RECONCILIATION_REQUIRED', updated_at=? "
                 "WHERE state IN ('AUTHORIZED', 'SUBMITTING', 'ACKNOWLEDGED', 'PARTIALLY_FILLED')",
@@ -838,7 +841,7 @@ class SqliteRuntimeStore:
         type_placeholders = ", ".join("?" for _ in event_types)
         events: list[dict[str, Any]] = []
         chunk_size = 400
-        with sqlite3.connect(self.database) as connection:
+        with self._connect() as connection:
             for start in range(0, len(ids), chunk_size):
                 window = ids[start:start + chunk_size]
                 id_placeholders = ", ".join("?" for _ in window)
@@ -855,7 +858,7 @@ class SqliteRuntimeStore:
     def event_counts(self) -> dict[str, Any]:
         if self._event_counts_cache is not None:
             return {key: dict(value) for key, value in self._event_counts_cache.items()}
-        with sqlite3.connect(self.database) as connection:
+        with self._connect() as connection:
             rows = connection.execute("SELECT event_type, COUNT(*) FROM runtime_events GROUP BY event_type").fetchall()
             reasons = connection.execute("SELECT json_extract(payload, '$.reason'), COUNT(*) FROM runtime_events WHERE json_extract(payload, '$.reason') IS NOT NULL GROUP BY json_extract(payload, '$.reason')").fetchall()
         self._event_counts_cache = {"by_event_type": {str(kind): int(count) for kind, count in rows},

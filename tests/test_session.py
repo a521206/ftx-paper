@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from threading import Event
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -60,7 +61,7 @@ def test_replay_and_runtime_share_paper_engine_bundle_path(monkeypatch, tmp_path
     RuntimeSession(runtime_store, None, [], engine=PaperEngine())._process_bundle(bundle, source="live")
 
     replay = ReplayWorker(RuntimeStore(tmp_path / "replay"))
-    replay._bars = lambda _date: (bar,)
+    replay._bars = lambda session_date: (bar,)
     result = replay._execute({"session_date": "2026-01-01"}, Event())
 
     assert calls == [bundle.bundle_id, bundle.bundle_id]
@@ -154,7 +155,7 @@ def test_replay_bars_use_rollover_selected_futures_contract(tmp_path):
         bar for bar in ReplayWorker(store)._bars("2026-09-29")
         if str(bar.instrument.instrument_type).upper() in {"FUT", "FUTURES"}
     ]
-    assert {bar.instrument.symbol for bar in futures} == {"NIFTY26OCTFUT"}
+    assert {bar.instrument.symbol for bar in futures} == {"NIFTY26SEPFUT"}
 
 
 def test_replay_prior_day_levels_follow_rollover_source_independently(tmp_path):
@@ -183,11 +184,24 @@ def test_replay_prior_day_levels_follow_rollover_source_independently(tmp_path):
     ), source="fixture")
 
     worker = ReplayWorker(store)
-    assert worker._prior_day_levels("2026-09-29") == (220.0, 180.0)
+    assert worker._prior_day_levels("2026-09-29") == (110.0, 90.0)
     provenance = worker.input_manifest("2026-09-29")["futures_source"]
-    assert provenance["selected_symbol"] == "NIFTY26OCTFUT"
-    assert provenance["selected_expiry"] == "2026-10-28"
-    assert provenance["rollover_policy_version"] == "v1-preexpiry-2d"
+    assert provenance["selected_symbol"] == "NIFTY26SEPFUT"
+    assert provenance["selected_expiry"] == "2026-09-30"
+    assert provenance["rollover_policy_version"] == "canonical-expiry-session"
+    assert provenance["rollover_decision"] == {
+        "rule": "keep the nearest contract through its expiry session",
+        "front_expiry": "2026-09-30",
+        "days_to_front_expiry": 1,
+        "selected_expiry": "2026-09-30",
+    }
+    assert provenance["eligible_contracts"] == [
+        {"symbol": "NIFTY26SEPFUT", "expiry": "2026-09-30"},
+        {"symbol": "NIFTY26OCTFUT", "expiry": "2026-10-28"},
+    ]
+    assert provenance["rejected_contracts"] == [
+        {"symbol": "NIFTY26OCTFUT", "expiry": "2026-10-28", "reason": "rollover_not_selected"},
+    ]
 
 
 def test_replay_resolves_current_then_prior_source_once(tmp_path):
@@ -208,7 +222,7 @@ def test_replay_resolves_current_then_prior_source_once(tmp_path):
     class RecordingResolver:
         def __init__(self):
             self.calls = []
-            self.delegate = FuturesSessionSourceResolver(store, rollover_days_before_expiry=0)
+            self.delegate = FuturesSessionSourceResolver(store)
 
         def resolve(self, session_date):
             self.calls.append(session_date)
@@ -291,8 +305,10 @@ def test_live_normalizer_uses_packet_receipt_time_for_bar_clock():
         "instrument_token": 1,
         "exchange": "NFO",
         "symbol": "NIFTY26SEPFUT",
+        "tradingsymbol": "NIFTY26SEPFUT",
         "instrument_type": "FUT",
         "expiry": "2026-09-29",
+        "role": MarketRole.FUTURES,
     }])
     received_at = datetime(2026, 9, 28, 6, 40, tzinfo=timezone.utc)
 
@@ -320,8 +336,8 @@ def test_incomplete_bundle_is_diagnosed_without_advancing_completion(tmp_path):
     store = RuntimeStore(tmp_path)
     session = RuntimeSession(store, None, [], engine=PaperEngine())
     session._aggregator = CompletedBarAggregator({
-        ("NFO", "NIFTY26JANFUT"): "futures",
-        ("NSE", "INDIA VIX"): "vix",
+        ("NFO", "NIFTY26JANFUT"): MarketRole.FUTURES,
+        ("NSE", "INDIA VIX"): MarketRole.VIX,
     }, deadline_seconds=0)
     store.write_status({"state": "RUNNING"})
 
@@ -369,7 +385,7 @@ def test_live_order_reaches_paper_broker_and_persists_fill(tmp_path):
                 events=({"event_type": "ACCEPTEDDECISION", "decision_id": "live-order"},),
             )
 
-    session = RuntimeSession(store, None, [], engine=Engine())
+    session = RuntimeSession(store, None, [], engine=cast(PaperEngine, Engine()))
     session.broker = PaperBroker({"NIFTYFUT": 101.5})
     session._process_bundle(
         type("Bundle", (), {
@@ -419,8 +435,10 @@ def _session_with_futures_position(tmp_path, *, entry_id="entry-1", instrument=N
     session.broker = PaperBroker({"NIFTYFUT": 101.5})
     instrument = instrument or Instrument("NIFTYFUT", "NFO", "FUTURES")
     entry = OrderIntent(entry_id, instrument, OrderSide.BUY, quantity, role=OrderRole.ENTRY)
-    session.coordinator.submit(entry)
-    session.coordinator.fill(entry, price=100.0)
+    coordinator = session.coordinator
+    assert coordinator is not None
+    coordinator.submit(entry)
+    coordinator.fill(entry, price=100.0)
     return session, store
 
 
@@ -464,7 +482,7 @@ def test_exit_rejects_broker_fill_for_a_different_instrument(tmp_path):
             return (Fill(order.client_order_id, wrong_instrument, order.quantity, 101.0,
                          "2026-01-01T10:20:00+00:00"),)
 
-    session.broker = WrongFillBroker()
+    session.broker = cast(Any, WrongFillBroker())
     order = OrderIntent("exit-1", entry_instrument, OrderSide.SELL, 2,
                         role=OrderRole.EXIT, entry_order_id="entry-1")
 
@@ -494,7 +512,7 @@ def test_session_uses_strategy_portfolio_as_execution_owner(tmp_path):
 
 
 def test_startup_discovers_options_before_backfill_and_feed_subscription(monkeypatch, tmp_path):
-    configured = [
+    configured: list[dict[str, object]] = [
         {"exchange": "NFO", "underlying": "NIFTY", "role": "futures"},
         {"exchange": "NSE_INDEX", "tradingsymbol": "INDIA VIX", "role": "vix"},
     ]
@@ -546,9 +564,9 @@ def test_startup_discovers_options_before_backfill_and_feed_subscription(monkeyp
 
 def test_runtime_session_rejects_non_flat_intraday_startup(tmp_path):
     session = RuntimeSession(RuntimeStore(tmp_path), None, [])
-    session.portfolio = type("Portfolio", (), {
+    session.portfolio = cast(Any, type("Portfolio", (), {
         "positions": {"entry-1": object()}, "pending_orders": {}, "reservations": {},
-    })()
+    })())
 
     with pytest.raises(RuntimeError, match="must start flat"):
         session.start()

@@ -1,6 +1,9 @@
 # Keep this file focused on small store behavior; do not reintroduce broad
 # lease/process-thread tests or artificial ReplayWorker thread stubs here.
 from datetime import datetime
+import sqlite3
+from threading import Event, Thread
+from time import sleep
 from zoneinfo import ZoneInfo
 
 from ftx_paper.contracts import Instrument, MarketBar, OptionType
@@ -35,6 +38,26 @@ def test_runtime_store_clears_replay_runs_for_requested_date(tmp_path):
 
     assert store.clear_replay_runs_for_date("2026-01-05") == 1
     assert [run["run_id"] for run in store.read_replay_runs()] == ["old-jan-6"]
+
+
+def test_runtime_store_waits_for_replay_read_lock(tmp_path):
+    store = RuntimeStore(tmp_path)
+    store.create_replay_run("locked-run", {"session_date": "2026-01-05"})
+    lock_acquired = Event()
+
+    def release_lock() -> None:
+        lock = sqlite3.connect(store.database)
+        lock.execute("BEGIN EXCLUSIVE")
+        lock_acquired.set()
+        sleep(0.1)
+        lock.rollback()
+        lock.close()
+
+    Thread(target=release_lock).start()
+    assert lock_acquired.wait(1)
+    run = store.read_replay_run("locked-run")
+    assert run is not None
+    assert run["run_id"] == "locked-run"
 
 
 def test_runtime_store_replaces_expiry_calendar_without_touching_replay_runs(tmp_path):
@@ -73,7 +96,9 @@ def test_runtime_store_replay_summaries_keep_latest_run_per_day(tmp_path):
     store.create_replay_run("other-day", {"session_date": "2026-01-06"})
 
     assert {run["run_id"] for run in store.read_replay_run_summaries()} == {"new-run", "other-day"}
-    assert store.read_latest_replay_for_date("2026-01-05")["run_id"] == "new-run"
+    latest = store.read_latest_replay_for_date("2026-01-05")
+    assert latest is not None
+    assert latest["run_id"] == "new-run"
 
 
 def test_runtime_store_preserves_warmup_event_payload(tmp_path):
@@ -103,7 +128,9 @@ def test_runtime_store_persists_order_before_external_dispatch(tmp_path):
     ) is False
 
     assert store.update_order_lifecycle("order-1", state="SUBMITTING") is True
-    assert store.read_order_lifecycle("order-1")["state"] == "SUBMITTING"
+    order = store.read_order_lifecycle("order-1")
+    assert order is not None
+    assert order["state"] == "SUBMITTING"
     assert store.read_in_flight_orders()[0]["client_order_id"] == "order-1"
 
 
@@ -117,7 +144,9 @@ def test_runtime_store_persists_contract_changes_once(tmp_path):
 
     assert store.record_runtime_contract(contract) is True
     assert store.record_runtime_contract(contract) is False
-    assert store.read_runtime_contract(
+    runtime_contract = store.read_runtime_contract(
         exchange="NFO", underlying="NIFTY", role="futures",
-    )["tradingsymbol"] == "NIFTY26OCTFUT"
+    )
+    assert runtime_contract is not None
+    assert runtime_contract["tradingsymbol"] == "NIFTY26OCTFUT"
     assert [event["event_type"] for event in store.read_events()] == ["CONTRACT_CHANGED"]

@@ -9,7 +9,7 @@
 
 ## Validation
 
-- For every task that changes Python files, run `.venv\Scripts\pyright.exe <changed Python files>` from the repository root before finishing. This uses the root `pyrightconfig.json`; do not substitute an editor-only Pylance check. Resolve all reported errors in changed files, or explicitly report the remaining errors and why they cannot be fixed. Do not skip the check because unrelated baseline errors exist. Include the exact Pyright command and its pass/fail result in the final response. If the executable is unavailable, run `.venv\Scripts\python.exe -m pyright <changed Python files>` and report the environment problem if that also fails.
+- For every task that changes Python files, run `.venv\Scripts\pyright.exe <changed Python files>` from the repository root before finishing. This uses the root `pyrightconfig.json`; do not substitute an editor-only Pylance check. If the project-local executable is unavailable, run `.venv\Scripts\python.exe -m pyright <changed Python files>`; if that module is unavailable, use the globally installed `pyright.exe <changed Python files>` as the final fallback. Resolve all reported errors in changed files, or explicitly report the remaining errors and why they cannot be fixed. Do not skip the check because unrelated baseline errors exist. Include each attempted command and its pass/fail result in the final response.
 
 ## Critical Boundaries
 
