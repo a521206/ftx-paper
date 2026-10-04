@@ -10,3 +10,8 @@ class RuntimeEvent:
     event_type: str
     timestamp: datetime
     payload: dict[str, Any]
+    event_id: str | None = None
+    source: str | None = None
+    correlation_id: str | None = None
+    strategy_id: str | None = None
+    account_id: str | None = None

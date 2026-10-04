@@ -15,6 +15,11 @@ class ExecutionNotification:
     price: float | None = None
     reason: str | None = None
     broker_order_id: str | None = None
+    event_id: str | None = None
+    occurred_at: str | None = None
+    source: str | None = None
+    strategy_id: str | None = None
+    account_id: str | None = None
 
 
 __all__ = ["ExecutionNotification"]

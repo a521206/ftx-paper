@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any, Callable
 
 from ftx_paper.contracts import OrderIntent
@@ -16,11 +17,13 @@ class ExecutionService:
 
     def __init__(self, account: AccountAggregate | None,
                  coordinator: PaperExecutionCoordinator | None,
-                 store: Any, notify: Callable[[ExecutionNotification], None] | None = None) -> None:
+                 store: Any, notify: Callable[[ExecutionNotification], None] | None = None,
+                 *, observers: Iterable[Callable[[ExecutionNotification], None]] = ()) -> None:
         self.account = account
         self.coordinator = coordinator
         self.store = store
         self.notify = notify
+        self.observers = tuple(observers)
 
     def authorize(self, order: OrderIntent, *, payload: dict[str, object], timestamp: str | None) -> None:
         """Re-check current account state and persist authorization before dispatch."""
@@ -51,6 +54,13 @@ class ExecutionService:
     def publish(self, notification: ExecutionNotification) -> None:
         if self.notify is not None:
             self.notify(notification)
+        for observer in self.observers:
+            try:
+                observer(notification)
+            except Exception:
+                # Diagnostics and projections cannot compromise the critical
+                # strategy/account execution path.
+                continue
 
 
 __all__ = ["ExecutionService"]

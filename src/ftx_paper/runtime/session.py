@@ -12,16 +12,18 @@ from ftx_paper.broker import Broker, Fill, PaperBroker
 from ftx_paper.domain.capital import CapitalRuntimeContext, ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
 from ftx_paper.domain.portfolio import PaperPosition, PortfolioState
 from ftx_paper.contracts import (
-    Instrument, MarketBar, MarketRole, OptionRole, OptionType, OrderRole, OrderSide, Role, normalize_exchange_timestamp, parse_role,
+    MarketBar, MarketRole, OptionRole, OrderRole, OrderSide, Role, RuntimeEvent, parse_role,
     role_to_key,
 )
-from ftx_paper.market import AggregatorConfig, CompletedBarAggregator, InstrumentKey
+from ftx_paper.market import AggregatorConfig, CompletedBarAggregator, InstrumentKey, LiveMarketNormalizer
 from ftx_paper.domain import AccountAggregate
 from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.strategy.protocol import Strategy
 from ftx_paper.execution.cost import futures_cost
 from ftx_paper.execution.settlement import ExitValidationError, validate_exit_order
 from .engine import PaperEngine
+from .facades import FeedManager, OrderManager, StrategyRunner
+from .event_bus import EventBus
 from ftx_paper.execution import ExecutionService, PaperExecutionCoordinator
 from .events import is_decision_event, serialize_datetime
 
@@ -60,8 +62,9 @@ class RuntimeSession:
                  portfolio: PortfolioState | None = None,
                  capital_context: CapitalRuntimeContext | None = None,
                  feed_factory: Callable[..., Any] | None = None, broker_factory: Callable[[Any], Broker] | None = None,
-                 client_factory: Callable[[], Any] | None = None, normalize_payload: Callable[..., Any] | None = None,
-                 market_clock: Callable[[], datetime] | None = None) -> None:
+                  client_factory: Callable[[], Any] | None = None, normalize_payload: Callable[..., Any] | None = None,
+                  market_clock: Callable[[], datetime] | None = None,
+                  event_bus: EventBus | None = None) -> None:
         self.store, self.auth, self.specifications = store, auth, specifications
         self.capital_profile = capital_profile
         self.engine = engine or PaperEngine()
@@ -86,10 +89,14 @@ class RuntimeSession:
             PaperExecutionCoordinator(self.portfolio, self.capital_context)
             if self.portfolio is not None else None
         )
+        self.strategy_runner = StrategyRunner(self.engine)
         self.execution = ExecutionService(
             self.account, self.coordinator, self.store,
-            notify=getattr(self.engine, "on_execution_event", None),
+            notify=self.strategy_runner.on_execution_event,
         )
+        self.order_manager = OrderManager(self.execution)
+        self.feed_manager = FeedManager()
+        self.event_bus = event_bus or EventBus()
         self.feed_factory, self.broker_factory = feed_factory, broker_factory
         self.client_factory, self.normalize_payload = client_factory, normalize_payload
         self.market_clock = market_clock or (lambda: datetime.now(ZoneInfo("Asia/Kolkata")))
@@ -184,8 +191,11 @@ class RuntimeSession:
             if self.broker_factory:
                 self.broker = self.broker_factory(client)
             else:
-                from ftx_paper.broker.zerodha import ZerodhaBroker
-                self.broker = ZerodhaBroker(client)
+                # Zerodha supplies market data only. Orders must remain paper
+                # executions even when the live feed is broker-backed.
+                self.broker = PaperBroker()
+            if not isinstance(self.broker, PaperBroker):
+                raise TypeError("runtime order execution must use PaperBroker")
             backfill = load_startup_backfill(client, resolved, contract_store=self.store)
             self.store.append_market_bars(backfill, source="historical_backfill")
             access_token = self._wait_for_session_readiness(is_nse_market_open)
@@ -204,13 +214,14 @@ class RuntimeSession:
                     for item in resolved
                 },
             )
+            self.feed_manager.attach(self.feed)
             with self._lock:
                 if self._stopping:
                     self.feed.stop()
                     self.broker.close()
                     self._release_feed_lease()
                     return
-                self.feed.start()
+                self.feed_manager.start()
                 self.store.patch_status({"state": "RUNNING", "health_state": "DEGRADED",
                                          "phase": "LIVE", "execution_enabled": True})
                 health_snapshot = getattr(self.feed, "health_snapshot", None)
@@ -279,46 +290,7 @@ class RuntimeSession:
     @staticmethod
     def _make_normalizer(resolved: list[ZerodhaInstrument]):
         from ftx_paper.broker.zerodha import instrument_expiry_iso
-
-        by_token = {int(item["instrument_token"]): item for item in resolved}
-
-        def normalize(payload):
-            from datetime import datetime
-            item = by_token[int(payload["instrument_token"])]
-            # The exchange timestamp can lag for a live derivative quote even
-            # while the WebSocket is delivering fresh packets.  Use packet
-            # receipt time for the live aggregation clock. The broker timestamp
-            # remains available to the feed layer for diagnostics.
-            received = payload.get("timestamp")
-            if received is not None:
-                try:
-                    received_value = float(received)
-                    if received_value > 100_000_000_000:
-                        received_value /= 1000
-                    timestamp = normalize_exchange_timestamp(received_value)
-                except (OverflowError, TypeError, ValueError):
-                    timestamp = normalize_exchange_timestamp(datetime.now(ZoneInfo("Asia/Kolkata")))
-            else:
-                timestamp = normalize_exchange_timestamp(datetime.now(ZoneInfo("Asia/Kolkata")))
-            price = float(payload["last_price"])
-            instrument_type = str(item.get("instrument_type", "INDEX"))
-            if str(item["symbol"]).upper() in {"NIFTY", "NIFTY 50", "INDIA VIX", "INDIAVIX"}:
-                instrument_type = "INDEX"
-            expiry = instrument_expiry_iso(item.get("expiry")) if instrument_type in {"FUT", "CE", "PE"} else None
-            raw_strike = item.get("strike")
-            strike = float(raw_strike) if raw_strike is not None and instrument_type in {"CE", "PE"} else None
-            instrument = Instrument(
-                str(item["symbol"]), str(item["exchange"]), instrument_type,
-                expiry=expiry,
-                strike=strike,
-                option_type=OptionType(instrument_type) if instrument_type in {"CE", "PE"} else None,
-            )
-            open_interest = payload.get("oi")
-            if instrument_type == "FUT" and open_interest is None:
-                open_interest = 0.0
-            return MarketBar(instrument, timestamp, price, price, price, price, payload.get("volume_traded"), open_interest)
-
-        return normalize
+        return LiveMarketNormalizer(resolved, expiry_normalizer=instrument_expiry_iso)
 
     def _persist_engine_event(self, event: dict[str, object], *, source: str, bundle_id: str,
                               session_date: str, decision_at: datetime, timestamp: str,
@@ -335,6 +307,18 @@ class RuntimeSession:
         self.store.append_event(event_type, payload,
                                 f"{event_type}:{source}:{bundle_id}:{payload.get('decision_id', '')}",
                                 timestamp=timestamp)
+        try:
+            self.event_bus.publish(RuntimeEvent(
+                event_type=event_type,
+                timestamp=decision_at,
+                payload=payload,
+                event_id=f"{event_type}:{source}:{bundle_id}",
+                source=source,
+            ))
+        except Exception as exc:
+            self._stopping = True
+            self.store.patch_status({"state": "ERROR", "health_state": "FAILED", "error": str(exc)})
+            raise
 
     def _process_bundle(self, bundle, *, source: str, engine: PaperEngine | None = None) -> None:
         active_engine = engine or self.engine
@@ -470,7 +454,7 @@ class RuntimeSession:
             return False
         if self.coordinator is not None:
             try:
-                self.execution.authorize(order, payload=context, timestamp=timestamp)
+                self.order_manager.authorize(order, payload=context, timestamp=timestamp)
             except ValueError as exc:
                 self.store.append_event(
                     "RISK_REJECTED",
@@ -677,7 +661,10 @@ class RuntimeSession:
                 try:
                     fill_result = self.coordinator.fill(
                         order, price=execution_price, timestamp=timestamp,
-                        synthetic_entry_prices=None,
+                        synthetic_entry_prices=None, filled_quantity=fill.quantity,
+                        fill_id=fill.fill_id or fill.event_id or (
+                            f"fill:{fill.client_order_id}:{fill.timestamp}:{fill.quantity}:{fill.price}"
+                        ),
                     )
                     if not isinstance(fill_result, PaperPosition):
                         raise TypeError("entry coordinator fill did not return a position")
@@ -717,15 +704,57 @@ class RuntimeSession:
                                                    }}
                                                    if order.role is OrderRole.ENTRY and position is not None
                                                    else {}
-                                                       ))}, f"fill:{fill.client_order_id}", timestamp=timestamp)
+                                               ))}, f"fill:{fill.client_order_id}", timestamp=timestamp)
+            record_fill = getattr(self.store, "record_order_fill", None)
+            lifecycle_state = "FILLED"
+            if callable(record_fill):
+                try:
+                    # Synthetic orders produce two leg fills but one logical order
+                    # fill; persist the logical quantity once.
+                    fill_id = fill.fill_id or fill.event_id or (
+                        f"fill:{fill.client_order_id}:{fill.timestamp}:{fill.quantity}:{fill.price}"
+                    )
+                    record_fill(order.client_order_id, fill_id=fill_id, quantity=fill.quantity)
+                    lifecycle = self.store.read_order_lifecycle(order.client_order_id)
+                    if isinstance(lifecycle, Mapping):
+                        lifecycle_state = str(lifecycle.get("state", lifecycle_state))
+                except Exception as exc:
+                    self._stopping = True
+                    self.store.patch_status({"state": "ERROR", "health_state": "FAILED", "error": str(exc)})
+                    self.store.append_event(
+                        "EXECUTION_ERROR",
+                        {**context, "outcome": "execution_error", "phase": "fill_persistence",
+                         "error_type": type(exc).__name__, "reason": str(exc)},
+                        f"execution_error:fill_persistence:{order.client_order_id}", timestamp=timestamp,
+                    )
+                    raise
             if callable(update_order):
-                update_order(order.client_order_id, state="FILLED", broker_order_id=ack.broker_order_id)
-            self.execution.publish(ExecutionNotification(
-                event_type="FILLED", client_order_id=fill.client_order_id,
-                status="FILLED", quantity=order.quantity,
-                filled_quantity=fill.quantity, price=fill.price,
-                broker_order_id=ack.broker_order_id,
-            ))
+                update_order(order.client_order_id, state=lifecycle_state, broker_order_id=ack.broker_order_id)
+            try:
+                self.order_manager.publish(ExecutionNotification(
+                    event_type="FILLED", client_order_id=fill.client_order_id,
+                    status="FILLED", quantity=order.quantity,
+                    filled_quantity=fill.quantity, price=fill.price,
+                    broker_order_id=ack.broker_order_id,
+                    event_id=fill.fill_id or fill.event_id or (
+                        f"fill:{fill.client_order_id}:{fill.timestamp}:{fill.quantity}:{fill.price}"
+                    ),
+                    occurred_at=fill.timestamp,
+                    source="live",
+                    strategy_id=getattr(getattr(self.engine, "strategy_metadata", None), "version", None),
+                ))
+            except Exception as exc:
+                # Strategy execution notifications are part of the critical
+                # path; do not continue processing against stale strategy state.
+                self._stopping = True
+                self.store.patch_status({"state": "ERROR", "health_state": "FAILED", "error": str(exc)})
+                self.store.append_event(
+                    "EXECUTION_ERROR",
+                    {**context, "outcome": "execution_error", "phase": "critical_notification",
+                     "error_type": type(exc).__name__, "reason": str(exc)},
+                    f"execution_error:notification:{order.client_order_id}", timestamp=timestamp,
+                )
+                raise
         else:
             if callable(update_order):
                 update_order(order.client_order_id, state="REJECTED", broker_order_id=ack.broker_order_id)
@@ -918,8 +947,8 @@ class RuntimeSession:
         feed_stopped = True
         try:
             if feed:
-                feed_result = feed.stop()
-                feed_stopped = feed_result is not False
+                self.feed_manager.attach(feed)
+                feed_stopped = self.feed_manager.stop()
         except Exception:
             feed_stopped = False
             logger.exception("Runtime feed failed while stopping")

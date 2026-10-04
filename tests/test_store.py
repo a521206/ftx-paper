@@ -6,6 +6,8 @@ from threading import Event, Thread
 from time import sleep
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from ftx_paper.contracts import Instrument, MarketBar, OptionType
 from ftx_paper.runtime import RuntimeStore
 
@@ -147,6 +149,47 @@ def test_runtime_store_persists_order_before_external_dispatch(tmp_path):
     assert order is not None
     assert order["state"] == "SUBMITTING"
     assert store.read_in_flight_orders()[0]["client_order_id"] == "order-1"
+
+
+def test_runtime_store_rejects_illegal_order_transition(tmp_path):
+    store = RuntimeStore(tmp_path)
+    assert store.create_order_lifecycle("order-graph", {"client_order_id": "order-graph"})
+
+    assert store.update_order_lifecycle("order-graph", state="AUTHORIZED") is True
+    assert store.update_order_lifecycle("order-graph", state="FILLED") is False
+    order = store.read_order_lifecycle("order-graph")
+    assert order is not None
+    assert order["state"] == "AUTHORIZED"
+
+
+def test_runtime_store_rejects_reused_order_id_with_different_payload(tmp_path):
+    store = RuntimeStore(tmp_path)
+    payload = {"client_order_id": "order-retry", "quantity": 2}
+    assert store.create_order_lifecycle("order-retry", payload) is True
+    assert store.create_order_lifecycle("order-retry", dict(payload)) is False
+
+    with pytest.raises(ValueError, match="reused with a different command"):
+        store.create_order_lifecycle(
+            "order-retry", {"client_order_id": "order-retry", "quantity": 3},
+        )
+
+
+def test_runtime_store_persists_fill_quantities_idempotently(tmp_path):
+    store = RuntimeStore(tmp_path)
+    assert store.create_order_lifecycle(
+        "order-fill", {"client_order_id": "order-fill", "quantity": 3}, state="ACKNOWLEDGED",
+    )
+
+    assert store.record_order_fill("order-fill", fill_id="fill-1", quantity=2) is True
+    assert store.record_order_fill("order-fill", fill_id="fill-1", quantity=2) is False
+    order = store.read_order_lifecycle("order-fill")
+    assert order is not None
+    assert order["state"] == "PARTIALLY_FILLED"
+    assert order["payload"]["filled_quantity"] == 2
+    assert order["payload"]["remaining_quantity"] == 1
+
+    with pytest.raises(ValueError, match="exceeds remaining"):
+        store.record_order_fill("order-fill", fill_id="fill-2", quantity=2)
 
 
 def test_runtime_store_persists_contract_changes_once(tmp_path):

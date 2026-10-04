@@ -10,6 +10,7 @@ class PaperExecutionCoordinator:
     def __init__(self, portfolio: PortfolioState, capital_context: CapitalRuntimeContext | None = None) -> None:
         self.portfolio = portfolio
         self.capital_context = capital_context or CapitalRuntimeContext(ResearchCapitalProfile())
+        self._entry_fill_ids: dict[str, set[str]] = {}
 
     def submit(self, order: OrderIntent) -> None:
         self._require_futures(order)
@@ -21,14 +22,22 @@ class PaperExecutionCoordinator:
 
     def fill(self, order: OrderIntent, *, price: float, timestamp: str | None = None,
              synthetic_entry_prices: tuple[float, float] | None = None,
-             cost: float = 0.0) -> PaperPosition | SettlementResult | None:
+             cost: float = 0.0, filled_quantity: int | None = None,
+             fill_id: str | None = None) -> PaperPosition | SettlementResult | None:
         self._require_futures(order)
         if order.role is OrderRole.ENTRY:
-            return self.portfolio.fill_entry(
+            existing = self.portfolio.positions.get(order.client_order_id)
+            if fill_id is not None and fill_id in self._entry_fill_ids.setdefault(order.client_order_id, set()):
+                return existing
+            result = self.portfolio.fill_entry(
                 order, price=price,
                 margin_per_lot=self.capital_context.profile.vehicle_limit(order.vehicle).margin_per_lot,
                 timestamp=timestamp, synthetic_entry_prices=synthetic_entry_prices,
+                filled_quantity=filled_quantity,
             )
+            if fill_id is not None:
+                self._entry_fill_ids[order.client_order_id].add(fill_id)
+            return result
         return self.portfolio.settle_exit(order, price=price, cost=cost)
 
     def cancel(self, order: OrderIntent) -> bool:

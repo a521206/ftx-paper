@@ -11,7 +11,10 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 from collections.abc import Iterable
 
-from ftx_paper.contracts import MarketBar, MarketRole, OptionRole, role_to_key
+from ftx_paper.contracts import (
+    MarketBar, MarketRole, OptionRole, OrderLifecycle, OrderLifecycleState, is_legal_order_transition,
+    role_to_key,
+)
 from ftx_paper.runtime.events import (
     DECISION_EVENT_TYPES,
     EXECUTION_EVENT_TYPES,
@@ -522,23 +525,46 @@ class SqliteRuntimeStore:
     def create_order_lifecycle(self, client_order_id: str, payload: dict[str, Any], *, state: str = "PROPOSED",
                                account_revision: int | None = None) -> bool:
         """Durably register an order before any external broker call."""
+        normalized_state = str(state).upper()
+        try:
+            OrderLifecycleState(normalized_state)
+        except ValueError as exc:
+            raise ValueError(f"unknown order lifecycle state: {state}") from exc
+        order_id = str(client_order_id)
+        serialized_payload = json.dumps(_json_safe(payload, path="order payload"), sort_keys=True)
         with self._connect() as connection:
+            existing = connection.execute(
+                "SELECT payload, state FROM runtime_orders WHERE client_order_id=?", (order_id,)
+            ).fetchone()
+            if existing is not None:
+                if json.dumps(json.loads(existing[0]), sort_keys=True) != serialized_payload:
+                    raise ValueError("client order ID was reused with a different command")
+                return False
             cursor = connection.execute(
                 "INSERT OR IGNORE INTO runtime_orders(client_order_id, state, payload, account_revision, updated_at) "
                 "VALUES (?, ?, ?, ?, ?)",
-                (str(client_order_id), str(state),
-                 json.dumps(_json_safe(payload, path="order payload")), account_revision, self._now()),
+                (order_id, normalized_state, serialized_payload, account_revision, self._now()),
             )
         return cursor.rowcount == 1
 
     def update_order_lifecycle(self, client_order_id: str, *, state: str,
                                broker_order_id: str | None = None,
                                account_revision: int | None = None) -> bool:
+        normalized_state = str(state).upper()
+        try:
+            OrderLifecycleState(normalized_state)
+        except ValueError as exc:
+            raise ValueError(f"unknown order lifecycle state: {state}") from exc
         with self._connect() as connection:
+            current = connection.execute(
+                "SELECT state FROM runtime_orders WHERE client_order_id=?", (str(client_order_id),)
+            ).fetchone()
+            if current is None or not is_legal_order_transition(str(current[0]), normalized_state):
+                return False
             cursor = connection.execute(
                 "UPDATE runtime_orders SET state=?, broker_order_id=COALESCE(?, broker_order_id), "
                 "account_revision=COALESCE(?, account_revision), updated_at=? WHERE client_order_id=?",
-                (str(state), broker_order_id, account_revision, self._now(), str(client_order_id)),
+                (normalized_state, broker_order_id, account_revision, self._now(), str(client_order_id)),
             )
         return cursor.rowcount == 1
 
@@ -553,6 +579,43 @@ class SqliteRuntimeStore:
         value = dict(row)
         value["payload"] = json.loads(value["payload"])
         return value
+
+    def record_order_fill(self, client_order_id: str, *, fill_id: str, quantity: int) -> bool:
+        """Persist one observed fill with duplicate and overfill protection."""
+        if not fill_id or quantity <= 0:
+            raise ValueError("fill ID and positive quantity are required")
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT state, payload FROM runtime_orders WHERE client_order_id=?",
+                (str(client_order_id),),
+            ).fetchone()
+            if row is None:
+                return False
+            payload = json.loads(row[1])
+            fill_ids = set(payload.get("fill_ids", []))
+            if fill_id in fill_ids:
+                return False
+            requested = int(payload.get("quantity", 0))
+            lifecycle = OrderLifecycle(
+                requested,
+                state=OrderLifecycleState(str(row[0])),
+                filled_quantity=int(payload.get("filled_quantity", 0)),
+            )
+            changed = lifecycle.apply_fill(fill_id, quantity)
+            if not changed:
+                return False
+            fill_ids.add(fill_id)
+            payload.update(
+                filled_quantity=lifecycle.filled_quantity,
+                remaining_quantity=lifecycle.remaining_quantity,
+                fill_ids=sorted(fill_ids),
+            )
+            connection.execute(
+                "UPDATE runtime_orders SET state=?, payload=?, updated_at=? WHERE client_order_id=?",
+                (lifecycle.state.value, json.dumps(_json_safe(payload, path="order payload")),
+                 self._now(), str(client_order_id)),
+            )
+            return True
 
     def read_in_flight_orders(self) -> list[dict[str, Any]]:
         with self._connect() as connection:

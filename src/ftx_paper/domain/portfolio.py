@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from math import isfinite
-from typing import Any, Mapping, TypedDict
+from typing import Mapping, TypedDict
 
 from ftx_paper.config import NIFTY_LOT_SIZE
 from ftx_paper.contracts import OrderIntent, OrderRole, OrderSide
@@ -208,18 +208,42 @@ class PortfolioState:
 
     def fill_entry(self, order: OrderIntent, *, price: float, margin_per_lot: float,
                    timestamp: str | None = None,
-                   synthetic_entry_prices: tuple[float, float] | None = None) -> PaperPosition:
+                   synthetic_entry_prices: tuple[float, float] | None = None,
+                   filled_quantity: int | None = None) -> PaperPosition:
+        quantity = int(order.quantity if filled_quantity is None else filled_quantity)
+        if quantity <= 0 or quantity > order.quantity:
+            raise ValueError("entry fill quantity is outside order quantity")
         existing = self.positions.get(order.client_order_id)
         if existing is not None:
-            return existing
+            requested_quantity = self.reservations.get(order.client_order_id)
+            requested = requested_quantity.quantity if requested_quantity is not None else order.quantity
+            new_quantity = existing.quantity + quantity
+            if existing.quantity >= requested and quantity == order.quantity:
+                return existing
+            if new_quantity > requested:
+                raise ValueError("entry fill quantity exceeds remaining quantity")
+            if quantity == 0:
+                return existing
+            average_price = (
+                (existing.entry_price * existing.quantity) + (float(price) * quantity)
+            ) / new_quantity
+            updated = replace(existing, quantity=new_quantity, entry_price=average_price)
+            self.positions[order.client_order_id] = updated
+            self.pending_orders[order.client_order_id] = (
+                "filled" if new_quantity == requested else "partially_filled"
+            )
+            self.state_revision += 1
+            return updated
         self.reserve_entry(order, margin_per_lot=margin_per_lot)
-        position = PaperPosition(order.client_order_id, order.instrument.symbol, order.side, int(order.quantity),
+        position = PaperPosition(order.client_order_id, order.instrument.symbol, order.side, quantity,
                                  float(price), str(order.vehicle), order.cell, timestamp,
                                   (order.synthetic_legs[0].symbol, order.synthetic_legs[1].symbol)
                                   if order.synthetic_legs and len(order.synthetic_legs) == 2 else None,
                                  synthetic_entry_prices)
         self.positions[order.client_order_id] = position
-        self.pending_orders[order.client_order_id] = "filled"
+        self.pending_orders[order.client_order_id] = (
+            "filled" if quantity == order.quantity else "partially_filled"
+        )
         self.state_revision += 1
         return position
 

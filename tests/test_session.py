@@ -577,6 +577,7 @@ def test_startup_discovers_options_before_backfill_and_feed_subscription(monkeyp
 
     assert any(item["symbol"] == option["symbol"] for item in captured["backfill"])
     assert 3 in captured["tokens"]
+    assert isinstance(session.broker, PaperBroker)
 
 
 def test_runtime_session_rejects_non_flat_intraday_startup(tmp_path):
