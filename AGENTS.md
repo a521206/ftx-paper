@@ -5,7 +5,7 @@
 - Windows with PowerShell; use `.venv\Scripts\python.exe` for Python. Run commands directly through the configured shell, without nesting another PowerShell invocation.
 - Use the `ftx_paper` package imports from `src/`; do not add repository-root import hacks.
 - Run `.venv\Scripts\python.exe -m pytest` from the repository root for the test suite, or target the relevant test files when iterating.
-- Run `.venv\Scripts\ruff.exe check .` from the repository root when Ruff is available. Add `--fix` only when intentionally applying autofixes.
+- Run `.venv\Scripts\ruff.exe check .` from the repository root when Ruff is installed in the virtual environment. If that executable is unavailable, use `py -m ruff check .` when the system Python provides Ruff. Add `--fix` only when intentionally applying autofixes.
 
 ## Validation
 
