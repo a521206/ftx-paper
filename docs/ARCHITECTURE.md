@@ -91,6 +91,103 @@ and `PnlManager`. They delegate to the existing runtime owner and aggregate;
 `PnlManager` is read-only. The UI remains separate and facades must not create
 another runtime owner.
 
+## Strategy Extension
+
+Strategies live in `ftx_paper.strategy` and are selected at the composition
+boundary. The `Strategy` protocol is the stable extension point:
+
+```text
+normalized market bars -> DecisionBundle -> Strategy -> LiveDecision values
+                                      execution events -> Strategy
+```
+
+A strategy may keep deterministic in-memory state, but it must not read the
+clock, access SQLite, call a broker, or mutate the portfolio. The runtime owns
+market timing, account context, authorization, reservations, execution, and
+persistence. Implement both decision methods: `on_bundle` for bundle-only
+evaluation and `evaluate` when the account `DecisionContext` is required.
+Implement `on_execution_event` when fills or cancellations affect strategy
+state. `snapshot` should return serializable state for diagnostics and replay.
+
+Every implementation must expose `StrategyMetadata` with a stable name,
+version, and configuration hash. This metadata is recorded with decisions so
+that a result can be attributed to the exact strategy configuration that
+produced it.
+
+To add a strategy:
+
+1. Add the implementation under `ftx_paper.strategy` and depend only on
+   contracts, domain decision context, market bundles, and other strategy
+   policy modules.
+2. Define its configuration and deterministic state explicitly. Do not put
+   persistence or broker calls in the strategy.
+3. Implement `StrategyFactory` (or pass a constructor to
+   `ConfiguredStrategyFactory`) and select it in the application composition
+   root. Do not create a second runtime or portfolio.
+4. Add unit and integration tests for decisions, metadata, snapshots, sizing,
+   exits, execution notifications, and rejection/authorization behavior.
+5. Run the same replay inputs against the new strategy and compare decisions,
+   fills, and audit events before enabling it for a runtime session.
+
+## Broker Extension
+
+Broker integrations are adapters, not domain objects. Keep provider-specific
+authentication, sockets, historical data, order payloads, and response mapping
+under `ftx_paper.broker.<provider>`. Convert provider data into the shared
+`MarketBar`, `Instrument`, `OrderIntent`, `OrderAck`, and `Fill` contracts at
+the adapter boundary. Market normalization remains broker-neutral in
+`ftx_paper.market`.
+
+To add a broker:
+
+1. Add provider auth and feed code implementing the `MarketFeed` lifecycle
+   (`start`, `stop`, and `flush`) and map quotes/bars to shared market
+   contracts.
+2. Add historical backfill and instrument resolution where the provider
+   requires them, keeping retries and provider errors inside the adapter.
+3. If an execution adapter is needed, implement the `Broker` contract
+   (`submit`, `poll_fill`, and `close`) with stable client-order and fill
+   identifiers, idempotency, quantity validation, and explicit uncertainty.
+4. Register adapter construction in the composition/runtime wiring and add
+   contract tests for authentication, feed lifecycle, normalization, order
+   acknowledgements, fills, partial fills, and failures.
+
+This application is paper-trading only. `build_runtime_session` deliberately
+ignores injected execution brokers and the runtime enforces `PaperBroker` for
+orders. A real broker may supply market data and authentication, but provider
+orders must not bypass paper execution. Unsupported capabilities must remain
+explicit failures rather than being reported as successful operations.
+
+## UI And API Clients
+
+The UI is a separate presentation process. It must communicate with the API
+over HTTP and must not import runtime, domain, broker, SQLite, or strategy
+implementation modules. Configure its API origin with `FTX_API_BASE_URL`
+(default `http://127.0.0.1:8501`).
+
+Build a UI client as follows:
+
+1. Discover the contract from `GET /api/v1/openapi.json`; use the versioned
+   `/api/v1` routes rather than reading the runtime database.
+2. Use `GET /api/v1/health` for availability, then poll or refresh
+   `/runtime`, `/diagnostics`, `/events`, `/decisions`, `/positions`,
+   `/capital`, and `/trades` for live views. Use the replay routes for
+   historical investigation and progress updates.
+3. Treat responses as projections. Do not infer hidden portfolio state or
+   issue orders from the UI; runtime commands and paper execution remain owned
+   by the API process.
+4. Preserve cursor pagination for decisions and replay events, handle `202`
+   responses for queued/incomplete work, and display error payloads using
+   their stable `error.code` and `error.message` fields.
+5. Send the configured authentication token when the API is not using its
+   loopback-only development allowance, and restrict browser origins through
+   the API's configured CORS policy.
+
+The existing Flask UI follows this model: it renders presentation templates,
+passes the API base URL to the page, and contains no backend imports. A
+different web, desktop, or mobile client can use the same API without adding
+another runtime owner.
+
 ## Extension Rules
 
 Keep new code inside the existing packages; do not reintroduce a shared
