@@ -1,31 +1,30 @@
 # ftx-paper Deployment
 
-`ftx-paper` is deployed independently of NiftyZoning. Install it in its own
-virtual environment and run the API and UI as separate processes. The API owns
-one in-process `RuntimeSession`; do not launch a separate market process.
+`ftx-paper` runs independently of NiftyZoning. Install it in its own virtual
+environment and run one API process plus the separate UI process. Never start
+a second market process: the API owns the single `RuntimeSession`.
 
-## Installation
+## Install
 
-Install the base package for the API and UI:
+Install the API and UI:
 
 ```text
 pip install ftx-paper
 ```
 
-Install the optional Zerodha dependencies when using the live Zerodha feed or
-login flow:
+For the Zerodha feed or login flow:
 
 ```text
 pip install "ftx-paper[zerodha]"
 ```
 
-The package exposes `ftx-paper-api` and `ftx-paper-ui` entry points. The local
-PowerShell wrappers (`run-api.ps1` and `run-ui.ps1`) instead use the repository
-`.venv` and source tree, and are intended for local Windows startup.
+The package provides `ftx-paper-api` and `ftx-paper-ui`. On Windows, the
+repository scripts `run-api.ps1` and `run-ui.ps1` use the local `.venv` and
+source tree.
 
-## Configuration
+## Configure
 
-Set these variables explicitly in the service environment:
+Set these values in the service environment:
 
 ```text
 FTX_PAPER_HOME=/var/lib/ftx-paper
@@ -38,41 +37,44 @@ FTX_WEB_PORT=8501
 FTX_UI_PORT=8502
 ```
 
-Keep `FTX_PAPER_HOME`, the runtime directory, and the auth database on
-persistent storage. Never place broker secrets in source control. For local
-setup, copy `.env.example` into the service environment and change
-`FTX_PAPER_AUTH_DB` to a writable persistent location.
+Keep the home directory, runtime directory, and auth database on persistent
+storage. Keep broker secrets out of source control. For local setup, use
+`.env.example` as a starting point and choose a writable auth database path.
 
-The supported deployment is loopback-only. The API intentionally permits
-loopback requests without a bearer token, and the UI is presentation-only and
-calls the API directly. Remote access, application-level API tokens, and
-browser-managed credentials are outside the current deployment model; do not
-bind the API to a public interface.
+The supported deployment is loopback-only. Do not bind the API to a public
+interface. Loopback requests intentionally do not require a bearer token, and
+the UI calls the API directly.
 
-## Processes
+## Run
 
 ```text
 ftx-paper-api     # REST API and runtime orchestration
 ftx-paper-ui      # presentation-only dashboard
 ```
 
-Deploy one API instance per runtime state directory. The process lease prevents
-multiple API instances from owning the same runtime directory. An interrupted
-session is returned to `STOPPED` on the next API startup and the interruption is
-retained in the audit log.
+Run one API instance per runtime directory. The process lease prevents two
+instances from owning the same directory. On startup after an interruption,
+the previous session is marked `STOPPED` and the interruption remains in the
+audit log.
 
-For local Windows startup, run `./run-api.ps1` for the API and `./run-ui.ps1`
-for the dashboard. The API defaults to port 8501 and the UI to port 8502.
-Override ports with `-Port`; override the UI API target with `-ApiBaseUrl`.
+For local Windows startup:
 
-## Upgrade Procedure
+```powershell
+./run-api.ps1
+./run-ui.ps1
+```
 
-1. Stop the runtime session and confirm it has reached `STOPPED`.
+The defaults are API port `8501` and UI port `8502`. Use `-Port` to override a
+port and `-ApiBaseUrl` to point the UI at another API URL.
+
+## Upgrade
+
+1. Stop the runtime and confirm it is `STOPPED`.
 2. Back up the runtime and auth SQLite databases.
-3. Install the new wheel in the package environment, including the `zerodha` extra when required.
+3. Install the new wheel, including the `zerodha` extra when needed.
 4. Start the API and verify `/api/v1/health` and `/api/v1/openapi.json`.
-5. Start the runtime session and inspect recovery or audit events if the previous process was interrupted.
+5. Start the runtime and inspect recovery or audit events.
 6. Start the UI and verify runtime, capital, positions, trades, and events.
 
-Rollback uses the previous wheel against the backed-up runtime data. Do not
-delete or recreate the runtime database during an upgrade.
+To roll back, reinstall the previous wheel against the backups. Do not delete
+or recreate the runtime database during an upgrade.
