@@ -993,7 +993,7 @@ def test_supporting_only_expiry_does_not_advance_futures_watermark() -> None:
     assert bundle.bars["futures"].close == 100
 
 
-def test_live_decision_engine_reports_unconfigured_cells() -> None:
+def test_live_decision_engine_skips_unconfigured_cells() -> None:
     instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
     vix = Instrument("INDIA VIX", "NSE", "VIX")
     call = Instrument("NIFTYCE", "NFO", "CE")
@@ -1018,10 +1018,7 @@ def test_live_decision_engine_reports_unconfigured_cells() -> None:
     engine.evaluate(bundle("10:21", {}))
     third = engine.evaluate(bundle("10:22", {}))
 
-    assert [event.event_type for event in third] == ["CANDIDATEDECISION", "REJECTEDDECISION"]
-    assert third[0].payload["decision_id"] == third[1].payload["decision_id"]
-    assert third[0].payload["outcome"] == "candidate"
-    assert third[1].payload["reason"] == "cell_not_configured"
+    assert third == ()
 
 
 def test_live_decision_engine_emits_input_rejection_for_incomplete_bundle() -> None:
@@ -1070,9 +1067,7 @@ def test_live_decision_engine_persists_score_and_quality_bucket() -> None:
     engine.evaluate(bundle(1))
     engine.evaluate(bundle(2))
     events = engine.evaluate(bundle(3))
-    assert [event.event_type for event in events] == ["CANDIDATEDECISION", "REJECTEDDECISION"]
-    assert events[0].payload["score"] == events[1].payload["score"]
-    assert events[1].payload["reason"] == "cell_not_configured"
+    assert events == ()
 
 
 def test_admission_contract_replaces_grinding_score_filter() -> None:

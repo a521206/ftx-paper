@@ -355,7 +355,9 @@ class IndependentLiveDecisionEngine:
         score_setup_type, score_multiplier = "Accepted", 1.0
         sequence = len(self._futures)
         events = []
-        policies = configured or [(cell, None)]
+        # Prepared canonical inputs are policy-filtered; unsupported detected
+        # cells never reach the decision boundary.
+        policies = configured
         session_selected = self._session_selected(decision_session)
         for cell, cell_policy in policies:
             direction = cell_policy.direction.value.lower() if cell_policy is not None else "NONE"
