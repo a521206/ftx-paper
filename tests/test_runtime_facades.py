@@ -134,7 +134,7 @@ def test_order_manager_unsupported_operations_are_explicit():
         manager.cancel("order-1")
 
 
-def test_order_manager_submits_through_paper_coordinator():
+def test_order_manager_authorizes_and_submits_through_paper_coordinator():
     class Coordinator:
         def submit(self, _order):
             self.submitted = True
@@ -148,7 +148,7 @@ def test_order_manager_submits_through_paper_coordinator():
         "paper-1", Instrument("NIFTYFUT", "NFO", "FUTURES"), OrderSide.BUY, 1,
         role=OrderRole.ENTRY,
     )
-    manager.submit(order)
+    manager.authorize_and_submit(order)
     assert coordinator.submitted
 
 

@@ -15,7 +15,7 @@ from .engine import EngineResult, PaperEngine
 
 
 class FeedController(Protocol):
-    """Minimal lifecycle capability required by the runtime feed facade."""
+    """Lifecycle-only subset of the future ``MarketDataPort`` capability."""
 
     def start(self) -> None: ...
 
@@ -87,7 +87,11 @@ class FeedManager:
 
 
 class OrderManager:
-    """Execution facade that delegates to the existing execution service."""
+    """Paper-order facade over authorization and coordinator submission.
+
+    Broker dispatch remains owned by ``RuntimeSession`` so this facade cannot
+    accidentally become a second execution path.
+    """
 
     def __init__(self, execution: ExecutionService) -> None:
         self.execution = execution
@@ -98,9 +102,9 @@ class OrderManager:
     def publish(self, notification: ExecutionNotification) -> None:
         self.execution.publish(notification)
 
-    def submit(self, order: OrderIntent, *, payload: dict[str, object] | None = None,
-               timestamp: str | None = None) -> None:
-        """Run the established authorization/reservation path for a paper order."""
+    def authorize_and_submit(self, order: OrderIntent, *, payload: dict[str, object] | None = None,
+                             timestamp: str | None = None) -> None:
+        """Run authorization/reservation and coordinator submission for a paper order."""
         self.execution.authorize(
             order,
             payload=payload or {
