@@ -31,6 +31,21 @@ def test_runtime_store_round_trips_market_bars(tmp_path):
     assert store.read_market_dates() == ["2026-01-05"]
 
 
+def test_runtime_store_keeps_same_minute_contract_bars_separate(tmp_path):
+    store = RuntimeStore(tmp_path)
+    timestamp = datetime(2026, 9, 29, 4, 0, tzinfo=ZoneInfo("UTC"))
+    store.append_market_bars((
+        MarketBar(Instrument("NIFTYFUT", "NFO", "FUTURES", "2026-09-29"), timestamp, 1, 2, 0, 1),
+        MarketBar(Instrument("NIFTYFUT", "NFO", "FUTURES", "2026-10-27"), timestamp, 3, 4, 2, 3),
+    ), source="fixture")
+
+    rows = store.read_market_bars("2026-09-29")
+
+    assert {(row["symbol"], row["expiry"], row["close"]) for row in rows} == {
+        ("NIFTYFUT", "2026-09-29", 1.0), ("NIFTYFUT", "2026-10-27", 3.0),
+    }
+
+
 def test_runtime_store_clears_replay_runs_for_requested_date(tmp_path):
     store = RuntimeStore(tmp_path)
     store.create_replay_run("old-jan-5", {"session_date": "2026-01-05"})
@@ -149,4 +164,31 @@ def test_runtime_store_persists_contract_changes_once(tmp_path):
     )
     assert runtime_contract is not None
     assert runtime_contract["tradingsymbol"] == "NIFTY26OCTFUT"
+    history = store.read_runtime_contracts(
+        exchange="NFO", underlying="NIFTY", role="futures",
+    )
+    assert [item["tradingsymbol"] for item in history] == ["NIFTY26OCTFUT"]
     assert [event["event_type"] for event in store.read_events()] == ["CONTRACT_CHANGED"]
+
+
+def test_runtime_store_migrates_legacy_contract_key(tmp_path):
+    database = tmp_path / "runtime.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE runtime_contracts ("
+            "exchange TEXT NOT NULL, underlying TEXT NOT NULL, role TEXT NOT NULL, "
+            "tradingsymbol TEXT NOT NULL, instrument_token INTEGER NOT NULL, "
+            "expiry TEXT NOT NULL, selected_at TEXT NOT NULL, "
+            "PRIMARY KEY (exchange, underlying, role))",
+        )
+        connection.execute(
+            "INSERT INTO runtime_contracts VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("NFO", "NIFTY", "futures", "NIFTY26OCTFUT", 2, "2026-10-27", "now"),
+        )
+
+    store = RuntimeStore(tmp_path)
+
+    contracts = store.read_runtime_contracts(exchange="NFO", underlying="NIFTY", role="futures")
+    assert [(item["tradingsymbol"], item["instrument_token"]) for item in contracts] == [
+        ("NIFTY26OCTFUT", 2),
+    ]

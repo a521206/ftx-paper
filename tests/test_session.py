@@ -158,6 +158,23 @@ def test_replay_bars_use_rollover_selected_futures_contract(tmp_path):
     assert {bar.instrument.symbol for bar in futures} == {"NIFTY26SEPFUT"}
 
 
+def test_replay_rollover_selects_september_through_expiry_session(tmp_path):
+    store = RuntimeStore(tmp_path / "rollover-expiry-session")
+    bars = []
+    for day in (28, 29, 30):
+        timestamp = datetime(2026, 9, day, 4, 0, tzinfo=timezone.utc)
+        bars.extend((
+            MarketBar(Instrument("NIFTYFUT", "NFO", "FUTURES", "2026-09-29"), timestamp, 100, 110, 90, 105),
+            MarketBar(Instrument("NIFTYFUT", "NFO", "FUTURES", "2026-10-27"), timestamp, 200, 220, 180, 205),
+        ))
+    store.append_market_bars(bars, source="fixture")
+    worker = ReplayWorker(store)
+
+    assert worker.input_manifest("2026-09-28")["futures_source"]["selected_expiry"] == "2026-09-29"
+    assert worker.input_manifest("2026-09-29")["futures_source"]["selected_expiry"] == "2026-09-29"
+    assert worker.input_manifest("2026-09-30")["futures_source"]["selected_expiry"] == "2026-10-27"
+
+
 def test_replay_prior_day_levels_follow_rollover_source_independently(tmp_path):
     store = RuntimeStore(tmp_path / "rollover-prior-source")
     store.append_market_bars((
@@ -545,7 +562,7 @@ def test_startup_discovers_options_before_backfill_and_feed_subscription(monkeyp
 
     monkeypatch.setattr(zerodha, "resolve_instruments", lambda _client, _specs, **_kwargs: list(resolved))
     monkeypatch.setattr(zerodha, "discover_option_surface_contracts", lambda _client, **_kwargs: [option])
-    def fake_backfill(_client, instruments):
+    def fake_backfill(_client, instruments, **_kwargs):
         captured["backfill"] = list(instruments)
         return ()
 

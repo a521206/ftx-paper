@@ -281,12 +281,77 @@ def classify_runtime_roles(instruments: list[ZerodhaInstrument]) -> RuntimeRoles
     return RuntimeRoles(futures=futures, vix=vix, options={"contracts": options_list} if options_list else None)
 
 
-def load_startup_backfill(client: Any, instruments: list[ZerodhaInstrument], *, days: int = 2) -> tuple[MarketBar, ...]:
+def load_startup_backfill(
+    client: Any,
+    instruments: list[ZerodhaInstrument],
+    *,
+    days: int = 2,
+    contract_store: Any | None = None,
+) -> tuple[MarketBar, ...]:
     """Fetch bounded one-minute warmup bars and normalize them at the broker edge."""
     end = datetime.now(IST).date()
     start = end - timedelta(days=max(1, days + 3))
+    backfill_instruments = list(instruments)
+    if any(str(item.get("instrument_type", "")).upper() == "FUT" for item in instruments):
+        instrument_loader = getattr(client, "instruments", None)
+        if callable(instrument_loader):
+            known_tokens = {int(item["instrument_token"]) for item in backfill_instruments}
+            underlyings = {
+                _normalized_instrument_name(item.get("name"))
+                or (_futures_underlying(str(item["symbol"]), dict(item)) or "")
+                for item in instruments
+                if str(item.get("instrument_type", "")).upper() == "FUT"
+            }
+            underlying = next(iter(underlyings), "NIFTY")
+            candidates: list[tuple[date, dict[str, Any]]] = []
+            for row in instrument_loader("NFO") or ():
+                if (_normalized_instrument_name(row.get("name")) not in underlyings
+                        or str(row.get("instrument_type", "")).upper() != "FUT"
+                        or row.get("expiry") is None):
+                    continue
+                expiry = _instrument_expiry(row["expiry"])
+                if expiry < end or int(row["instrument_token"]) in known_tokens:
+                    continue
+                candidates.append((expiry, row))
+            for _, row in sorted(candidates, key=lambda item: item[0])[:1]:
+                backfill_instruments.append({
+                    **row,
+                    "exchange": "NFO",
+                    "symbol": str(row["tradingsymbol"]),
+                    "role": MarketRole.FUTURES,
+                })
+                if contract_store is not None:
+                    contract_store.record_runtime_contract({
+                        "exchange": "NFO", "underlying": underlying,
+                        "role": "futures", "tradingsymbol": str(row["tradingsymbol"]),
+                        "instrument_token": int(row["instrument_token"]),
+                        "expiry": expiry.isoformat(),
+                    })
+                known_tokens.add(int(row["instrument_token"]))
+            if contract_store is not None:
+                for contract in contract_store.read_runtime_contracts(
+                    exchange="NFO", underlying=underlying, role="futures",
+                ):
+                    try:
+                        expiry = date.fromisoformat(str(contract["expiry"])[:10])
+                    except (TypeError, ValueError):
+                        logger.warning("Skipping cached futures contract with invalid expiry: %s", contract)
+                        continue
+                    if expiry < start or int(contract["instrument_token"]) in known_tokens:
+                        continue
+                    backfill_instruments.append({
+                        "instrument_token": int(contract["instrument_token"]),
+                        "exchange": "NFO",
+                        "symbol": str(contract["tradingsymbol"]),
+                        "tradingsymbol": str(contract["tradingsymbol"]),
+                        "instrument_type": "FUT",
+                        "role": MarketRole.FUTURES,
+                        "expiry": expiry,
+                        "name": underlying,
+                    })
+                    known_tokens.add(int(contract["instrument_token"]))
     bars: list[MarketBar] = []
-    for item in instruments:
+    for item in backfill_instruments:
         instrument_type = str(item.get("instrument_type", "INDEX"))
         if _is_index_symbol(item["symbol"]):
             instrument_type = "INDEX"

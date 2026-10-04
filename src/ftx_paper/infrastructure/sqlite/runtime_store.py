@@ -155,13 +155,13 @@ class SqliteRuntimeStore:
                     close REAL NOT NULL,
                     volume REAL,
                     open_interest REAL,
-                    instrument_type TEXT,
-                    expiry TEXT,
+                    instrument_type TEXT NOT NULL,
+                    expiry TEXT NOT NULL,
                     strike REAL,
                     option_type TEXT,
                     source TEXT NOT NULL,
                     ingested_at TEXT NOT NULL,
-                    PRIMARY KEY (symbol, exchange, minute)
+                    PRIMARY KEY (symbol, exchange, minute, expiry)
                 );
                 CREATE TABLE IF NOT EXISTS market_dates (
                     date TEXT PRIMARY KEY
@@ -189,7 +189,7 @@ class SqliteRuntimeStore:
                     instrument_token INTEGER NOT NULL,
                     expiry TEXT NOT NULL,
                     selected_at TEXT NOT NULL,
-                    PRIMARY KEY (exchange, underlying, role)
+                    PRIMARY KEY (exchange, tradingsymbol)
                 );
                 CREATE TABLE IF NOT EXISTS runtime_orders (
                     client_order_id TEXT PRIMARY KEY,
@@ -201,12 +201,36 @@ class SqliteRuntimeStore:
                 );
                 """
             )
+            primary_key = [
+                row[1] for row in connection.execute("PRAGMA table_info(runtime_contracts)")
+                if row[5]
+            ]
+            if primary_key == ["exchange", "underlying", "role"]:
+                connection.executescript(
+                    """
+                    CREATE TABLE runtime_contracts_v2 (
+                        exchange TEXT NOT NULL,
+                        underlying TEXT NOT NULL,
+                        role TEXT NOT NULL,
+                        tradingsymbol TEXT NOT NULL,
+                        instrument_token INTEGER NOT NULL,
+                        expiry TEXT NOT NULL,
+                        selected_at TEXT NOT NULL,
+                        PRIMARY KEY (exchange, tradingsymbol)
+                    );
+                    INSERT INTO runtime_contracts_v2
+                    SELECT exchange, underlying, role, tradingsymbol, instrument_token, expiry, selected_at
+                    FROM runtime_contracts;
+                    DROP TABLE runtime_contracts;
+                    ALTER TABLE runtime_contracts_v2 RENAME TO runtime_contracts;
+                    """
+                )
             connection.execute(
                 "UPDATE market_bars SET instrument_type = 'INDEX' "
                 "WHERE upper(symbol) IN ('NIFTY', 'NIFTY 50', 'INDIA VIX', 'INDIAVIX')"
             )
             connection.execute(
-                "UPDATE market_bars SET expiry = NULL, strike = NULL, option_type = NULL "
+                "UPDATE market_bars SET expiry = '', strike = NULL, option_type = NULL "
                 "WHERE upper(instrument_type) = 'INDEX'"
             )
             connection.execute(
@@ -294,10 +318,22 @@ class SqliteRuntimeStore:
             connection.row_factory = sqlite3.Row
             row = connection.execute(
                 "SELECT exchange, underlying, role, tradingsymbol, instrument_token, expiry, selected_at "
-                "FROM runtime_contracts WHERE exchange = ? AND underlying = ? AND role = ?",
+                "FROM runtime_contracts WHERE exchange = ? AND underlying = ? AND role = ? "
+                "ORDER BY expiry, tradingsymbol LIMIT 1",
                 (exchange, underlying, role),
             ).fetchone()
         return dict(row) if row else None
+
+    def read_runtime_contracts(self, *, exchange: str, underlying: str, role: str) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                "SELECT exchange, underlying, role, tradingsymbol, instrument_token, expiry, selected_at "
+                "FROM runtime_contracts WHERE exchange = ? AND underlying = ? AND role = ? "
+                "ORDER BY expiry, tradingsymbol",
+                (exchange, underlying, role),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def record_runtime_contract(self, contract: dict[str, Any]) -> bool:
         required = ("exchange", "underlying", "role", "tradingsymbol", "instrument_token", "expiry")
@@ -308,8 +344,8 @@ class SqliteRuntimeStore:
         with self._connect() as connection:
             previous = connection.execute(
                 "SELECT tradingsymbol, instrument_token, expiry FROM runtime_contracts "
-                "WHERE exchange = ? AND underlying = ? AND role = ?",
-                (contract["exchange"], contract["underlying"], contract["role"]),
+                "WHERE exchange = ? AND tradingsymbol = ?",
+                (contract["exchange"], contract["tradingsymbol"]),
             ).fetchone()
             changed = previous is None or tuple(previous) != (
                 contract["tradingsymbol"], int(contract["instrument_token"]), str(contract["expiry"]),
@@ -318,8 +354,8 @@ class SqliteRuntimeStore:
                 "INSERT INTO runtime_contracts "
                 "(exchange, underlying, role, tradingsymbol, instrument_token, expiry, selected_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(exchange, underlying, role) DO UPDATE SET "
-                "tradingsymbol=excluded.tradingsymbol, instrument_token=excluded.instrument_token, "
+                "ON CONFLICT(exchange, tradingsymbol) DO UPDATE SET "
+                "underlying=excluded.underlying, role=excluded.role, instrument_token=excluded.instrument_token, "
                 "expiry=excluded.expiry, selected_at=excluded.selected_at",
                 (contract["exchange"], contract["underlying"], contract["role"],
                  contract["tradingsymbol"], int(contract["instrument_token"]), str(contract["expiry"]), selected_at),
@@ -381,7 +417,7 @@ class SqliteRuntimeStore:
                 ("FUT" if str(bar.instrument.instrument_type).upper() == "FUTURES"
                 else "INDEX" if bar.instrument.symbol.upper() in {"NIFTY", "NIFTY 50", "INDIA VIX", "INDIAVIX"}
                  else bar.instrument.instrument_type),
-                bar.instrument.expiry if str(bar.instrument.instrument_type).upper() in {"FUT", "FUTURES", "CE", "PE"} else None,
+                bar.instrument.expiry if str(bar.instrument.instrument_type).upper() in {"FUT", "FUTURES", "CE", "PE"} and bar.instrument.expiry else "",
                 bar.instrument.strike if str(bar.instrument.instrument_type).upper() in {"CE", "PE"} else None,
                 str(bar.instrument.option_type) if str(bar.instrument.instrument_type).upper() in {"CE", "PE"} and bar.instrument.option_type is not None else None,
                 source, now,

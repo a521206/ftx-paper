@@ -125,3 +125,33 @@ def test_load_startup_backfill_retries_transient_connection_reset(monkeypatch):
 
     assert result == ()
     assert attempts == 3
+
+
+def test_load_startup_backfill_includes_current_and_next_futures(monkeypatch):
+    calls = []
+    current_expiry = date.today() + timedelta(days=23)
+    next_expiry = date.today() + timedelta(days=54)
+
+    class Client(InstrumentMaster):
+        def historical_data(self, token, *_args, **_kwargs):
+            calls.append(token)
+            return []
+
+    client = Client([
+        {"tradingsymbol": "NIFTY26SEPFUT", "name": "NIFTY", "instrument_type": "FUT",
+         "expiry": date.today() - timedelta(days=1), "instrument_token": 1},
+        {"tradingsymbol": "NIFTY26OCTFUT", "name": "NIFTY", "instrument_type": "FUT",
+         "expiry": current_expiry, "instrument_token": 2},
+        {"tradingsymbol": "NIFTY26NOVFUT", "name": "NIFTY", "instrument_type": "FUT",
+         "expiry": next_expiry, "instrument_token": 3},
+    ])
+    current = {**client.rows[1], "symbol": client.rows[1]["tradingsymbol"]}
+
+    monkeypatch.setattr(
+        "ftx_paper.broker.zerodha.adapter._reserve_historical_request_slot",
+        lambda: None,
+    )
+
+    load_startup_backfill(client, [current])
+
+    assert calls == [2, 3]

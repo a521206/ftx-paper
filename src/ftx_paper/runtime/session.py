@@ -186,7 +186,7 @@ class RuntimeSession:
             else:
                 from ftx_paper.broker.zerodha import ZerodhaBroker
                 self.broker = ZerodhaBroker(client)
-            backfill = load_startup_backfill(client, resolved)
+            backfill = load_startup_backfill(client, resolved, contract_store=self.store)
             self.store.append_market_bars(backfill, source="historical_backfill")
             access_token = self._wait_for_session_readiness(is_nse_market_open)
             if access_token is None:
