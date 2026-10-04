@@ -59,7 +59,7 @@ class ReplayWorker:
     """Bounded in-process replay queue with a fresh engine per job."""
 
     def __init__(self, store: Any, *, capital_profile: ResearchCapitalProfile = RESEARCH_CAPITAL_PROFILE,
-                 max_queue_size: int = 8, strategy_factory: StrategyFactory | None = None,
+                 max_queue_size: int = 1024, strategy_factory: StrategyFactory | None = None,
                  futures_source_resolver: Any | None = None) -> None:
         self.store = store
         self.capital_profile = capital_profile

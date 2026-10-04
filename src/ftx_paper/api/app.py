@@ -95,7 +95,12 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             return jsonify(error_payload("invalid_request", "JSON object body required")), 400
         if "vehicle" in payload:
             return jsonify(error_payload("invalid_request", "use vehicles array; vehicle is no longer supported")), 400
-        if set(payload) - {"session_date", "vehicles", "emit_rejected_decisions"}:
+        range_aliases = (("date_from", "date_to"), ("from", "to"), ("from_date", "to_date"))
+        range_pair = next((pair for pair in range_aliases if any(key in payload for key in pair)), None)
+        supported = {"session_date", "vehicles", "emit_rejected_decisions"}
+        if range_pair:
+            supported.update(range_pair)
+        if set(payload) - supported:
             return jsonify(error_payload("invalid_request", "unsupported replay request fields")), 400
         if "emit_rejected_decisions" in payload and not isinstance(
             payload["emit_rejected_decisions"], bool,
@@ -113,6 +118,31 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
         ):
             return jsonify(error_payload("invalid_request", "vehicles must include futures; synthetic is reporting-only")), 400
         requested_date = payload.get("session_date")
+        if range_pair and requested_date is not None:
+            return jsonify(error_payload("invalid_request", "use either session_date or a date range")), 400
+        if range_pair:
+            start_raw, end_raw = (payload.get(key) for key in range_pair)
+            if not isinstance(start_raw, str) or not isinstance(end_raw, str):
+                return jsonify(error_payload("invalid_date", "both range dates are required and must be YYYY-MM-DD")), 400
+            try:
+                start = datetime.strptime(start_raw, "%Y-%m-%d").date().isoformat()
+                end = datetime.strptime(end_raw, "%Y-%m-%d").date().isoformat()
+            except ValueError:
+                return jsonify(error_payload("invalid_date", "range dates must be YYYY-MM-DD")), 400
+            if start != start_raw or end != end_raw or start > end:
+                return jsonify(error_payload("invalid_date", "range dates must be ordered YYYY-MM-DD values")), 400
+            dates = [value for value in store.read_market_dates() if start <= value <= end]
+            if not dates:
+                return jsonify(error_payload("no_data", "no market data in requested date range")), 404
+            request_base = {key: value for key, value in payload.items() if key not in range_pair}
+            run_ids = []
+            try:
+                for session_date in dates:
+                    run_request = {**request_base, "session_date": session_date}
+                    run_ids.append(operations.submit_replay(run_request))
+            except RuntimeError as exc:
+                return jsonify(error_payload("replay_queue_full", str(exc))), 409
+            return jsonify({"run_ids": run_ids, "date_from": start, "date_to": end, "dates": dates}), 202
         if not isinstance(requested_date, str):
             return jsonify(error_payload("invalid_date", "session_date is required and must be YYYY-MM-DD")), 400
         try:
