@@ -75,6 +75,33 @@ def test_detector_vwap_uses_canonical_ordered_accumulation() -> None:
     assert snapshot.features.vwap == (0.1 + 0.2 + 0.3) / 3
 
 
+def test_detector_completes_fifteen_bar_opening_range_at_nine_thirty() -> None:
+    start = datetime(2026, 1, 5, 9, 15, tzinfo=ZoneInfo("Asia/Kolkata"))
+    instrument = Instrument("NIFTY26JANFUT", "NFO", "FUTURES", "2026-01-29")
+    bars = tuple(
+        MarketBar(
+            instrument,
+            start + timedelta(minutes=index),
+            100 + index,
+            101 + index,
+            99 + index,
+            100 + index,
+            1,
+        )
+        for index in range(16)
+    )
+    detector = LocationDetector()
+    snapshots = [detector.observe(bar) for bar in bars]
+
+    snapshot = snapshots[15]
+    assert snapshot is not None
+    assert snapshot.features.opening_range_complete is True
+    assert snapshot.features.opening_range_high == 115
+    assert snapshot.features.opening_range_low == 99
+    assert snapshots[14] is not None
+    assert snapshots[14].features.opening_range_complete is False
+
+
 def test_detector_snapshot_preserves_simultaneous_new_and_session_low() -> None:
     start = datetime(2026, 1, 5, 9, 15, tzinfo=ZoneInfo("Asia/Kolkata"))
     instrument = Instrument("NIFTY26JANFUT", "NFO", "FUTURES", "2026-01-29")

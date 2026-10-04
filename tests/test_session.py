@@ -10,6 +10,7 @@ from ftx_paper.runtime.store import _json_safe
 from ftx_paper.market import DecisionBundle, CompletedBarAggregator
 from ftx_paper.runtime.engine import EngineResult, PaperEngine
 from ftx_paper.runtime.replay_worker import ReplayWorker
+from ftx_paper.runtime.futures_source import FuturesSessionSourceResolver
 from ftx_paper.runtime import RuntimeSession, RuntimeStore
 from ftx_paper.domain.capital import ResearchCapitalProfile
 from ftx_paper.strategy import ConfiguredLiveStrategy
@@ -115,7 +116,7 @@ def test_replay_trace_has_one_causal_record_per_futures_bar(tmp_path):
     assert trace[0]["transitions"] == []
 
 
-def test_replay_prior_day_levels_use_nearest_unexpired_futures_contract(tmp_path):
+def test_replay_prior_day_levels_use_selected_session_source(tmp_path):
     store = RuntimeStore(tmp_path / "rollover-context")
     store.append_market_bars((
         MarketBar(
@@ -134,7 +135,7 @@ def test_replay_prior_day_levels_use_nearest_unexpired_futures_contract(tmp_path
     assert worker._prior_day_levels("2026-01-02") == (110.0, 90.0)
 
 
-def test_replay_bars_use_nearest_unexpired_futures_contract(tmp_path):
+def test_replay_bars_use_rollover_selected_futures_contract(tmp_path):
     store = RuntimeStore(tmp_path / "replay-contract")
     store.append_market_bars((
         MarketBar(
@@ -153,7 +154,77 @@ def test_replay_bars_use_nearest_unexpired_futures_contract(tmp_path):
         bar for bar in ReplayWorker(store)._bars("2026-09-29")
         if str(bar.instrument.instrument_type).upper() in {"FUT", "FUTURES"}
     ]
-    assert {bar.instrument.symbol for bar in futures} == {"NIFTY26SEPFUT"}
+    assert {bar.instrument.symbol for bar in futures} == {"NIFTY26OCTFUT"}
+
+
+def test_replay_prior_day_levels_follow_rollover_source_independently(tmp_path):
+    store = RuntimeStore(tmp_path / "rollover-prior-source")
+    store.append_market_bars((
+        MarketBar(
+            Instrument("NIFTY26SEPFUT", "NFO", "FUTURES", "2026-09-30"),
+            datetime(2026, 9, 28, 4, 0, tzinfo=timezone.utc),
+            100, 110, 90, 105,
+        ),
+        MarketBar(
+            Instrument("NIFTY26OCTFUT", "NFO", "FUTURES", "2026-10-28"),
+            datetime(2026, 9, 28, 4, 0, tzinfo=timezone.utc),
+            200, 220, 180, 205,
+        ),
+        MarketBar(
+            Instrument("NIFTY26SEPFUT", "NFO", "FUTURES", "2026-09-30"),
+            datetime(2026, 9, 29, 4, 0, tzinfo=timezone.utc),
+            101, 111, 91, 106,
+        ),
+        MarketBar(
+            Instrument("NIFTY26OCTFUT", "NFO", "FUTURES", "2026-10-28"),
+            datetime(2026, 9, 29, 4, 0, tzinfo=timezone.utc),
+            201, 221, 181, 206,
+        ),
+    ), source="fixture")
+
+    worker = ReplayWorker(store)
+    assert worker._prior_day_levels("2026-09-29") == (220.0, 180.0)
+    provenance = worker.input_manifest("2026-09-29")["futures_source"]
+    assert provenance["selected_symbol"] == "NIFTY26OCTFUT"
+    assert provenance["selected_expiry"] == "2026-10-28"
+    assert provenance["rollover_policy_version"] == "v1-preexpiry-2d"
+
+
+def test_replay_resolves_current_then_prior_source_once(tmp_path):
+    store = RuntimeStore(tmp_path / "resolved-source-calls")
+    store.append_market_bars((
+        MarketBar(
+            Instrument("NIFTY26SEPFUT", "NFO", "FUTURES", "2026-09-30"),
+            datetime(2026, 9, 28, 4, 0, tzinfo=timezone.utc),
+            100, 23124.1, 22792.9, 105,
+        ),
+        MarketBar(
+            Instrument("NIFTY01OCTFUT", "NFO", "FUTURES", "2026-10-01"),
+            datetime(2026, 9, 29, 4, 0, tzinfo=timezone.utc),
+            200, 220, 180, 205,
+        ),
+    ), source="fixture")
+
+    class RecordingResolver:
+        def __init__(self):
+            self.calls = []
+            self.delegate = FuturesSessionSourceResolver(store, rollover_days_before_expiry=0)
+
+        def resolve(self, session_date):
+            self.calls.append(session_date)
+            return self.delegate.resolve(session_date)
+
+    resolver = RecordingResolver()
+    worker = ReplayWorker(store, futures_source_resolver=resolver)
+    bars = worker._bars("2026-09-29")
+    levels = worker._prior_day_levels("2026-09-29")
+    manifest = worker.input_manifest("2026-09-29")
+
+    assert {bar.instrument.symbol for bar in bars} == {"NIFTY01OCTFUT"}
+    assert levels == (23124.1, 22792.9)
+    assert manifest["provenance"]["current"]["selected_symbol"] == "NIFTY01OCTFUT"
+    assert manifest["provenance"]["prior"]["selected_symbol"] == "NIFTY26SEPFUT"
+    assert resolver.calls == ["2026-09-29", "2026-09-28"]
 
 
 def test_replay_input_window_matches_canonical_session_close(tmp_path):

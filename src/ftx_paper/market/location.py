@@ -149,9 +149,9 @@ def _features(prefix: tuple[MarketBar, ...], *, opening_range_bars: int, atr_win
     return LocationFeatures(
         vwap=vwap, session_high=max(bar.high for bar in session), session_low=min(bar.low for bar in session),
         atr=max(atr, 1e-6),
-        opening_range_high=max(bar.high for bar in opening) if len(session) > opening_range_bars else None,
-        opening_range_low=min(bar.low for bar in opening) if len(session) > opening_range_bars else None,
-        opening_range_complete=len(session) > opening_range_bars,
+        opening_range_high=max(bar.high for bar in opening) if len(session) >= opening_range_bars else None,
+        opening_range_low=min(bar.low for bar in opening) if len(session) >= opening_range_bars else None,
+        opening_range_complete=len(session) >= opening_range_bars,
         prior_day_high=prior_day_high, prior_day_low=prior_day_low,
     )
 

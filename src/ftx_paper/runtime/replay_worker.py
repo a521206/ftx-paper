@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
-from datetime import date as date_type, datetime
+from datetime import datetime
 import hashlib
 import json
 from queue import Empty, Full, Queue
@@ -17,6 +17,7 @@ from ftx_paper.market.features import option_pcr_at_event, vix_open_and_event
 from ftx_paper.domain import AccountAggregate, PortfolioState
 from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.runtime.engine import PaperEngine
+from ftx_paper.runtime.futures_source import FuturesSessionSourceResolver
 from ftx_paper.execution.cost import futures_cost, synthetic_futures_cost
 from ftx_paper.execution import PaperExecutionCoordinator
 from ftx_paper.execution.settlement import ExitValidationError, validate_exit_order
@@ -58,10 +59,13 @@ class ReplayWorker:
     """Bounded in-process replay queue with a fresh engine per job."""
 
     def __init__(self, store: Any, *, capital_profile: ResearchCapitalProfile = RESEARCH_CAPITAL_PROFILE,
-                 max_queue_size: int = 8, strategy_factory: StrategyFactory | None = None) -> None:
+                 max_queue_size: int = 8, strategy_factory: StrategyFactory | None = None,
+                 futures_source_resolver: Any | None = None) -> None:
         self.store = store
         self.capital_profile = capital_profile
         self.strategy_factory = strategy_factory or ConfiguredStrategyFactory(capital_profile=capital_profile)
+        self._futures_sources = futures_source_resolver or FuturesSessionSourceResolver(store)
+        self._source_cache: dict[str, Any] = {}
         self._queue: Queue[tuple[str, dict[str, Any], Event]] = Queue(maxsize=max_queue_size)
         self._lock = Lock()
         self._cancel: dict[str, Event] = {}
@@ -102,6 +106,7 @@ class ReplayWorker:
     def input_manifest(self, session_date: str) -> dict[str, Any]:
         """Return the deterministic, API-safe inputs used by a replay date."""
         rows = self.store.read_market_bars(session_date)
+        futures_source = self._resolve_source(session_date)
         bars = self._bars(session_date)
         replay_rows = [
             {
@@ -141,6 +146,10 @@ class ReplayWorker:
             str(row.get("minute")) for row in rows
             if str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
         }
+        source_provenance = {
+            "current": futures_source.provenance() if futures_source is not None else None,
+            "prior": self._prior_source_provenance(session_date),
+        }
         payload = {
             "available_date": session_date,
             "date": session_date,
@@ -148,6 +157,8 @@ class ReplayWorker:
             "bar_count": len(strategy_rows),
             "raw_bar_count": len(rows),
             "supporting_bar_count": len(bars) - len(strategy_rows),
+            "futures_source": futures_source.provenance() if futures_source is not None else None,
+            "provenance": source_provenance,
             "per_instrument_counts": dict(sorted(by_instrument.items())),
             "availability": {
                 "vix": bool(vix_rows),
@@ -249,6 +260,7 @@ class ReplayWorker:
         expiry_dates = self.store.read_expiry_dates()
         # This engine/strategy is private to this replay run and never shared
         # with RuntimeSession, its broker, ledger, or risk state.
+        self._source_cache = {}
         for date in dates:
             if cancel.is_set():
                 break
@@ -268,8 +280,8 @@ class ReplayWorker:
                 "pending_orders": {},
                 "settled_orders": [],
             })
-            prior_day_high, prior_day_low = self._prior_day_levels(date, available_dates)
             bars = self._bars(date)
+            prior_day_high, prior_day_low = self._prior_day_levels(date, available_dates)
             # Historical replay databases may not contain the imported expiry
             # calendar. Infer an expiry session from the option bars themselves
             # so adaptive stops use the same expiry widening as canonical.
@@ -952,88 +964,36 @@ class ReplayWorker:
         prior = [value for value in dates if value < session_date]
         if not prior:
             return None, None
-        rows = self.store.read_market_bars(prior[-1])
-        futures = [
-            row for row in rows
-            if str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
-        ]
-        if not futures:
+        source = self._resolve_source(prior[-1])
+        if source is None:
             return None, None
-        prior_date = date_type.fromisoformat(prior[-1])
-        target_rows = self.store.read_market_bars(session_date)
-        target_expiries = sorted({
-            str(row["expiry"])[:10] for row in target_rows
-            if str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
-            and row.get("expiry") and str(row["expiry"])[:10] >= session_date
-        })
-        if target_expiries:
-            matching = [row for row in futures if str(row.get("expiry", ""))[:10] == target_expiries[0]]
-            if matching:
-                futures = matching
-        contracts: dict[date_type, list[dict[str, Any]]] = {}
-        for row in futures:
-            expiry = row.get("expiry")
-            if not expiry:
-                continue
-            try:
-                expiry_date = date_type.fromisoformat(str(expiry)[:10])
-            except ValueError:
-                continue
-            if expiry_date >= prior_date:
-                contracts.setdefault(expiry_date, []).append(row)
-        if contracts:
-            futures = contracts[min(contracts)]
-        else:
-            # Never silently fall back to an expired contract when replay
-            # lacks the preceding session's active futures input.
-            return None, None
-        session_futures = []
-        for row in futures:
-            try:
-                timestamp = datetime.fromisoformat(str(row["minute"])).astimezone(IST)
-                minute = timestamp.hour * 60 + timestamp.minute
-            except (KeyError, ValueError):
-                continue
-            if SESSION_OPEN_MINUTES <= minute <= SESSION_CLOSE_MINUTES:
-                session_futures.append(row)
-        if not session_futures:
-            return None, None
-        return max(float(row["high"]) for row in session_futures), min(float(row["low"]) for row in session_futures)
+        return max(float(row["high"]) for row in source.bars), min(float(row["low"]) for row in source.bars)
+
+    def _resolve_source(self, session_date: str) -> Any | None:
+        if session_date not in self._source_cache:
+            self._source_cache[session_date] = self._futures_sources.resolve(session_date)
+        return self._source_cache[session_date]
+
+    def _prior_source_provenance(self, session_date: str) -> dict[str, Any] | None:
+        dates = sorted(value for value in self._dates() if value < session_date)
+        if not dates:
+            return None
+        source = self._resolve_source(dates[-1])
+        return source.provenance() if source is not None else None
 
     def _bars(self, session_date: str) -> tuple[MarketBar, ...]:
         rows = self.store.read_market_bars(session_date)
-        futures_rows = [
-            row for row in rows
-            if str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
-        ]
-        if futures_rows:
-            session_day = date_type.fromisoformat(session_date)
-            contracts: dict[date_type, list[dict[str, Any]]] = {}
-            for row in futures_rows:
-                expiry = row.get("expiry")
-                if not expiry:
-                    continue
-                try:
-                    expiry_day = date_type.fromisoformat(str(expiry)[:10])
-                except ValueError:
-                    continue
-                if expiry_day >= session_day:
-                    contracts.setdefault(expiry_day, []).append(row)
-            if contracts:
-                selected = min(contracts)
-                selected_rows = contracts[selected]
-                rows = [
-                    row for row in rows
-                    if str(row.get("instrument_type", "")).upper() not in {"FUT", "FUTURES"}
-                ] + selected_rows
-            else:
-                # An expired-only futures slice is unavailable input, not a
-                # valid front-contract replay. Keep supporting market bars,
-                # but do not let an expired instrument drive decisions.
-                rows = [
-                    row for row in rows
-                    if str(row.get("instrument_type", "")).upper() not in {"FUT", "FUTURES"}
-                ]
+        futures_source = self._resolve_source(session_date)
+        if any(str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"} for row in rows):
+            rows = [
+                row for row in rows
+                if str(row.get("instrument_type", "")).upper() not in {"FUT", "FUTURES"}
+                or (
+                    futures_source is not None
+                    and str(row.get("symbol")) == futures_source.symbol
+                    and str(row.get("expiry"))[:10] == futures_source.expiry
+                )
+            ]
         bars = []
         for row in rows:
             instrument_type = str(row.get("instrument_type", "")).upper()
