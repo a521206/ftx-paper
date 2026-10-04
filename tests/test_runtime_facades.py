@@ -3,12 +3,16 @@ from typing import cast
 
 import pytest
 
-from ftx_paper.contracts import Instrument, MarketBar
+from ftx_paper.contracts import Instrument, MarketBar, OrderIntent, OrderRole, OrderSide
 from ftx_paper.market import DecisionBundle
 from ftx_paper.contracts import RuntimeEvent
 from ftx_paper.execution.events import ExecutionNotification
+from ftx_paper.execution import PaperExecutionCoordinator
 from ftx_paper.execution.service import ExecutionService
-from ftx_paper.runtime import EventBus, FeedManager, StrategyRunner
+from ftx_paper.runtime import EventBus, FeedManager, OrderManager, PnlManager, StrategyRunner
+from ftx_paper.ports import ExecutionPort, MarketDataPort, OrderStatusPort, PnlQueryPort
+from ftx_paper.broker import PaperBroker
+from ftx_paper.domain import PortfolioState
 from ftx_paper.market import LiveMarketNormalizer
 from ftx_paper.runtime.engine import EngineResult, PaperEngine
 
@@ -38,6 +42,13 @@ def test_feed_manager_delegates_lifecycle_without_owning_feed_state():
     manager.flush()
     assert manager.stop() is True
     assert feed.started and feed.flushed and feed.stopped
+
+
+def test_feed_manager_fails_explicitly_for_unimplemented_capabilities():
+    feed = Feed()
+    manager = FeedManager(feed)
+    with pytest.raises(NotImplementedError):
+        manager.health()
 
 
 def test_strategy_runner_delegates_to_one_engine():
@@ -104,6 +115,41 @@ def test_event_bus_propagates_critical_and_isolates_optional_handlers():
     bus.publish(event)
 
     assert delivered == [("critical", "health-1"), ("optional", "health-1")]
+
+
+def test_capability_ports_are_split_and_paper_execution_is_compatible():
+    broker = PaperBroker({"NIFTYFUT": 100.0})
+    assert isinstance(broker, ExecutionPort)
+    assert not isinstance(broker, MarketDataPort)
+    assert isinstance(PnlManager(PortfolioState(1000.0)), PnlQueryPort)
+    assert not isinstance(object(), OrderStatusPort)
+
+
+def test_order_manager_unsupported_operations_are_explicit():
+    service = ExecutionService(None, None, object())
+    manager = OrderManager(service)
+    with pytest.raises(NotImplementedError):
+        manager.modify(cast(OrderIntent, None))
+    with pytest.raises(NotImplementedError):
+        manager.cancel("order-1")
+
+
+def test_order_manager_submits_through_paper_coordinator():
+    class Coordinator:
+        def submit(self, _order):
+            self.submitted = True
+
+        submitted = False
+
+    coordinator = Coordinator()
+    service = ExecutionService(None, cast(PaperExecutionCoordinator, coordinator), object())
+    manager = OrderManager(service)
+    order = OrderIntent(
+        "paper-1", Instrument("NIFTYFUT", "NFO", "FUTURES"), OrderSide.BUY, 1,
+        role=OrderRole.ENTRY,
+    )
+    manager.submit(order)
+    assert coordinator.submitted
 
 
 def test_market_normalizer_owns_raw_payload_conversion():

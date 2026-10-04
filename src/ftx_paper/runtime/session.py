@@ -22,7 +22,7 @@ from ftx_paper.strategy.protocol import Strategy
 from ftx_paper.execution.cost import futures_cost
 from ftx_paper.execution.settlement import ExitValidationError, validate_exit_order
 from .engine import PaperEngine
-from .facades import FeedManager, OrderManager, StrategyRunner
+from .facades import FeedController, FeedManager, OrderManager, PnlManager, StrategyRunner
 from .event_bus import EventBus
 from ftx_paper.execution import ExecutionService, PaperExecutionCoordinator
 from .events import is_decision_event, serialize_datetime
@@ -90,6 +90,7 @@ class RuntimeSession:
             if self.portfolio is not None else None
         )
         self.strategy_runner = StrategyRunner(self.engine)
+        self.pnl_manager = PnlManager(self.portfolio)
         self.execution = ExecutionService(
             self.account, self.coordinator, self.store,
             notify=self.strategy_runner.on_execution_event,
@@ -214,7 +215,7 @@ class RuntimeSession:
                     for item in resolved
                 },
             )
-            self.feed_manager.attach(self.feed)
+            self.feed_manager.attach(cast(FeedController, self.feed))
             with self._lock:
                 if self._stopping:
                     self.feed.stop()
@@ -372,6 +373,8 @@ class RuntimeSession:
                             "role": order.role.value,
                             "vehicle": order.vehicle,
                             "entry_order_id": order.entry_order_id,
+                            "strategy_id": order.strategy_id,
+                            "account_id": order.account_id,
                         },
                     )
             self.store.append_event("ORDER_INTENT", {
@@ -388,6 +391,8 @@ class RuntimeSession:
                 "decision_source": source,
                 "session_date": bundle.trading_date,
                 "execution_allowed": source == "live",
+                "strategy_id": order.strategy_id,
+                "account_id": order.account_id,
             }, f"order_intent:{source}:{bundle.bundle_id}:{order.client_order_id}", timestamp=timestamp)
             if source == "replay":
                 self.store.append_event("ORDER_SUPPRESSED", {
@@ -443,6 +448,8 @@ class RuntimeSession:
             "execution_allowed": True,
             "reason": order.reason,
             "vehicle": order.vehicle,
+            "strategy_id": order.strategy_id,
+            "account_id": order.account_id,
         }
         if order.vehicle != "futures":
             self.store.append_event(
@@ -741,7 +748,8 @@ class RuntimeSession:
                     ),
                     occurred_at=fill.timestamp,
                     source="live",
-                    strategy_id=getattr(getattr(self.engine, "strategy_metadata", None), "version", None),
+                    strategy_id=order.strategy_id,
+                    account_id=order.account_id,
                 ))
             except Exception as exc:
                 # Strategy execution notifications are part of the critical
@@ -947,7 +955,7 @@ class RuntimeSession:
         feed_stopped = True
         try:
             if feed:
-                self.feed_manager.attach(feed)
+                self.feed_manager.attach(cast(FeedController, feed))
                 feed_stopped = self.feed_manager.stop()
         except Exception:
             feed_stopped = False

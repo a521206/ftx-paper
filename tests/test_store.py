@@ -162,6 +162,20 @@ def test_runtime_store_rejects_illegal_order_transition(tmp_path):
     assert order["state"] == "AUTHORIZED"
 
 
+def test_runtime_store_keeps_unknown_and_cancel_requested_in_flight(tmp_path):
+    store = RuntimeStore(tmp_path)
+    assert store.create_order_lifecycle("unknown", {"client_order_id": "unknown"})
+    assert store.update_order_lifecycle("unknown", state="SUBMITTING")
+    assert store.update_order_lifecycle("unknown", state="UNKNOWN")
+    assert store.create_order_lifecycle("cancel", {"client_order_id": "cancel"})
+    assert store.update_order_lifecycle("cancel", state="AUTHORIZED")
+    assert store.update_order_lifecycle("cancel", state="SUBMITTING")
+    assert store.update_order_lifecycle("cancel", state="ACKNOWLEDGED")
+    assert store.update_order_lifecycle("cancel", state="CANCEL_REQUESTED")
+
+    assert {row["client_order_id"] for row in store.read_in_flight_orders()} == {"unknown", "cancel"}
+
+
 def test_runtime_store_rejects_reused_order_id_with_different_payload(tmp_path):
     store = RuntimeStore(tmp_path)
     payload = {"client_order_id": "order-retry", "quantity": 2}

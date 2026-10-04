@@ -89,8 +89,11 @@ coordinator. External broker execution and external-position reconciliation are
 out of scope. The UI remains a separate presentation process; facades do not
 create another runtime owner or bypass the runtime-directory process lease.
 
-This section describes the intended scaffold, not a claim that the new ports,
-facades, event bus, or complete lifecycle graph are already implemented.
+This section describes the intentionally minimal scaffold. The capability ports
+in `ftx_paper.ports` (`MarketDataPort`, `ExecutionPort`, `OrderStatusPort`,
+`AccountDataPort`, and `PnlQueryPort`) are contracts only. `PaperBroker` is the
+implemented execution adapter; no live execution adapter is selected or
+implied.
 
 ### Ownership And Sequencing
 
@@ -134,6 +137,14 @@ tick-based protective exits as well as decision-clock processing. Complete the
 critical path before evaluating subsequent decisions. Persistence or critical
 notification failure must halt affected processing without blindly resubmitting
 an order whose simulated fill may already have occurred.
+
+The in-process facades are `FeedManager`, `OrderManager`, `StrategyRunner`, and
+`PnlManager`. They delegate to the existing runtime owner and aggregate. Feed
+subscription, quote, and health capabilities are exposed when the selected
+adapter implements them. Order modification and cancellation are explicit
+`NotImplementedError` operations in this scaffold, rather than false success.
+`PnlManager` is read-only and returns a snapshot from the canonical
+`PortfolioState`.
 
 Startup recovery remains unchanged: an interrupted runtime becomes `STOPPED`,
 retains a `RUNTIME_RECOVERY` audit event, and does not reconstruct the
@@ -201,6 +212,10 @@ and cancellation behavior remains an explicit capability limitation of the
 paper adapter until implemented and tested; this graph does not enable external
 execution or reconciliation.
 
+`RECONCILIATION_REQUIRED` is deferred. It remains a persisted audit/state value
+for startup gating, is treated as non-terminal by in-flight queries, and does
+not enable recovery, external position reconciliation, or automatic resubmission.
+
 ### Staged Scaffold
 
 Before adding another broker or any process boundary, introduce only typed
@@ -216,8 +231,10 @@ ports, in-process facades, and contract tests around existing components:
 4. Add a strategy-runner facade around the existing single `PaperEngine`.
 5. Add a P&L query/projection facade over the canonical `PortfolioState`; do not
    create a second mutable portfolio.
-6. Introduce an in-process event bus only after critical versus optional
-   delivery semantics are defined and tested.
+6. Use the in-process `EventBus` as scaffold transport only: critical handlers
+   run in order and propagate exceptions; optional observers are isolated.
+   Portfolio mutation remains in the direct critical sequence and is not an
+   optional subscriber.
 7. Keep composition in `application.composition`/runtime wiring so tests can
    substitute fakes without changing domain or strategy code.
 
@@ -230,4 +247,6 @@ facade when extracting responsibilities.
 
 This scaffold creates replaceable boundaries without implying live execution,
 distributed delivery, automatic broker reconciliation, or rollback semantics
-that the current runtime does not provide.
+that the current runtime does not provide. Zerodha may supply normalized market
+input, while normalization and decision-clock processing remain in
+`ftx_paper.market`; `PaperBroker` remains mandatory for order execution.

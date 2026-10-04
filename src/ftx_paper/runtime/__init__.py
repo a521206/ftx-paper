@@ -5,13 +5,13 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .controller import RuntimeController
     from .event_bus import EventBus, EventHandler
-    from .facades import FeedController, FeedManager, OrderManager, StrategyRunner
+    from .facades import FeedController, FeedManager, OrderManager, PnlManager, StrategyRunner
     from .session import RuntimeSession
     from .store import ProcessAlreadyRunningError, RuntimeStore
 
 __all__ = [
     "EventBus", "EventHandler", "FeedController", "FeedManager", "OrderManager",
-    "ProcessAlreadyRunningError", "RuntimeController", "RuntimeSession", "RuntimeStore", "StrategyRunner",
+    "ProcessAlreadyRunningError", "PnlManager", "RuntimeController", "RuntimeSession", "RuntimeStore", "StrategyRunner",
 ]
 
 
@@ -25,11 +25,11 @@ def __getattr__(name: str) -> object:
     if name in {"EventBus", "EventHandler"}:
         from .event_bus import EventBus, EventHandler
         return {"EventBus": EventBus, "EventHandler": EventHandler}[name]
-    if name in {"FeedController", "FeedManager", "OrderManager", "StrategyRunner"}:
-        from .facades import FeedController, FeedManager, OrderManager, StrategyRunner
+    if name in {"FeedController", "FeedManager", "OrderManager", "PnlManager", "StrategyRunner"}:
+        from .facades import FeedController, FeedManager, OrderManager, PnlManager, StrategyRunner
         return {
             "FeedController": FeedController, "FeedManager": FeedManager,
-            "OrderManager": OrderManager, "StrategyRunner": StrategyRunner,
+            "OrderManager": OrderManager, "PnlManager": PnlManager, "StrategyRunner": StrategyRunner,
         }[name]
     if name == "RuntimeSession":
         from .session import RuntimeSession

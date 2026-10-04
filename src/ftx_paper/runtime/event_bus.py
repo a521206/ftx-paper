@@ -24,8 +24,17 @@ class EventBus:
         self._optional.append(handler)
 
     def publish(self, event: RuntimeEvent) -> None:
+        """Publish through critical delivery, then isolated observers."""
+        self.publish_critical(event)
+        self.publish_optional(event)
+
+    def publish_critical(self, event: RuntimeEvent) -> None:
+        """Run critical handlers in order; exceptions deliberately propagate."""
         for handler in self._critical:
             handler(event)
+
+    def publish_optional(self, event: RuntimeEvent) -> None:
+        """Run optional observers while isolating observer failures."""
         for handler in self._optional:
             try:
                 handler(event)

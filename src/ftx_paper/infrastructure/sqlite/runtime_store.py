@@ -621,7 +621,7 @@ class SqliteRuntimeStore:
         with self._connect() as connection:
             connection.row_factory = sqlite3.Row
             rows = connection.execute(
-                "SELECT * FROM runtime_orders WHERE state IN ('AUTHORIZED', 'SUBMITTING', 'ACKNOWLEDGED', 'PARTIALLY_FILLED') "
+                "SELECT * FROM runtime_orders WHERE state NOT IN ('FILLED', 'CANCELLED', 'REJECTED') "
                 "ORDER BY updated_at"
             ).fetchall()
         result = []

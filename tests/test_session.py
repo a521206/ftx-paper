@@ -428,6 +428,33 @@ def test_live_order_reaches_paper_broker_and_persists_fill(tmp_path):
     assert fill["created_at"] != "2026-01-01T10:20:00+05:30"
 
 
+def test_execution_notification_preserves_order_ownership_metadata(tmp_path):
+    store = RuntimeStore(tmp_path)
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    captured = []
+
+    class Engine:
+        bars_seen = 0
+        strategy_metadata = type("Metadata", (), {"version": "strategy-version"})()
+
+        def on_bundle(self, bundle):
+            return EngineResult(orders=(OrderIntent(
+                "owned-order", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY,
+                strategy_id="strategy-7", account_id="account-3",
+            ),))
+
+    session = RuntimeSession(store, None, [], engine=cast(PaperEngine, Engine()))
+    session.order_manager.publish = cast("Any", captured.append)
+    session.broker = PaperBroker({"NIFTYFUT": 101.5})
+    session._process_bundle(type("Bundle", (), {
+        "bundle_id": "2026-01-01:10:20", "trading_date": "2026-01-01", "minute": "10:20",
+        "required_roles": (), "bars": {},
+    })(), source="live")
+
+    assert captured[0].strategy_id == "strategy-7"
+    assert captured[0].account_id == "account-3"
+
+
 def test_exit_without_entry_identity_is_rejected_before_broker_submission(tmp_path):
     store = RuntimeStore(tmp_path)
     session = RuntimeSession(store, None, [])

@@ -29,6 +29,24 @@ class Application:
     runtime: RuntimeOperations | None = None
 
 
+def build_runtime_session(store, auth, specifications, **kwargs):
+    """Compose the single runtime owner with paper execution enforced.
+
+    Market-feed dependencies remain injectable for tests and a broker-backed
+    feed may still be supplied, but the execution factory is always PaperBroker.
+    """
+    from ftx_paper.broker import PaperBroker
+    from ftx_paper.runtime.session import RuntimeSession
+
+    # Deliberately ignore broker injection at this root: execution is always paper.
+    kwargs.pop("broker_factory", None)
+    return RuntimeSession(
+        store, auth, specifications,
+        broker_factory=lambda _client: PaperBroker(),
+        **kwargs,
+    )
+
+
 def build_application(database_path: str | Path, strategy, replay_worker) -> Application:
     """Build services with one fresh SQLite UoW per operation."""
     from ftx_paper.infrastructure.sqlite.runtime_store import SqliteRuntimeStore
