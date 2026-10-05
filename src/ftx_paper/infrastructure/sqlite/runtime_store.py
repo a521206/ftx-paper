@@ -838,7 +838,8 @@ class SqliteRuntimeStore:
         executed_types = ("FILL", "EXECUTEDDECISION")
         executed_placeholders = ", ".join("?" for _ in executed_types)
         sql = (
-            "SELECT event_type, substr(json_extract(payload, '$.decision_at'), 12, 5), COUNT(*), "
+            "SELECT event_type, substr(json_extract(payload, '$.decision_at'), 12, 5), "
+            "json_extract(payload, '$.outcome'), COUNT(*), "
             "SUM(CASE WHEN EXISTS (SELECT 1 FROM runtime_events lifecycle "
             "WHERE lifecycle.event_type IN (" + executed_placeholders + ") "
             "AND json_extract(lifecycle.payload, '$.decision_id') = "
@@ -848,7 +849,8 @@ class SqliteRuntimeStore:
             "AND substr(json_extract(payload, '$.decision_at'), 1, 10) = ? "
             "AND (json_extract(payload, '$.decision_source') IS NULL "
             "OR lower(json_extract(payload, '$.decision_source')) <> 'replay') "
-            "GROUP BY event_type, substr(json_extract(payload, '$.decision_at'), 12, 5)"
+            "GROUP BY event_type, substr(json_extract(payload, '$.decision_at'), 12, 5), "
+            "json_extract(payload, '$.outcome')"
         )
         with self._connect() as connection:
             rows = connection.execute(sql, (*executed_types, *event_types, session_date)).fetchall()
@@ -860,7 +862,7 @@ class SqliteRuntimeStore:
         totals: DecisionSummary = {
             "detections": 0, "candidates": 0, "accepted": 0, "rejected": 0, "executed": 0,
         }
-        for event_type, minute, count, executed in rows:
+        for event_type, minute, outcome, count, executed in rows:
             if not minute:
                 continue
             session_minute = int(minute[:2]) * 60 + int(minute[3:5])
@@ -874,8 +876,8 @@ class SqliteRuntimeStore:
             amount = int(count)
             stats["detections"] += amount
             stats["candidates"] += amount if "CANDIDATE" in event_type else 0
-            stats["accepted"] += amount if event_type == "ACCEPTEDDECISION" else 0
-            stats["rejected"] += amount if event_type == "REJECTEDDECISION" else 0
+            stats["accepted"] += amount if event_type == "CANDIDATEDECISION" and outcome == "accepted" else 0
+            stats["rejected"] += amount if event_type == "CANDIDATEDECISION" and outcome == "rejected" else 0
             stats["executed"] += int(executed or 0)
         for stats in sessions.values():
             for key in totals:

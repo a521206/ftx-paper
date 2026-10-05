@@ -70,7 +70,7 @@ def build_authoritative_payload(
         payload = dict(event.get("payload", event))
         event_type = str(event.get("event_type", "")).upper()
         candidate_id = payload.get("candidate_id") or payload.get("decision_id")
-        if candidate_id and event_type in {"CANDIDATEDECISION", "CANDIDATE", "DECISION"}:
+        if candidate_id and event_type == "CANDIDATEDECISION":
             candidate_id = str(candidate_id)
             if candidate_id not in seen:
                 seen.add(candidate_id)
@@ -84,7 +84,7 @@ def build_authoritative_payload(
                     "cell": payload.get("cell"),
                     "direction": payload.get("direction"),
                     "eligibility": (
-                        "eligible" if payload.get("outcome") in {"candidate", "accepted", "filled"}
+                        "eligible" if payload.get("outcome") in {"accepted", "filled"}
                         else "rejected" if payload.get("outcome") in {"rejected", "policy rejection", "sizing rejection"}
                         else "unavailable"
                     ),
@@ -93,7 +93,7 @@ def build_authoritative_payload(
                     "score_factors": payload.get("score_factors", {}),
                     "sizing_diagnostics": payload.get("sizing_pipeline"),
                 })
-        if candidate_id and event_type in {"ACCEPTEDDECISION", "REJECTEDDECISION", "SIZING_REJECTED"}:
+        if candidate_id and event_type == "CANDIDATEDECISION":
             decisions.append({"candidate_id": str(candidate_id), **payload})
         if event_type in {"FILLED", "EXECUTIONFILLED", "EXITED", "EXECUTIONEXITED"}:
             trades.append(payload)

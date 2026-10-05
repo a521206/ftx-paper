@@ -15,7 +15,7 @@ def openapi_document() -> dict[str, Any]:
             "event_id": {"type": "integer", "description": "Stable event identifier used for pagination"},
             "event_type": {
                 "type": "string",
-                "enum": ["CANDIDATEDECISION", "REJECTEDDECISION", "ACCEPTEDDECISION", "EXITDECISION"],
+                "enum": ["CANDIDATEDECISION", "EXITDECISION"],
             },
             "category": {"type": "string", "enum": ["decision"]},
             "payload": {

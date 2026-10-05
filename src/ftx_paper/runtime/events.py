@@ -11,8 +11,6 @@ IST = ZoneInfo("Asia/Kolkata")
 
 DECISION_EVENT_TYPES = frozenset({
     "CANDIDATEDECISION",
-    "ACCEPTEDDECISION",
-    "REJECTEDDECISION",
     "EXITDECISION",
 })
 

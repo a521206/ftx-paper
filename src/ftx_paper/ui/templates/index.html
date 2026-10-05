@@ -1270,9 +1270,9 @@
             const detail = payload.reason || payload.detail || payload.setup_type || (payload.close != null ? `Close ${payload.close}` : '—');
             const riskDetail = payload.risk_status ? `Risk: ${payload.risk_status.replaceAll('_', ' ')}` : '';
             const displayDetail = [detail, riskDetail].filter(Boolean).join(' · ');
-            const outcome = String(payload.decision_source || '').toLowerCase() === 'replay' ? 'Replayed' : (payload.execution_status || payload.outcome || (eventType === 'ACCEPTEDDECISION' ? 'Accepted' : eventType === 'REJECTEDDECISION' ? 'Policy rejection' : 'No qualifying setup'));
+            const outcome = String(payload.decision_source || '').toLowerCase() === 'replay' ? 'Replayed' : (payload.execution_status || payload.outcome || 'No qualifying setup');
             const outcomeLabel = String(outcome).replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
-            const outcomeTone = ['Accepted', 'Filled'].includes(outcomeLabel) ? 'good' : ['Policy Rejection', 'Sizing Rejection', 'Incomplete Bundle', 'Replayed', 'Unfilled', 'Execution Error'].includes(outcomeLabel) ? 'warn' : 'subtle';
+             const outcomeTone = ['Accepted', 'Filled'].includes(outcomeLabel) ? 'good' : ['Rejected', 'Policy Rejection', 'Sizing Rejection', 'Incomplete Bundle', 'Replayed', 'Unfilled', 'Execution Error'].includes(outcomeLabel) ? 'warn' : 'subtle';
             return `<details>
             <summary class="decision-row">
               <span>${date(decisionAt)}</span>
@@ -1316,8 +1316,7 @@
     function replayEventLabel(event) {
       const type = String(event.event_type || '').toUpperCase();
       const labels = {
-        ACCEPTEDDECISION: 'Accepted decision',
-        REJECTEDDECISION: 'Rejected decision',
+        CANDIDATEDECISION: 'Candidate decision',
         ORDER_SUPPRESSED: 'Order suppressed',
         EXITDECISION: 'Exit decision',
       };
@@ -1341,7 +1340,7 @@
 
     function replayReasonSummary(events) {
       const reasons = {};
-      events.filter((event) => String(event.event_type || '').toUpperCase() === 'REJECTEDDECISION').forEach((event) => {
+      events.filter((event) => String(event.event_type || '').toUpperCase() === 'CANDIDATEDECISION' && event.outcome === 'rejected').forEach((event) => {
         const reason = String(event.reason || 'unspecified').replace(/_/g, ' ');
         reasons[reason] = (reasons[reason] || 0) + 1;
       });
@@ -1379,9 +1378,9 @@
       const haystack = JSON.stringify(event).toLowerCase();
       const search = filters.search.toLowerCase().trim();
       const typeMatch = filters.type === 'all' ||
-        (filters.type === 'key' && ['ACCEPTEDDECISION', 'EXITDECISION'].includes(type)) ||
-        (filters.type === 'accepted' && type === 'ACCEPTEDDECISION') ||
-        (filters.type === 'rejected' && type === 'REJECTEDDECISION') ||
+        (filters.type === 'key' && ['CANDIDATEDECISION', 'EXITDECISION'].includes(type)) ||
+        (filters.type === 'accepted' && type === 'CANDIDATEDECISION' && event.outcome === 'accepted') ||
+        (filters.type === 'rejected' && type === 'CANDIDATEDECISION' && event.outcome === 'rejected') ||
         (filters.type === 'exit' && type === 'EXITDECISION');
       return typeMatch &&
         (!filters.direction || direction === filters.direction) &&
@@ -1407,13 +1406,13 @@
       const events = allEvents.filter((event) => replayEventMatches(event, filters));
       const result = run.result || {};
       const status = String(run.status || '').toLowerCase();
-      const accepted = replayEventCount(events, 'ACCEPTEDDECISION');
-      const rejected = replayEventCount(events, 'REJECTEDDECISION');
+      const accepted = events.filter((event) => String(event.event_type || '').toUpperCase() === 'CANDIDATEDECISION' && event.outcome === 'accepted').length;
+      const rejected = events.filter((event) => String(event.event_type || '').toUpperCase() === 'CANDIDATEDECISION' && event.outcome === 'rejected').length;
       const exits = replayEventCount(events, 'EXITDECISION');
       const suppressed = replayEventCount(events, 'ORDER_SUPPRESSED');
       const capital = result.capital || {};
       const scoring = result.scoring || {};
-      const notable = events.filter((event) => ['ACCEPTEDDECISION', 'EXITDECISION'].includes(String(event.event_type || '').toUpperCase()));
+      const notable = events.filter((event) => ['CANDIDATEDECISION', 'EXITDECISION'].includes(String(event.event_type || '').toUpperCase()));
       const reasons = replayReasonSummary(events);
       const diagnosticTrades = Array.isArray(result.diagnostic_trades) ? result.diagnostic_trades : result.trades;
       const trades = Array.isArray(diagnosticTrades) ? diagnosticTrades.length : 0;
@@ -1421,7 +1420,7 @@
       const eventSummary = notable.length
         ? `<div class="replay-event-list">${notable.map((event) => `<div class="replay-event">
               <div><strong>${esc(replayEventLabel(event))}</strong><small>${esc(date(replayEventTime(event)))}</small></div>
-              <div>${badge(event.event_type === 'ACCEPTEDDECISION' ? 'Decision accepted' : 'Exit recorded', event.event_type === 'ACCEPTEDDECISION' ? 'good' : 'warn')}</div>
+              <div>${badge(event.outcome === 'accepted' ? 'Decision accepted' : event.outcome === 'rejected' ? 'Decision rejected' : 'Exit recorded', event.outcome === 'accepted' ? 'good' : 'warn')}</div>
               <div>${replayEventDetail(event)}</div>
             </div>`).join('')}</div>`
         : `<div class="empty">No events match these filters in this run.</div>`;
@@ -1450,7 +1449,7 @@
         </div>
         ${suppressed ? `<div class="replay-note">${suppressed} order${suppressed === 1 ? '' : 's'} were suppressed for paper replay. They did not submit broker orders or alter live positions.</div>` : ''}
         ${reasonSummary}
-        ${filters.type === 'all' || filters.type === 'rejected' ? `<div class="replay-event-list replay-secondary-events">${events.filter((event) => !['ACCEPTEDDECISION', 'EXITDECISION'].includes(String(event.event_type || '').toUpperCase())).map((event) => `<div class="replay-event"><div><strong>${esc(replayEventLabel(event))}</strong><small>${esc(date(replayEventTime(event)))}</small></div><div>${badge('Diagnostic', 'subtle')}</div><div>${replayEventDetail(event)}</div></div>`).join('') || '<div class="empty">No additional events match.</div>'}</div>` : ''}
+        ${filters.type === 'all' || filters.type === 'rejected' ? `<div class="replay-event-list replay-secondary-events">${events.filter((event) => !['CANDIDATEDECISION', 'EXITDECISION'].includes(String(event.event_type || '').toUpperCase())).map((event) => `<div class="replay-event"><div><strong>${esc(replayEventLabel(event))}</strong><small>${esc(date(replayEventTime(event)))}</small></div><div>${badge('Diagnostic', 'subtle')}</div><div>${replayEventDetail(event)}</div></div>`).join('') || '<div class="empty">No additional events match.</div>'}</div>` : ''}
         ${eventSummary}
         <details class="replay-advanced"><summary>Show full replay data</summary><div class="payload">${esc(JSON.stringify(run, null, 2))}</div></details>
       </article>`;
@@ -1568,8 +1567,8 @@
       const result = run.result || {};
       const requestDate = run.request?.session_date || 'All available dates';
       const events = replayEvents(run);
-      const accepted = replayEventCount(events, 'ACCEPTEDDECISION');
-      const rejected = replayEventCount(events, 'REJECTEDDECISION');
+      const accepted = events.filter((event) => String(event.event_type || '').toUpperCase() === 'CANDIDATEDECISION' && event.outcome === 'accepted').length;
+      const rejected = events.filter((event) => String(event.event_type || '').toUpperCase() === 'CANDIDATEDECISION' && event.outcome === 'rejected').length;
       const candidates = accepted + rejected;
       const suppressed = replayEventCount(events, 'ORDER_SUPPRESSED');
       const noTrades = stats.closed.length === 0;
@@ -1582,16 +1581,17 @@
             return `<tr><td>${esc(date(entryTimestamp))}</td><td>${esc(date(exitTimestamp))}</td><td>${esc(String(trade.side || trade.direction || '').toUpperCase())}</td><td>${esc(trade.quantity ?? trade.lots ?? '—')}</td><td>${esc(money(trade.entry_price))}${syntheticLegs(trade)}</td><td>${esc(trade.exit_price == null ? 'Open' : money(trade.exit_price))}</td><td class="pnl ${Number(pnl || 0) < 0 ? 'negative' : ''}">${pnl == null ? 'Open' : esc(money(pnl))}</td><td>${esc(String(trade.exit_reason || 'Still open').replaceAll('_', ' '))}</td></tr>`;
           }).join('')
         : '<tr><td colspan="8" class="empty">No trades recorded.</td></tr>';
-      const causalEvents = events.filter((event) => ['ACCEPTEDDECISION', 'REJECTEDDECISION', 'ORDER_SUPPRESSED', 'EXITDECISION'].includes(String(event.event_type || '').toUpperCase())).slice().sort((a, b) => new Date(replayEventTime(a)) - new Date(replayEventTime(b)));
+      const causalEvents = events.filter((event) => ['CANDIDATEDECISION', 'ORDER_SUPPRESSED', 'EXITDECISION'].includes(String(event.event_type || '').toUpperCase())).slice().sort((a, b) => new Date(replayEventTime(a)) - new Date(replayEventTime(b)));
       const causalStream = causalEvents.length
         ? causalEvents.map((event) => {
             const type = String(event.event_type || '').toUpperCase();
-            const acceptedEvent = type === 'ACCEPTEDDECISION';
+            const acceptedEvent = type === 'CANDIDATEDECISION' && event.outcome === 'accepted';
+            const rejectedEvent = type === 'CANDIDATEDECISION' && event.outcome === 'rejected';
             const suppressedEvent = type === 'ORDER_SUPPRESSED';
             const exitEvent = type === 'EXITDECISION';
             const direction = String(event.direction || event.side || (exitEvent ? 'exit' : 'not reported')).toUpperCase();
-            const outcome = exitEvent ? 'EXIT' : suppressedEvent ? 'BLOCKED' : acceptedEvent ? 'EXECUTED' : 'SKIPPED';
-            const tone = exitEvent || suppressedEvent ? 'warn' : acceptedEvent ? 'good' : 'subtle';
+            const outcome = exitEvent ? 'EXIT' : suppressedEvent ? 'BLOCKED' : acceptedEvent ? 'EXECUTED' : rejectedEvent ? 'REJECTED' : 'SKIPPED';
+            const tone = exitEvent || suppressedEvent || rejectedEvent ? 'warn' : acceptedEvent ? 'good' : 'subtle';
             const evidence = event.cell || event.setup_type || replayEventLabel(event);
             return `<details class="causal-row"><summary><span class="mono">${esc(date(replayEventTime(event)))}</span><span><strong>${esc(direction)}</strong><small>${esc(replayDecisionLabel(evidence))}</small></span><span class="causal-detail">${esc(replayReasonLabel(event.reason || event.exit_reason || (acceptedEvent ? 'Entry allowed' : suppressedEvent ? 'Risk check blocked order' : exitEvent ? 'Position closed' : 'Entry rejected')))}</span>${badge(outcome, tone)}</summary><div class="causal-path"><strong>Signal</strong><b>→</b><strong>${acceptedEvent ? 'Entry allowed' : suppressedEvent ? 'Risk check' : exitEvent ? 'Exit signal' : 'Entry rejected'}</strong><b>→</b><strong>${acceptedEvent ? 'Synthetic entry' : suppressedEvent ? 'Order blocked' : exitEvent ? 'Exit' : 'No entry'}</strong></div><div class="causal-meta"><div><span>Market state</span><strong>${esc(event.entry_price ?? event.price ?? 'Not reported')}</strong></div><div><span>Evidence</span><strong>${esc(replayDecisionLabel(evidence))}</strong></div><div><span>Decision ID</span><strong>${esc(event.decision_id || event.event_id || 'Not reported')}</strong></div></div></details>`;
           }).join('')

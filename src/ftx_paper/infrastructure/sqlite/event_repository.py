@@ -36,7 +36,7 @@ class SqliteEventQueryRepository:
         connection = self._database.connect()
         try:
             connection.row_factory = sqlite3.Row
-            sql = "SELECT id, event_type, payload, created_at FROM runtime_events WHERE event_type IN ('CANDIDATEDECISION', 'ACCEPTEDDECISION', 'REJECTEDDECISION')"
+            sql = "SELECT id, event_type, payload, created_at FROM runtime_events WHERE event_type IN ('CANDIDATEDECISION', 'EXITDECISION')"
             params = []
             if session_date:
                 sql += " AND substr(json_extract(payload, '$.decision_at'), 1, 10) = ?"

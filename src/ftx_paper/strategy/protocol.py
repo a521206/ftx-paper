@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from ftx_paper.market.bundles import DecisionBundle
-from .decision import LiveDecision
+from .decision import DecisionEvent
 from ftx_paper.domain.decision_context import DecisionContext
 from ftx_paper.execution.events import ExecutionNotification
 
@@ -29,11 +29,11 @@ class Strategy(Protocol):
     @property
     def metadata(self) -> StrategyMetadata: ...
 
-    def on_bundle(self, bundle: DecisionBundle) -> tuple[LiveDecision, ...]: ...
+    def on_bundle(self, bundle: DecisionBundle) -> tuple[DecisionEvent, ...]: ...
 
     def evaluate(
         self, bundle: DecisionBundle, context: DecisionContext,
-    ) -> tuple[LiveDecision, ...]: ...
+    ) -> tuple[DecisionEvent, ...]: ...
 
     def on_execution_event(self, event: ExecutionNotification) -> None: ...
 

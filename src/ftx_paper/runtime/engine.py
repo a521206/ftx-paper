@@ -6,7 +6,7 @@ from typing import cast
 from ftx_paper.contracts import MarketBar, OrderIntent
 from ftx_paper.market.bundles import DecisionBundle
 from ftx_paper.strategy.protocol import Strategy, StrategyMetadata
-from ftx_paper.strategy.decision import LiveDecision
+from ftx_paper.strategy.decision import DecisionEvent
 from ftx_paper.domain.decision_context import DecisionContext
 from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.strategy.exits import ExitAction
@@ -46,7 +46,7 @@ class PaperEngine:
                                          "bundle_complete": bundle.complete},))
         evaluate = getattr(self.strategy, "evaluate", None)
         decisions = cast(
-            tuple[LiveDecision, ...],
+            tuple[DecisionEvent, ...],
             evaluate(bundle, context) if callable(evaluate) and context is not None
             else self.strategy.on_bundle(bundle),
         )

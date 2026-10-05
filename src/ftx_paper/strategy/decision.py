@@ -135,6 +135,32 @@ class LiveDecision:
     order: OrderIntent | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class CandidateDecision:
+    """One terminal decision for a candidate.
+
+    Candidate observations and terminal outcomes are intentionally not emitted
+    as separate decision events.  Execution remains a separate lifecycle.
+    """
+
+    payload: dict[str, object]
+    order: OrderIntent | None = None
+
+    event_type: str = "CANDIDATEDECISION"
+
+    def __post_init__(self) -> None:
+        outcome = self.payload.get("outcome")
+        if outcome not in {"accepted", "rejected", "cancelled", "superseded"}:
+            raise ValueError("CandidateDecision requires a terminal outcome")
+        if not self.payload.get("decision_id") and not self.payload.get("candidate_id"):
+            raise ValueError("CandidateDecision requires a candidate identifier")
+        if outcome == "rejected" and not self.payload.get("reason"):
+            raise ValueError("rejected CandidateDecision requires a reason")
+
+
+DecisionEvent = LiveDecision | CandidateDecision
+
+
 class IndependentLiveDecisionEngine:
     """Live-side causal decision implementation.
 
@@ -241,7 +267,7 @@ class IndependentLiveDecisionEngine:
             return None
         return session, 0
 
-    def evaluate(self, bundle: DecisionBundle) -> tuple[LiveDecision, ...]:
+    def evaluate(self, bundle: DecisionBundle) -> tuple[DecisionEvent, ...]:
         if self._trading_date != bundle.trading_date:
             self.portfolio.start_day()
             if self._futures:
@@ -270,18 +296,21 @@ class IndependentLiveDecisionEngine:
                 "required_input_availability": {r: r not in bundle.missing_roles for r in bundle.required_roles}}
         if not bundle.complete:
             decision_id = sha256(f"{bundle.bundle_id}:incomplete_bundle".encode()).hexdigest()[:24]
-            return (LiveDecision("REJECTEDDECISION", {
+            return (CandidateDecision({
                 **base,
                 "decision_id": decision_id,
                 "cell": "NONE",
                 "direction": "NONE",
                 "setup_type": "Skip",
-                "outcome": "input rejection",
+                "outcome": "rejected",
+                "decision_stage": "input",
                 "reason": "incomplete_bundle",
                 "feature_values": {},
             }),)
         if self.portfolio.equity < self.portfolio.daily_baseline * (1 - self.max_daily_loss):
-            return (LiveDecision("REJECTEDDECISION", {**base, "reason": "daily_loss_limit"}),)
+            return (CandidateDecision({**base,
+                "decision_id": sha256(f"{bundle.bundle_id}:daily_loss_limit".encode()).hexdigest()[:24],
+                "outcome": "rejected", "decision_stage": "risk", "reason": "daily_loss_limit"}),)
         current_vix = bundle.bars.get(MarketRole.VIX) or _supporting_bar(bundle, MarketRole.VIX)
         if current_vix is not None:
             self._previous_vix = current_vix
@@ -298,9 +327,9 @@ class IndependentLiveDecisionEngine:
         vix_open = self._vix_open
         if vix_bar is not None and vix_open is None:
             decision_id = sha256(f"{bundle.bundle_id}:missing_vix_open".encode()).hexdigest()[:24]
-            return (LiveDecision("REJECTEDDECISION", {
+            return (CandidateDecision({
                 **base, "decision_id": decision_id, "cell": "NONE", "direction": "NONE",
-                "setup_type": "Skip", "outcome": "policy rejection", "reason": "missing_vix",
+                "setup_type": "Skip", "outcome": "rejected", "decision_stage": "policy", "reason": "missing_vix",
                 "required_input_availability": {
                     **base["required_input_availability"], "vix_open": False,
                 }, "feature_values": {},
@@ -311,9 +340,9 @@ class IndependentLiveDecisionEngine:
             self._location_detector.observe(futures)
             if vix_bar is None:
                 decision_id = sha256(f"{bundle.bundle_id}:missing_vix".encode()).hexdigest()[:24]
-                return (LiveDecision("REJECTEDDECISION", {
+                return (CandidateDecision({
                     **base, "decision_id": decision_id, "cell": "NONE", "direction": "NONE",
-                    "setup_type": "Skip", "outcome": "policy rejection", "reason": "missing_vix",
+                    "setup_type": "Skip", "outcome": "rejected", "decision_stage": "policy", "reason": "missing_vix",
                     "required_input_availability": {**base["required_input_availability"], "vix": False},
                     "feature_values": {},
                 }),)
@@ -323,9 +352,9 @@ class IndependentLiveDecisionEngine:
         if location_snapshot is None:
             if vix_bar is None:
                 decision_id = sha256(f"{bundle.bundle_id}:missing_vix".encode()).hexdigest()[:24]
-                return (LiveDecision("REJECTEDDECISION", {
+                return (CandidateDecision({
                     **base, "decision_id": decision_id, "cell": "NONE", "direction": "NONE",
-                    "setup_type": "Skip", "outcome": "policy rejection", "reason": "missing_vix",
+                    "setup_type": "Skip", "outcome": "rejected", "decision_stage": "policy", "reason": "missing_vix",
                     "required_input_availability": {**base["required_input_availability"], "vix": False},
                     "feature_values": {},
                 }),)
@@ -392,7 +421,6 @@ class IndependentLiveDecisionEngine:
                              transitions=[{"reference": item.reference.value, "kind": item.kind.value,
                                            "from": item.from_side.value, "to": item.to_side.value}
                                           for item in location_snapshot.transitions])
-            events.append(LiveDecision("CANDIDATEDECISION", candidate))
             reason = None
             if cell_policy is None:
                 reason = "cell_not_configured"
@@ -417,9 +445,8 @@ class IndependentLiveDecisionEngine:
             if reason is None and vix_at_event is not None and vix_at_event <= 0:
                 reason = "vix_gate"
             if reason:
-                events.append(LiveDecision(
-                    "REJECTEDDECISION",
-                    {**candidate, "outcome": "policy rejection", "reason": reason,
+                events.append(CandidateDecision(
+                    {**candidate, "outcome": "rejected", "decision_stage": "policy", "reason": reason,
                      "decision_id": candidate_id},
                 ))
                 continue
@@ -431,9 +458,8 @@ class IndependentLiveDecisionEngine:
                 cell=cell.name, bar=sequence, date=bundle.trading_date,
             )
             if thesis_reason is not None:
-                events.append(LiveDecision(
-                    "REJECTEDDECISION",
-                    {**candidate, "outcome": "thesis rejection", "reason": thesis_reason,
+                events.append(CandidateDecision(
+                    {**candidate, "outcome": "rejected", "decision_stage": "thesis", "reason": thesis_reason,
                       "decision_id": candidate_id},
                 ))
                 continue
@@ -542,8 +568,8 @@ class IndependentLiveDecisionEngine:
                     "scoped_risk_lot_ceiling": scoped_risk_lot_ceiling,
                 })
                 if not sizing.approved:
-                    events.append(LiveDecision("SIZING_REJECTED", {
-                        **vehicle_candidate, "outcome": "sizing rejection", "reason": sizing.reason,
+                    events.append(CandidateDecision({
+                        **vehicle_candidate, "outcome": "rejected", "decision_stage": "sizing", "reason": sizing.reason,
                     }))
                     continue
                 # Gate the executable, stability-adjusted size rather than
@@ -553,8 +579,8 @@ class IndependentLiveDecisionEngine:
                     quantity=quantity, date=bundle.trading_date,
                 )
                 if quantity < 1:
-                    events.append(LiveDecision("SIZING_REJECTED", {
-                        **vehicle_candidate, "outcome": "sizing rejection",
+                    events.append(CandidateDecision({
+                        **vehicle_candidate, "outcome": "rejected", "decision_stage": "sizing",
                         "reason": (
                             "scoped_risk_buffer_exhausted"
                             if scoped_risk_lot_ceiling < 1
@@ -563,9 +589,8 @@ class IndependentLiveDecisionEngine:
                     }))
                     continue
                 if gate_reason is not None:
-                    events.append(LiveDecision(
-                        "REJECTEDDECISION",
-                        {**vehicle_candidate, "outcome": "risk rejection", "reason": gate_reason,
+                    events.append(CandidateDecision(
+                        {**vehicle_candidate, "outcome": "rejected", "decision_stage": "risk", "reason": gate_reason,
                           "decision_id": candidate_id},
                     ))
                     continue
@@ -580,8 +605,8 @@ class IndependentLiveDecisionEngine:
                         allowance=risk_allowance,
                         amount=risk_per_lot * quantity,
                     )
-                events.append(LiveDecision("ACCEPTEDDECISION", {
-                    **vehicle_candidate, "outcome": "accepted", "reason": "eligible",
+                events.append(CandidateDecision({
+                    **vehicle_candidate, "outcome": "accepted", "decision_stage": "sizing", "reason": "eligible",
                 }, order=order))
                 self.risk_gate.record_entry(
                     cell=cell.name, direction=direction, quantity=quantity,
@@ -614,4 +639,4 @@ class IndependentLiveDecisionEngine:
             self.risk_gate.restore(shared)
 
 
-__all__ = ["IndependentLiveDecisionEngine", "LiveDecision"]
+__all__ = ["CandidateDecision", "IndependentLiveDecisionEngine", "LiveDecision"]

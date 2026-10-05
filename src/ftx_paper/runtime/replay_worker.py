@@ -807,8 +807,8 @@ class ReplayWorker:
         return {
             "candidate_identity": payload.get("candidate_id") or payload.get("decision_id"),
             "decision_id": payload.get("decision_id"),
-            "decision_stage": event_type.lower().removesuffix("decision"),
-            "outcome": payload.get("outcome") or ("accepted" if event_type == "ACCEPTEDDECISION" else "rejected" if event_type == "REJECTEDDECISION" else event_type.lower()),
+            "decision_stage": payload.get("decision_stage") or event_type.lower().removesuffix("decision"),
+            "outcome": payload.get("outcome") or event_type.lower(),
             "rejection_reason": payload.get("reason"),
             "risk": {
                 key: payload.get(key) for key in ("stop_basis", "risk_per_trade", "risk_amount", "quantity", "score_multiplier")

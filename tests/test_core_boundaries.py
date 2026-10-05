@@ -11,7 +11,7 @@ from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, O
 from ftx_paper.market import CompletedBarAggregator, DecisionBundle, LiveFeatureCalculator, option_pcr_at_event, vix_open_and_event
 from ftx_paper.strategy import ConfiguredLiveStrategy
 from ftx_paper.strategy.exits import ExitStateMachine, PositionState
-from ftx_paper.strategy.decision import IndependentLiveDecisionEngine
+from ftx_paper.strategy.decision import CandidateDecision, IndependentLiveDecisionEngine
 from ftx_paper.strategy.risk import RiskAssessment, RiskConfig, RiskDecision, RiskEngine
 from ftx_paper.strategy.risk_state import RiskGateState
 from ftx_paper.strategy.sizing import SizingPipeline, SizingPipelineInput
@@ -27,6 +27,16 @@ from ftx_paper.strategy.scoring import _synthetic_delta_divergence
 from ftx_paper.strategy.config import Session
 from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.domain.capital import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE as CAPITAL_CONFIG
+
+
+def test_candidate_decision_is_one_typed_terminal_event() -> None:
+    accepted = CandidateDecision({"candidate_id": "accepted", "outcome": "accepted"})
+    rejected = CandidateDecision({"candidate_id": "rejected", "outcome": "rejected", "reason": "cell_not_configured"})
+
+    assert accepted.event_type == "CANDIDATEDECISION"
+    assert rejected.event_type == "CANDIDATEDECISION"
+    with pytest.raises(ValueError, match="terminal outcome"):
+        CandidateDecision({"candidate_id": "pending", "outcome": "candidate"})
 
 
 def test_delta_divergence_uses_signed_volume_from_actual_ohlc() -> None:
@@ -451,7 +461,7 @@ def test_live_decision_rejects_missing_vix_open_instead_of_using_event_value(mon
     ).evaluate(bundle)
 
     assert len(events) == 1
-    assert events[0].event_type == "REJECTEDDECISION"
+    assert events[0].event_type == "CANDIDATEDECISION"
     assert events[0].payload["reason"] == "missing_vix"
     assert events[0].payload["required_input_availability"]["vix_open"] is False
 
@@ -1018,9 +1028,9 @@ def test_live_decision_engine_rejects_unconfigured_cells() -> None:
     engine.evaluate(bundle("10:21", {}))
     third = engine.evaluate(bundle("10:22", {}))
 
-    assert [event.event_type for event in third] == ["CANDIDATEDECISION", "REJECTEDDECISION"]
+    assert [event.event_type for event in third] == ["CANDIDATEDECISION"]
     assert third[0].payload["cell"] == "vwap_zone"
-    assert third[1].payload["reason"] == "cell_not_configured"
+    assert third[0].payload["reason"] == "cell_not_configured"
 
 
 def test_live_decision_engine_emits_input_rejection_for_incomplete_bundle() -> None:
@@ -1036,8 +1046,8 @@ def test_live_decision_engine_emits_input_rejection_for_incomplete_bundle() -> N
     ).evaluate(bundle)
 
     assert len(events) == 1
-    assert events[0].event_type == "REJECTEDDECISION"
-    assert events[0].payload["outcome"] == "input rejection"
+    assert events[0].event_type == "CANDIDATEDECISION"
+    assert events[0].payload["outcome"] == "rejected"
     assert events[0].payload["reason"] == "incomplete_bundle"
 
 
@@ -1063,9 +1073,9 @@ def test_live_decision_engine_evaluates_cell_before_rejecting_missing_vix(monkey
             ("futures",),
         ))
 
-    assert [event.event_type for event in events] == ["CANDIDATEDECISION", "REJECTEDDECISION"]
+    assert [event.event_type for event in events] == ["CANDIDATEDECISION"]
     assert events[0].payload["cell"] == "vwap_zone"
-    assert events[1].payload["reason"] == "cell_not_configured"
+    assert events[0].payload["reason"] == "cell_not_configured"
 
 
 def test_configured_policy_requires_exact_location_composite() -> None:
@@ -1096,8 +1106,8 @@ def test_live_decision_engine_persists_score_and_quality_bucket() -> None:
     engine.evaluate(bundle(1))
     engine.evaluate(bundle(2))
     events = engine.evaluate(bundle(3))
-    assert [event.event_type for event in events] == ["CANDIDATEDECISION", "REJECTEDDECISION"]
-    assert events[1].payload["reason"] == "cell_not_configured"
+    assert [event.event_type for event in events] == ["CANDIDATEDECISION"]
+    assert events[0].payload["reason"] == "cell_not_configured"
 
 
 def test_admission_contract_replaces_grinding_score_filter() -> None:
