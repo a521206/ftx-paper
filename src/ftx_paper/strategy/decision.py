@@ -422,14 +422,14 @@ class IndependentLiveDecisionEngine:
                                            "from": item.from_side.value, "to": item.to_side.value}
                                           for item in location_snapshot.transitions])
             reason = None
-            if cell_policy is None:
+            if decision_session is Session.OUTSIDE:
+                reason = "outside_session_window"
+            elif cell_policy is None:
                 reason = "cell_not_configured"
             elif vix_bar is None:
                 reason = "missing_vix"
             elif vix_open is None:
                 reason = "missing_vix_open"
-            elif decision_session is Session.OUTSIDE:
-                reason = "outside_session_window"
             elif not session_selected:
                 reason = "session_not_selected"
             elif cell_policy is not None:
