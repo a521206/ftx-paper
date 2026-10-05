@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import json
 from queue import Empty, Full, Queue
@@ -18,6 +18,7 @@ from ftx_paper.domain import AccountAggregate, PortfolioState
 from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.runtime.engine import PaperEngine
 from ftx_paper.runtime.futures_source import FuturesSessionSourceResolver
+from ftx_paper.runtime.parity_artifacts import build_parity_artifact
 from ftx_paper.execution.cost import futures_cost, synthetic_futures_cost
 from ftx_paper.execution import PaperExecutionCoordinator
 from ftx_paper.execution.settlement import ExitValidationError, validate_exit_order
@@ -222,7 +223,7 @@ class ReplayWorker:
                 if run is None or run.get("status") == "cancelled":
                     continue
                 self.store.update_replay_run(run_id, status="running")
-                result = self._execute(request, cancel)
+                result = self._execute({**request, "run_id": run_id}, cancel)
                 run = self.store.read_replay_run(run_id)
                 if run is not None and run.get("status") != "cancelled":
                     self.store.update_replay_run(run_id, status="completed", result=result)
@@ -730,6 +731,8 @@ class ReplayWorker:
             "strategy_version": last_strategy_metadata.version,
             "configuration_hash": last_strategy_metadata.config_hash,
             "input_fingerprint": input_manifest["input_fingerprint"],
+            "input_provenance": input_manifest["provenance"],
+            "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "directional_exposure": directional_exposure,
             "requested_parameters": {
                 "session_date": session_date,
@@ -754,7 +757,7 @@ class ReplayWorker:
                                           if item.get("client_order_id")), None),
             })
             normalized_decisions.append(normalized)
-        return {
+        replay_result = {
             "result_schema_version": 2,
             "source": "replay",
             "vehicles": list(vehicles),
@@ -799,6 +802,8 @@ class ReplayWorker:
                 "score_average": sum(scores) / len(scores) if scores else None,
             },
         }
+        replay_result["parity_artifact"] = build_parity_artifact(replay_result, request=request)
+        return replay_result
 
     @staticmethod
     def _normalize_decision(event: dict[str, Any]) -> dict[str, Any]:

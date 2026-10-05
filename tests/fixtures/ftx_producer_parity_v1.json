@@ -1,0 +1,22 @@
+{
+  "artifact_type": "ftx_producer_parity",
+  "schema_version": 1,
+  "producer": {"identifier": "fixture", "source_version": "fixture"},
+  "run_id": "fixture",
+  "scope": {
+    "requested_date_from": "2026-01-01", "requested_date_to": "2026-01-01",
+    "effective_date_from": "2026-01-01", "effective_date_to": "2026-01-01",
+    "timezone": "Asia/Kolkata", "sessions": ["morning"], "vehicles": ["futures"],
+    "replay_input": {"identity": "fixture-input", "provenance": {}},
+    "processed": {"bar_count": 1, "session_count": 1},
+    "generated_at": "2026-01-01T00:00:00Z"
+  },
+  "coverage": {"complete": true, "issues": [], "field_availability": {}},
+  "strategy": {
+    "payload": {"algorithm_version": "fixture"},
+    "payload_hash": "1e4b128fed65ba246b70150a3e64b466b10b708bb9c7afba681639af9bf145be",
+    "hash_recipe": "sha256(canonical-json(sort_keys=true,separators=(',',':'),ensure_ascii=true))"
+  },
+  "p9": {"decision_records": [], "coverage": {"complete": true, "issues": [], "field_availability": {}}},
+  "p10": {"execution": [], "exits": [], "synthetic_settlements": [], "ledger": {}}
+}
