@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 
 def _is_index_symbol(symbol: object) -> bool:
-    return str(symbol).upper() in {"NIFTY", "NIFTY 50", "INDIA VIX", "INDIAVIX"}
+    return str(symbol).upper() in {"NIFTY", "NIFTY 50", "INDIA VIX"}
 
 
 class ZerodhaInstrument(TypedDict):
@@ -269,7 +269,7 @@ def classify_runtime_roles(instruments: list[ZerodhaInstrument]) -> RuntimeRoles
         exchange = str(item.get("exchange", ""))
         raw_role = item.get("role")
         role = parse_role(raw_role) if isinstance(raw_role, (str, MarketRole, OptionRole)) else None
-        if role is MarketRole.VIX or symbol in {"INDIA VIX", "INDIAVIX"}:
+        if role is MarketRole.VIX or symbol == "INDIA VIX":
             vix = item
         elif role is MarketRole.FUTURES or (exchange == "NFO" and symbol.endswith("FUT")):
             futures = item

@@ -30,7 +30,7 @@ class LiveMarketNormalizer:
         item = self._by_token[int(raw_token)]
         timestamp = self._timestamp(payload.get("timestamp"))
         instrument_type = str(item.get("instrument_type", "INDEX"))
-        if str(item["symbol"]).upper() in {"NIFTY", "NIFTY 50", "INDIA VIX", "INDIAVIX"}:
+        if str(item["symbol"]).upper() in {"NIFTY", "NIFTY 50", "INDIA VIX"}:
             instrument_type = "INDEX"
         expiry = (
             self._expiry_normalizer(item.get("expiry"))

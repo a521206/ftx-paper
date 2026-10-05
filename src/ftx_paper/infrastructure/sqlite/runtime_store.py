@@ -169,6 +169,8 @@ class SqliteRuntimeStore:
                 CREATE TABLE IF NOT EXISTS market_dates (
                     date TEXT PRIMARY KEY
                 );
+                CREATE INDEX IF NOT EXISTS ix_market_bars_session_minute
+                    ON market_bars(substr(minute, 1, 10), minute, exchange, symbol);
                 CREATE INDEX IF NOT EXISTS ix_runtime_events_event_type
                     ON runtime_events(event_type);
                 CREATE INDEX IF NOT EXISTS ix_runtime_events_decision_id
@@ -230,7 +232,7 @@ class SqliteRuntimeStore:
                 )
             connection.execute(
                 "UPDATE market_bars SET instrument_type = 'INDEX' "
-                "WHERE upper(symbol) IN ('NIFTY', 'NIFTY 50', 'INDIA VIX', 'INDIAVIX')"
+                "WHERE upper(symbol) IN ('NIFTY', 'NIFTY 50', 'INDIA VIX')"
             )
             connection.execute(
                 "UPDATE market_bars SET expiry = '', strike = NULL, option_type = NULL "
@@ -418,7 +420,7 @@ class SqliteRuntimeStore:
                 (bar.open_interest if bar.open_interest is not None else 0.0
                  if str(bar.instrument.instrument_type).upper() in {"FUT", "FUTURES"} else None),
                 ("FUT" if str(bar.instrument.instrument_type).upper() == "FUTURES"
-                else "INDEX" if bar.instrument.symbol.upper() in {"NIFTY", "NIFTY 50", "INDIA VIX", "INDIAVIX"}
+                else "INDEX" if bar.instrument.symbol.upper() in {"NIFTY", "NIFTY 50", "INDIA VIX"}
                  else bar.instrument.instrument_type),
                 bar.instrument.expiry if str(bar.instrument.instrument_type).upper() in {"FUT", "FUTURES", "CE", "PE"} and bar.instrument.expiry else "",
                 bar.instrument.strike if str(bar.instrument.instrument_type).upper() in {"CE", "PE"} else None,

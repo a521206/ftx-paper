@@ -20,7 +20,7 @@ from ftx_paper.strategy.adaptive_stop import adaptive_stop_bp
 from ftx_paper.domain import PortfolioState
 from ftx_paper.runtime.engine import PaperEngine
 from ftx_paper.execution import PaperExecutionCoordinator
-from ftx_paper.market.location import Cell, Location
+from ftx_paper.market.location import Cell, Location, LocationFeatures, LocationSnapshot
 from ftx_paper.strategy.decision import _configured_policies_for_cell
 from ftx_paper.strategy.admission import admission_result
 from ftx_paper.strategy.scoring import _synthetic_delta_divergence
@@ -419,7 +419,7 @@ def test_vix_lookup_uses_opening_value_and_latest_causal_bar() -> None:
 
 
 def test_vix_lookup_recognizes_replay_index_instrument() -> None:
-    vix = Instrument("INDIAVIX", "NSE", "INDEX")
+    vix = Instrument("INDIA VIX", "NSE", "INDEX")
     bars = (
         MarketBar(vix, datetime(2026, 1, 1, 9, 15, tzinfo=ZoneInfo("Asia/Kolkata")), 10, 11, 9, 10.5),
         MarketBar(vix, datetime(2026, 1, 1, 9, 16, tzinfo=ZoneInfo("Asia/Kolkata")), 11, 12, 10, 11.5),
@@ -993,7 +993,7 @@ def test_supporting_only_expiry_does_not_advance_futures_watermark() -> None:
     assert bundle.bars["futures"].close == 100
 
 
-def test_live_decision_engine_skips_unconfigured_cells() -> None:
+def test_live_decision_engine_rejects_unconfigured_cells() -> None:
     instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
     vix = Instrument("INDIA VIX", "NSE", "VIX")
     call = Instrument("NIFTYCE", "NFO", "CE")
@@ -1018,7 +1018,9 @@ def test_live_decision_engine_skips_unconfigured_cells() -> None:
     engine.evaluate(bundle("10:21", {}))
     third = engine.evaluate(bundle("10:22", {}))
 
-    assert third == ()
+    assert [event.event_type for event in third] == ["CANDIDATEDECISION", "REJECTEDDECISION"]
+    assert third[0].payload["cell"] == "vwap_zone"
+    assert third[1].payload["reason"] == "cell_not_configured"
 
 
 def test_live_decision_engine_emits_input_rejection_for_incomplete_bundle() -> None:
@@ -1037,6 +1039,33 @@ def test_live_decision_engine_emits_input_rejection_for_incomplete_bundle() -> N
     assert events[0].event_type == "REJECTEDDECISION"
     assert events[0].payload["outcome"] == "input rejection"
     assert events[0].payload["reason"] == "incomplete_bundle"
+
+
+def test_live_decision_engine_evaluates_cell_before_rejecting_missing_vix(monkeypatch) -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    timestamp = datetime(2026, 1, 1, 10, 20, tzinfo=ZoneInfo("Asia/Kolkata"))
+    snapshot = LocationSnapshot(
+        LocationFeatures(100.0, 101.0, 99.0, 2.0, None, None, False, None, None),
+        (Location.VWAP_ZONE,),
+        Cell(Location.VWAP_ZONE),
+    )
+    engine = IndependentLiveDecisionEngine(
+        version="test", config_hash="hash", capital=CAPITAL_CONFIG.initial_capital,
+    )
+    monkeypatch.setattr(engine._location_detector, "observe", lambda _bar: snapshot)
+
+    events = ()
+    for index in range(3):
+        bar_time = timestamp.replace(minute=timestamp.minute + index)
+        events = engine.evaluate(DecisionBundle(
+            f"missing-vix-{index}", "2026-01-01", bar_time.isoformat(),
+            {"futures": MarketBar(instrument, bar_time, 99, 102, 98, 100, 100)},
+            ("futures",),
+        ))
+
+    assert [event.event_type for event in events] == ["CANDIDATEDECISION", "REJECTEDDECISION"]
+    assert events[0].payload["cell"] == "vwap_zone"
+    assert events[1].payload["reason"] == "cell_not_configured"
 
 
 def test_configured_policy_requires_exact_location_composite() -> None:
@@ -1067,7 +1096,8 @@ def test_live_decision_engine_persists_score_and_quality_bucket() -> None:
     engine.evaluate(bundle(1))
     engine.evaluate(bundle(2))
     events = engine.evaluate(bundle(3))
-    assert events == ()
+    assert [event.event_type for event in events] == ["CANDIDATEDECISION", "REJECTEDDECISION"]
+    assert events[1].payload["reason"] == "cell_not_configured"
 
 
 def test_admission_contract_replaces_grinding_score_filter() -> None:

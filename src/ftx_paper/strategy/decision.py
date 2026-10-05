@@ -289,14 +289,14 @@ class IndependentLiveDecisionEngine:
             opening, _ = vix_open_and_event(tuple(self._vix_history), current_vix)
             if opening is not None:
                 self._vix_open = opening
-        # Canonical decisions require an event-time VIX value.  A prior VIX
-        # observation is retained only for opening-value calculation; it must
-        # not be carried forward as the current event input.
+        # Canonical decisions require an event-time VIX value, but its absence
+        # must not prevent candidate evaluation.  A prior VIX observation is
+        # retained only for opening-value calculation; it is never carried
+        # forward as the current event input.
         vix_bar = current_vix
-        if vix_bar is None:
-            decision_id = sha256(f"{bundle.bundle_id}:missing_vix".encode()).hexdigest()[:24]
-            return (LiveDecision("REJECTEDDECISION", {**base, "decision_id": decision_id, "cell": "NONE", "direction": "NONE", "setup_type": "Skip", "outcome": "policy rejection", "reason": "missing_vix", "required_input_availability": {**base["required_input_availability"], "vix": False}, "feature_values": {}}),)
-        if self._vix_open is None:
+        vix_at_event = float(vix_bar.close) if vix_bar is not None else None
+        vix_open = self._vix_open
+        if vix_bar is not None and vix_open is None:
             decision_id = sha256(f"{bundle.bundle_id}:missing_vix_open".encode()).hexdigest()[:24]
             return (LiveDecision("REJECTEDDECISION", {
                 **base, "decision_id": decision_id, "cell": "NONE", "direction": "NONE",
@@ -309,10 +309,26 @@ class IndependentLiveDecisionEngine:
         self._futures.append(futures)
         if len(self._futures) < 3:
             self._location_detector.observe(futures)
+            if vix_bar is None:
+                decision_id = sha256(f"{bundle.bundle_id}:missing_vix".encode()).hexdigest()[:24]
+                return (LiveDecision("REJECTEDDECISION", {
+                    **base, "decision_id": decision_id, "cell": "NONE", "direction": "NONE",
+                    "setup_type": "Skip", "outcome": "policy rejection", "reason": "missing_vix",
+                    "required_input_availability": {**base["required_input_availability"], "vix": False},
+                    "feature_values": {},
+                }),)
             return (LiveDecision("WARMUP", {**base, "reason": "insufficient_history", "feature_values": {}}),)
         prior = tuple(self._futures[:-1])
         location_snapshot = self._location_detector.observe(futures)
         if location_snapshot is None:
+            if vix_bar is None:
+                decision_id = sha256(f"{bundle.bundle_id}:missing_vix".encode()).hexdigest()[:24]
+                return (LiveDecision("REJECTEDDECISION", {
+                    **base, "decision_id": decision_id, "cell": "NONE", "direction": "NONE",
+                    "setup_type": "Skip", "outcome": "policy rejection", "reason": "missing_vix",
+                    "required_input_availability": {**base["required_input_availability"], "vix": False},
+                    "feature_values": {},
+                }),)
             return (LiveDecision("WARMUP", {**base, "reason": "insufficient_history", "feature_values": {}}),)
         features = location_snapshot.features
         vwap = features.vwap
@@ -320,7 +336,7 @@ class IndependentLiveDecisionEngine:
         or_high, or_low = features.opening_range_high, features.opening_range_low
         current = futures.close
         stop_basis = adaptive_stop_bp(
-            prior, float(vix_bar.close),
+            prior, vix_at_event or 0.0,
             is_expiry_day=bundle.trading_date in self.expiry_dates,
             current_close=current,
         )
@@ -328,7 +344,7 @@ class IndependentLiveDecisionEngine:
                           "opening_range_high": or_high, "opening_range_low": or_low,
                           "atr": features.atr, "prior_day_high": features.prior_day_high,
                           "prior_day_low": features.prior_day_low,
-                          "vix": vix_bar.close, "vix_open": self._vix_open,
+                          "vix": vix_at_event, "vix_open": vix_open,
                           "pcr": pcr}
         cell = location_snapshot.cell
         if cell is None and any(
@@ -348,16 +364,16 @@ class IndependentLiveDecisionEngine:
             self._cell_policies, decision_session, cell,
         )
         score_factors = build_admission_features(
-            prior, futures, pcr=pcr, vix_open=float(self._vix_open),
-            vix_at_event=float(vix_bar.close),
+            prior, futures, pcr=pcr, vix_open=vix_open or 0.0,
+            vix_at_event=vix_at_event or 0.0,
         )
         score = sum(value is True for value in score_factors.values())
         score_setup_type, score_multiplier = "Accepted", 1.0
         sequence = len(self._futures)
         events = []
-        # Prepared canonical inputs are policy-filtered; unsupported detected
-        # cells never reach the decision boundary.
-        policies = configured
+        # Preserve unsupported detected cells as candidates so policy rejection
+        # remains observable at the decision boundary.
+        policies = configured or [(cell, None)]
         session_selected = self._session_selected(decision_session)
         for cell, cell_policy in policies:
             direction = cell_policy.direction.value.lower() if cell_policy is not None else "NONE"
@@ -372,7 +388,7 @@ class IndependentLiveDecisionEngine:
                          "research_candidate_id": profile_id,
                          "capital_policy_version": self.capital_context.profile.schema_version if self.capital_context is not None else 1}
             candidate.update(_synthetic_settlement_metadata(bundle))
-            candidate.update(vix_at_event=vix_bar.close, pcr_at_event=pcr, stop_basis=stop_basis,
+            candidate.update(vix_at_event=vix_at_event, pcr_at_event=pcr, stop_basis=stop_basis,
                              transitions=[{"reference": item.reference.value, "kind": item.kind.value,
                                            "from": item.from_side.value, "to": item.to_side.value}
                                           for item in location_snapshot.transitions])
@@ -380,6 +396,10 @@ class IndependentLiveDecisionEngine:
             reason = None
             if cell_policy is None:
                 reason = "cell_not_configured"
+            elif vix_bar is None:
+                reason = "missing_vix"
+            elif vix_open is None:
+                reason = "missing_vix_open"
             elif decision_session is Session.OUTSIDE:
                 reason = "outside_session_window"
             elif not session_selected:
@@ -394,7 +414,7 @@ class IndependentLiveDecisionEngine:
                 location_snapshot, cell_policy.transition_patterns or self.transition_patterns,
             ):
                 reason = "transition_policy_mismatch"
-            if reason is None and vix_bar.close <= 0:
+            if reason is None and vix_at_event is not None and vix_at_event <= 0:
                 reason = "vix_gate"
             if reason:
                 events.append(LiveDecision(
@@ -422,7 +442,7 @@ class IndependentLiveDecisionEngine:
                     capital=self.portfolio.initial_capital, equity=self.portfolio.equity, peak_equity=self.portfolio.peak_equity,
                     # Score qualifies the setup but is not a sizing input in
                     # the current canonical FTX capital path.
-                    entry=current, stop=stop, score=None, vix=float(vix_bar.close),
+                    entry=current, stop=stop, score=None, vix=vix_at_event or 0.0,
                     is_expiry_day=bundle.trading_date in self.expiry_dates,
                     vehicle=vehicle,
                     open_margin_used=self.portfolio.open_margin,

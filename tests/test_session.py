@@ -61,7 +61,7 @@ def test_replay_and_runtime_share_paper_engine_bundle_path(monkeypatch, tmp_path
     RuntimeSession(runtime_store, None, [], engine=PaperEngine())._process_bundle(bundle, source="live")
 
     replay = ReplayWorker(RuntimeStore(tmp_path / "replay"))
-    replay._bars = lambda session_date: (bar,)
+    replay._bars = lambda session_date, **_kwargs: (bar,)
     result = replay._execute({"session_date": "2026-01-01"}, Event())
 
     assert calls == [bundle.bundle_id, bundle.bundle_id]

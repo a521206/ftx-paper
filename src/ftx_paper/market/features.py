@@ -117,7 +117,7 @@ def vix_open_and_event(
     vix_bars = [
         bar for bar in same_day
         if str(bar.instrument.instrument_type).upper() == "VIX"
-        or bar.instrument.symbol.upper().replace(" ", "") == "INDIAVIX"
+        or bar.instrument.symbol.upper() == "INDIA VIX"
     ]
     if not vix_bars:
         return None, None

@@ -107,7 +107,16 @@ class ReplayWorker:
         """Return the deterministic, API-safe inputs used by a replay date."""
         rows = self.store.read_market_bars(session_date)
         futures_source = self._resolve_source(session_date)
-        bars = self._bars(session_date)
+        # Reuse the rows already loaded above.  A manifest is metadata-only,
+        # but _bars still applies the canonical contract and session filters.
+        try:
+            bars = self._bars(session_date, rows=rows, futures_source=futures_source)
+        except TypeError as exc:
+            # Preserve compatibility with lightweight test doubles that still
+            # expose the original one-argument _bars hook.
+            if "unexpected keyword argument 'rows'" not in str(exc):
+                raise
+            bars = self._bars(session_date)
         replay_rows = [
             {
                 "symbol": bar.instrument.symbol,
@@ -131,7 +140,7 @@ class ReplayWorker:
             if str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES", "INDEX"}
             and (
                 str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
-                or str(row.get("symbol", "")).upper() in {"NIFTY", "NIFTY 50", "INDIA VIX", "INDIAVIX"}
+                or str(row.get("symbol", "")).upper() in {"NIFTY", "NIFTY 50", "INDIA VIX"}
             )
         ]
         by_instrument: dict[str, int] = {}
@@ -139,7 +148,7 @@ class ReplayWorker:
             key = ":".join(str(row.get(field) or "").upper() for field in ("exchange", "symbol", "instrument_type"))
             if key:
                 by_instrument[key] = by_instrument.get(key, 0) + 1
-        vix_rows = [row for row in replay_rows if str(row.get("symbol", "")).upper() in {"INDIA VIX", "INDIAVIX"}]
+        vix_rows = [row for row in replay_rows if str(row.get("symbol", "")).upper() == "INDIA VIX"]
         option_rows = [row for row in replay_rows if str(row.get("instrument_type", "")).upper() in {"CE", "PE"}]
         option_minutes = {str(row.get("minute")) for row in option_rows}
         futures_minutes = {
@@ -981,12 +990,18 @@ class ReplayWorker:
         source = self._resolve_source(dates[-1])
         return source.provenance() if source is not None else None
 
-    def _bars(self, session_date: str) -> tuple[MarketBar, ...]:
-        rows = self.store.read_market_bars(session_date)
-        futures_source = self._resolve_source(session_date)
-        if any(str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"} for row in rows):
-            rows = [
-                row for row in rows
+    def _bars(
+        self,
+        session_date: str,
+        *,
+        rows: list[dict[str, Any]] | None = None,
+        futures_source: Any | None = None,
+    ) -> tuple[MarketBar, ...]:
+        loaded_rows = rows if rows is not None else self.store.read_market_bars(session_date)
+        futures_source = futures_source if futures_source is not None else self._resolve_source(session_date)
+        if any(str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"} for row in loaded_rows):
+            loaded_rows = [
+                row for row in loaded_rows
                 if str(row.get("instrument_type", "")).upper() not in {"FUT", "FUTURES"}
                 or (
                     futures_source is not None
@@ -995,7 +1010,7 @@ class ReplayWorker:
                 )
             ]
         bars = []
-        for row in rows:
+        for row in loaded_rows:
             instrument_type = str(row.get("instrument_type", "")).upper()
             if instrument_type not in {"FUT", "FUTURES", "INDEX", "EQ", "CE", "PE"}:
                 continue
@@ -1028,7 +1043,7 @@ class ReplayWorker:
         for bar in bars:
             kind = str(bar.instrument.instrument_type).upper()
             role = (MarketRole.FUTURES if kind in {"FUT", "FUTURES"}
-                    else MarketRole.VIX if bar.instrument.symbol.upper() in {"INDIA VIX", "INDIAVIX"}
+                    else MarketRole.VIX if bar.instrument.symbol.upper() == "INDIA VIX"
                     else OptionRole(bar.instrument.symbol) if kind in {"CE", "PE"}
                     else MarketRole.SPOT)
             roles[InstrumentKey(bar.instrument.exchange, bar.instrument.symbol)] = role
