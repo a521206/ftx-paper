@@ -22,8 +22,11 @@ from ftx_paper.runtime.engine import PaperEngine
 from ftx_paper.execution import PaperExecutionCoordinator
 from ftx_paper.market.location import Cell, Location, LocationFeatures, LocationSnapshot
 from ftx_paper.strategy.decision import _configured_policies_for_cell
-from ftx_paper.strategy.admission import admission_result
-from ftx_paper.strategy.scoring import _synthetic_delta_divergence
+from ftx_paper.strategy.admission import admission_result, build_admission_features
+from ftx_paper.strategy.scoring import (
+    _synthetic_delta_divergence,
+    compute_selling_structure,
+)
 from ftx_paper.strategy.config import Session
 from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.domain.capital import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE as CAPITAL_CONFIG
@@ -1123,6 +1126,41 @@ def test_admission_contract_replaces_grinding_score_filter() -> None:
     assert admission_result(features, "trend_continuation") == (True, None)
     rejected, reason = admission_result({**features, "volume_climax_prior": False}, "trend_continuation")
     assert not rejected and reason == "tr_confirmation_count"
+
+
+def test_admission_missing_required_predicate_is_generic_rejection() -> None:
+    features = {
+        "panic_descent": False,
+        "pcr_extreme": None,
+        "climactic_selling": False,
+    }
+
+    assert admission_result(features, "mean_reversion") == (False, "admission_rejected")
+
+
+def test_live_admission_windows_are_shifted_replay_windows() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    bars = tuple(
+        MarketBar(
+            instrument,
+            datetime(2026, 1, 1, 10, index, tzinfo=timezone.utc),
+            100 - index,
+            101 - index,
+            99 - index,
+            100 - index,
+            100 if index < 9 else 300,
+        )
+        for index in range(10)
+    )
+    replay = compute_selling_structure(
+        bars[:-1], bars[-1], vix_open=15.0, vix_at_event=15.0,
+    )
+    live = build_admission_features(
+        bars, bars[-1], pcr=1.0, vix_open=15.0, vix_at_event=15.0,
+    )
+
+    assert live["climactic_selling"] is (replay.consec_down >= 3)
+    assert live["volume_climax_prior"] is (replay.vol_climax >= 2.0)
 
 def test_risk_sizer_never_exceeds_risk_budget_when_budget_is_marginal() -> None:
     sizer = RiskEngine()

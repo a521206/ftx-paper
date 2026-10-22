@@ -18,7 +18,11 @@ def build_admission_features(
     vix_open: float, vix_at_event: float,
 ) -> dict[str, bool | None]:
     """Build the seven causal admission predicates from completed bars."""
-    bars = list(prior_bars)
+    # Admission runs live one bar behind replay: these are the ten completed
+    # bars immediately preceding the event.  Replay uses the same window with
+    # its current bar appended, so the two paths are shift-equivalent.
+    all_bars = list(prior_bars)
+    bars = all_bars[-10:]
     closes = [float(bar.close) for bar in bars]
     volumes = [float(bar.volume or 0.0) for bar in bars]
     recent = bars[-10:]
@@ -36,11 +40,15 @@ def build_admission_features(
     if len(volumes) >= 6:
         volume_drying = sum(volumes[-3:]) < sum(volumes[-6:-3])
     ratios: list[float] = []
-    for index in range(max(1, len(volumes) - 10), len(volumes)):
-        baseline_values = volumes[max(0, index - 5):index]
+    first_index = len(all_bars) - len(bars)
+    for index, volume in enumerate(volumes, start=first_index):
+        baseline_values = [
+            float(item.volume or 0.0)
+            for item in all_bars[max(0, index - 5):index]
+        ]
         baseline = sum(baseline_values) / len(baseline_values) if baseline_values else 0.0
         if baseline > 0:
-            ratios.append(volumes[index] / baseline)
+            ratios.append(volume / baseline)
     prior_midpoint_reclaim = None
     if bars:
         prior = bars[-1]
@@ -69,7 +77,13 @@ def admission_result(features: dict[str, bool | None], hypothesis: str) -> tuple
     else:
         return True, None
     for name, expected in requirements.items():
-        if features.get(name) is not expected:
+        value = features.get(name)
+        if value is None:
+            # Missing inputs are not negative predicates.  Keep admission
+            # fail-closed, but avoid exposing a predicate-specific reason when
+            # canonical evaluation can only report generic rejection.
+            return False, "admission_rejected"
+        if value is not expected:
             return False, f"{hypothesis}_{name}_required_{expected}"
     return True, None
 

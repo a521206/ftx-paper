@@ -105,13 +105,18 @@ def compute_selling_structure(
 ) -> SellingStructure:
     """Build selling diagnostics used by the canonical FTX score."""
     all_prior = list(prior_bars)
-    bars = all_prior[-10:]
+    # Replay evaluates the event bar itself.  Keep the causal window at ten
+    # completed/event bars so the live decision on the next bar, which uses
+    # its ten completed predecessors, sees the identical window shifted one
+    # bar forward.
+    prior_window = all_prior[-9:]
+    bars = [*prior_window, current]
     if len(bars) < 3:
         return SellingStructure(0, 0.0, 0.0, False, 0.0, 0.0, 0.0, 0, "grinding")
 
     consec_down = 0
     previous_close = current.close
-    for bar in reversed(bars):
+    for bar in reversed(bars[:-1]):
         if previous_close < bar.close:
             consec_down += 1
             previous_close = bar.close
@@ -122,8 +127,12 @@ def compute_selling_structure(
     descent_speed_bp = total_drop / current.close * 10000 / len(bars) if current.close > 0 else 0.0
 
     vol_climax = 0.0
-    first_index = len(all_prior) - len(bars)
-    for index, bar in enumerate(bars, start=first_index):
+    prior_start = len(all_prior) - len(prior_window)
+    indexed_bars = [
+        *enumerate(prior_window, start=prior_start),
+        (len(all_prior), current),
+    ]
+    for index, bar in indexed_bars:
         reference = all_prior[max(0, index - 5):index]
         average = sum(float(item.volume or 0.0) for item in reference) / len(reference) if reference else float(bar.volume or 0.0)
         if average > 0:
