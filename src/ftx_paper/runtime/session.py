@@ -6,9 +6,9 @@ import logging
 from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, NotRequired, TypedDict, cast
-from zoneinfo import ZoneInfo
 
 from ftx_paper.broker import Broker, Fill, PaperBroker
+from ftx_paper.config import IST
 from ftx_paper.domain.capital import CapitalRuntimeContext, ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
 from ftx_paper.domain.portfolio import PaperPosition, PortfolioState
 from ftx_paper.contracts import (
@@ -47,7 +47,7 @@ def _bundle_timestamp(session_date: str, minute: str) -> datetime:
     value = minute if "T" in minute else f"{session_date}T{minute}"
     parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+        parsed = parsed.replace(tzinfo=IST)
     return parsed
 
 
@@ -100,7 +100,7 @@ class RuntimeSession:
         self.event_bus = event_bus or EventBus()
         self.feed_factory, self.broker_factory = feed_factory, broker_factory
         self.client_factory, self.normalize_payload = client_factory, normalize_payload
-        self.market_clock = market_clock or (lambda: datetime.now(ZoneInfo("Asia/Kolkata")))
+        self.market_clock = market_clock or (lambda: datetime.now(IST))
         self.feed = None
         self.broker = None
         self._thread = None
@@ -810,7 +810,7 @@ class RuntimeSession:
             for action in self.engine.on_closed_bar(bar):
                 filled = self._execute_paper_order(
                     action.intent,
-                    session_date=bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat(),
+                    session_date=bar.timestamp.astimezone(IST).date().isoformat(),
                     timestamp=bar.timestamp.isoformat(),
                 )
                 self.engine.settle_exit(action.intent.client_order_id, filled=filled)
@@ -820,7 +820,7 @@ class RuntimeSession:
                         reason=action.reason,
                         entry_bar=action.intent.entry_bar or 0,
                         exit_bar=self.engine.bars_seen,
-                        date=bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat(),
+                        date=bar.timestamp.astimezone(IST).date().isoformat(),
                         vehicle=action.intent.vehicle,
                         direction="long" if action.intent.side.value == "SELL" else "short",
                         quantity=action.intent.quantity,
@@ -865,7 +865,7 @@ class RuntimeSession:
             for action in result:
                 filled = self._execute_paper_order(
                     action.intent,
-                    session_date=bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat(),
+                    session_date=bar.timestamp.astimezone(IST).date().isoformat(),
                     timestamp=bar.timestamp.isoformat(),
                 )
                 self.engine.settle_exit(action.intent.client_order_id, filled=filled)
@@ -875,7 +875,7 @@ class RuntimeSession:
                         reason=action.reason,
                         entry_bar=action.intent.entry_bar or 0,
                         exit_bar=self.engine.bars_seen,
-                        date=bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat(),
+                        date=bar.timestamp.astimezone(IST).date().isoformat(),
                         vehicle=action.intent.vehicle,
                         direction="long" if action.intent.side.value == "SELL" else "short",
                         quantity=action.intent.quantity,

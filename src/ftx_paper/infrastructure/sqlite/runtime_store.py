@@ -8,9 +8,9 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, TypedDict
 from uuid import uuid4
-from zoneinfo import ZoneInfo
 from collections.abc import Iterable
 
+from ftx_paper.config import IST
 from ftx_paper.contracts import (
     MarketBar, MarketRole, OptionRole, OrderLifecycle, OrderLifecycleState, is_legal_order_transition,
     role_to_key,
@@ -412,7 +412,7 @@ class SqliteRuntimeStore:
         now = self._now()
         rows = []
         for bar in bars:
-            timestamp = bar.timestamp.astimezone(ZoneInfo("Asia/Kolkata"))
+            timestamp = bar.timestamp.astimezone(IST)
             minute = timestamp.replace(second=0, microsecond=0).isoformat()
             rows.append((
                 bar.instrument.symbol, bar.instrument.exchange, minute,

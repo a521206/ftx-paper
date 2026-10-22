@@ -5,12 +5,9 @@ import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
+from ftx_paper.config import IST
 from ftx_paper.ports.records import AuthToken
-
-
-IST = ZoneInfo("Asia/Kolkata")
 
 
 class ZerodhaAuth:

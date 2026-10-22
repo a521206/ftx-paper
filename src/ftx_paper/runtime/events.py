@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 from datetime import datetime, time
-from zoneinfo import ZoneInfo
 
-
-IST = ZoneInfo("Asia/Kolkata")
+from ftx_paper.config import IST
 
 
 DECISION_EVENT_TYPES = frozenset({

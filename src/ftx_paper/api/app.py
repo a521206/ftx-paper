@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from flask import Flask, jsonify, redirect, request
 from typing import Any
 
+from ftx_paper.config import IST
 from ftx_paper.infrastructure.sqlite.runtime_store import ProcessAlreadyRunningError
 from ftx_paper.runtime.session import RuntimeSession
 from ftx_paper.runtime.store import RuntimeStore
@@ -333,7 +333,7 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
 
     @app.get("/api/v1/decisions")
     def decisions():
-        selected_date = request.args.get("date") or datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
+        selected_date = request.args.get("date") or datetime.now(IST).date().isoformat()
         try:
             parsed_date = datetime.strptime(selected_date, "%Y-%m-%d").date()
         except ValueError:

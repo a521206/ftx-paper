@@ -8,7 +8,6 @@ from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread
 from typing import Any, cast
 from uuid import uuid4
-from zoneinfo import ZoneInfo
 
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderRole, OrderSide, Role, SyntheticFutureQuote, role_to_key, synthetic_future_quote
 from ftx_paper.domain.capital import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE, CapitalRuntimeContext
@@ -28,12 +27,13 @@ from ftx_paper.strategy.config import (
     AFTERNOON_ENTRY_MINUTES,
     MORNING_ENTRY_MINUTES,
 )
-from ftx_paper.config import NIFTY_LOT_SIZE
-
-
-IST = ZoneInfo("Asia/Kolkata")
-SESSION_OPEN_MINUTES = 9 * 60 + 15
-SESSION_CLOSE_MINUTES = 15 * 60 + 10
+from ftx_paper.config import (
+    IST,
+    NIFTY_LOT_SIZE,
+    SESSION_DATA_END,
+    SESSION_DATA_END_MINUTES,
+    SESSION_OPEN_MINUTES,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,7 +184,7 @@ class ReplayWorker:
             "session_configuration": {
                 "timezone": "Asia/Kolkata",
                 "open": "09:15",
-                "close": "15:10",
+                "data_end": SESSION_DATA_END,
                 "morning_entry_minutes": list(MORNING_ENTRY_MINUTES),
                 "afternoon_entry_minutes": list(AFTERNOON_ENTRY_MINUTES),
                 "aggregator": {"required_roles": ["futures"], "deadline_seconds": 0},
@@ -1022,7 +1022,7 @@ class ReplayWorker:
                 continue
             timestamp = datetime.fromisoformat(str(row["minute"]))
             minute_of_day = timestamp.astimezone(IST).hour * 60 + timestamp.astimezone(IST).minute
-            if not SESSION_OPEN_MINUTES <= minute_of_day <= SESSION_CLOSE_MINUTES:
+            if not SESSION_OPEN_MINUTES <= minute_of_day <= SESSION_DATA_END_MINUTES:
                 continue
             bars.append(MarketBar(
                 instrument=Instrument(symbol=str(row["symbol"]), exchange=str(row["exchange"]),

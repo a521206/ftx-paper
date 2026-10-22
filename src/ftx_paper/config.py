@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import time
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 def _path(name: str, default: Path) -> Path:
@@ -11,6 +13,24 @@ def _path(name: str, default: Path) -> Path:
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 NIFTY_LOT_SIZE = 65
+
+IST = ZoneInfo("Asia/Kolkata")
+
+# Two distinct session boundaries (IST).  Do not conflate them: the exit
+# deadline force-closes open positions, while the data end still admits market
+# input used for levels, extrema, and PCR.
+SESSION_OPEN_MINUTES = 9 * 60 + 15
+SESSION_EXIT_DEADLINE = "15:10"
+SESSION_DATA_END = "15:30"
+SESSION_EXIT_DEADLINE_TIME = time.fromisoformat(SESSION_EXIT_DEADLINE)
+
+
+def _minute_of_day(value: str) -> int:
+    parsed = time.fromisoformat(value)
+    return parsed.hour * 60 + parsed.minute
+
+
+SESSION_DATA_END_MINUTES = _minute_of_day(SESSION_DATA_END)
 
 
 @dataclass(frozen=True, slots=True)

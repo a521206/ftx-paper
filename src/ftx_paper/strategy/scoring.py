@@ -9,8 +9,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from math import isfinite
-from zoneinfo import ZoneInfo
 
+from ftx_paper.config import IST
 from ftx_paper.contracts import MarketBar
 
 CONSEC_DOWN_THRESH = 3
@@ -38,9 +38,6 @@ class SellingStructure:
     vix_trend_pct: float
     climax_score: int
     selling_type: str
-
-
-IST = ZoneInfo("Asia/Kolkata")
 
 
 def _synthetic_delta_divergence(

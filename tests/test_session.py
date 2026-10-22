@@ -293,11 +293,11 @@ def test_replay_input_window_matches_canonical_session_close(tmp_path):
             datetime(2026, 9, 29, hour, minute, tzinfo=ZoneInfo("Asia/Kolkata")),
             100, 101, 99, 100,
         )
-        for hour, minute in ((9, 14), (9, 15), (15, 10), (15, 11))
+        for hour, minute in ((9, 14), (9, 15), (15, 30), (15, 31))
     ), source="fixture")
 
     bars = ReplayWorker(store)._bars("2026-09-29")
-    assert [bar.timestamp.strftime("%H:%M") for bar in bars] == ["09:15", "15:10"]
+    assert [bar.timestamp.strftime("%H:%M") for bar in bars] == ["09:15", "15:30"]
 
 
 def test_replay_marks_expired_only_futures_input_unavailable(tmp_path):

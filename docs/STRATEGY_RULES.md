@@ -94,7 +94,18 @@ Admission uses hypothesis-specific price, volume, PCR, and VIX conditions. Trend
 
 ---
 
-## 8. Source File Map
+## 8. Session Boundaries
+
+| Constant | IST | Meaning |
+|---|---|---|
+| `SESSION_EXIT_DEADLINE` | `15:10` | Force-closes open positions only (`eod` exit). |
+| `SESSION_DATA_END` | `15:30` | Market-input window for bars, levels, and extrema. |
+
+Both are defined once in [`src/ftx_paper/config.py`](../src/ftx_paper/config.py); the data window never extends the exit deadline.
+
+---
+
+## 9. Source File Map
 
 - [`src/ftx_paper/strategy/config.py`](../src/ftx_paper/strategy/config.py): Session constants, cell policy declarations, parameters.
 - [`src/ftx_paper/strategy/decision.py`](../src/ftx_paper/strategy/decision.py): Main bar-by-bar decision loop and order intent generator.

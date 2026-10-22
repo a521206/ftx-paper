@@ -4,9 +4,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
-from zoneinfo import ZoneInfo
 from ftx_paper.market.bundles import DecisionBundle
-from ftx_paper.config import NIFTY_LOT_SIZE
+from ftx_paper.config import IST, NIFTY_LOT_SIZE
 from ftx_paper.contracts import MarketBar, MarketRole, OptionRole, OrderIntent, OrderRole, Role, synthetic_future_quote, role_to_key
 from ftx_paper.execution.cost import FUTURES_RTD_COST_PER_LOT
 from ftx_paper.market.features import option_pcr_at_event, vix_open_and_event
@@ -120,7 +119,7 @@ def _decision_datetime(bundle: DecisionBundle) -> datetime:
     else:
         parsed = datetime.fromisoformat(f"{bundle.trading_date}T{bundle.minute}")
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+        parsed = parsed.replace(tzinfo=IST)
     return parsed
 
 
@@ -251,7 +250,7 @@ class IndependentLiveDecisionEngine:
         return self.portfolio.open_margin
 
     def _session_for_time(self, decision_at: datetime) -> Session:
-        ist_time = decision_at.astimezone(ZoneInfo("Asia/Kolkata"))
+        ist_time = decision_at.astimezone(IST)
         minutes_from_open = ist_time.hour * 60 + ist_time.minute - (9 * 60 + 15)
         if self.morning_entry_minutes[0] <= minutes_from_open < self.morning_entry_minutes[1]:
             return Session.MORNING

@@ -612,6 +612,18 @@ def test_exit_state_machine_handles_opening_gaps_at_stop_and_target() -> None:
     assert target is not None and (target.reason, target.price) == ("target", 110)
 
 
+def test_session_boundaries_keep_exit_deadline_before_data_end() -> None:
+    from ftx_paper.config import (
+        SESSION_DATA_END, SESSION_DATA_END_MINUTES, SESSION_EXIT_DEADLINE, SESSION_EXIT_DEADLINE_TIME,
+    )
+
+    assert (SESSION_EXIT_DEADLINE, SESSION_DATA_END) == ("15:10", "15:30")
+    assert SESSION_EXIT_DEADLINE_TIME.strftime("%H:%M") == "15:10"
+    assert SESSION_DATA_END_MINUTES == 15 * 60 + 30
+    assert SESSION_EXIT_DEADLINE_TIME.hour * 60 + SESSION_EXIT_DEADLINE_TIME.minute < SESSION_DATA_END_MINUTES
+    assert ExitStateMachine().close_time == SESSION_EXIT_DEADLINE_TIME
+
+
 def test_exit_state_machine_forces_exit_at_canonical_1510_close() -> None:
     instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
     position = PositionState(instrument, 100, 95, 1, OrderSide.BUY)

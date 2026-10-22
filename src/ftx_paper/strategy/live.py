@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import datetime, time
+from datetime import datetime
 
+from ftx_paper.config import SESSION_EXIT_DEADLINE_TIME
 from ftx_paper.contracts import Instrument, MarketBar, OrderIntent
 from ftx_paper.domain.capital import CapitalRuntimeContext, RESEARCH_CAPITAL_PROFILE, ResearchCapitalProfile
 from ftx_paper.domain.portfolio import PortfolioState
@@ -177,7 +178,7 @@ class ConfiguredLiveStrategy:
                 position,
                 ExitStateMachine(
                     **trail_kwargs,
-                    close_time=time(15, 10),
+                    close_time=SESSION_EXIT_DEADLINE_TIME,
                     initial_close=position.exit_reference_price or position.entry_price,
                     counter_move_bars=1 if position.cell == "new_low" else 2,
                 ),

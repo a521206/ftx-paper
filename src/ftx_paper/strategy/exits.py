@@ -4,8 +4,9 @@ from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, time
-from zoneinfo import ZoneInfo
 import math
+
+from ftx_paper.config import IST, SESSION_EXIT_DEADLINE_TIME
 from ftx_paper.contracts import Instrument, OrderIntent, OrderRole, OrderSide
 
 
@@ -55,7 +56,7 @@ class ExitStateMachine:
     def __init__(self, *, trail_distance: float | None = None,
                  trail_activation_bp: float | None = None,
                  trail_distance_bp: float | None = None,
-                 close_time: time = time(15, 10),
+                 close_time: time = SESSION_EXIT_DEADLINE_TIME,
                  initial_close: float | None = None,
                  counter_move_bars: int = 2) -> None:
         if counter_move_bars < 1:
@@ -254,7 +255,7 @@ class ExitStateMachine:
                     adverse = all(recent[-index] > recent[-index - 1] for index in range(1, self.counter_move_bars + 1))
                 if adverse:
                     return self._action(position, close, "counter_move", client_order_id)
-        local_time = timestamp.astimezone(ZoneInfo("Asia/Kolkata")).time()
+        local_time = timestamp.astimezone(IST).time()
         if local_time >= self.close_time:
             return self._action(position, close, "eod", client_order_id)
         return None

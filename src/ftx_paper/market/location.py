@@ -11,12 +11,9 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
-from zoneinfo import ZoneInfo
 
+from ftx_paper.config import IST
 from ftx_paper.contracts import MarketBar
-
-
-IST = ZoneInfo("Asia/Kolkata")
 
 
 def _ist_minute(bar: MarketBar) -> int:

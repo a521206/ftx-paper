@@ -5,10 +5,8 @@ from datetime import datetime, timezone
 from enum import StrEnum
 import math
 from typing import Mapping
-from zoneinfo import ZoneInfo
 
-
-IST = ZoneInfo("Asia/Kolkata")
+from ftx_paper.config import IST
 
 
 def normalize_exchange_timestamp(value: datetime | int | float | str) -> datetime:

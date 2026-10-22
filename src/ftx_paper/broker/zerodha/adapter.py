@@ -7,18 +7,17 @@ import logging
 import re
 import threading
 import time
-from zoneinfo import ZoneInfo
 
 from requests import exceptions as requests_exceptions
 
 from ftx_paper.broker.protocol import Fill
+from ftx_paper.config import IST
 from ftx_paper.contracts import (
     Instrument, MarketBar, MarketRole, OptionRole, OptionType, OrderAck, OrderIntent, OrderSide, Role,
     normalize_exchange_timestamp, parse_role, role_to_key,
 )
 
 KITE_EXCHANGE_MAP = {"NSE_INDEX": "NSE", "BSE_INDEX": "BSE"}
-IST = ZoneInfo("Asia/Kolkata")
 HISTORICAL_REQUEST_INTERVAL_SECONDS = 0.5
 HISTORICAL_RATE_LIMIT_RETRIES = 3
 HISTORICAL_RATE_LIMIT_BACKOFF_SECONDS = 1.0

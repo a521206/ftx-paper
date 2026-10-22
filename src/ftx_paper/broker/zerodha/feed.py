@@ -7,8 +7,8 @@ from datetime import datetime, time as datetime_time, timedelta, timezone
 from threading import Event, RLock, Thread, current_thread
 from time import monotonic, sleep
 from typing import Any, Protocol
-from zoneinfo import ZoneInfo
 
+from ftx_paper.config import IST
 from ftx_paper.contracts import MarketBar
 from ftx_paper.broker.zerodha.socket import ShutdownResult
 
@@ -19,7 +19,6 @@ class TickerSocket(Protocol):
     def close(self) -> ShutdownResult: ...
 
 
-IST = ZoneInfo("Asia/Kolkata")
 logger = logging.getLogger(__name__)
 
 

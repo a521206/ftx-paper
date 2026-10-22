@@ -7,12 +7,10 @@ from datetime import date as date_type, datetime
 import hashlib
 import json
 from typing import Any
-from zoneinfo import ZoneInfo
+
+from ftx_paper.config import IST, SESSION_DATA_END_MINUTES, SESSION_OPEN_MINUTES
 
 
-IST = ZoneInfo("Asia/Kolkata")
-SESSION_OPEN_MINUTES = 9 * 60 + 15
-SESSION_CLOSE_MINUTES = 15 * 60 + 10
 SELECTION_POLICY_VERSION = "canonical-expiry-session"
 
 
@@ -173,7 +171,7 @@ class FuturesSessionSourceResolver:
             minute = timestamp.hour * 60 + timestamp.minute
         except (KeyError, ValueError):
             return False
-        return SESSION_OPEN_MINUTES <= minute <= SESSION_CLOSE_MINUTES
+        return SESSION_OPEN_MINUTES <= minute <= SESSION_DATA_END_MINUTES
 
 
 __all__ = [
