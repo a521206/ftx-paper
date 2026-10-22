@@ -194,7 +194,7 @@ class SqliteRuntimeStore:
                     instrument_token INTEGER NOT NULL,
                     expiry TEXT NOT NULL,
                     selected_at TEXT NOT NULL,
-                    PRIMARY KEY (exchange, tradingsymbol)
+                    PRIMARY KEY (exchange, underlying, role, tradingsymbol)
                 );
                 CREATE TABLE IF NOT EXISTS runtime_orders (
                     client_order_id TEXT PRIMARY KEY,
@@ -206,30 +206,6 @@ class SqliteRuntimeStore:
                 );
                 """
             )
-            primary_key = [
-                row[1] for row in connection.execute("PRAGMA table_info(runtime_contracts)")
-                if row[5]
-            ]
-            if primary_key == ["exchange", "underlying", "role"]:
-                connection.executescript(
-                    """
-                    CREATE TABLE runtime_contracts_v2 (
-                        exchange TEXT NOT NULL,
-                        underlying TEXT NOT NULL,
-                        role TEXT NOT NULL,
-                        tradingsymbol TEXT NOT NULL,
-                        instrument_token INTEGER NOT NULL,
-                        expiry TEXT NOT NULL,
-                        selected_at TEXT NOT NULL,
-                        PRIMARY KEY (exchange, tradingsymbol)
-                    );
-                    INSERT INTO runtime_contracts_v2
-                    SELECT exchange, underlying, role, tradingsymbol, instrument_token, expiry, selected_at
-                    FROM runtime_contracts;
-                    DROP TABLE runtime_contracts;
-                    ALTER TABLE runtime_contracts_v2 RENAME TO runtime_contracts;
-                    """
-                )
             connection.execute(
                 "UPDATE market_bars SET instrument_type = 'INDEX' "
                 "WHERE upper(symbol) IN ('NIFTY', 'NIFTY 50', 'INDIA VIX')"
@@ -349,8 +325,9 @@ class SqliteRuntimeStore:
         with self._connect() as connection:
             previous = connection.execute(
                 "SELECT tradingsymbol, instrument_token, expiry FROM runtime_contracts "
-                "WHERE exchange = ? AND tradingsymbol = ?",
-                (contract["exchange"], contract["tradingsymbol"]),
+                "WHERE exchange = ? AND underlying = ? AND role = ? AND tradingsymbol = ?",
+                (contract["exchange"], contract["underlying"], contract["role"],
+                 contract["tradingsymbol"]),
             ).fetchone()
             changed = previous is None or tuple(previous) != (
                 contract["tradingsymbol"], int(contract["instrument_token"]), str(contract["expiry"]),
@@ -359,8 +336,8 @@ class SqliteRuntimeStore:
                 "INSERT INTO runtime_contracts "
                 "(exchange, underlying, role, tradingsymbol, instrument_token, expiry, selected_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(exchange, tradingsymbol) DO UPDATE SET "
-                "underlying=excluded.underlying, role=excluded.role, instrument_token=excluded.instrument_token, "
+                "ON CONFLICT(exchange, underlying, role, tradingsymbol) DO UPDATE SET "
+                "instrument_token=excluded.instrument_token, "
                 "expiry=excluded.expiry, selected_at=excluded.selected_at",
                 (contract["exchange"], contract["underlying"], contract["role"],
                  contract["tradingsymbol"], int(contract["instrument_token"]), str(contract["expiry"]), selected_at),

@@ -228,24 +228,31 @@ def test_runtime_store_persists_contract_changes_once(tmp_path):
     assert [event["event_type"] for event in store.read_events()] == ["CONTRACT_CHANGED"]
 
 
-def test_runtime_store_migrates_legacy_contract_key(tmp_path):
-    database = tmp_path / "runtime.sqlite3"
-    with sqlite3.connect(database) as connection:
-        connection.execute(
-            "CREATE TABLE runtime_contracts ("
-            "exchange TEXT NOT NULL, underlying TEXT NOT NULL, role TEXT NOT NULL, "
-            "tradingsymbol TEXT NOT NULL, instrument_token INTEGER NOT NULL, "
-            "expiry TEXT NOT NULL, selected_at TEXT NOT NULL, "
-            "PRIMARY KEY (exchange, underlying, role))",
-        )
-        connection.execute(
-            "INSERT INTO runtime_contracts VALUES (?, ?, ?, ?, ?, ?, ?)",
-            ("NFO", "NIFTY", "futures", "NIFTY26OCTFUT", 2, "2026-10-27", "now"),
-        )
-
+def test_runtime_store_creates_contract_key_with_underlying_and_role(tmp_path):
     store = RuntimeStore(tmp_path)
 
-    contracts = store.read_runtime_contracts(exchange="NFO", underlying="NIFTY", role="futures")
-    assert [(item["tradingsymbol"], item["instrument_token"]) for item in contracts] == [
-        ("NIFTY26OCTFUT", 2),
-    ]
+    with sqlite3.connect(store.database) as connection:
+        primary_key = [
+            row[1] for row in connection.execute("PRAGMA table_info(runtime_contracts)")
+            if row[5]
+        ]
+
+    assert primary_key == ["exchange", "underlying", "role", "tradingsymbol"]
+
+
+def test_runtime_store_keeps_same_symbol_for_distinct_roles(tmp_path):
+    store = RuntimeStore(tmp_path)
+    base = {
+        "exchange": "NFO", "underlying": "NIFTY", "tradingsymbol": "NIFTY26OCTFUT",
+        "instrument_token": 7, "expiry": "2026-10-27",
+    }
+
+    assert store.record_runtime_contract({**base, "role": "futures"}) is True
+    assert store.record_runtime_contract({**base, "role": "spot"}) is True
+
+    futures = store.read_runtime_contracts(exchange="NFO", underlying="NIFTY", role="futures")
+    spot = store.read_runtime_contracts(exchange="NFO", underlying="NIFTY", role="spot")
+    assert [item["instrument_token"] for item in futures] == [7]
+    assert [item["instrument_token"] for item in spot] == [7]
+    selected = store.read_runtime_contract(exchange="NFO", underlying="NIFTY", role="futures")
+    assert selected is not None and selected["tradingsymbol"] == "NIFTY26OCTFUT"

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, NotRequired, TypedDict
+from typing import Any, NotRequired, TypedDict, cast
 from datetime import date, datetime, timedelta
 import logging
 import re
@@ -14,7 +15,8 @@ from ftx_paper.broker.protocol import Fill
 from ftx_paper.config import IST
 from ftx_paper.contracts import (
     Instrument, MarketBar, MarketRole, OptionRole, OptionType, OrderAck, OrderIntent, OrderSide, Role,
-    normalize_exchange_timestamp, parse_role, role_to_key,
+    futures_contract_from_row, normalize_exchange_timestamp, parse_role, role_to_key,
+    select_front_futures_contract,
 )
 
 KITE_EXCHANGE_MAP = {"NSE_INDEX": "NSE", "BSE_INDEX": "BSE"}
@@ -78,18 +80,14 @@ def _futures_underlying(symbol: str, row: dict[str, Any] | None) -> str | None:
 def _nearest_live_futures(
     rows: list[dict[str, Any]], *, underlying: str, as_of: date,
 ) -> dict[str, Any] | None:
-    candidates = []
-    for row in rows:
-        if (_normalized_instrument_name(row.get("name")) != underlying
-                or str(row.get("instrument_type", "")).upper() != "FUT"):
-            continue
-        expiry = row.get("expiry")
-        if expiry is None:
-            continue
-        parsed_expiry = _instrument_expiry(expiry)
-        if parsed_expiry >= as_of:
-            candidates.append((parsed_expiry, row))
-    return min(candidates, key=lambda item: item[0])[1] if candidates else None
+    contracts = (
+        contract for row in rows
+        if (_normalized_instrument_name(row.get("name")) == underlying
+            and str(row.get("instrument_type", "")).upper() == "FUT")
+        if (contract := futures_contract_from_row(row)) is not None
+    )
+    selection = select_front_futures_contract(contracts, session_date=as_of)
+    return selection.payload if selection is not None else None
 
 
 def _is_live_futures_row(row: dict[str, Any], *, underlying: str, as_of: date) -> bool:
@@ -296,29 +294,36 @@ def load_startup_backfill(
         if callable(instrument_loader):
             known_tokens = {int(item["instrument_token"]) for item in backfill_instruments}
             underlyings = {
-                _normalized_instrument_name(item.get("name"))
-                or (_futures_underlying(str(item["symbol"]), dict(item)) or "")
+                underlying
                 for item in instruments
                 if str(item.get("instrument_type", "")).upper() == "FUT"
-            }
-            underlying = next(iter(underlyings), "NIFTY")
-            candidates: list[tuple[date, dict[str, Any]]] = []
-            for row in instrument_loader("NFO") or ():
-                if (_normalized_instrument_name(row.get("name")) not in underlyings
+                if (underlying := (
+                    _normalized_instrument_name(item.get("name"))
+                    or _futures_underlying(str(item["symbol"]), dict(item))
+                ))
+            } or {"NIFTY"}
+            candidates: dict[str, tuple[date, dict[str, Any]]] = {}
+            nfo_rows = cast(Iterable[dict[str, Any]], instrument_loader("NFO") or ())
+            for row in nfo_rows:
+                name = _normalized_instrument_name(row.get("name"))
+                if (name not in underlyings
                         or str(row.get("instrument_type", "")).upper() != "FUT"
                         or row.get("expiry") is None):
                     continue
                 expiry = _instrument_expiry(row["expiry"])
                 if expiry < end or int(row["instrument_token"]) in known_tokens:
                     continue
-                candidates.append((expiry, row))
-            for _, row in sorted(candidates, key=lambda item: item[0])[:1]:
-                backfill_instruments.append({
+                current = candidates.get(name)
+                if current is None or expiry < current[0]:
+                    candidates[name] = (expiry, row)
+            for underlying in sorted(candidates):
+                expiry, row = candidates[underlying]
+                backfill_instruments.append(cast(ZerodhaInstrument, {
                     **row,
                     "exchange": "NFO",
                     "symbol": str(row["tradingsymbol"]),
                     "role": MarketRole.FUTURES,
-                })
+                }))
                 if contract_store is not None:
                     contract_store.record_runtime_contract({
                         "exchange": "NFO", "underlying": underlying,
@@ -328,27 +333,28 @@ def load_startup_backfill(
                     })
                 known_tokens.add(int(row["instrument_token"]))
             if contract_store is not None:
-                for contract in contract_store.read_runtime_contracts(
-                    exchange="NFO", underlying=underlying, role="futures",
-                ):
-                    try:
-                        expiry = date.fromisoformat(str(contract["expiry"])[:10])
-                    except (TypeError, ValueError):
-                        logger.warning("Skipping cached futures contract with invalid expiry: %s", contract)
-                        continue
-                    if expiry < start or int(contract["instrument_token"]) in known_tokens:
-                        continue
-                    backfill_instruments.append({
-                        "instrument_token": int(contract["instrument_token"]),
-                        "exchange": "NFO",
-                        "symbol": str(contract["tradingsymbol"]),
-                        "tradingsymbol": str(contract["tradingsymbol"]),
-                        "instrument_type": "FUT",
-                        "role": MarketRole.FUTURES,
-                        "expiry": expiry,
-                        "name": underlying,
-                    })
-                    known_tokens.add(int(contract["instrument_token"]))
+                for underlying in sorted(underlyings):
+                    for contract in contract_store.read_runtime_contracts(
+                        exchange="NFO", underlying=underlying, role="futures",
+                    ):
+                        try:
+                            expiry = date.fromisoformat(str(contract["expiry"])[:10])
+                        except (TypeError, ValueError):
+                            logger.warning("Skipping cached futures contract with invalid expiry: %s", contract)
+                            continue
+                        if expiry < start or int(contract["instrument_token"]) in known_tokens:
+                            continue
+                        backfill_instruments.append({
+                            "instrument_token": int(contract["instrument_token"]),
+                            "exchange": "NFO",
+                            "symbol": str(contract["tradingsymbol"]),
+                            "tradingsymbol": str(contract["tradingsymbol"]),
+                            "instrument_type": "FUT",
+                            "role": MarketRole.FUTURES,
+                            "expiry": expiry,
+                            "name": underlying,
+                        })
+                        known_tokens.add(int(contract["instrument_token"]))
     bars: list[MarketBar] = []
     for item in backfill_instruments:
         instrument_type = str(item.get("instrument_type", "INDEX"))
@@ -481,30 +487,3 @@ class ZerodhaBroker:
                 raise RuntimeError("Zerodha returned an incomplete synthetic leg fill")
             fills.append(Fill(order.client_order_id, leg, quantity, price, timestamp, order.vehicle))
         return tuple(fills)
-
-    def abort_partial(self, order: OrderIntent, broker_order_id: str,
-                      fills: tuple[Fill, ...]) -> bool:
-        """Cancel open legs and verify that every filled leg was flattened."""
-        ids = tuple(broker_order_id.split(","))
-        completed_symbols = {fill.instrument.symbol for fill in fills}
-        legs = order.synthetic_legs or (order.instrument,)
-        sides = (order.side, OrderSide.SELL if order.side is OrderSide.BUY else OrderSide.BUY)
-        for leg, leg_id, side in zip(legs, ids, sides):
-            history = self._client.order_history(order_id=leg_id)
-            complete = next((item for item in reversed(history or ())
-                             if str(item.get("status", "")).upper() == "COMPLETE"), None)
-            if complete is None:
-                cancel = getattr(self._client, "cancel_order", None)
-                if not callable(cancel):
-                    return False
-                cancel(variety="regular", order_id=leg_id)
-                continue
-            if leg.symbol in completed_symbols:
-                quantity = int(complete.get("filled_quantity", 0))
-                reverse = OrderSide.SELL if side is OrderSide.BUY else OrderSide.BUY
-                reverse_id = self._place(leg, reverse, quantity)
-                reverse_history = self._client.order_history(order_id=reverse_id)
-                if not any(str(item.get("status", "")).upper() == "COMPLETE"
-                           for item in (reverse_history or ())):
-                    raise RuntimeError(f"failed to verify flatten order for {leg.symbol}")
-        return True

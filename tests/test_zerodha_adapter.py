@@ -5,6 +5,7 @@ import pytest
 from requests import exceptions as requests_exceptions
 
 from ftx_paper.broker.zerodha.adapter import (
+    ZerodhaInstrument,
     discover_option_surface_contracts,
     load_startup_backfill,
     resolve_instruments,
@@ -145,7 +146,9 @@ def test_load_startup_backfill_includes_current_and_next_futures(monkeypatch):
         {"tradingsymbol": "NIFTY26NOVFUT", "name": "NIFTY", "instrument_type": "FUT",
          "expiry": next_expiry, "instrument_token": 3},
     ])
-    current = {**client.rows[1], "symbol": client.rows[1]["tradingsymbol"]}
+    current = ZerodhaInstrument(
+        **client.rows[1], symbol=client.rows[1]["tradingsymbol"], role=None,
+    )
 
     monkeypatch.setattr(
         "ftx_paper.broker.zerodha.adapter._reserve_historical_request_slot",
@@ -155,3 +158,45 @@ def test_load_startup_backfill_includes_current_and_next_futures(monkeypatch):
     load_startup_backfill(client, [current])
 
     assert calls == [2, 3]
+
+
+def test_load_startup_backfill_selects_next_contract_per_underlying(tmp_path, monkeypatch):
+    calls = []
+    store = RuntimeStore(tmp_path)
+    near_expiry = date.today() + timedelta(days=20)
+    later_expiry = date.today() + timedelta(days=50)
+
+    class Client(InstrumentMaster):
+        def historical_data(self, token, *_args, **_kwargs):
+            calls.append(token)
+            return []
+
+    client = Client([
+        {"tradingsymbol": "NIFTY26OCTFUT", "name": "NIFTY", "instrument_type": "FUT",
+         "expiry": near_expiry, "instrument_token": 1},
+        {"tradingsymbol": "NIFTY26NOVFUT", "name": "NIFTY", "instrument_type": "FUT",
+         "expiry": later_expiry, "instrument_token": 2},
+        {"tradingsymbol": "BANKNIFTY26OCTFUT", "name": "BANKNIFTY", "instrument_type": "FUT",
+         "expiry": near_expiry, "instrument_token": 3},
+        {"tradingsymbol": "BANKNIFTY26NOVFUT", "name": "BANKNIFTY", "instrument_type": "FUT",
+         "expiry": later_expiry, "instrument_token": 4},
+    ])
+    current = [
+        ZerodhaInstrument(**client.rows[0], symbol=client.rows[0]["tradingsymbol"], role=None),
+        ZerodhaInstrument(**client.rows[2], symbol=client.rows[2]["tradingsymbol"], role=None),
+    ]
+
+    monkeypatch.setattr(
+        "ftx_paper.broker.zerodha.adapter._reserve_historical_request_slot",
+        lambda: None,
+    )
+
+    load_startup_backfill(client, current, contract_store=store)
+
+    assert sorted(calls) == [1, 2, 3, 4]
+    nifty = store.read_runtime_contracts(exchange="NFO", underlying="NIFTY", role="futures")
+    banknifty = store.read_runtime_contracts(exchange="NFO", underlying="BANKNIFTY", role="futures")
+    assert {item["tradingsymbol"] for item in nifty} == {"NIFTY26NOVFUT"}
+    assert {item["tradingsymbol"] for item in banknifty} == {"BANKNIFTY26NOVFUT"}
+
+
