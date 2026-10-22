@@ -18,6 +18,7 @@ def test_parity_artifact_is_deterministic_and_separates_p9_p10():
         "events": [
             {"event_type": "ACCEPTEDDECISION", "decision_id": "d1", "session_date": "2026-01-05", "decision_at": "2026-01-05T04:30:00+00:00", "sequence": 0, "outcome": "accepted"},
             {"event_type": "FILL", "decision_id": "d1", "fill_timestamp": "2026-01-05T04:30:00+00:00", "price": 100.0},
+            {"event_type": "EXECUTEDDECISION", "decision_id": "d1", "fill_timestamp": "2026-01-05T04:30:00+00:00", "price": 100.0},
             {"event_type": "EXITDECISION", "decision_id": "x1", "decision_at": "2026-01-05T05:00:00+00:00", "outcome": "closed"},
         ],
         "ledger": {"2026-01-05": {"net_pnl_rs": 1.0}},
@@ -29,6 +30,8 @@ def test_parity_artifact_is_deterministic_and_separates_p9_p10():
     assert artifact["p10"]["execution"][0]["ordinal"] == 0
     assert artifact["p10"]["exits"][0]["ordinal"] == 0
     assert len(artifact["p9"]["decision_records"]) == 1
+    assert all(record["event_type"] != "EXECUTEDDECISION" for record in artifact["p9"]["decision_records"])
+    assert any(record["event_type"] == "EXECUTEDDECISION" for record in artifact["p10"]["execution"])
     assert artifact["scope"]["generated_at"] == "2026-01-05T06:00:00Z"
     assert artifact["scope"]["replay_input"]["provenance"] == {"source": "fixture"}
     assert artifact == build_parity_artifact(result, request={"session_date": "2026-01-05"})

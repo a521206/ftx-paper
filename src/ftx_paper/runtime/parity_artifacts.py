@@ -118,10 +118,12 @@ def build_parity_artifact(
     """Build the Paper-owned schema-v1 envelope from a replay result."""
     request = request or {}
     events = list(result.get("events", ()))
+    # P9 is the candidate/acceptance decision stream. Execution lifecycle
+    # events such as EXECUTEDDECISION belong exclusively to P10.
     decisions = [_record(event, ordinal) for ordinal, event in enumerate(
         event for event in events
         if str(event.get("event_type", "")).upper().endswith("DECISION")
-        and str(event.get("event_type", "")).upper() != "EXITDECISION"
+        and str(event.get("event_type", "")).upper() not in {"EXITDECISION", "EXECUTEDDECISION"}
     )]
     execution_types = {"ORDER_INTENT", "ORDER_AUTHORIZED", "ORDER_ACK", "FILL", "EXECUTEDDECISION", "ORDER_UNFILLED", "ORDER_SUPPRESSED", "RISK_REJECTED"}
     execution = [_jsonable({"ordinal": ordinal, **dict(event)}) for ordinal, event in enumerate(
