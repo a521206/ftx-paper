@@ -175,6 +175,33 @@ def test_replay_rollover_selects_september_through_expiry_session(tmp_path):
     assert worker.input_manifest("2026-09-30")["futures_source"]["selected_expiry"] == "2026-10-27"
 
 
+def test_replay_manifest_marks_missing_option_input_unavailable(tmp_path):
+    store = RuntimeStore(tmp_path / "missing-options")
+    store.append_market_bars((MarketBar(
+        Instrument("NIFTY26SEPFUT", "NFO", "FUTURES", "2026-09-29"),
+        datetime(2026, 9, 28, 4, 0, tzinfo=timezone.utc), 100, 101, 99, 100,
+    ),), source="fixture")
+
+    availability = ReplayWorker(store).input_manifest("2026-09-28")["availability"]
+
+    assert availability["pcr"] is None
+
+
+def test_replay_manifest_marks_same_minute_option_input_available(tmp_path):
+    store = RuntimeStore(tmp_path / "present-options")
+    timestamp = datetime(2026, 9, 28, 4, 0, tzinfo=timezone.utc)
+    store.append_market_bars((
+        MarketBar(Instrument("NIFTY26SEPFUT", "NFO", "FUTURES", "2026-09-29"), timestamp, 100, 101, 99, 100),
+        MarketBar(Instrument("NIFTY", "NSE", "INDEX"), timestamp, 100, 101, 99, 100),
+        MarketBar(Instrument("NIFTY26SEP100CE", "NFO", "CE", "2026-09-29", 100), timestamp, 1, 1, 1, 1, volume=10),
+        MarketBar(Instrument("NIFTY26SEP100PE", "NFO", "PE", "2026-09-29", 100), timestamp, 1, 1, 1, 1, volume=20),
+    ), source="fixture")
+
+    availability = ReplayWorker(store).input_manifest("2026-09-28")["availability"]
+
+    assert availability["pcr"] is True
+
+
 def test_replay_prior_day_levels_follow_rollover_source_independently(tmp_path):
     store = RuntimeStore(tmp_path / "rollover-prior-source")
     store.append_market_bars((

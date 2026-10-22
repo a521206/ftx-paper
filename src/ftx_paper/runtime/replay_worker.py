@@ -172,7 +172,7 @@ class ReplayWorker:
             "per_instrument_counts": dict(sorted(by_instrument.items())),
             "availability": {
                 "vix": bool(vix_rows),
-                "pcr": bool(option_rows and option_minutes.intersection(futures_minutes)),
+                "pcr": bool(option_rows and option_minutes.intersection(futures_minutes)) or None,
             },
             "expiry_calendar": sorted({
                 str(item)[:10] for item in self.store.read_expiry_dates()
@@ -732,6 +732,7 @@ class ReplayWorker:
             "configuration_hash": last_strategy_metadata.config_hash,
             "input_fingerprint": input_manifest["input_fingerprint"],
             "input_provenance": input_manifest["provenance"],
+            "input_availability": input_manifest["availability"],
             "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "directional_exposure": directional_exposure,
             "requested_parameters": {

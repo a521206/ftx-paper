@@ -63,13 +63,42 @@ def _record(event: Mapping[str, Any], ordinal: int) -> dict[str, Any]:
     payload = dict(event.get("payload", event))
     event_type = str(event.get("event_type", payload.get("event_type", ""))).upper()
     timestamp = _timestamp(payload)
+    feature_values = dict(payload.get("feature_values") or payload.get("causal_features") or {})
+    score_factors = dict(payload.get("score_factors") or {})
+    pcr = payload.get("pcr")
+    if pcr is None:
+        pcr = payload.get("pcr_at_event", feature_values.get("pcr_at_event", feature_values.get("pcr")))
+    vix = payload.get("vix")
+    if vix is None:
+        vix = payload.get("vix_at_event", feature_values.get("vix_at_event", feature_values.get("vix")))
+    confirmation_count = payload.get("confirmation_count")
+    if confirmation_count is None:
+        confirmation_count = sum(
+            score_factors.get(name) is True
+            for name in ("volume_climax_prior", "prior_midpoint_reclaim", "volume_drying")
+        )
+    missing_inputs = payload.get("missing_inputs")
+    if missing_inputs is None:
+        missing_inputs = [
+            name for name in (*score_factors, "pcr_at_event", "vix_at_event")
+            if (name in score_factors and score_factors[name] is None)
+            or (name in feature_values and feature_values[name] is None)
+        ]
     values = {key: payload.get(key) for key in (
-        "entry_price", "stop", "score", "score_factors", "requested_quantity", "effective_quantity",
+        "entry_price", "stop", "score", "requested_quantity", "effective_quantity",
     )}
+    values.update({
+        "score_factors": score_factors,
+        "feature_values": feature_values,
+        "pcr": pcr,
+        "vix": vix,
+        "confirmation_count": confirmation_count,
+        "missing_inputs": list(missing_inputs),
+    })
     record = {
         "comparison_identity": _identity({
             "event_type": event_type, "date": str(payload.get("session_date") or payload.get("date") or (timestamp or ""))[:10],
-            "timestamp": timestamp, "session": payload.get("session"), "vehicle": payload.get("vehicle"),
+            "timestamp": timestamp, "session": payload.get("session"), "vehicle": payload.get("vehicle", "futures"),
             "cell": payload.get("cell"), "direction": payload.get("direction"),
             "stage": payload.get("decision_stage"), "outcome": payload.get("outcome") or event_type.lower(),
             "reason_code": payload.get("reason") or payload.get("rejection_reason"),
@@ -81,6 +110,7 @@ def _record(event: Mapping[str, Any], ordinal: int) -> dict[str, Any]:
         "event_type": event_type,
         "detector_ordinal": payload.get("detector_emission_ordinal"),
         "session": payload.get("session"),
+        "vehicle": payload.get("vehicle", "futures"),
         "cell": payload.get("cell"),
         "direction": payload.get("direction"),
         "stage": payload.get("decision_stage"), "outcome": payload.get("outcome") or event_type.lower(),
@@ -145,7 +175,7 @@ def build_parity_artifact(
         "schema_version": PARITY_ARTIFACT_SCHEMA_VERSION,
         "producer": {"identifier": "ftx-paper", "source_version": str(result.get("strategy", {}).get("version", "unknown"))},
         "run_id": run_id,
-        "scope": {"requested_date_from": str(request.get("session_date", ""))[:10], "requested_date_to": str(request.get("session_date", ""))[:10], "effective_date_from": str(request.get("session_date", ""))[:10], "effective_date_to": str(request.get("session_date", ""))[:10], "timezone": "Asia/Kolkata", "sessions": list(request.get("sessions", ())), "vehicles": list(result.get("vehicles", ())), "replay_input": {"identity": result.get("metadata", {}).get("input_fingerprint"), "provenance": result.get("metadata", {}).get("input_provenance", {})}, "processed": {"bar_count": int(result.get("bars_seen", 0)), "session_count": 1}, "generated_at": generated_at},
+        "scope": {"requested_date_from": str(request.get("session_date", ""))[:10], "requested_date_to": str(request.get("session_date", ""))[:10], "effective_date_from": str(request.get("session_date", ""))[:10], "effective_date_to": str(request.get("session_date", ""))[:10], "timezone": "Asia/Kolkata", "sessions": list(request.get("sessions", ())), "vehicles": list(result.get("vehicles", ())), "replay_input": {"identity": result.get("metadata", {}).get("input_fingerprint"), "provenance": result.get("metadata", {}).get("input_provenance", {}), "availability": result.get("metadata", {}).get("input_availability", {})}, "processed": {"bar_count": int(result.get("bars_seen", 0)), "session_count": 1}, "generated_at": generated_at},
         "strategy": {"payload": strategy, "payload_hash": strategy_hash, "hash_recipe": "sha256(canonical-json(sort_keys=true,separators=(',',':'),ensure_ascii=true))"},
         "coverage": coverage,
         "p9": {"decision_records": decisions, "coverage": coverage},

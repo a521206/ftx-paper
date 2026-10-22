@@ -301,6 +301,7 @@ class IndependentLiveDecisionEngine:
         pcr = _option_pcr(bundle, self.expiry_dates)
         base = {"decision_at": decision_at.isoformat(), "bundle_id": bundle.bundle_id,
                 "strategy_version": self.version, "config_hash": self.config_hash,
+                "vehicle": "futures",
                 "required_input_availability": {r: r not in bundle.missing_roles for r in bundle.required_roles}}
         if not bundle.complete:
             decision_id = sha256(f"{bundle.bundle_id}:incomplete_bundle".encode()).hexdigest()[:24]
