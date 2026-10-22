@@ -33,15 +33,17 @@ from .config import (
 
 def _option_pcr(bundle: DecisionBundle, expiry_dates: frozenset[str] = frozenset()) -> float | None:
     """Read exact-minute volume PCR, with the canonical 10:00 cutoff."""
-    supporting = bundle.supporting_inputs or {}
+    supporting = bundle.supporting_inputs
+    if supporting is None:
+        return None
     bars = supporting.get("bars", {})
-    if not isinstance(bars, dict):
+    if not isinstance(bars, Mapping):
         return None
     futures = bundle.bars.get(MarketRole.FUTURES)
     if futures is None:
         return None
     sources = supporting.get("sources", {})
-    if isinstance(sources, dict):
+    if isinstance(sources, Mapping):
         bars = {
             key: bar for key, bar in bars.items()
             if sources.get(
@@ -52,15 +54,19 @@ def _option_pcr(bundle: DecisionBundle, expiry_dates: frozenset[str] = frozenset
     return option_pcr_at_event(bars, futures, expiry_dates=expiry_dates)
 
 
-def _supporting_bar(bundle: DecisionBundle, role: Role):
-    supporting = bundle.supporting_inputs or {}
+def _supporting_bar(bundle: DecisionBundle, role: Role) -> MarketBar | None:
+    supporting = bundle.supporting_inputs
+    if supporting is None:
+        return None
     bars = supporting.get("bars", {})
-    return bars.get(role) if isinstance(bars, dict) else None
+    return bars.get(role) if isinstance(bars, Mapping) else None
 
 
 def _same_minute_option_bars(bundle: DecisionBundle) -> dict[Role, MarketBar]:
     """Return typed, same-minute supporting option bars only."""
-    supporting = bundle.supporting_inputs or {}
+    supporting = bundle.supporting_inputs
+    if supporting is None:
+        return {}
     bars = supporting.get("bars", {})
     if not isinstance(bars, Mapping):
         return {}
@@ -81,7 +87,9 @@ def _synthetic_settlement_metadata(bundle: DecisionBundle) -> dict[str, object]:
     futures = bundle.bars.get(MarketRole.FUTURES)
     if futures is None:
         return {"synthetic_premium_status": "unavailable", "synthetic_contract": None}
-    supporting = bundle.supporting_inputs or {}
+    supporting = bundle.supporting_inputs
+    if supporting is None:
+        return {"synthetic_premium_status": "unavailable", "synthetic_contract": None}
     bars = supporting.get("bars", {})
     selection_bar = bars.get(MarketRole.SPOT, futures) if isinstance(bars, Mapping) else futures
     quote = synthetic_future_quote(

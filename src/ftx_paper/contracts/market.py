@@ -147,7 +147,7 @@ class SyntheticQuoteSelection:
 
 def synthetic_future_quote(
     futures: MarketBar,
-    option_bars: Mapping[Role, MarketBar],
+    option_bars: Mapping[Role, MarketBar] | Mapping[str, MarketBar],
     *,
     symbols: tuple[str, str] | None = None,
     same_minute: bool = False,
@@ -178,7 +178,9 @@ def synthetic_future_quote(
 
 
 def select_synthetic_quote(
-    anchor: MarketBar, option_bars: Mapping[Role, MarketBar], *,
+    anchor: MarketBar,
+    option_bars: Mapping[Role, MarketBar] | Mapping[str, MarketBar],
+    *,
     symbols: tuple[str, str] | None = None, same_minute: bool = True,
     allow_fallback: bool = False,
 ) -> tuple[SyntheticFutureQuote, SyntheticQuoteSelection] | None:
