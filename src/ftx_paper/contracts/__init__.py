@@ -10,6 +10,10 @@ from .orders import (
 )
 from .decision_artifacts import DecisionTrace, FuturesExecutionPlan, SyntheticSettlement, TradePlan
 from .events import RuntimeEvent
+from .futures_rollover import (
+    FuturesContract, ROLLOVER_RULE, RolloverSelection, SELECTION_POLICY_VERSION,
+    futures_contract_from_row, parse_expiry, select_front_futures_contract,
+)
 
 __all__ = [
     "Instrument", "MarketBar", "MarketRole", "OptionRole", "OptionType", "Role", "SyntheticFutureQuote", "SyntheticPremiumPair", "SyntheticQuoteSelection", "select_synthetic_quote", "synthetic_future_quote",
@@ -18,4 +22,6 @@ __all__ = [
     "is_legal_order_transition",
     "TradePlan", "FuturesExecutionPlan", "SyntheticSettlement", "DecisionTrace",
     "RuntimeEvent",
+    "FuturesContract", "ROLLOVER_RULE", "RolloverSelection", "SELECTION_POLICY_VERSION",
+    "futures_contract_from_row", "parse_expiry", "select_front_futures_contract",
 ]

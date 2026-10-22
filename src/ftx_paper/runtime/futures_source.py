@@ -9,9 +9,9 @@ import json
 from typing import Any
 
 from ftx_paper.config import IST, SESSION_DATA_END_MINUTES, SESSION_OPEN_MINUTES
-
-
-SELECTION_POLICY_VERSION = "canonical-expiry-session"
+from ftx_paper.contracts import (
+    FuturesContract, SELECTION_POLICY_VERSION, parse_expiry, select_front_futures_contract,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,10 +81,9 @@ class FuturesSessionSourceResolver:
             if not raw_expiry:
                 rejected.append({"symbol": str(row.get("symbol", "")), "reason": "missing_expiry"})
                 continue
-            expiry = raw_expiry.date().isoformat() if isinstance(raw_expiry, datetime) else str(raw_expiry)[:10]
-            try:
-                expiry_day = date_type.fromisoformat(expiry)
-            except ValueError:
+            expiry_day = parse_expiry(raw_expiry)
+            expiry = expiry_day.isoformat() if expiry_day is not None else str(raw_expiry)[:10]
+            if expiry_day is None:
                 rejected.append({"symbol": str(row.get("symbol", "")), "expiry": expiry, "reason": "invalid_expiry"})
                 continue
             symbol = str(row.get("symbol", ""))
@@ -95,18 +94,16 @@ class FuturesSessionSourceResolver:
         if not contracts:
             return None
 
-        expiry_days = sorted({date_type.fromisoformat(expiry) for expiry, _ in contracts})
-        selected_expiry = expiry_days[0]
-        decision = {
-            "rule": "keep the nearest contract through its expiry session",
-            "front_expiry": selected_expiry.isoformat(),
-            "days_to_front_expiry": (selected_expiry - session_day).days,
-            "selected_expiry": selected_expiry.isoformat(),
-        }
-        selected_symbol = min(
-            symbol for expiry, symbol in contracts
-            if date_type.fromisoformat(expiry) == selected_expiry
+        selection = select_front_futures_contract(
+            (FuturesContract(symbol=symbol, expiry=date_type.fromisoformat(expiry))
+             for expiry, symbol in contracts),
+            session_date=session_day,
         )
+        if selection is None:
+            return None
+        selected_expiry = selection.expiry
+        decision = selection.decision()
+        selected_symbol = selection.symbol
         selected_rows = tuple(
             row for row in contracts[(selected_expiry.isoformat(), selected_symbol)]
             if self._in_session(row)
