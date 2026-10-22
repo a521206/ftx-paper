@@ -12,6 +12,19 @@
 - Install development dependencies with `.venv\Scripts\python.exe -m pip install -e ".[dev]"` when needed.
 - For every task that changes Python files, run `.venv\Scripts\pyright.exe <changed Python files>` from the repository root. Resolve reported errors in changed files and include the command result in the final response.
 
+## Testing
+
+- Add tests for reusable logic, not experiment scripts.
+- Extend the established test file for the source module; avoid duplicate test names.
+- Test project behavior, not Python language semantics.
+- Prefer high-value tests for end-to-end workflows, public contracts, causal/replay rules, and critical regressions.
+- Avoid duplicate implementation-detail tests; keep lower-level tests only when integration tests do not provide equivalent coverage.
+- Keep tests focused, deterministic, and maintainable.
+- By default, run only tests relevant to changed code; do not run the entire suite unless explicitly requested.
+- Use the repository-configured test runner: `.venv\Scripts\python.exe -m pytest`.
+- For Python changes, also run `.venv\Scripts\pyright.exe <changed Python files>` and report the exact command and pass/fail result.
+- Run lint with `.venv\Scripts\ruff.exe check .`.
+
 ## Critical Boundaries
 
 - **Paper trading only.** Do not describe simulated execution as live trading or add behavior that assumes external positions can be reconciled. Preserve explicit runtime, recovery, and audit semantics.
@@ -27,7 +40,7 @@
 - Keep strategy policy and decision policy in `ftx_paper.strategy`; keep market normalization and decision-clock processing in `ftx_paper.market`.
 - Treat runtime, portfolio, broker, and execution mutations as in-memory operations that are persisted afterward; do not imply that SQLite writes roll back those mutations.
 - Preserve startup recovery behavior: interrupted runtime sessions become `STOPPED` and retain an audit event without reconstructing the in-memory engine.
-- Add tests for reusable behavior and architecture boundaries. Extend the established test file for the source module and test project behavior rather than Python language semantics.
+- Add tests for reusable behavior and architecture boundaries according to the testing guidance above.
 - Do not commit files under `data/runtime/`, SQLite databases, broker configuration, `.env` files, or other generated/runtime artifacts.
 - For `apply_patch` edits, read the current symbol and patch the smallest stable hunk. After changing a function signature, search all call sites before applying follow-up patches.
 

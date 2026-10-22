@@ -24,9 +24,9 @@ class DecisionBundle:
     bundle_id: str
     trading_date: str
     minute: str
-    bars: Mapping[Role, MarketBar]
-    required_roles: tuple[Role, ...]
-    missing_roles: tuple[Role, ...] = ()
+    bars: Mapping[Role | str, MarketBar]
+    required_roles: tuple[Role | str, ...]
+    missing_roles: tuple[Role | str, ...] = ()
     supporting_inputs: SupportingInputs | None = None
 
     @property
@@ -68,10 +68,10 @@ class CompletedBarAggregator:
 
     def __init__(
         self,
-        role_by_instrument: Mapping[InstrumentKey | tuple[str, str], Role],
+        role_by_instrument: Mapping[InstrumentKey | tuple[str, str], Role | str],
         config: AggregatorConfig | None = None,
         *,
-        required_roles: Iterable[Role] | None = None,
+        required_roles: Iterable[Role | str] | None = None,
         deadline_seconds: float | None = None,
     ) -> None:
         # Accept tuple keys temporarily at this boundary for old callers;
