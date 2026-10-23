@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import sys
 import threading
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -66,6 +67,46 @@ def _json_safe(value: Any, *, path: str) -> Any:
 def _pid_is_alive(pid: int) -> bool:
     if pid <= 0:
         return False
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            import ctypes.wintypes
+
+            th32cs_snapprocess = 0x00000002
+
+            class PROCESSENTRY32(ctypes.Structure):
+                _fields_ = [
+                    ("dwSize", ctypes.wintypes.DWORD),
+                    ("cntUsage", ctypes.wintypes.DWORD),
+                    ("th32ProcessID", ctypes.wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_void_p),
+                    ("th32ModuleID", ctypes.wintypes.DWORD),
+                    ("cntThreads", ctypes.wintypes.DWORD),
+                    ("th32ParentProcessID", ctypes.wintypes.DWORD),
+                    ("pcPriClassBase", ctypes.c_long),
+                    ("dwFlags", ctypes.wintypes.DWORD),
+                    ("szExeFile", ctypes.c_char * 260),
+                ]
+
+            h_snap = ctypes.windll.kernel32.CreateToolhelp32Snapshot(th32cs_snapprocess, 0)
+            if h_snap == -1 or h_snap == 0xFFFFFFFF:
+                return False
+            try:
+                pe = PROCESSENTRY32()
+                pe.dwSize = ctypes.sizeof(PROCESSENTRY32)
+                if not ctypes.windll.kernel32.Process32First(h_snap, ctypes.byref(pe)):
+                    return False
+                while True:
+                    if pe.th32ProcessID == pid:
+                        return True
+                    if not ctypes.windll.kernel32.Process32Next(h_snap, ctypes.byref(pe)):
+                        break
+                return False
+            finally:
+                ctypes.windll.kernel32.CloseHandle(h_snap)
+        except Exception:
+            pass
+
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

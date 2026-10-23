@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 import time
 import logging
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, NotRequired, TypedDict, cast
 from zoneinfo import ZoneInfo
@@ -159,21 +159,56 @@ class RuntimeSession:
 
     def _start_impl(self) -> None:
         try:
+            provider = getattr(self.auth, "provider", "zerodha")
             if self.auth is None or self.auth.access_token() is None:
-                raise ValueError("Zerodha authentication required")
-            from ftx_paper.broker.zerodha import ZerodhaFeed, classify_runtime_roles, create_kite_socket, discover_option_surface_contracts, is_nse_market_open, load_startup_backfill, resolve_instruments
+                raise ValueError(f"{provider.capitalize()} authentication required")
+
+            if provider == "xts":
+                from ftx_paper.broker.xts import (
+                    XTSFeed,
+                    classify_runtime_roles,
+                    create_xts_socket,
+                    discover_option_surface_contracts,
+                    instrument_expiry_iso,
+                    is_nse_market_open,
+                    load_startup_backfill,
+                    resolve_instruments,
+                )
+            elif provider == "shoonya":
+                from ftx_paper.broker.shoonya import (
+                    ShoonyaFeed,
+                    classify_runtime_roles,
+                    create_shoonya_socket,
+                    discover_option_surface_contracts,
+                    instrument_expiry_iso,
+                    is_nse_market_open,
+                    load_startup_backfill,
+                    resolve_instruments,
+                )
+            else:
+                from ftx_paper.broker.zerodha import (
+                    ZerodhaFeed,
+                    classify_runtime_roles,
+                    create_kite_socket,
+                    discover_option_surface_contracts,
+                    instrument_expiry_iso,
+                    is_nse_market_open,
+                    load_startup_backfill,
+                    resolve_instruments,
+                )
+
             client = self.client_factory() if self.client_factory else self.auth.authenticated_client()
-            resolved: list[ZerodhaInstrument] = resolve_instruments(
+            resolved: list[Any] = list(cast(Sequence[Any], resolve_instruments(
                 client, self.specifications, contract_store=self.store,
-            )
-            discovered_options = discover_option_surface_contracts(client, underlying="NIFTY")
+            )))
+            discovered_options = cast(Sequence[Any], discover_option_surface_contracts(client, underlying="NIFTY"))
             resolved_keys = {(str(item["exchange"]), str(item["symbol"])) for item in resolved}
             resolved.extend(
                 item for item in discovered_options
                 if (str(item["exchange"]), str(item["symbol"])) not in resolved_keys
             )
             logger.info("Discovered %d nearest-expiry option contracts", len(discovered_options))
-            roles = classify_runtime_roles(resolved)
+            roles = classify_runtime_roles(cast(Any, resolved))
             inferred_roles = {
                 InstrumentKey(str(roles.futures["exchange"]), str(roles.futures["symbol"])): MarketRole.FUTURES,
                 InstrumentKey(str(roles.vix["exchange"]), str(roles.vix["symbol"])): MarketRole.VIX,
@@ -192,29 +227,61 @@ class RuntimeSession:
             if self.broker_factory:
                 self.broker = self.broker_factory(client)
             else:
-                # Zerodha supplies market data only. Orders must remain paper
+                # External brokers supply market data only. Orders must remain paper
                 # executions even when the live feed is broker-backed.
                 self.broker = PaperBroker()
             if not isinstance(self.broker, PaperBroker):
                 raise TypeError("runtime order execution must use PaperBroker")
-            backfill = load_startup_backfill(client, resolved, contract_store=self.store)
+            backfill = load_startup_backfill(client, cast(Any, resolved), contract_store=self.store)
             self.store.append_market_bars(backfill, source="historical_backfill")
             access_token = self._wait_for_session_readiness(is_nse_market_open)
             if access_token is None:
                 return
-            normalize = self.normalize_payload or self._make_normalizer(resolved)
-            socket = create_kite_socket(self.auth.api_key, access_token)
-            feed_type = self.feed_factory or ZerodhaFeed
-            self.feed = feed_type(
-                socket, [int(item["instrument_token"]) for item in resolved], normalize,
-                self.on_closed_bar,
-                on_tick=self.on_tick,
-                on_health=self.on_feed_health,
-                expected_instruments={
-                    f"{item['exchange']}:{item['symbol']}": (str(item["exchange"]), str(item["symbol"]))
-                    for item in resolved
-                },
-            )
+            normalize = self.normalize_payload or LiveMarketNormalizer(resolved, expiry_normalizer=instrument_expiry_iso)
+            if provider == "xts":
+                xts_socket = create_xts_socket(access_token, user_id=getattr(self.auth, "user_id", ""), root_url=getattr(self.auth, "root_url", "https://ttblaze.iifl.com"))
+                xts_feed_type = self.feed_factory or XTSFeed
+                xts_tokens = [(item.get("segment_id", 1), int(item["instrument_token"])) for item in resolved]
+                self.feed = xts_feed_type(
+                    xts_socket, xts_tokens, normalize,
+                    self.on_closed_bar,
+                    on_tick=self.on_tick,
+                    on_health=self.on_feed_health,
+                    expected_instruments={
+                        f"{item['exchange']}:{item['symbol']}": (str(item["exchange"]), str(item["symbol"]))
+                        for item in resolved
+                    },
+                )
+            elif provider == "shoonya":
+                shoonya_socket = create_shoonya_socket(getattr(self.auth, "uid", ""), access_token)
+                shoonya_feed_type = self.feed_factory or ShoonyaFeed
+                shoonya_tokens = [(str(item["exchange"]), int(item["instrument_token"])) for item in resolved]
+                self.feed = shoonya_feed_type(
+                    shoonya_socket, shoonya_tokens, normalize,
+                    self.on_closed_bar,
+                    on_tick=self.on_tick,
+                    on_health=self.on_feed_health,
+                    expected_instruments={
+                        f"{item['exchange']}:{item['symbol']}": (str(item["exchange"]), str(item["symbol"]))
+                        for item in resolved
+                    },
+                )
+            else:
+                kite_socket = create_kite_socket(self.auth.api_key, access_token)
+                kite_feed_type = self.feed_factory or ZerodhaFeed
+                kite_tokens = [int(item["instrument_token"]) for item in resolved]
+                self.feed = kite_feed_type(
+                    kite_socket, kite_tokens, normalize,
+                    self.on_closed_bar,
+                    on_tick=self.on_tick,
+                    on_health=self.on_feed_health,
+                    expected_instruments={
+                        f"{item['exchange']}:{item['symbol']}": (str(item["exchange"]), str(item["symbol"]))
+                        for item in resolved
+                    },
+                )
+
+
             self.feed_manager.attach(cast(FeedController, self.feed))
             with self._lock:
                 if self._stopping:
@@ -262,7 +329,7 @@ class RuntimeSession:
                     "message": (
                         "NSE/NFO market closed; waiting for the next session"
                         if authenticated else
-                        "Zerodha login required for the current trading day"
+                        f"{getattr(self.auth, 'provider', 'broker').capitalize()} login required for the current trading day"
                     ),
                 },
             })

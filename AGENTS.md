@@ -31,7 +31,22 @@
 - Do not commit files under `data/runtime/`, SQLite databases, broker configuration, `.env` files, or other generated/runtime artifacts.
 - For `apply_patch` edits, read the current symbol and patch the smallest stable hunk. After changing a function signature, search all call sites before applying follow-up patches.
 
+## Broker Integrations & Architecture
+
+- **Supported Providers:** `xts` (IIFL Symphony XTS), `shoonya` (Finvasia), and `zerodha` (Kite Connect), structured under `src/ftx_paper/broker/<provider>/`. Broker selection is governed by `FTX_BROKER`, CLI `--broker`, or automatic config detection in `PaperConfig.from_env()`.
+- **Market Data Only:** External brokers supply market data feeds, ticks, historical startup backfill, and option surface discovery. Order execution is strictly in-process simulation via `PaperBroker`.
+- **Standard Broker Module Structure:**
+  - `protocol.py`: Wire protocol formatting, binary packet decoding (`decode_binary_packets` for XTS Engine.IO raw deflate frames), and segment/exchange mapping.
+  - `client.py`: HTTP REST API endpoints (login, search, quotes, OHLC historical backfill). Always respect API limits (e.g., chunk XTS subscription calls into batches of <= 100 instruments).
+  - `auth.py`: Token management and storage in `auth.sqlite3`. Supports automated headless login (XTS, Shoonya) or OAuth redirect flows (Zerodha).
+  - `socket.py`: Single-owner asynchronous WebSocket transport with automated ping/pong keepalive and resubscription on reconnect.
+  - `feed.py`: 1-minute completed bar aggregation delivering normalized `MarketBar` sequences to `RuntimeSession`.
+  - `adapter.py`: Instrument role classification, contract resolution (filter out dual-expiry calendar spreads to isolate monthly futures), and option chain discovery.
+- **Dedicated Broker Test Coverage:** Maintain and extend unit tests under `tests/test_<broker>_{adapter,auth,protocol,socket}.py` whenever broker behavior is modified.
+
 ## Supporting References
 
 - See `docs/ARCHITECTURE.md` for dependency boundaries, persistence behavior, and runtime composition.
 - See `docs/DEPLOYMENT.md` for process ownership, loopback deployment, configuration, and upgrade rules.
+- See `docs/STRATEGY_RULES.md` for live strategy rules, session windows, location cells, exits, and risk parameters.
+

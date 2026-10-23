@@ -1615,11 +1615,16 @@
       const capital = data.capital || {};
       const decisionRows = data.decisions.decisions || [];
 
+      const brokerObj = data.broker || {};
+      const rawBrokerName = brokerObj.provider || 'broker';
+      const brokerLabel = rawBrokerName.charAt(0).toUpperCase() + rawBrokerName.slice(1);
+      const connectText = brokerObj.authenticated ? `${brokerLabel} Connected` : `Connect ${brokerLabel}`;
+
       const top = page === 'replay' ? '' : `<div class="card">
         <div class="toolbar">
           <strong>Runtime controls</strong>
           <div>
-            <button id="connect">Connect Zerodha</button>
+            <button id="connect">${esc(connectText)}</button>
             <button data-cmd="restart" class="secondary">Restart</button>
             <button data-cmd="stop" class="danger">Stop</button>
           </div>
@@ -1653,7 +1658,7 @@
             ? `Stale · ${Math.floor(heartbeatAgeMs / 60000)} min ago`
             : `Updated ${Math.max(0, Math.floor(heartbeatAgeMs / 1000))} sec ago`;
           return [
-            ['Zerodha', data.broker.authenticated ? 'Connected' : 'Not connected', data.broker.authenticated ? 'good' : 'warn', ''],
+            [brokerLabel, data.broker.authenticated ? 'Connected' : 'Not connected', data.broker.authenticated ? 'good' : 'warn', ''],
             ['Runtime session', runtime.state || 'Unknown', runtime.health_state === 'HEALTHY' ? 'good' : runtime.health_state === 'FAILED' ? 'bad' : runtime.state === 'RUNNING' ? 'warn' : '', runtime.health_state && runtime.health_state !== 'HEALTHY' ? runtime.health_state : ''],
             ['Feed', feedValue, feedConnected && !feedHealth.transport_stale ? 'good' : feedState === 'FAILED' ? 'bad' : 'warn', feedDetail],
             ['Last bar', date(runtime.last_bar_at), '', ''],
@@ -1808,8 +1813,35 @@
       });
       document.getElementById('connect')?.addEventListener('click', async () => {
         try {
-          const result = await get('/api/v1/broker/zerodha/login');
-          location.assign(result.login_url);
+          const provider = (latestData?.broker?.provider || 'zerodha').toLowerCase();
+          if (provider === 'xts') {
+            const result = await get('/api/v1/broker/xts/login', { method: 'POST' });
+            flash('IIFL XTS authenticated seamlessly');
+            refresh();
+          } else if (provider === 'shoonya') {
+            const result = await get('/api/v1/broker/shoonya/login');
+            if (result.login_url) {
+              window.open(result.login_url, '_blank');
+              const input = window.prompt(
+                'After logging in, copy the redirected URL or code (from trade.yotek.net?code=...) and paste it here:'
+              );
+              if (input && input.trim()) {
+                await get('/api/v1/broker/shoonya/login', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ auth_code: input.trim() }),
+                });
+                flash('Shoonya authenticated successfully');
+                refresh();
+              }
+            } else {
+              flash('Shoonya authenticated');
+              refresh();
+            }
+          } else {
+            const result = await get('/api/v1/broker/zerodha/login');
+            location.assign(result.login_url);
+          }
         } catch (e) {
           flash(e.message);
         }
@@ -1863,7 +1895,7 @@
       const entries = await Promise.allSettled([
         get('/api/v1/health'),
         get('/api/v1/runtime'),
-        get('/api/v1/broker/zerodha/status'),
+        get('/api/v1/broker/status').catch(() => get('/api/v1/broker/zerodha/status')),
       ]);
       const [health, runtime, broker] = entries;
       document.getElementById('health').innerHTML = health.status === 'fulfilled' && health.value.status === 'pass'

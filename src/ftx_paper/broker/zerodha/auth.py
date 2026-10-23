@@ -16,6 +16,8 @@ IST = ZoneInfo("Asia/Kolkata")
 class ZerodhaAuth:
     """Token persistence and Kite session exchange, isolated from the engine."""
 
+    provider: str = "zerodha"
+
     def __init__(self, token_db: str | Path, api_key: str, api_secret: str, token_repository=None) -> None:
         self.token_db = Path(token_db)
         self.api_key = api_key
@@ -27,7 +29,7 @@ class ZerodhaAuth:
 
     def _client(self) -> Any:
         try:
-            from kiteconnect import KiteConnect
+            from kiteconnect import KiteConnect  # pyright: ignore[reportMissingImports]
         except ImportError as exc:
             raise RuntimeError("Install ftx-paper[zerodha] to use Zerodha") from exc
         return KiteConnect(api_key=self.api_key)
