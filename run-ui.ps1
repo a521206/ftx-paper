@@ -23,8 +23,6 @@ function Stop-ExistingUiProcess {
     $uiProcesses = @(
         Get-CimInstance -ClassName Win32_Process |
             Where-Object {
-                $_.ExecutablePath -and
-                $_.ExecutablePath -ieq $PythonPath -and
                 $_.CommandLine -and
                 (
                     $_.CommandLine -like "*from ftx_paper.cli import ui_main*" -or

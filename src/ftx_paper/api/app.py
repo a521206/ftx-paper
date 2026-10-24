@@ -24,10 +24,12 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
                controller: Any | None = None, session: RuntimeSession | None = None,
                replay_worker: ReplayWorker | None = None,
                capital_profile: ResearchCapitalProfile | None = None,
-               runtime_operations: RuntimeOperations | None = None) -> Flask:
+               runtime_operations: RuntimeOperations | None = None,
+               broker_auth: Any | None = None) -> Flask:
     app = Flask(__name__)
     store.recover_interrupted()
-    session = session or RuntimeSession(store, zerodha_auth, [])
+    effective_auth = broker_auth or zerodha_auth
+    session = session or RuntimeSession(store, effective_auth, [])
     replay_worker = replay_worker or ReplayWorker(
         store, capital_profile=capital_profile or RESEARCH_CAPITAL_PROFILE,
     )
@@ -252,6 +254,10 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
     def openapi():
         return jsonify(openapi_document())
 
+    shoonya_auth = broker_auth if getattr(broker_auth, "provider", "") == "shoonya" else None
+    xts_auth = broker_auth if getattr(broker_auth, "provider", "") == "xts" else None
+    active_auth = broker_auth or zerodha_auth
+
     @app.get("/api/v1/broker/zerodha/login")
     def zerodha_login():
         if zerodha_auth is None:
@@ -294,6 +300,102 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
         authenticated = zerodha_auth is not None and zerodha_auth.access_token() is not None
         return jsonify({"provider": "zerodha", "configured": zerodha_auth is not None, "authenticated": authenticated})
 
+    @app.route("/api/v1/broker/xts/login", methods=["GET", "POST"])
+    def xts_login():
+        auth = xts_auth or (active_auth if getattr(active_auth, "provider", "") == "xts" else None)
+        if auth is None:
+            return jsonify(error_payload("broker_not_configured", "XTS is not configured")), 503
+
+        try:
+            token = auth.login()
+            operations.request_start()
+            return jsonify({"provider": "xts", "authenticated": True, "token_obtained": bool(token)})
+        except Exception as exc:
+            return jsonify(error_payload("broker_auth_failed", str(exc))), 502
+
+    @app.get("/api/v1/broker/xts/status")
+    def xts_status():
+        auth = xts_auth or (active_auth if getattr(active_auth, "provider", "") == "xts" else None)
+        authenticated = auth is not None and auth.access_token() is not None
+        return jsonify({"provider": "xts", "configured": auth is not None, "authenticated": authenticated})
+
+    @app.route("/api/v1/broker/shoonya/login", methods=["GET", "POST"])
+    def shoonya_login():
+        auth = shoonya_auth or (active_auth if getattr(active_auth, "provider", "") == "shoonya" else None)
+        if auth is None:
+            return jsonify(error_payload("broker_not_configured", "Shoonya is not configured")), 503
+
+        if request.method == "POST":
+            payload = request.get_json(silent=True) or {}
+            token = str(payload.get("token", "")).strip()
+            raw_code = str(payload.get("code") or payload.get("auth_code", "")).strip()
+            if "code=" in raw_code:
+                from urllib.parse import urlparse, parse_qs
+                parsed = urlparse(raw_code)
+                qs = parse_qs(parsed.query or parsed.path)
+                auth_code = qs.get("code", [raw_code])[0]
+            else:
+                auth_code = raw_code
+            try:
+                if token:
+                    auth.save_token(token)
+                elif auth_code:
+                    auth.exchange(auth_code)
+                else:
+                    auth.login()
+                operations.request_start()
+                return jsonify({"provider": "shoonya", "authenticated": True}), 200
+            except Exception as exc:
+                return jsonify(error_payload("broker_auth_failed", str(exc))), 502
+
+        # GET request
+        try:
+            token = auth.login()
+            operations.request_start()
+            return jsonify({"provider": "shoonya", "authenticated": True, "token_obtained": bool(token)})
+        except Exception as exc:
+            login_url = getattr(auth, "login_url", lambda: None)()
+            return (
+                jsonify(
+                    {
+                        "provider": "shoonya",
+                        "authenticated": False,
+                        "login_url": login_url,
+                        "error": str(exc),
+                    }
+                ),
+                200 if login_url else 502,
+            )
+
+    @app.get("/shoonya/callback")
+    def shoonya_browser_callback():
+        auth = shoonya_auth or (active_auth if getattr(active_auth, "provider", "") == "shoonya" else None)
+        if auth is None:
+            return "Shoonya is not configured", 503
+        code = request.args.get("code") or request.args.get("auth_code", "")
+        if not code:
+            return "Shoonya login did not provide an authorization code. You may close this window.", 400
+        try:
+            auth.exchange(code)
+        except Exception as exc:
+            return f"Shoonya token exchange failed: {exc}", 502
+        operations.request_start()
+        dashboard_url = os.getenv("FTX_UI_BASE_URL", "http://127.0.0.1:8502/")
+        return redirect(dashboard_url)
+
+    @app.get("/api/v1/broker/shoonya/status")
+    def shoonya_status():
+        auth = shoonya_auth or (active_auth if getattr(active_auth, "provider", "") == "shoonya" else None)
+        authenticated = auth is not None and auth.access_token() is not None
+        return jsonify({"provider": "shoonya", "configured": auth is not None, "authenticated": authenticated})
+
+    @app.get("/api/v1/broker/status")
+    def active_broker_status():
+        auth = active_auth
+        provider = getattr(auth, "provider", "none") if auth is not None else "none"
+        authenticated = auth is not None and auth.access_token() is not None
+        return jsonify({"provider": provider, "configured": auth is not None, "authenticated": authenticated})
+
     @app.get("/api/v1/runtime")
     def runtime():
         status = store.read_status()
@@ -315,13 +417,16 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
         action = actions.get(command)
         if action is None:
             return jsonify({"error": {"code": "unknown_command", "message": command}}), 404
-        if command in {"start", "restart"} and zerodha_auth is not None and zerodha_auth.access_token() is None:
-            return jsonify({"error": {"code": "auth_required", "message": "Connect Zerodha before starting the runtime session", "login_url": zerodha_auth.login_url()}}), 409
+        if command in {"start", "restart"} and active_auth is not None and active_auth.access_token() is None:
+            login_url = getattr(active_auth, "login_url", lambda: None)()
+            provider = getattr(active_auth, "provider", "broker")
+            return jsonify({"error": {"code": "auth_required", "message": f"Connect {provider.capitalize()} before starting the runtime session", "login_url": login_url}}), 409
         try:
             action()
         except ProcessAlreadyRunningError as exc:
             return jsonify(error_payload("runtime_already_running", str(exc))), 409
         return jsonify(store.read_status()), 202
+
 
     @app.get("/api/v1/events")
     def events():

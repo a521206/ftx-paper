@@ -7,6 +7,9 @@ data/output/
 runtime.sqlite3
 *.sqlite3
 config/zerodha.json
+config/shoonya.json
+config/xts.json
+info.txt
 .env
 .env.*
 !\.env.example

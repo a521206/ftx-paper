@@ -17,6 +17,8 @@ from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.strategy import ConfiguredStrategyFactory
 from ftx_paper.runtime.engine import PaperEngine
 from ftx_paper.ui import create_ui_app
+from ftx_paper.broker.shoonya import ShoonyaAuth
+from ftx_paper.broker.xts import XTSAuth
 from ftx_paper.broker.zerodha import ZerodhaAuth
 
 
@@ -66,18 +68,46 @@ def api_main() -> None:
         raise SystemExit(str(exc)) from exc
     session = None
     try:
-        try:
-            auth = ZerodhaAuth.from_config_path(config.zerodha_config, token_db=config.auth_db)
-        except ValueError:
-            auth = None
-        import json
-        raw_value = json.loads(config.zerodha_config.read_text(encoding="utf-8")) if config.zerodha_config.exists() else {}
-        if not isinstance(raw_value, dict):
-            raise ValueError("Zerodha configuration must be a JSON object")
-        raw = raw_value
-        instruments_value = raw.get("instruments", ())
-        if not isinstance(instruments_value, list) or any(not isinstance(item, dict) for item in instruments_value):
-            raise ValueError("Zerodha instruments must be a list of objects")
+        broker_name = config.broker.lower()
+        if broker_name == "xts":
+            try:
+                auth = XTSAuth.from_config_path(config.xts_config, token_db=config.auth_db)
+            except ValueError:
+                auth = None
+            import json
+            raw_value = json.loads(config.xts_config.read_text(encoding="utf-8")) if config.xts_config.exists() else {}
+            if not isinstance(raw_value, dict):
+                raise ValueError("XTS configuration must be a JSON object")
+            raw = raw_value
+            instruments_value = raw.get("instruments", ())
+            if not isinstance(instruments_value, list) or any(not isinstance(item, dict) for item in instruments_value):
+                raise ValueError("XTS instruments must be a list of objects")
+        elif broker_name == "shoonya":
+            try:
+                auth = ShoonyaAuth.from_config_path(config.shoonya_config, token_db=config.auth_db)
+            except ValueError:
+                auth = None
+            import json
+            raw_value = json.loads(config.shoonya_config.read_text(encoding="utf-8")) if config.shoonya_config.exists() else {}
+            if not isinstance(raw_value, dict):
+                raise ValueError("Shoonya configuration must be a JSON object")
+            raw = raw_value
+            instruments_value = raw.get("instruments", ())
+            if not isinstance(instruments_value, list) or any(not isinstance(item, dict) for item in instruments_value):
+                raise ValueError("Shoonya instruments must be a list of objects")
+        else:
+            try:
+                auth = ZerodhaAuth.from_config_path(config.zerodha_config, token_db=config.auth_db)
+            except ValueError:
+                auth = None
+            import json
+            raw_value = json.loads(config.zerodha_config.read_text(encoding="utf-8")) if config.zerodha_config.exists() else {}
+            if not isinstance(raw_value, dict):
+                raise ValueError("Zerodha configuration must be a JSON object")
+            raw = raw_value
+            instruments_value = raw.get("instruments", ())
+            if not isinstance(instruments_value, list) or any(not isinstance(item, dict) for item in instruments_value):
+                raise ValueError("Zerodha instruments must be a list of objects")
         session = RuntimeSession(
             store,
             auth,
@@ -93,9 +123,19 @@ def api_main() -> None:
         )
         replay_worker = ReplayWorker(store, capital_profile=capital_profile)
         operations = RuntimeOperations(session, replay_worker)
+        if auth is not None and auth.access_token() is not None:
+            try:
+                operations.request_start()
+            except Exception as start_exc:
+                logging.getLogger(__name__).warning("Auto-start runtime failed: %s", start_exc)
         create_app(
-            store, zerodha_auth=auth, session=session, capital_profile=capital_profile,
-            replay_worker=replay_worker, runtime_operations=operations,
+            store,
+            zerodha_auth=auth if broker_name == "zerodha" else None,
+            broker_auth=auth,
+            session=session,
+            capital_profile=capital_profile,
+            replay_worker=replay_worker,
+            runtime_operations=operations,
         ).run(host=config.host, port=config.port, debug=False, use_reloader=False)
     finally:
         try:

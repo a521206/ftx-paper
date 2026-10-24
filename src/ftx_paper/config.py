@@ -39,6 +39,9 @@ class PaperConfig:
     runtime_dir: Path
     auth_db: Path
     zerodha_config: Path
+    shoonya_config: Path
+    xts_config: Path
+    broker: str = "zerodha"
     host: str = "127.0.0.1"
     port: int = 8501
 
@@ -47,16 +50,43 @@ class PaperConfig:
         local_app_data = Path(os.getenv("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
         home = _path("FTX_PAPER_HOME", local_app_data / "ftx-paper")
         runtime_dir = _path("FTX_PAPER_RUNTIME_DIR", home / "runtime")
+        zerodha_cfg = _path(
+            "FTX_PAPER_CONFIG_PATH",
+            PACKAGE_ROOT / "config" / "zerodha.json" if (PACKAGE_ROOT / "config" / "zerodha.json").exists() else home / "config" / "zerodha.json",
+        )
+        shoonya_cfg = _path(
+            "FTX_PAPER_SHOONYA_CONFIG_PATH",
+            PACKAGE_ROOT / "config" / "shoonya.json" if (PACKAGE_ROOT / "config" / "shoonya.json").exists() else home / "config" / "shoonya.json",
+        )
+        xts_cfg = _path(
+            "FTX_PAPER_XTS_CONFIG_PATH",
+            PACKAGE_ROOT / "config" / "xts.json" if (PACKAGE_ROOT / "config" / "xts.json").exists() else home / "config" / "xts.json",
+        )
+        configured_broker = os.getenv("FTX_BROKER")
+        if configured_broker:
+            broker = configured_broker.lower().strip()
+        elif "xts" in str(zerodha_cfg).lower() or "xts" in os.getenv("FTX_PAPER_CONFIG_PATH", "").lower():
+            broker = "xts"
+        elif "shoonya" in str(zerodha_cfg).lower():
+            broker = "shoonya"
+        elif "zerodha" in os.getenv("FTX_PAPER_CONFIG_PATH", "").lower():
+            broker = "zerodha"
+        elif xts_cfg.exists():
+            broker = "xts"
+        elif shoonya_cfg.exists():
+            broker = "shoonya"
+        else:
+            broker = "zerodha"
+
         return cls(
             home=home,
             runtime_dir=runtime_dir,
             auth_db=_path("FTX_PAPER_AUTH_DB", home / "auth" / "auth.sqlite3"),
-            # Keep the standalone config beside the ftx-paper package so local
-            # runs do not depend on the canonical repository layout.
-            zerodha_config=_path(
-                "FTX_PAPER_CONFIG_PATH",
-                PACKAGE_ROOT / "config" / "zerodha.json" if (PACKAGE_ROOT / "config" / "zerodha.json").exists() else home / "config" / "zerodha.json",
-            ),
+            zerodha_config=zerodha_cfg,
+            shoonya_config=shoonya_cfg,
+            xts_config=xts_cfg,
+            broker=broker,
             host=os.getenv("FTX_WEB_HOST", "127.0.0.1"),
             port=int(os.getenv("FTX_WEB_PORT", "8501")),
         )
+

@@ -2,7 +2,8 @@
 param(
     [int]$Port = 8501,
     [string]$HostAddress = "127.0.0.1",
-    [string]$ConfigPath = ""
+    [string]$ConfigPath = "",
+    [string]$Broker = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,8 +22,6 @@ function Stop-ExistingApiProcess {
     $apiProcesses = @(
         Get-CimInstance -ClassName Win32_Process |
             Where-Object {
-                $_.ExecutablePath -and
-                $_.ExecutablePath -ieq $PythonPath -and
                 $_.CommandLine -and
                 (
                     $_.CommandLine -like "*from ftx_paper.cli import api_main*" -or
@@ -51,6 +50,7 @@ $env:FTX_WEB_PORT = [string]$Port
 $env:FTX_PAPER_RUNTIME_DIR = Join-Path $paperHome "runtime"
 $env:FTX_PAPER_AUTH_DB = Join-Path $paperHome "auth\auth.sqlite3"
 if ($ConfigPath) { $env:FTX_PAPER_CONFIG_PATH = $ConfigPath }
+if ($Broker) { $env:FTX_BROKER = $Broker }
 
 & $venvPython -c "from ftx_paper.cli import api_main; api_main()"
 exit $LASTEXITCODE

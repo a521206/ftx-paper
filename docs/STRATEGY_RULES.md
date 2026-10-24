@@ -5,6 +5,7 @@
 - **Strategy Name:** `ftx-paper-research`
 - **Version:** `0.4.0-pipeline-research-aligned`
 - **Target Instrument:** Nifty 50 Index Futures; options provide supporting PCR data.
+- **Primary Code Base:** [`src/ftx_paper/strategy/`](../src/ftx_paper/strategy/) and [`src/ftx_paper/market/location.py`](../src/ftx_paper/market/location.py)
 - **Execution Mode:** Paper trading only (in-memory simulation with SQLite audit trail)
 
 ---
@@ -66,11 +67,13 @@ Entries are only permitted during two intraday regimes (IST), using half-open mi
 
 ## 5. Admission, Momentum & Supporting Filters
 
-Admission uses hypothesis-specific price, volume, PCR, and VIX conditions. Trend-continuation policies additionally require at least two confirmations from volume climax, prior-bar midpoint reclaim, and volume drying. PCR is derived from same-minute option data when eligible inputs are available; VIX is evaluated against its day-open value. A 2-bar per-cell cooldown applies after exit before re-entry.
+Before a signal triggers an order, it must pass checks in [`admission.py`](../src/ftx_paper/strategy/admission.py), including location stability, option-volume PCR, and India VIX conditions. Admission uses hypothesis-specific price and volume conditions. Trend-continuation policies additionally require at least two confirmations from volume climax, prior-bar midpoint reclaim, and volume drying. PCR is derived from same-minute option data when eligible inputs are available; VIX is evaluated against its day-open value. A mandatory 2-bar per-cell cooldown applies after exit before re-entry.
 
 ---
 
 ## 6. Exit Mechanics & Stop Logic
+
+Defined in [`exits.py`](../src/ftx_paper/strategy/exits.py) and [`adaptive_stop.py`](../src/ftx_paper/strategy/adaptive_stop.py):
 
 ### 1. Trailing Stop (`ExitMode.TRAIL`)
 - **Activation Threshold:** Activates when unrealized gain reaches **`+20.0 bps`** (0.20%).
@@ -113,4 +116,5 @@ Both are defined once in [`src/ftx_paper/config.py`](../src/ftx_paper/config.py)
 - [`src/ftx_paper/strategy/exits.py`](../src/ftx_paper/strategy/exits.py): Trailing stop and signal exit evaluations.
 - [`src/ftx_paper/strategy/adaptive_stop.py`](../src/ftx_paper/strategy/adaptive_stop.py): Dynamic stop-loss calculator.
 - [`src/ftx_paper/strategy/risk.py`](../src/ftx_paper/strategy/risk.py): Risk sizing and position boundaries.
+- **Lot Sizing:** Dynamically computed according to risk budget, volatility, and distance to the adaptive stop, subject to margin and position limits.
 - [`src/ftx_paper/market/location.py`](../src/ftx_paper/market/location.py): Price level classification, OR calculation, and cell detection.
