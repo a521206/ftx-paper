@@ -67,7 +67,13 @@ Entries are only permitted during two intraday regimes (IST), using half-open mi
 
 ## 5. Admission, Momentum & Supporting Filters
 
-Before a signal triggers an order, it must pass checks in [`admission.py`](../src/ftx_paper/strategy/admission.py), including location stability, option-volume PCR, and India VIX conditions. Admission uses hypothesis-specific price and volume conditions. Trend-continuation policies additionally require at least two confirmations from volume climax, prior-bar midpoint reclaim, and volume drying. PCR is derived from same-minute option data when eligible inputs are available; VIX is evaluated against its day-open value. A mandatory 2-bar per-cell cooldown applies after exit before re-entry.
+Before a signal triggers an order, it must pass the causal checks in [`admission.py`](../src/ftx_paper/strategy/admission.py):
+
+- **Mean-reversion policies:** Reject panic descent, extreme PCR, or climactic selling.
+- **Trend-continuation policies:** Apply the same rejection gates, reject a VIX spike, and require at least two confirmations from prior volume climax, prior-bar midpoint reclaim, and volume drying.
+- **Missing inputs:** Required admission values fail closed rather than being treated as favorable conditions.
+- **PCR and VIX:** PCR is derived from eligible option data at the event timestamp; VIX is compared with its day-open value.
+- **Post-exit cooldown:** A mandatory 2-bar per-cell cooldown applies before re-entry.
 
 ---
 
@@ -80,7 +86,9 @@ Defined in [`exits.py`](../src/ftx_paper/strategy/exits.py) and [`adaptive_stop.
 - **Trailing Distance:** Uses a **20.0 bps** distance relative to entry and the peak favorable price.
 
 ### 2. Signal Exit (`ExitMode.SIGNAL`)
-- Uses price and volume reversal signals after a favorable move; it is not based on cell dissolution or reaching an opposing structural boundary.
+- Arms only after a favorable excursion greater than **5 bps**.
+- Exits on either a volume climax greater than **2.5x** the prior completed-bar average or a 2-bar adverse close sequence.
+- It is not based on cell dissolution or reaching an opposing structural boundary.
 
 ### 3. Adaptive Stop Loss
 - Sets an initial defensive stop from ATR and VIX, bounded to **15–50 bps** (widened on expiry days).
@@ -89,10 +97,13 @@ Defined in [`exits.py`](../src/ftx_paper/strategy/exits.py) and [`adaptive_stop.
 
 ## 7. Sizing & Risk Management
 
-- **Lot Sizing:** Dynamically computed according to risk budget, volatility, and distance to the adaptive stop, subject to margin and position limits.
+- **Risk Budget:** Default research profile risks **3% of available capital per trade**, subject to the adaptive stop and margin limits.
+- **Lot Sizing:** Determined by risk budget, stop distance, score, directional headroom, vehicle limits, drawdown scaling, and policy stability.
 - **Per-Order Maximum:** **8 lots** under the default research capital profile.
 - **Maximum Directional Exposure:** Capped at **12 lots** net position under the default research capital profile.
 - **Daily Loss Guardrail:** If equity falls below 95% of the daily baseline, new entries are halted for the remainder of the session.
+- **Peak Drawdown Guardrail:** Trading is blocked when equity falls more than **15%** below peak equity.
+- **Margin:** The research profile reserves at most **80%** of available capital for margin; the default futures margin reference is `175,000` per lot.
 - **Intraday Square-Off:** Open positions exit at or after **15:10 IST**; positions are not intended to carry overnight.
 
 ---
@@ -116,5 +127,6 @@ Both are defined once in [`src/ftx_paper/config.py`](../src/ftx_paper/config.py)
 - [`src/ftx_paper/strategy/exits.py`](../src/ftx_paper/strategy/exits.py): Trailing stop and signal exit evaluations.
 - [`src/ftx_paper/strategy/adaptive_stop.py`](../src/ftx_paper/strategy/adaptive_stop.py): Dynamic stop-loss calculator.
 - [`src/ftx_paper/strategy/risk.py`](../src/ftx_paper/strategy/risk.py): Risk sizing and position boundaries.
-- **Lot Sizing:** Dynamically computed according to risk budget, volatility, and distance to the adaptive stop, subject to margin and position limits.
+- [`src/ftx_paper/strategy/sizing.py`](../src/ftx_paper/strategy/sizing.py): Deterministic score, concurrency, vehicle, drawdown, and stability sizing stages.
+- [`src/ftx_paper/domain/capital_config.py`](../src/ftx_paper/domain/capital_config.py): Research capital profile and vehicle limits.
 - [`src/ftx_paper/market/location.py`](../src/ftx_paper/market/location.py): Price level classification, OR calculation, and cell detection.
