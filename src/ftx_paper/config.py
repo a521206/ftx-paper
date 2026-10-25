@@ -41,7 +41,7 @@ class PaperConfig:
     zerodha_config: Path
     shoonya_config: Path
     xts_config: Path
-    broker: str = "zerodha"
+    broker: str = "xts"
     host: str = "127.0.0.1"
     port: int = 8501
 
@@ -76,7 +76,7 @@ class PaperConfig:
         elif shoonya_cfg.exists():
             broker = "shoonya"
         else:
-            broker = "zerodha"
+            broker = "xts"
 
         return cls(
             home=home,

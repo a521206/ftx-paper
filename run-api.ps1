@@ -11,6 +11,26 @@ $packageRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $venvPython = Join-Path $packageRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path -LiteralPath $venvPython)) { throw "Python virtual environment not found: $venvPython" }
 
+$envFile = Join-Path $packageRoot ".env"
+if (Test-Path -LiteralPath $envFile) {
+    Get-Content -LiteralPath $envFile | ForEach-Object {
+        $line = $_.Trim()
+        if (-not $line -or $line.StartsWith("#") -or $line.IndexOf("=") -lt 1) { return }
+
+        $separator = $line.IndexOf("=")
+        $name = $line.Substring(0, $separator).Trim()
+        $value = $line.Substring($separator + 1).Trim()
+        if (($value.StartsWith('"') -and $value.EndsWith('"')) -or
+            ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+            $value = $value.Substring(1, $value.Length - 2)
+        }
+
+        if (-not [Environment]::GetEnvironmentVariable($name)) {
+            Set-Item -Path "Env:$name" -Value $value
+        }
+    }
+}
+
 function Stop-ExistingApiProcess {
     param(
         [Parameter(Mandatory)]

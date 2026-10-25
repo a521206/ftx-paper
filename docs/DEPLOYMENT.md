@@ -35,10 +35,10 @@ Set these values in the service environment:
 FTX_PAPER_HOME=/var/lib/ftx-paper
 FTX_PAPER_RUNTIME_DIR=/var/lib/ftx-paper/runtime
 FTX_PAPER_AUTH_DB=/var/lib/ftx-paper/auth/auth.sqlite3
-FTX_BROKER=zerodha
-FTX_PAPER_CONFIG_PATH=/etc/ftx-paper/zerodha.json
+FTX_BROKER=xts
+FTX_PAPER_XTS_CONFIG_PATH=/etc/ftx-paper/xts.json
+# FTX_PAPER_CONFIG_PATH=/etc/ftx-paper/zerodha.json
 # FTX_PAPER_SHOONYA_CONFIG_PATH=/etc/ftx-paper/shoonya.json
-# FTX_PAPER_XTS_CONFIG_PATH=/etc/ftx-paper/xts.json
 FTX_API_BASE_URL=http://127.0.0.1:8501
 FTX_WEB_HOST=127.0.0.1
 FTX_WEB_PORT=8501

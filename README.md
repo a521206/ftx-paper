@@ -1,20 +1,21 @@
 # ftx-paper
 
-Standalone paper-trading runtime, REST API, and dashboard for Zerodha market
-data. The API owns the in-process paper runtime; the UI is a separate,
+Standalone paper-trading runtime, REST API, and dashboard for XTS market data.
+The API owns the in-process paper runtime; the UI is a separate,
 presentation-only process.
 
 ## Local Setup
 
-Use Python 3.14 or newer and install the package with Zerodha support:
+Use Python 3.14 or newer and install the package with XTS support:
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\pip install -e ".[zerodha]"
+.\.venv\Scripts\pip install -e ".[xts]"
 ```
 
-Provide broker configuration through `FTX_PAPER_CONFIG_PATH` or the default
-configuration location, then start the processes in separate terminals:
+Provide XTS broker configuration through `FTX_PAPER_XTS_CONFIG_PATH` or the
+default configuration location. The API launcher automatically loads `.env`
+from the repository root, then start the processes in separate terminals:
 
 ```powershell
 .\run-api.ps1
