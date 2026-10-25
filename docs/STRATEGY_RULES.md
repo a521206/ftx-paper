@@ -1,4 +1,14 @@
-# FTX Paper Research Strategy & System Rules
+# FTX Paper Research Strategy Rules
+
+This document specifies the behavior of the `ftx-paper-research` strategy:
+locations, entry and exit policies, admission filters, sizing, and session
+boundaries. It is a research and review contract, not an installation guide or
+general system-architecture document. See [Deployment](DEPLOYMENT.md) for
+operations and [Architecture](ARCHITECTURE.md) for ownership and boundaries.
+
+The implementation and tests remain authoritative when this document and the
+code disagree. Update this specification whenever an intentional strategy
+change is made, and record the change in `CHANGELOG.md`.
 
 ## 1. Overview & Identity
 

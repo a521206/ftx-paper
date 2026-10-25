@@ -1,5 +1,10 @@
 # ftx-paper Deployment
 
+This is the operator runbook for installing, configuring, running, and
+upgrading `ftx-paper`. Design boundaries are documented in
+[Architecture](ARCHITECTURE.md); strategy behavior is documented in
+[Strategy rules](STRATEGY_RULES.md).
+
 `ftx-paper` runs independently of NiftyZoning. Install it in its own virtual
 environment and run one API process plus the separate UI process. Never start
 a second market process: the API owns the single `RuntimeSession`.
@@ -30,7 +35,10 @@ Set these values in the service environment:
 FTX_PAPER_HOME=/var/lib/ftx-paper
 FTX_PAPER_RUNTIME_DIR=/var/lib/ftx-paper/runtime
 FTX_PAPER_AUTH_DB=/var/lib/ftx-paper/auth/auth.sqlite3
+FTX_BROKER=zerodha
 FTX_PAPER_CONFIG_PATH=/etc/ftx-paper/zerodha.json
+# FTX_PAPER_SHOONYA_CONFIG_PATH=/etc/ftx-paper/shoonya.json
+# FTX_PAPER_XTS_CONFIG_PATH=/etc/ftx-paper/xts.json
 FTX_API_BASE_URL=http://127.0.0.1:8501
 FTX_WEB_HOST=127.0.0.1
 FTX_WEB_PORT=8501
@@ -40,6 +48,13 @@ FTX_UI_PORT=8502
 Keep the home directory, runtime directory, and auth database on persistent
 storage. Keep broker secrets out of source control. For local setup, use
 `.env.example` as a starting point and choose a writable auth database path.
+
+Supported providers are `zerodha`, `shoonya`, and `xts`. Set `FTX_BROKER` when
+more than one provider configuration is available; otherwise the configured
+provider is detected from the available settings. `FTX_PAPER_CONFIG_PATH` is
+the Zerodha path; use `FTX_PAPER_SHOONYA_CONFIG_PATH` or
+`FTX_PAPER_XTS_CONFIG_PATH` for the other providers. Install the matching
+extra (`zerodha`, `shoonya`, or `xts`) for the selected provider.
 
 The supported deployment is loopback-only. Do not bind the API to a public
 interface. Loopback requests intentionally do not require a bearer token, and
@@ -71,9 +86,9 @@ port and `-ApiBaseUrl` to point the UI at another API URL.
 
 1. Stop the runtime and confirm it is `STOPPED`.
 2. Back up the runtime and auth SQLite databases.
-3. Install the new wheel, including the `zerodha` extra when needed.
+3. Install the new wheel, including the extra for the selected provider when needed.
 4. Start the API and verify `/api/v1/health` and `/api/v1/openapi.json`.
-5. Start the runtime and inspect recovery or audit events.
+5. Confirm the API-owned runtime is healthy and inspect recovery or audit events.
 6. Start the UI and verify runtime, capital, positions, trades, and events.
 
 To roll back, reinstall the previous wheel against the backups. Do not delete

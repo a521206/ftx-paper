@@ -1,5 +1,10 @@
 # Architecture
 
+This document describes the system's design contracts for maintainers and
+extension authors. It is not an installation, operations, or strategy-parameter
+runbook; see [Deployment](DEPLOYMENT.md) and [Strategy rules](STRATEGY_RULES.md)
+for those concerns.
+
 `ftx-paper` is a paper-trading modular monolith. The API process owns one
 in-process `RuntimeSession`; the UI is a separate presentation process. The
 system may use a real broker for market data, but orders always go through
@@ -158,35 +163,23 @@ orders. A real broker may supply market data and authentication, but provider
 orders must not bypass paper execution. Unsupported capabilities must remain
 explicit failures rather than being reported as successful operations.
 
-## UI And API Clients
+## UI And API Boundary
 
 The UI is a separate presentation process. It must communicate with the API
 over HTTP and must not import runtime, domain, broker, SQLite, or strategy
 implementation modules. Configure its API origin with `FTX_API_BASE_URL`
 (default `http://127.0.0.1:8501`).
 
-Build a UI client as follows:
-
-1. Discover the contract from `GET /api/v1/openapi.json`; use the versioned
-   `/api/v1` routes rather than reading the runtime database.
-2. Use `GET /api/v1/health` for availability, then poll or refresh
-   `/runtime`, `/diagnostics`, `/events`, `/decisions`, `/positions`,
-   `/capital`, and `/trades` for live views. Use the replay routes for
-   historical investigation and progress updates.
-3. Treat responses as projections. Do not infer hidden portfolio state or
-   issue orders from the UI; runtime commands and paper execution remain owned
-   by the API process.
-4. Preserve cursor pagination for decisions and replay events, handle `202`
-   responses for queued/incomplete work, and display error payloads using
-   their stable `error.code` and `error.message` fields.
-5. Send the configured authentication token when the API is not using its
-   loopback-only development allowance, and restrict browser origins through
-   the API's configured CORS policy.
-
 The existing Flask UI follows this model: it renders presentation templates,
 passes the API base URL to the page, and contains no backend imports. A
 different web, desktop, or mobile client can use the same API without adding
 another runtime owner.
+
+Clients consume the versioned `/api/v1` contract and treat responses as
+projections. They must not read the runtime database, infer hidden portfolio
+state, or issue orders outside API-owned commands. OpenAPI discovery,
+pagination, queued responses, authentication, and CORS are API contract
+details maintained with the route implementation.
 
 ## Extension Rules
 
