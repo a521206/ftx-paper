@@ -1,0 +1,23 @@
+{
+  "app_key": "YOUR_XTS_APP_KEY",
+  "secret_key": "YOUR_XTS_SECRET_KEY",
+  "root_url": "https://ttblaze.iifl.com",
+  "source": "WEBAPI",
+  "instruments": [
+    {
+      "exchange": "NSECM",
+      "tradingsymbol": "NIFTY 50",
+      "role": "spot"
+    },
+    {
+      "exchange": "NSEFO",
+      "underlying": "NIFTY",
+      "role": "futures"
+    },
+    {
+      "exchange": "NSECM",
+      "tradingsymbol": "INDIA VIX",
+      "role": "vix"
+    }
+  ]
+}
