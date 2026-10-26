@@ -342,6 +342,17 @@
       gap: 12px;
     }
 
+    .strategy-filter {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      white-space: nowrap;
+    }
+
+    .strategy-filter input {
+      width: auto;
+    }
+
     .event-toolbar {
       display: flex;
       flex-wrap: wrap;
@@ -1621,6 +1632,7 @@
     function render(data) {
       latestData = data;
       const runtime = data.runtime || {};
+      const strategies = runtime.strategies || [];
       const feedHealth = runtime.feed_health || {};
       const capital = data.capital || {};
       const decisionRows = data.decisions.decisions || [];
@@ -1634,7 +1646,7 @@
         <div class="toolbar">
           <strong>Runtime controls</strong>
           <div>
-            <select id="strategy-filter" aria-label="Strategy view"><option value="">All strategies</option>${(runtime.strategies || []).map((item) => `<option value="${esc(item.strategy_id)}"${selectedStrategy === item.strategy_id ? ' selected' : ''}>${esc(item.name || item.strategy_id)}</option>`).join('')}</select>
+            ${strategies.map((item) => `<label class="strategy-filter"><input type="checkbox" aria-label="Filter by ${esc(item.name || item.strategy_id)}" data-strategy-id="${esc(item.strategy_id)}"${selectedStrategy === item.strategy_id ? ' checked' : ''}>${esc(item.name || item.strategy_id)}</label>`).join('')}
             <button id="connect">${esc(connectText)}</button>
             <button data-cmd="restart" class="secondary">Restart</button>
             <button data-cmd="stop" class="danger">Stop</button>
@@ -1807,11 +1819,13 @@
     }
 
     function wire() {
-      document.getElementById('strategy-filter')?.addEventListener('change', (event) => {
-        const query = new URLSearchParams(location.search);
-        if (event.target.value) query.set('strategy_id', event.target.value);
-        else query.delete('strategy_id');
-        location.search = query.toString();
+      document.querySelectorAll('.strategy-filter input').forEach((input) => {
+        input.addEventListener('change', (event) => {
+          const query = new URLSearchParams(location.search);
+          if (event.target.checked) query.set('strategy_id', event.target.dataset.strategyId);
+          else query.delete('strategy_id');
+          location.search = query.toString();
+        });
       });
       document.getElementById('load-more-decisions')?.addEventListener('click', async (event) => {
         const button = event.currentTarget;
