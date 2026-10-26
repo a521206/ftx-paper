@@ -19,9 +19,11 @@ from ftx_paper.market import AggregatorConfig, CompletedBarAggregator, Instrumen
 from ftx_paper.domain import AccountAggregate
 from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.strategy.protocol import Strategy
+from ftx_paper.strategy.orderflow_producer import CausalOrderflowProducer
+from ftx_paper.market.requirements import feature_union
 from ftx_paper.execution.cost import futures_cost
 from ftx_paper.execution.settlement import ExitValidationError, validate_exit_order
-from .engine import PaperEngine, StrategyDispatchError
+from .engine import MultiStrategyEngine, PaperEngine, StrategyDispatchError
 from .facades import FeedController, FeedManager, OrderManager, PnlManager, StrategyRunner
 from .event_bus import EventBus
 from ftx_paper.execution import ExecutionService, PaperExecutionCoordinator
@@ -57,7 +59,7 @@ class RuntimeSession:
     LIVE_FEED_LEASE = "zerodha-live-feed"
 
     def __init__(self, store: Any, auth: Any, specifications: list[dict[str, object]],
-                 *, engine: PaperEngine | None = None,
+                 *, engine: PaperEngine | MultiStrategyEngine | None = None,
                  capital_profile: ResearchCapitalProfile = RESEARCH_CAPITAL_PROFILE,
                  portfolio: PortfolioState | None = None,
                  capital_context: CapitalRuntimeContext | None = None,
@@ -113,6 +115,7 @@ class RuntimeSession:
         self._started = threading.Event()
         self._market_wait = threading.Event()
         self._aggregator: CompletedBarAggregator | None = None
+        self._orderflow_producer = CausalOrderflowProducer()
         self._last_execution_fill: LastExecutionFill | None = None
         self._feed_lease_id: str | None = None
 
@@ -128,7 +131,8 @@ class RuntimeSession:
         if not callable(restore) or not isinstance(raw_snapshot, Mapping) or self.capital_profile is None:
             return
         restored = restore(raw_snapshot, capital_profile=self.capital_profile)
-        self.engine.strategy = cast(Strategy, restored)
+        if isinstance(self.engine, PaperEngine):
+            self.engine.strategy = cast(Strategy, restored)
 
     def _persist_strategy_state(self) -> None:
         snapshot = getattr(self.engine, "snapshot", None)
@@ -282,8 +286,30 @@ class RuntimeSession:
                 )
                 for item in resolved
             }
+            strategy = getattr(self.engine, "strategy", None)
+            instances = getattr(self.engine, "instances", ())
+            policies = tuple(
+                getattr(getattr(item, "strategy", item), "policy", None)
+                for item in instances
+            )
+            if strategy is not None and not policies:
+                policies = (getattr(strategy, "policy", None),)
+            policies = tuple(policy for policy in policies if policy is not None)
+            strategy_metadata = getattr(strategy, "metadata", None)
+            orderflow_enabled = getattr(strategy_metadata, "name", None) == "ftx-paper-orderflow" or any(
+                getattr(getattr(getattr(item, "strategy", item), "metadata", None), "name", None)
+                == "ftx-paper-orderflow"
+                for item in instances
+            )
             self._aggregator = CompletedBarAggregator(
-                role_map, AggregatorConfig(required_roles=(MarketRole.FUTURES,), deadline_seconds=10.0),
+                role_map,
+                AggregatorConfig(
+                    required_roles=(MarketRole.FUTURES,), deadline_seconds=10.0,
+                    feature_requirements=feature_union(policies),
+                ),
+                orderflow_context_provider=(
+                    self._orderflow_producer.context if orderflow_enabled else None
+                ),
             )
             if self.broker_factory:
                 self.broker = self.broker_factory(client)
@@ -446,7 +472,7 @@ class RuntimeSession:
 
     def _persist_engine_event(self, event: dict[str, object], *, source: str, bundle_id: str,
                               session_date: str, decision_at: datetime, timestamp: str,
-                              engine: PaperEngine | None = None) -> None:
+                               engine: PaperEngine | MultiStrategyEngine | None = None) -> None:
         event_type = str(event.get("event_type", "ENGINE_EVENT"))
         payload = {**event, "decision_source": source, "session_date": session_date,
                    "execution_allowed": source == "live"}
@@ -472,11 +498,13 @@ class RuntimeSession:
             self.store.patch_status({"state": "ERROR", "health_state": "FAILED", "error": str(exc)})
             raise
 
-    def _process_bundle(self, bundle, *, source: str, engine: PaperEngine | None = None) -> None:
+    def _process_bundle(self, bundle, *, source: str,
+                        engine: PaperEngine | MultiStrategyEngine | None = None) -> None:
         active_engine = engine or self.engine
         self._process_bundle_for_source(bundle, source=source, engine=active_engine)
 
-    def _process_bundle_for_source(self, bundle, *, source: str, engine: PaperEngine) -> None:
+    def _process_bundle_for_source(self, bundle, *, source: str,
+                                   engine: PaperEngine | MultiStrategyEngine) -> None:
         """Persist a bundle result, with live execution kept behind the source gate."""
         active_engine = engine
         context = self.account.context() if source == "live" and self.account is not None else None
@@ -969,6 +997,7 @@ class RuntimeSession:
             }, f"bar_closed:{bar_key}", timestamp=bar.timestamp.isoformat())
             if self._aggregator is None:
                 return
+            self._orderflow_producer.ingest(bar)
             expired = self._aggregator.expire(now=time.monotonic())
             for incomplete in expired:
                 self._record_incomplete(incomplete)

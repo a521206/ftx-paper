@@ -7,7 +7,12 @@ from ftx_paper.config import SESSION_EXIT_DEADLINE_TIME
 from ftx_paper.contracts import Instrument, MarketBar, OrderIntent
 from ftx_paper.domain.capital import CapitalRuntimeContext, RESEARCH_CAPITAL_PROFILE, ResearchCapitalProfile
 from ftx_paper.domain.portfolio import PortfolioState
-from ftx_paper.domain.decision_context import DecisionContext
+from ftx_paper.domain.decision_context import (
+    CapitalSnapshot,
+    DecisionContext,
+    ExposureSnapshot,
+    MarginSnapshot,
+)
 from ftx_paper.execution.events import ExecutionNotification
 
 from .config import (
@@ -24,14 +29,15 @@ from .risk import VehicleRiskLimits
 from ftx_paper.market.bundles import DecisionBundle
 from .decision import IndependentLiveDecisionEngine
 from .snapshot import restore_strategy, snapshot_strategy
+from .coordinator import SharedDecisionCoordinator
+from .research_policy import ResearchPolicyAdapter
 
 
 class ConfiguredLiveStrategy:
     """Live strategy shell with explicit feature/decision injection.
 
-    The rule implementation is intentionally supplied as a callable while the
-    NiftyZoning behavior is being migrated. This keeps the engine boundary
-    stable and prevents research modules from becoming dependencies.
+    The rule implementation remains behind the stable strategy boundary while
+    reusable policy and coordinator contracts are introduced.
     """
 
     name = STRATEGY_NAME
@@ -91,6 +97,8 @@ class ConfiguredLiveStrategy:
             vehicle_risk_limits=self.vehicle_risk_limits,
             capital_context=self.capital_context,
         )
+        self.policy = ResearchPolicyAdapter(self._decision_engine)
+        self.coordinator = SharedDecisionCoordinator(self.policy)
 
     @property
     def portfolio_state(self) -> dict[str, float]:
@@ -138,11 +146,23 @@ class ConfiguredLiveStrategy:
         }
 
     def on_bundle(self, bundle: DecisionBundle):
-        return self._decision_engine.evaluate(bundle)
+        return self.coordinator.evaluate(bundle, self._context_for_bundle(bundle))
+
+    @staticmethod
+    def _context_for_bundle(bundle: DecisionBundle) -> DecisionContext:
+        from .decision import _decision_datetime
+
+        return DecisionContext(
+            as_of=_decision_datetime(bundle),
+            account_revision=0,
+            capital=CapitalSnapshot(0.0, 0.0, 0.0, 0.0),
+            margin=MarginSnapshot(0.0, 0.0, 0.0),
+            exposure=ExposureSnapshot(0.0, 0),
+        )
 
     def evaluate(self, bundle: DecisionBundle, context: DecisionContext):
         """Evaluate with a common account snapshot while retaining signal state."""
-        return self._decision_engine.evaluate(bundle)
+        return self.coordinator.evaluate(bundle, context)
 
     def on_execution_event(self, event: ExecutionNotification) -> None:
         """Receive common execution outcomes without owning account state."""

@@ -95,6 +95,17 @@ def _record(event: Mapping[str, Any], ordinal: int) -> dict[str, Any]:
         "confirmation_count": confirmation_count,
         "missing_inputs": list(missing_inputs),
     })
+    orderflow_provenance = {
+        key: payload.get(key)
+        for key in (
+            "feature_version", "availability_cutoff", "timeframe", "instrument",
+            "generation", "interaction_id", "opportunity_id", "source_observation_ids",
+            "source_observation_id", "response_evidence_ids", "response_state", "interaction_state",
+            "config_hash", "feature_values", "replay_provenance",
+            "template_id", "template_version", "trigger",
+        )
+        if payload.get(key) is not None
+    }
     record = {
         "comparison_identity": _identity({
             "event_type": event_type, "date": str(payload.get("session_date") or payload.get("date") or (timestamp or ""))[:10],
@@ -115,6 +126,7 @@ def _record(event: Mapping[str, Any], ordinal: int) -> dict[str, Any]:
         "direction": payload.get("direction"),
         "stage": payload.get("decision_stage"), "outcome": payload.get("outcome") or event_type.lower(),
         "reason_code": payload.get("reason") or payload.get("rejection_reason"), "values": values,
+        "orderflow_provenance": orderflow_provenance,
         "field_availability": {key: "available" if value not in (None, "") else "missing" for key, value in values.items()},
     }
     return _jsonable(record)

@@ -12,10 +12,12 @@ from uuid import uuid4
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderRole, OrderSide, Role, SyntheticFutureQuote, role_to_key, synthetic_future_quote
 from ftx_paper.domain.capital import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE, CapitalRuntimeContext
 from ftx_paper.market import AggregatorConfig, Cell, CompletedBarAggregator, InstrumentKey, LocationDetector
+from ftx_paper.market.requirements import FeatureRequirement
 from ftx_paper.market.features import option_pcr_at_event, vix_open_and_event
 from ftx_paper.domain import AccountAggregate, PortfolioState
 from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.runtime.engine import PaperEngine
+from ftx_paper.strategy.orderflow_producer import CausalOrderflowProducer
 from ftx_paper.runtime.futures_source import FuturesSessionSourceResolver
 from ftx_paper.runtime.parity_artifacts import build_parity_artifact
 from ftx_paper.execution.cost import futures_cost, synthetic_futures_cost
@@ -320,7 +322,15 @@ class ReplayWorker:
             )
             # Each date gets a fresh position/risk session while cumulative
             # capital is carried by the authoritative PortfolioState.
-            aggregator = self._aggregator(bars)
+            orderflow_producer = (
+                CausalOrderflowProducer()
+                if strategy.metadata.name == "ftx-paper-orderflow" else None
+            )
+            aggregator = self._aggregator(
+                bars,
+                orderflow_producer,
+                tuple(getattr(getattr(strategy, "policy", None), "required_features", ())),
+            )
             trace_detector = LocationDetector()
             trace_detector.reset(prior_day_high=prior_day_high, prior_day_low=prior_day_low)
             trace_vix_history: list[MarketBar] = []
@@ -334,6 +344,8 @@ class ReplayWorker:
             for bar in bars:
                 if cancel.is_set():
                     break
+                if orderflow_producer is not None:
+                    orderflow_producer.ingest(bar)
                 bundle = aggregator.ingest(bar)
                 if bundle is None:
                     continue
@@ -1047,7 +1059,11 @@ class ReplayWorker:
         ))
 
     @staticmethod
-    def _aggregator(bars: tuple[MarketBar, ...]) -> CompletedBarAggregator:
+    def _aggregator(
+        bars: tuple[MarketBar, ...],
+        orderflow_producer: CausalOrderflowProducer | None = None,
+        feature_requirements: tuple[FeatureRequirement, ...] = (),
+    ) -> CompletedBarAggregator:
         roles = {}
         for bar in bars:
             kind = str(bar.instrument.instrument_type).upper()
@@ -1056,6 +1072,13 @@ class ReplayWorker:
                     else OptionRole(bar.instrument.symbol) if kind in {"CE", "PE"}
                     else MarketRole.SPOT)
             roles[InstrumentKey(bar.instrument.exchange, bar.instrument.symbol)] = role
-        return CompletedBarAggregator(roles, AggregatorConfig(required_roles=(MarketRole.FUTURES,), deadline_seconds=0))
+        return CompletedBarAggregator(
+            roles,
+            AggregatorConfig(
+                required_roles=(MarketRole.FUTURES,), deadline_seconds=0,
+                feature_requirements=feature_requirements,
+            ),
+            orderflow_context_provider=(orderflow_producer.context if orderflow_producer else None),
+        )
 
 __all__ = ["ReplayWorker"]

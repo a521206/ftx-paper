@@ -75,6 +75,44 @@ def test_p9_preserves_missing_pcr_diagnostics() -> None:
     assert "pcr_at_event" in record["values"]["missing_inputs"]
 
 
+def test_p9_preserves_orderflow_provenance() -> None:
+    result = {
+        "strategy": {"name": "ftx-paper-orderflow", "version": "0.1.0", "config_hash": "cfg"},
+        "vehicles": ["futures"],
+        "bars_seen": 1,
+        "events": [{
+            "event_type": "CANDIDATEDECISION",
+            "decision_at": "2026-01-05T10:01:00+05:30",
+            "session_date": "2026-01-05",
+            "outcome": "accepted",
+            "candidate_id": "candidate-1",
+            "feature_version": "v1",
+            "availability_cutoff": "2026-01-05T10:01:00+05:30",
+            "timeframe": "5m",
+            "instrument": "NIFTYFUT",
+            "generation": 3,
+            "interaction_id": "interaction-1",
+            "source_observation_ids": ["obs-1"],
+            "response_evidence_ids": ["evidence-1"],
+            "trigger": {"eligible": False, "ineligible_reason": "diagnostic_only"},
+        }],
+    }
+
+    record = build_parity_artifact(result, request={"session_date": "2026-01-05"})["p9"]["decision_records"][0]
+
+    assert record["orderflow_provenance"] == {
+        "feature_version": "v1",
+        "availability_cutoff": "2026-01-05T10:01:00+05:30",
+        "timeframe": "5m",
+        "instrument": "NIFTYFUT",
+        "generation": 3,
+        "interaction_id": "interaction-1",
+        "source_observation_ids": ["obs-1"],
+        "response_evidence_ids": ["evidence-1"],
+        "trigger": {"eligible": False, "ineligible_reason": "diagnostic_only"},
+    }
+
+
 def test_shared_fixture_contract_and_strategy_fingerprint():
     fixture = json.loads(Path("tests/fixtures/ftx_producer_parity_v1.json").read_text())
     assert fixture["artifact_type"] == "ftx_producer_parity"

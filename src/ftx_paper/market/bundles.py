@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 import time
 from typing import Iterable, Mapping, TypedDict
 
 from ftx_paper.contracts import MarketBar, MarketRole, Role, market_minute_key, parse_role, role_to_key
+from ftx_paper.market.requirements import FeatureRequirement, feature_union
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ftx_paper.strategy.orderflow_contract import OrderflowContext
+    from ftx_paper.strategy.policy_contract import StrategyPolicy
 
 
 class SupportingInputs(TypedDict, total=False):
@@ -28,6 +35,7 @@ class DecisionBundle:
     required_roles: tuple[Role | str, ...]
     missing_roles: tuple[Role | str, ...] = ()
     supporting_inputs: SupportingInputs | None = None
+    orderflow_context: OrderflowContext | None = None
 
     @property
     def complete(self) -> bool:
@@ -48,6 +56,7 @@ class AggregatorConfig:
 
     required_roles: tuple[Role, ...] = (MarketRole.FUTURES, MarketRole.VIX)
     deadline_seconds: float = 10.0
+    feature_requirements: tuple[FeatureRequirement, ...] = ()
 
     def __post_init__(self) -> None:
         normalized_roles = tuple(parse_role(role) for role in self.required_roles)
@@ -56,6 +65,20 @@ class AggregatorConfig:
             raise ValueError("required roles must be non-empty and unique")
         if self.deadline_seconds < 0:
             raise ValueError("deadline_seconds must be non-negative")
+
+    @classmethod
+    def from_policies(
+        cls,
+        policies: tuple["StrategyPolicy", ...],
+        *,
+        required_roles: tuple[Role, ...] = (MarketRole.FUTURES, MarketRole.VIX),
+        deadline_seconds: float = 10.0,
+    ) -> "AggregatorConfig":
+        return cls(
+            required_roles=required_roles,
+            deadline_seconds=deadline_seconds,
+            feature_requirements=feature_union(policies),
+        )
 
 
 class CompletedBarAggregator:
@@ -73,6 +96,7 @@ class CompletedBarAggregator:
         *,
         required_roles: Iterable[Role | str] | None = None,
         deadline_seconds: float | None = None,
+        orderflow_context_provider: Callable[[str, str], "OrderflowContext | None"] | None = None,
     ) -> None:
         # Accept tuple keys temporarily at this boundary for old callers;
         # internal state always uses the named identity type.
@@ -99,6 +123,7 @@ class CompletedBarAggregator:
         self._latest_trading_date: str | None = None
         self._last_futures_key: tuple[str, str] | None = None
         self._last_emitted_key: tuple[str, str] | None = None
+        self._orderflow_context_provider = orderflow_context_provider
 
     def ingest(self, bar: MarketBar) -> DecisionBundle | None:
         role = self._roles.get(InstrumentKey(bar.instrument.exchange, bar.instrument.symbol))
@@ -256,6 +281,10 @@ class CompletedBarAggregator:
                 "missing": tuple(role_to_key(role) for role in sorted(missing_same_minute, key=role_to_key)),
                 "unavailable": tuple(role_to_key(role) for role in sorted(unavailable_inputs, key=role_to_key)),
             },
+            orderflow_context=(
+                self._orderflow_context_provider(trading_date, minute)
+                if self._orderflow_context_provider is not None else None
+            ),
         )
         self._last_emitted_key = key
         return bundle

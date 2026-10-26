@@ -57,7 +57,7 @@ class ZerodhaAuth:
 
     @classmethod
     def from_config_path(cls, path: str | Path, *, token_db: str | Path | None = None) -> "ZerodhaAuth":
-        """Build auth from standalone config without consulting NiftyZoning."""
+        """Build auth from standalone configuration."""
         config_path = Path(path)
         values: dict[str, str] = {}
         if config_path.exists():

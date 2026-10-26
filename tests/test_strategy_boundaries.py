@@ -66,3 +66,11 @@ def test_strategy_factory_is_the_strategy_selection_boundary() -> None:
 
     assert strategy.metadata.name
     assert strategy.metadata.version
+
+
+def test_strategy_factory_selects_orderflow_explicitly() -> None:
+    factory = ConfiguredStrategyFactory(capital_profile=RESEARCH_CAPITAL_PROFILE)
+    strategy = factory.create(strategy="ftx-paper-orderflow")
+
+    assert strategy.metadata.name == "ftx-paper-orderflow"
+    assert strategy.metadata.version == "0.1.0"
