@@ -30,6 +30,8 @@ The API runs on `http://127.0.0.1:8501`; the dashboard runs on
 - [Architecture](docs/ARCHITECTURE.md)
 - [Deployment](docs/DEPLOYMENT.md)
 - [Strategy rules](docs/STRATEGY_RULES.md)
+- [Strategy development](docs/STRATEGY_DEVELOPMENT.md)
+- [Strategy reuse refactor](docs/STRATEGY_REFACTORING.md)
 - [Changelog](CHANGELOG.md)
 
 ## Releases And Upgrades

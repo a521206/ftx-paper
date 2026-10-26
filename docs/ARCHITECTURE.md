@@ -101,9 +101,6 @@ another runtime owner.
 
 ### Multiple Strategy Instances
 
-See [Multi-Strategy Implementation](MULTI_STRATEGY_IMPLEMENTATION.md) for
-composition, dispatch, failure handling, snapshots, and UI/API integration.
-
 `MultiStrategyEngine` is the runtime-owned coordinator for running more than
 one configured strategy in a single `RuntimeSession`. Each `StrategyInstance`
 has an independent strategy object, stable `strategy_id`, and enabled flag. The
@@ -129,6 +126,12 @@ fails, the runtime stops without rollback or automatic retry. Mutations and
 paper fills already applied are preserved. Enabled strategies are configured
 at startup, and interrupted sessions remain `STOPPED` without snapshot-based
 resumption.
+
+Strategy snapshots are keyed by `strategy_id` and contain serializable strategy
+state only; they never restore a second portfolio or runtime owner. Runtime and
+activity API responses expose strategy attribution and optional filtering, while
+positions, capital, and health remain shared. The dashboard provides the same
+simple strategy filter and labels shared account values accordingly.
 
 Use the coordinator at the composition boundary:
 
