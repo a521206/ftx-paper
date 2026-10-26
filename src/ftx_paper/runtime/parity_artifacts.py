@@ -103,6 +103,7 @@ def _record(event: Mapping[str, Any], ordinal: int) -> dict[str, Any]:
             "source_observation_id", "response_evidence_ids", "response_state", "interaction_state",
             "config_hash", "feature_values", "replay_provenance",
             "template_id", "template_version", "trigger",
+            "decision_stage", "cell", "direction",
         )
         if payload.get(key) is not None
     }

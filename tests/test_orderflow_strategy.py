@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 
 import pytest
 
@@ -167,6 +168,56 @@ def test_interaction_episode_is_reused_then_ended() -> None:
     assert repeated == ()
     assert ended.payload["reason"] == "interaction_ended"
     assert ended.payload["interaction_state"] == "ENDED"
+
+
+def test_response_status_field_does_not_override_causal_candle_evidence() -> None:
+    strategy = OrderflowStrategy()
+    bundle, account = _context(response_status="recovery")
+
+    events = strategy.evaluate(bundle, account)
+
+    assert events[0].payload["response_state"] == "CONFIRMED"
+    assert events[0].payload["response_evidence_ids"] == ["evidence-1"]
+
+
+def test_response_window_expires_without_confirmation() -> None:
+    strategy = OrderflowStrategy()
+    for index in range(2):
+        bundle, account = _context(close=99.0, response_status="confirmed_rejection", observation_id=f"obs-{index}")
+        assert strategy.evaluate(bundle, account)[0].payload["response_state"] == "PENDING_RESPONSE"
+    bundle, account = _context(close=99.0, response_status="confirmed_rejection", observation_id="obs-2")
+
+    expired = strategy.evaluate(bundle, account)[0]
+
+    assert expired.payload["reason"] == "response_expired"
+    assert expired.payload["response_state"] == "EXPIRED"
+
+
+def test_executable_trigger_requires_arming_and_displacement() -> None:
+    bundle, _ = _context()
+    observation = bundle.orderflow_context.observations_for("5m")[0]
+
+    unarmed = observe_trigger(observation, boundary=100.0, execution_mode="executable")
+    no_displacement = observe_trigger(
+        replace_observation(observation, {"trigger_armed": True, "displacement": 0.0}),
+        boundary=100.0,
+        execution_mode="executable",
+    )
+    armed = observe_trigger(
+        replace_observation(observation, {"trigger_armed": True}),
+        boundary=100.0,
+        execution_mode="executable",
+    )
+
+    assert not unarmed.eligible
+    assert unarmed.ineligible_reason == "not_armed"
+    assert not no_displacement.eligible
+    assert no_displacement.ineligible_reason == "insufficient_displacement"
+    assert armed.eligible
+
+
+def replace_observation(observation, feature_updates):
+    return replace(observation, features=dict(observation.features) | feature_updates)
 
 
 def test_orderflow_diagnostic_is_attributed_in_multi_strategy_engine() -> None:

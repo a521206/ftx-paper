@@ -135,12 +135,12 @@ class OrderflowContext:
             return False
         if parent.interval_start is None or parent.interval_end is None:
             return False
-        if parent.interval_start != parent.observed_at or parent.interval_end != parent.available_at:
+        if parent.interval_start != parent.observed_at or parent.interval_end > parent.available_at:
             return False
         if parent.context.child_observation_ids != child_ids:
             return False
         intervals = parent.context.child_intervals
-        if intervals[0][0] != parent.observed_at or intervals[-1][1] != parent.available_at:
+        if intervals[0][0] != parent.interval_start or intervals[-1][1] != parent.interval_end:
             return False
         if parent.instrument != children[0].instrument:
             return False

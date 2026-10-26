@@ -45,6 +45,7 @@ class OrderflowConfig:
     session_reset: str = "trading_date"
     interaction_band: float = 5.0
     response_type: str = "confirmed_rejection"
+    response_window_candles: int = 3
     confirmation_rule: str = "completed_response_candle"
     invalidation_rule: str = "close_outside_frozen_band"
     trigger_type: str = "diagnostic_touch"
@@ -64,6 +65,8 @@ class OrderflowConfig:
             raise ValueError("orderflow feature_set must be non-empty and unique")
         if "futures" not in self.enabled_vehicles:
             raise ValueError("orderflow requires futures as the enabled vehicle")
+        if self.response_window_candles <= 0:
+            raise ValueError("response window must be positive")
         if self.execution_mode is not ExecutionMode.DIAGNOSTIC:
             raise ValueError("executable orderflow policy is deferred to a later phase")
 
@@ -86,6 +89,11 @@ class InteractionState:
     state: str
     response_state: str
     generation: int | None
+    location: str | None = None
+    response_direction: str | None = None
+    response_armed: bool = False
+    response_evidence_ids: tuple[str, ...] = ()
+    response_age: int = 0
 
     def __post_init__(self) -> None:
         if self.state not in {"CREATED", "ACTIVE", "ENDED"}:
@@ -100,11 +108,66 @@ class InteractionState:
             raise ValueError("orderflow interaction geometry must be finite")
         if self.lower_band > self.reference_level or self.reference_level > self.upper_band:
             raise ValueError("orderflow interaction band is inconsistent")
+        if self.response_direction not in {None, "long", "short"}:
+            raise ValueError("invalid orderflow response direction")
 
 
 def _number(observation: OrderflowObservation, name: str) -> float | None:
     value = observation.features.get(name)
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _response_candle(observation: OrderflowObservation) -> tuple[float, float, float, float] | None:
+    close = _number(observation, "close")
+    if close is None:
+        return None
+    previous = _number(observation, "previous_close")
+    open_price = _number(observation, "open")
+    high = _number(observation, "high")
+    low = _number(observation, "low")
+    open_price = previous if open_price is None else open_price
+    if open_price is None:
+        open_price = close
+    high = max(open_price, close) if high is None else high
+    low = min(open_price, close) if low is None else low
+    return open_price, high, low, close
+
+
+def _advance_response(
+    interaction: InteractionState, observation: OrderflowObservation, *, max_candles: int,
+) -> InteractionState:
+    candle = _response_candle(observation)
+    if candle is None:
+        return interaction
+    open_price, high, low, close = candle
+    direction = interaction.response_direction
+    if direction is None:
+        previous = _number(observation, "previous_close")
+        direction = "long" if previous is None or previous <= interaction.reference_level else "short"
+    armed = interaction.response_armed or low <= interaction.reference_level <= high
+    evidence_items = observation.evidence_ids or (observation.observation_id,)
+    evidence = (*interaction.response_evidence_ids, *evidence_items)
+    status = interaction.response_state
+    age = interaction.response_age + 1
+    if status == "PENDING_RESPONSE":
+        if direction == "long" and close < interaction.lower_band:
+            status = "INVALIDATED"
+        elif direction == "short" and close > interaction.upper_band:
+            status = "INVALIDATED"
+        elif armed and direction == "long" and close >= interaction.reference_level and close > open_price:
+            status = "CONFIRMED"
+        elif armed and direction == "short" and close <= interaction.reference_level and close < open_price:
+            status = "CONFIRMED"
+        elif age >= max_candles:
+            status = "EXPIRED"
+    return replace(
+        interaction,
+        response_state=status,
+        response_direction=direction,
+        response_armed=armed,
+        response_evidence_ids=evidence,
+        response_age=age,
+    )
 
 
 class OrderflowPolicy:
@@ -135,6 +198,8 @@ class OrderflowPolicy:
             "decision_at": context.as_of.isoformat(),
             "availability_cutoff": orderflow.cutoff.isoformat() if orderflow else None,
             "feature_version": self.config.vwap_calculation_version,
+            "decision_stage": "interaction_response",
+            "cell": "vwap_zone",
         }
         if orderflow is None or orderflow.session_id != bundle.trading_date:
             return (PolicyDecision({**base, "outcome": "rejected", "reason": "orderflow_context_unavailable"}),)
@@ -192,6 +257,7 @@ class OrderflowPolicy:
                 "generation": observation.context.generation if observation.context else None,
                 "replay_provenance": dict(observation.context.replay_provenance) if observation.context else {},
                 "trigger": asdict(trigger),
+                "location": observation.location,
             }
             generation = observation.context.generation if observation.context else None
             previous = next(
@@ -200,6 +266,8 @@ class OrderflowPolicy:
                     if item.timeframe == observation.timeframe
                     and item.instrument == observation.instrument
                     and item.generation == generation
+                    and item.location == observation.location
+                    and (observation.interaction_id is None or item.interaction_id == observation.interaction_id)
                     and item.state == "ACTIVE"
                 ),
                 None,
@@ -211,9 +279,12 @@ class OrderflowPolicy:
             )
             if previous is None and not inside_band:
                 continue
-            interaction_id = previous.interaction_id if previous is not None else hashlib.sha256(
-                f"{observation.timeframe}:{generation}:{observation.observation_id}:{self.config.config_hash}".encode()
-            ).hexdigest()[:24]
+            interaction_id = previous.interaction_id if previous is not None else (
+                observation.interaction_id or hashlib.sha256(
+                    f"{observation.timeframe}:{observation.instrument}:{observation.location}:"
+                    f"{generation}:{observation.observation_id}:{self.config.config_hash}".encode()
+                ).hexdigest()[:24]
+            )
             if previous is None:
                 previous = InteractionState(
                     interaction_id=interaction_id,
@@ -226,11 +297,27 @@ class OrderflowPolicy:
                     state="CREATED",
                     response_state="PENDING_RESPONSE",
                     generation=observation.context.generation if observation.context else None,
+                    location=observation.location,
                 )
                 self._interactions[interaction_id] = previous
+            previous = _advance_response(
+                previous, observation, max_candles=self.config.response_window_candles,
+            )
+            provenance["cell"] = observation.location or "vwap_zone"
+            provenance["direction"] = previous.response_direction
             if not inside_band:
+                terminal_response = previous.response_state
+                if terminal_response == "PENDING_RESPONSE":
+                    terminal_response = (
+                        "INVALIDATED"
+                        if (
+                            (previous.response_direction == "long" and close < previous.lower_band)
+                            or (previous.response_direction == "short" and close > previous.upper_band)
+                        )
+                        else "EXPIRED"
+                    )
                 ended = replace(previous, state="ENDED", response_state=(
-                    "EXPIRED" if previous.response_state == "PENDING_RESPONSE" else previous.response_state
+                    terminal_response
                 ))
                 self._interactions[interaction_id] = ended
                 results.append(PolicyDecision({
@@ -246,29 +333,26 @@ class OrderflowPolicy:
                 }))
                 continue
             previous = replace(previous, state="ACTIVE")
-            if observation.response_status == "recovery":
-                previous = replace(previous, response_state="INVALIDATED")
+            if previous.response_state == "INVALIDATED":
+                self._interactions[interaction_id] = previous
+                results.append(PolicyDecision({
+                    **base, **provenance, "outcome": "rejected",
+                    "reason": "response_invalidated", "candidate_id": interaction_id,
+                    "interaction_id": interaction_id, "response_state": previous.response_state,
+                    "response_evidence_ids": list(previous.response_evidence_ids),
+                }))
+                continue
+            if previous.response_state != "CONFIRMED":
                 self._interactions[interaction_id] = previous
                 results.append(PolicyDecision({
                     **base,
                     **provenance,
                     "outcome": "rejected",
-                    "reason": "recovery_response_not_in_initial_hypothesis",
+                    "reason": "response_expired" if previous.response_state == "EXPIRED" else "response_pending",
                     "candidate_id": interaction_id,
                     "interaction_id": interaction_id,
                     "response_state": previous.response_state,
-                }))
-                continue
-            if observation.response_status != "confirmed_rejection":
-                self._interactions[interaction_id] = previous
-                results.append(PolicyDecision({
-                    **base,
-                    **provenance,
-                    "outcome": "rejected",
-                    "reason": "response_pending",
-                    "candidate_id": interaction_id,
-                    "interaction_id": interaction_id,
-                    "response_state": "PENDING_RESPONSE",
+                    "response_evidence_ids": list(previous.response_evidence_ids),
                 }))
                 continue
             previous = replace(previous, response_state="CONFIRMED")
@@ -289,6 +373,9 @@ class OrderflowPolicy:
                 "trigger": asdict(trigger),
                 "interaction_state": previous.state,
                 "response_state": previous.response_state,
+                "decision_stage": "interaction_response",
+                "cell": observation.location or "vwap_zone",
+                "direction": previous.response_direction,
             }
             results.append(PolicyDecision(payload))
         if not results and all(observation.observation_id in self._processed_observation_ids for observation in observations):
