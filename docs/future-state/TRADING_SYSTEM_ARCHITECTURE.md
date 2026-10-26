@@ -1,6 +1,15 @@
-# Fresh Trade Engine - Architecture & Operational Guide
+# Future-State Trading System Architecture
 
-A high-performance, fault-proof algorithmic trading engine with a component-based microservice architecture running locally on a shared SQLite WAL database.
+This document describes the proposed future-state architecture for evolving
+`ftx-paper` from a paper-trading system into a multi-client trading system.
+It is a design proposal, not the current implementation or an operational
+runbook. The current system architecture is documented in
+[Architecture](../ARCHITECTURE.md), with deployment guidance in
+[Deployment](../DEPLOYMENT.md).
+
+The first implementation should remain simple and component-based. Separate
+services, process isolation, and additional broker integrations are future
+extension points, not prerequisites for the initial version.
 
 ---
 
@@ -42,7 +51,7 @@ graph TD
 
 ## 📦 Component Breakdown
 
-### 1. Phase 1: Feed Manager (Microservice)
+### 1. Phase 1: Feed Manager (Component)
 - **Supported Brokers:** IIFL XTS, Shoonya (Finvasia), Fyers.
 - **Priority Failover:** Automatic switchover based on priority list (`["XTS", "SHOONYA", "FYERS"]`). If the primary feed experiences heartbeat timeout or socket disconnect, it seamlessly switches to the standby broker and restores all subscriptions.
 - **Supported Segments:** `NSE`, `NFO`, `BSE`, `BSEFO`, `MCX`, `MCXFO`.
@@ -54,10 +63,28 @@ graph TD
   - `MCX:NATURALGAS` (Current Month Future)
   - `MCX:GOLD` (Current Month Future)
   - `MCX:SILVER` (Current Month Future)
-- **Automatic Expiry Auto-Roll:** The Expiry Engine detects when commodity futures reach expiration and automatically rolls the contract to the next active month on the following day.
-- **Streaming OHLC Aggregator:** Real-time in-memory candle builder for `1m`, `5m`, `15m`, and `1h` resolutions.
+- **Automatic Expiry Auto-Roll:** The Expiry Engine selects the next active
+  contract when the current commodity future expires and updates the active
+  subscription.
+- **Streaming OHLC Aggregator:** Builds and stores completed `1m` bars. Higher
+  resolutions (`5m`, `15m`, and `1h`) are derived from the one-minute bars.
 
-Data Save
+#### Market Data Handling
+Broker adapters convert historical rows and live ticks into one common
+`MarketBar` format before the data reaches the event bus.
+
+- **Historical:** Resolve instruments, fetch a small warmup period, normalize
+  the bars, save them in SQLite, and load recent bars into memory.
+- **Live:** Receive normalized ticks, build one-minute bars in memory, save
+  completed bars in SQLite, and publish them to the local event bus. The
+  runtime delivers them to the strategy.
+- **Ticks:** Keep ticks in memory for aggregation and immediate stop handling;
+  the first version saves completed bars, not every tick.
+- **Replay:** Read the same normalized bars from SQLite.
+- **Ownership:** Strategies receive data through the runtime and do not access
+  the broker or database directly.
+- **Failover:** Reconnect and restore subscriptions, backfill any missing
+  interval, and ignore duplicate bars after switching providers.
 
 ### 2. Phase 2: Broker Order Manager (Independent Module)
 - **Supported Brokers:** XTS, Kotak Neo, Shoonya, Zerodha, Dhan, Fyers.
