@@ -6,12 +6,13 @@ from datetime import time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from dotenv import load_dotenv
+
 
 def _path(name: str, default: Path) -> Path:
     return Path(os.getenv(name, str(default))).expanduser()
 
 
-PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 NIFTY_LOT_SIZE = 65
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -47,36 +48,14 @@ class PaperConfig:
 
     @classmethod
     def from_env(cls) -> "PaperConfig":
+        load_dotenv(override=False)
         local_app_data = Path(os.getenv("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
         home = _path("FTX_PAPER_HOME", local_app_data / "ftx-paper")
         runtime_dir = _path("FTX_PAPER_RUNTIME_DIR", home / "runtime")
-        zerodha_cfg = _path(
-            "FTX_PAPER_CONFIG_PATH",
-            PACKAGE_ROOT / "config" / "zerodha.json" if (PACKAGE_ROOT / "config" / "zerodha.json").exists() else home / "config" / "zerodha.json",
-        )
-        shoonya_cfg = _path(
-            "FTX_PAPER_SHOONYA_CONFIG_PATH",
-            PACKAGE_ROOT / "config" / "shoonya.json" if (PACKAGE_ROOT / "config" / "shoonya.json").exists() else home / "config" / "shoonya.json",
-        )
-        xts_cfg = _path(
-            "FTX_PAPER_XTS_CONFIG_PATH",
-            PACKAGE_ROOT / "config" / "xts.json" if (PACKAGE_ROOT / "config" / "xts.json").exists() else home / "config" / "xts.json",
-        )
-        configured_broker = os.getenv("FTX_BROKER")
-        if configured_broker:
-            broker = configured_broker.lower().strip()
-        elif "xts" in str(zerodha_cfg).lower() or "xts" in os.getenv("FTX_PAPER_CONFIG_PATH", "").lower():
-            broker = "xts"
-        elif "shoonya" in str(zerodha_cfg).lower():
-            broker = "shoonya"
-        elif "zerodha" in os.getenv("FTX_PAPER_CONFIG_PATH", "").lower():
-            broker = "zerodha"
-        elif xts_cfg.exists():
-            broker = "xts"
-        elif shoonya_cfg.exists():
-            broker = "shoonya"
-        else:
-            broker = "xts"
+        zerodha_cfg = _path("FTX_PAPER_CONFIG_PATH", home / "config" / "zerodha.json")
+        shoonya_cfg = _path("FTX_PAPER_SHOONYA_CONFIG_PATH", home / "config" / "shoonya.json")
+        xts_cfg = _path("FTX_PAPER_XTS_CONFIG_PATH", home / "config" / "xts.json")
+        broker = os.getenv("FTX_BROKER", "xts").lower().strip()
 
         return cls(
             home=home,
