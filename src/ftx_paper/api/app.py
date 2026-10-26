@@ -132,7 +132,7 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             return jsonify(error_payload("invalid_request", "use vehicles array; vehicle is no longer supported")), 400
         range_aliases = (("date_from", "date_to"), ("from", "to"), ("from_date", "to_date"))
         range_pair = next((pair for pair in range_aliases if any(key in payload for key in pair)), None)
-        supported = {"session_date", "vehicles", "emit_rejected_decisions"}
+        supported = {"session_date", "strategy_id", "vehicles", "emit_rejected_decisions"}
         if range_pair:
             supported.update(range_pair)
         if set(payload) - supported:
@@ -143,6 +143,10 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             return jsonify(error_payload(
                 "invalid_request", "emit_rejected_decisions must be a boolean",
             )), 400
+        if "strategy_id" in payload and (
+            not isinstance(payload["strategy_id"], str) or not payload["strategy_id"].strip()
+        ):
+            return jsonify(error_payload("invalid_strategy", "strategy_id must be a non-empty string")), 400
         vehicles = payload.get("vehicles")
         if vehicles is not None and (
             not isinstance(vehicles, list)

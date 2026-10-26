@@ -305,7 +305,12 @@ class ReplayWorker:
             ):
                 effective_expiry_dates.add(date)
             capital_context = CapitalRuntimeContext(self.capital_profile, environment="replay")
+            strategy_kwargs = {}
+            strategy_id = request.get("strategy_id")
+            if strategy_id is not None:
+                strategy_kwargs["strategy"] = strategy_id
             strategy = self.strategy_factory.create(
+                **strategy_kwargs,
                 enabled_vehicles=vehicles,
                 portfolio=portfolio,
                 capital_context=capital_context,

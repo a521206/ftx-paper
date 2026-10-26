@@ -1963,7 +1963,7 @@
             const run = latestByDate.get(value);
             return !run || ['failed', 'rejected', 'cancelled'].includes(String(run.status || '').toLowerCase());
           });
-          await Promise.all(missing.map((session_date) => get('/api/v1/replay', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({session_date})})));
+          await Promise.all(missing.map((session_date) => get('/api/v1/replay', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({session_date, ...(selectedStrategy ? {strategy_id: selectedStrategy} : {})})})));
           const query = new URLSearchParams({ date: from, date_from: from, date_to: to });
           history.replaceState({}, '', `/replay?${query.toString()}`);
           flash(missing.length ? `${missing.length} missing day${missing.length === 1 ? '' : 's'} queued` : 'Loaded cached replay days');
