@@ -11,7 +11,7 @@ from ftx_paper.execution import ExecutionService
 from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.market.bundles import DecisionBundle
 
-from .engine import EngineResult, PaperEngine
+from .engine import EngineResult, MultiStrategyEngine, PaperEngine
 
 
 class FeedController(Protocol):
@@ -131,7 +131,7 @@ class OrderManager:
 class StrategyRunner:
     """Strategy facade around the one runtime-owned ``PaperEngine``."""
 
-    def __init__(self, engine: PaperEngine) -> None:
+    def __init__(self, engine: PaperEngine | MultiStrategyEngine) -> None:
         self.engine = engine
 
     def evaluate(self, bundle: DecisionBundle, context: Any = None) -> EngineResult:

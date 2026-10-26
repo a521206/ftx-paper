@@ -50,10 +50,27 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
         selected = request.args.get("strategy_id")
         if not selected:
             return None
-        known = {str(item["strategy_id"]) for item in session.strategy_status()}
+        known = {
+            str(item["strategy_id"])
+            for item in configured_strategy_statuses()
+            if item.get("strategy_id")
+        }
         if selected not in known:
             return INVALID_STRATEGY
         return selected
+
+    def configured_strategy_statuses() -> list[dict[str, Any]]:
+        """Keep configured strategies visible while the runtime is stopped.
+
+        A fresh process may not have an in-memory engine yet, but the last
+        runtime status still contains the strategy identities needed by the UI
+        and by strategy_id validation.
+        """
+        current = list(session.strategy_status())
+        if current:
+            return current
+        stored = store.read_status().get("strategies", [])
+        return [item for item in stored if isinstance(item, dict)]
 
     def filter_attributed(rows: list[dict[str, Any]], selected: str | None | object) -> list[dict[str, Any]]:
         if selected is None or selected is INVALID_STRATEGY:
@@ -415,7 +432,7 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
     @app.get("/api/v1/runtime")
     def runtime():
         status = store.read_status()
-        statuses = list(session.strategy_status())
+        statuses = configured_strategy_statuses()
         failed_id = status.get("failed_strategy_id")
         if failed_id:
             statuses = [
@@ -426,6 +443,11 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
         if status.get("bars_seen") or store.read_events(1):
             status["event_counts"] = store.event_counts()
         return jsonify(status)
+
+    @app.get("/api/v1/strategies")
+    def strategies():
+        """Return the canonical configured strategy catalog for every UI page."""
+        return jsonify(json_safe({"strategies": configured_strategy_statuses()}))
 
     @app.get("/api/v1/diagnostics")
     def diagnostics():

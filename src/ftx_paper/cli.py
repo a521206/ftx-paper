@@ -15,7 +15,7 @@ from ftx_paper.runtime.session import RuntimeSession
 from ftx_paper.runtime.store import RuntimeStore
 from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.strategy import ConfiguredStrategyFactory
-from ftx_paper.runtime.engine import PaperEngine
+from ftx_paper.runtime.engine import MultiStrategyEngine
 from ftx_paper.ui import create_ui_app
 from ftx_paper.broker.shoonya import ShoonyaAuth
 from ftx_paper.broker.xts import XTSAuth
@@ -115,11 +115,16 @@ def api_main() -> None:
             capital_profile=capital_profile,
             portfolio=portfolio,
             capital_context=capital_context,
-            engine=PaperEngine(strategy_factory.create(
-                expiry_dates=store.read_expiry_dates(),
-                portfolio=portfolio,
-                capital_context=capital_context,
-            )),
+            engine=MultiStrategyEngine({
+                "ftx-paper-research": strategy_factory.create(
+                    expiry_dates=store.read_expiry_dates(),
+                    portfolio=portfolio,
+                    capital_context=capital_context,
+                ),
+                "orderflow-research": strategy_factory.create(
+                    strategy_name="ftx-paper-orderflow",
+                ),
+            }),
         )
         replay_worker = ReplayWorker(store, capital_profile=capital_profile)
         operations = RuntimeOperations(session, replay_worker)

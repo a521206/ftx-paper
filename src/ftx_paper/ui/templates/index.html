@@ -353,6 +353,46 @@
       width: auto;
     }
 
+    .decision-filters {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: end;
+      justify-content: space-between;
+      gap: 14px;
+      margin: 0 0 18px;
+      padding: 14px;
+      border: 1px solid var(--md-outline-variant);
+      border-radius: 12px;
+      background: var(--md-surface);
+    }
+
+    .decision-strategy-control {
+      display: grid;
+      gap: 6px;
+      min-width: min(100%, 260px);
+      color: var(--md-on-surface-variant);
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .decision-strategy-control select {
+      min-height: 40px;
+      padding: 8px 36px 8px 12px;
+      border: 1px solid var(--md-outline-variant);
+      border-radius: 8px;
+      background: var(--md-surface);
+      color: var(--md-on-surface);
+      font: inherit;
+    }
+
+    .decision-filter-hint {
+      flex: 1 1 240px;
+      margin: 0;
+      color: var(--md-on-surface-variant);
+      font-size: 13px;
+      line-height: 19px;
+    }
+
     .event-toolbar {
       display: flex;
       flex-wrap: wrap;
@@ -1091,7 +1131,7 @@
     let refreshDelayMs = 5000;
     let refreshInFlight = false;
     let sharedRefreshInFlight = false;
-    let sharedData = { runtime: {}, broker: {} };
+    let sharedData = { runtime: {}, broker: {}, strategies: [] };
     const replayDetails = new Map();
     let latestData = null;
 
@@ -1632,7 +1672,7 @@
     function render(data) {
       latestData = data;
       const runtime = data.runtime || {};
-      const strategies = runtime.strategies || [];
+      const strategies = data.strategies || [];
       const feedHealth = runtime.feed_health || {};
       const capital = data.capital || {};
       const decisionRows = data.decisions.decisions || [];
@@ -1642,11 +1682,11 @@
       const brokerLabel = rawBrokerName.charAt(0).toUpperCase() + rawBrokerName.slice(1);
       const connectText = brokerObj.authenticated ? `${brokerLabel} Connected` : `Connect ${brokerLabel}`;
 
-      const top = page === 'replay' ? '' : `<div class="card">
+      const top = `<div class="card">
         <div class="toolbar">
           <strong>Runtime controls</strong>
           <div>
-            ${strategies.map((item) => `<label class="strategy-filter"><input type="checkbox" aria-label="Filter by ${esc(item.name || item.strategy_id)}" data-strategy-id="${esc(item.strategy_id)}"${selectedStrategy === item.strategy_id ? ' checked' : ''}>${esc(item.name || item.strategy_id)}</label>`).join('')}
+            ${page === 'decisions' ? '' : strategies.map((item) => `<label class="strategy-filter"><input type="checkbox" aria-label="Filter by ${esc(item.name || item.strategy_id)}" data-strategy-id="${esc(item.strategy_id)}"${selectedStrategy === item.strategy_id ? ' checked' : ''}>${esc(item.name || item.strategy_id)}</label>`).join('')}
             <button id="connect">${esc(connectText)}</button>
             <button data-cmd="restart" class="secondary">Restart</button>
             <button data-cmd="stop" class="danger">Stop</button>
@@ -1743,12 +1783,23 @@
         const selectedStats = decisionStats(summary, selectedDecisionSession);
         body = `<div class="card">
           <h2>Decision activity · ${esc(data.decisions.date || decisionDate)}</h2>
+          <div class="decision-filters">
+            <label class="decision-strategy-control" for="decision-strategy-filter">Strategy
+              <select id="decision-strategy-filter" aria-label="Filter decisions by strategy">
+                <option value=""${selectedStrategy ? '' : ' selected'}>All strategies</option>
+                ${strategies.map((item) => `<option value="${esc(item.strategy_id)}"${selectedStrategy === item.strategy_id ? ' selected' : ''}>${esc(item.name || item.strategy_id)}</option>`).join('')}
+              </select>
+            </label>
+            <p class="decision-filter-hint">Choose a strategy to focus the session totals and recent decisions. The selected strategy stays active while you change sessions.</p>
+          </div>
           <div class="session-grid">
             ${decisionSessions
               .map((x) => {
                 const stats = decisionStats(summary, x[0]);
                 const active = stats.detections > 0;
-                return `<a class="session session-filter" href="/decisions?session=${encodeURIComponent(x[0])}&date=${encodeURIComponent(decisionDate)}"${selectedDecisionSession === x[0] ? ' aria-current="page"' : ''}>
+                const sessionQuery = new URLSearchParams({ session: x[0], date: decisionDate });
+                if (selectedStrategy) sessionQuery.set('strategy_id', selectedStrategy);
+                return `<a class="session session-filter" href="/decisions?${sessionQuery.toString()}"${selectedDecisionSession === x[0] ? ' aria-current="page"' : ''}>
                   <strong>${x[0]}</strong>
                   <div class="label">${x[1]}</div>
                   <span class="session-count">${stats.detections} <span class="label">detections</span></span>
@@ -1819,6 +1870,12 @@
     }
 
     function wire() {
+      document.getElementById('decision-strategy-filter')?.addEventListener('change', (event) => {
+        const query = new URLSearchParams(location.search);
+        if (event.target.value) query.set('strategy_id', event.target.value);
+        else query.delete('strategy_id');
+        location.search = query.toString();
+      });
       document.querySelectorAll('.strategy-filter input').forEach((input) => {
         input.addEventListener('change', (event) => {
           const query = new URLSearchParams(location.search);
@@ -1929,13 +1986,15 @@
       const entries = await Promise.allSettled([
         get('/api/v1/health'),
         get('/api/v1/runtime'),
+        get('/api/v1/strategies'),
         get('/api/v1/broker/status').catch(() => get('/api/v1/broker/zerodha/status')),
       ]);
-      const [health, runtime, broker] = entries;
+      const [health, runtime, strategies, broker] = entries;
       document.getElementById('health').innerHTML = health.status === 'fulfilled' && health.value.status === 'pass'
         ? '<span class="dot good"></span>Healthy'
         : '<span class="dot bad"></span>API unavailable';
       if (runtime.status === 'fulfilled') sharedData.runtime = runtime.value;
+      if (strategies.status === 'fulfilled') sharedData.strategies = strategies.value.strategies || [];
       if (broker.status === 'fulfilled') sharedData.broker = broker.value;
       if (latestData) render({ ...latestData, ...sharedData });
       sharedRefreshInFlight = false;

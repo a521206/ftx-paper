@@ -166,6 +166,11 @@ class MultiStrategyEngine:
     def strategy_metadata(self) -> StrategyMetadata | None:
         return self.instances[0].strategy.metadata if len(self.instances) == 1 else None
 
+    @property
+    def bars_seen(self) -> int:
+        """Compatibility view for the single-strategy runtime metrics."""
+        return self._engines[self.instances[0].strategy_id].bars_seen
+
     def strategy_status(self) -> tuple[dict[str, object], ...]:
         return tuple({
             "strategy_id": item.strategy_id,
