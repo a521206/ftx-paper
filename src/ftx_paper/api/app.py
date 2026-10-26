@@ -19,6 +19,8 @@ from ftx_paper.runtime.events import (
 from ftx_paper.runtime.events import serialize_datetime
 from .schemas import error_payload, openapi_document
 
+INVALID_STRATEGY = object()
+
 
 def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token: str | None = None,
                controller: Any | None = None, session: RuntimeSession | None = None,
@@ -43,6 +45,20 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
         if isinstance(value, (list, tuple)):
             return [json_safe(item) for item in value]
         return value
+
+    def strategy_filter() -> str | None | object:
+        selected = request.args.get("strategy_id")
+        if not selected:
+            return None
+        known = {str(item["strategy_id"]) for item in session.strategy_status()}
+        if selected not in known:
+            return INVALID_STRATEGY
+        return selected
+
+    def filter_attributed(rows: list[dict[str, Any]], selected: str | None | object) -> list[dict[str, Any]]:
+        if selected is None or selected is INVALID_STRATEGY:
+            return rows
+        return [row for row in rows if row.get("payload", {}).get("strategy_id") == selected]
 
     def replay_metadata(run: dict[str, Any]) -> dict[str, Any]:
         result = run.get("result")
@@ -399,13 +415,29 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
     @app.get("/api/v1/runtime")
     def runtime():
         status = store.read_status()
+        statuses = list(session.strategy_status())
+        failed_id = status.get("failed_strategy_id")
+        if failed_id:
+            statuses = [
+                {**item, "state": "failed" if item["strategy_id"] == failed_id else "stopped"}
+                for item in statuses
+            ]
+        status["strategies"] = statuses
         if status.get("bars_seen") or store.read_events(1):
             status["event_counts"] = store.event_counts()
         return jsonify(status)
 
     @app.get("/api/v1/diagnostics")
     def diagnostics():
-        return jsonify({"status": store.read_status(), "event_counts": store.event_counts()})
+        selected = strategy_filter()
+        if selected is INVALID_STRATEGY:
+            return jsonify(error_payload("invalid_strategy", "strategy_id is not configured")), 400
+        events = filter_attributed(store.read_events(1000), selected)
+        counts: dict[str, int] = {}
+        for event in events:
+            event_type = str(event.get("event_type", "UNKNOWN"))
+            counts[event_type] = counts.get(event_type, 0) + 1
+        return jsonify({"status": store.read_status(), "event_counts": counts})
 
     @app.post("/api/v1/runtime/<command>")
     def runtime_command(command: str):
@@ -434,7 +466,10 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             limit = min(int(request.args.get("limit", "100")), 1000)
         except ValueError:
             return jsonify({"error": {"code": "invalid_limit", "message": "limit must be an integer"}}), 400
-        return jsonify(json_safe({"events": store.read_events(limit)}))
+        selected = strategy_filter()
+        if selected is INVALID_STRATEGY:
+            return jsonify(error_payload("invalid_strategy", "strategy_id is not configured")), 400
+        return jsonify(json_safe({"events": filter_attributed(store.read_events(limit), selected)}))
 
     @app.get("/api/v1/decisions")
     def decisions():
@@ -457,10 +492,15 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
         selected_session = request.args.get("session")
         if selected_session not in {None, "", "Pre", "Morning", "Mid", "Afternoon", "Post"}:
             return jsonify(error_payload("invalid_session", "session must be Pre, Morning, Mid, Afternoon, or Post")), 400
+        selected_strategy = strategy_filter()
+        if selected_strategy is INVALID_STRATEGY:
+            return jsonify(error_payload("invalid_strategy", "strategy_id is not configured")), 400
 
-        summary = store.read_decision_summary(selected_date)
+        strategy_id = selected_strategy if isinstance(selected_strategy, str) else None
+        summary = store.read_decision_summary(selected_date, strategy_id=strategy_id)
         decision_events = store.read_decision_events(
-            session_date=selected_date, limit=limit + 1, before_id=before_id,
+            session_date=selected_date, strategy_id=strategy_id,
+            limit=limit + 1, before_id=before_id,
             session_name=selected_session or None,
         )
         has_more = len(decision_events) > limit
@@ -471,7 +511,10 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
         }
         executions_by_decision: dict[str, list[dict[str, Any]]] = {}
         risks_by_decision: dict[str, list[dict[str, Any]]] = {}
-        for event in store.read_decision_lifecycle_events(decision_ids):
+        lifecycle_events = store.read_decision_lifecycle_events(decision_ids)
+        if strategy_id:
+            lifecycle_events = filter_attributed(lifecycle_events, strategy_id)
+        for event in lifecycle_events:
             event_type = str(event.get("event_type", "")).upper()
             decision_id = event.get("payload", {}).get("decision_id")
             if not decision_id:
@@ -554,7 +597,11 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
 
     @app.get("/api/v1/trades")
     def trades():
-        rows = [event for event in store.read_events(1000) if event["event_type"] in {"FILL", "TRADE"}]
+        selected = strategy_filter()
+        if selected is INVALID_STRATEGY:
+            return jsonify(error_payload("invalid_strategy", "strategy_id is not configured")), 400
+        rows = [event for event in filter_attributed(store.read_events(1000), selected)
+                if event["event_type"] in {"FILL", "TRADE"}]
         return jsonify({"trades": rows})
 
     @app.get("/api/v1/audit")

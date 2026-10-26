@@ -88,8 +88,9 @@ cross-process compare-and-set mechanism.
 
 On interruption, startup marks the session `STOPPED` and records a
 `RUNTIME_RECOVERY` audit event. It does not reconstruct the in-memory engine or
-portfolio from SQLite, and paper trading has no external positions to
-reconcile.
+portfolio from SQLite. Paper positions are internal simulated state and are
+not reconciled with broker positions; recovery is an audit and startup-gating
+operation only.
 
 The in-process facades are `FeedManager`, `OrderManager`, `StrategyRunner`,
 and `PnlManager`. They delegate to the existing runtime owner and aggregate;
@@ -97,6 +98,49 @@ and `PnlManager`. They delegate to the existing runtime owner and aggregate;
 another runtime owner.
 
 ## Strategy Extension
+
+### Multiple Strategy Instances
+
+See [Multi-Strategy Implementation](MULTI_STRATEGY_IMPLEMENTATION.md) for
+composition, dispatch, failure handling, snapshots, and UI/API integration.
+
+`MultiStrategyEngine` is the runtime-owned coordinator for running more than
+one configured strategy in a single `RuntimeSession`. Each `StrategyInstance`
+has an independent strategy object, stable `strategy_id`, and enabled flag. The
+coordinator dispatches each completed bundle to enabled instances. All
+instances share the one runtime portfolio and capital context. If any strategy
+fails while processing a bundle, the runtime treats the bundle as failed and
+stops the runtime rather than continuing with a partial multi-strategy result.
+Client order IDs are prefixed with the strategy ID to keep concurrent
+instances idempotent.
+
+The portfolio and capital context remain owned by `RuntimeSession` and are
+bound to every instance. Strategies do not own competing positions; execution
+still authorizes and settles against the one runtime portfolio.
+Execution notifications are routed by `strategy_id`, while unattributed
+notifications are delivered to all instances for compatibility.
+
+Strategies are evaluated in configured order. The runtime collects their
+decisions, then authorizes orders sequentially against shared capital and
+reservations, rejecting orders that exceed current limits. An order that would
+offset another strategy's open exposure in the same instrument is rejected;
+each strategy may close only its own attributed quantity. If any strategy
+fails, the runtime stops without rollback or automatic retry. Mutations and
+paper fills already applied are preserved. Enabled strategies are configured
+at startup, and interrupted sessions remain `STOPPED` without snapshot-based
+resumption.
+
+Use the coordinator at the composition boundary:
+
+```python
+engine = MultiStrategyEngine({
+    "opening-range": StrategyInstance("opening-range", opening_range),
+    "mean-reversion": StrategyInstance("mean-reversion", mean_reversion),
+})
+session = RuntimeSession(store, auth, specifications, engine=engine)
+```
+
+The single `PaperEngine` remains supported for existing deployments and tests.
 
 Strategies live in `ftx_paper.strategy` and are selected at the composition
 boundary. The `Strategy` protocol is the stable extension point:
@@ -180,6 +224,18 @@ projections. They must not read the runtime database, infer hidden portfolio
 state, or issue orders outside API-owned commands. OpenAPI discovery,
 pagination, queued responses, authentication, and CORS are API contract
 details maintained with the route implementation.
+
+With multiple strategies enabled, the API remains the single projection
+boundary for the shared runtime. Decision, order, execution, and diagnostic
+projections include the stable `strategy_id` when an event is attributable to
+one strategy. The first UI pass keeps the existing dashboard, defaults to an
+`All strategies` filter, and supports filtering decisions, orders, fills, and
+diagnostics by strategy. Activity tables include a `Strategy` column, and a
+small strategy list shows each strategy's name and enabled status. Positions,
+capital, reservations, and runtime health remain shared runtime views labelled
+`Shared portfolio`, not separate per-strategy accounts. A failure in any
+strategy is reported through one prominent runtime failure banner naming the
+source, and the UI shows the other strategies as stopped.
 
 ## Extension Rules
 

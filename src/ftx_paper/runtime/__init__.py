@@ -6,12 +6,14 @@ if TYPE_CHECKING:
     from .controller import RuntimeController
     from .event_bus import EventBus, EventHandler
     from .facades import FeedController, FeedManager, OrderManager, PnlManager, StrategyRunner
+    from .engine import MultiStrategyEngine, StrategyInstance
     from .session import RuntimeSession
     from .store import ProcessAlreadyRunningError, RuntimeStore
 
 __all__ = [
     "EventBus", "EventHandler", "FeedController", "FeedManager", "OrderManager",
     "ProcessAlreadyRunningError", "PnlManager", "RuntimeController", "RuntimeSession", "RuntimeStore", "StrategyRunner",
+    "MultiStrategyEngine", "StrategyInstance",
 ]
 
 
@@ -31,6 +33,9 @@ def __getattr__(name: str) -> object:
             "FeedController": FeedController, "FeedManager": FeedManager,
             "OrderManager": OrderManager, "PnlManager": PnlManager, "StrategyRunner": StrategyRunner,
         }[name]
+    if name in {"MultiStrategyEngine", "StrategyInstance"}:
+        from .engine import MultiStrategyEngine, StrategyInstance
+        return {"MultiStrategyEngine": MultiStrategyEngine, "StrategyInstance": StrategyInstance}[name]
     if name == "RuntimeSession":
         from .session import RuntimeSession
         return RuntimeSession

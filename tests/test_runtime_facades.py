@@ -9,12 +9,15 @@ from ftx_paper.contracts import RuntimeEvent
 from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.execution import PaperExecutionCoordinator
 from ftx_paper.execution.service import ExecutionService
-from ftx_paper.runtime import EventBus, FeedManager, OrderManager, PnlManager, StrategyRunner
+from ftx_paper.runtime import EventBus, FeedManager, MultiStrategyEngine, OrderManager, PnlManager, StrategyInstance, StrategyRunner
 from ftx_paper.ports import ExecutionPort, MarketDataPort, OrderStatusPort, PnlQueryPort
 from ftx_paper.broker import PaperBroker
 from ftx_paper.domain import PortfolioState
 from ftx_paper.market import LiveMarketNormalizer
 from ftx_paper.runtime.engine import EngineResult, PaperEngine
+from ftx_paper.strategy.decision import LiveDecision
+from ftx_paper.strategy.protocol import StrategyMetadata
+from ftx_paper.strategy.exits import ExitAction
 
 
 class Feed:
@@ -67,6 +70,101 @@ def test_strategy_runner_delegates_to_one_engine():
 
     assert runner.evaluate(cast(DecisionBundle, bundle)).events == ({"event_type": "DELEGATED"},)
     assert runner.on_tick(bar) == ()
+
+
+def test_multi_strategy_engine_dispatches_and_attributes_orders():
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    order = OrderIntent("decision-1", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY)
+
+    class Strategy:
+        def __init__(self, name, should_fail=False):
+            self.name = name
+            self.should_fail = should_fail
+            self.calls = 0
+
+        @property
+        def metadata(self):
+            return StrategyMetadata(self.name, "1", self.name)
+
+        def on_bundle(self, _bundle):
+            self.calls += 1
+            if self.should_fail:
+                raise RuntimeError("isolated")
+            return (LiveDecision("ENTRY", {"decision_id": self.name}, order),)
+
+        def evaluate(self, bundle, _context):
+            return self.on_bundle(bundle)
+
+        def on_execution_event(self, _event):
+            pass
+
+        def snapshot(self):
+            return {}
+
+    first = Strategy("first")
+    second = Strategy("second", should_fail=True)
+    engine = MultiStrategyEngine({
+        "first": StrategyInstance("first", first, account_id="paper"),
+        "second": second,
+    })
+    bundle = type("Bundle", (), {"bars": {}, "bundle_id": "bundle", "minute": "04:00", "complete": True})()
+
+    with pytest.raises(RuntimeError, match="strategy 'second' failed"):
+        engine.on_bundle(cast(DecisionBundle, bundle))
+
+    assert first.calls == second.calls == 1
+
+
+def test_multi_strategy_engine_collects_attributed_orders_in_configured_order():
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+
+    class Strategy:
+        def __init__(self, name):
+            self.name = name
+
+        @property
+        def metadata(self):
+            return StrategyMetadata(self.name, "1", self.name)
+
+        def on_bundle(self, _bundle):
+            return (LiveDecision("ENTRY", {}, OrderIntent(
+                self.name, instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY,
+            )),)
+
+        def on_execution_event(self, _event):
+            pass
+
+        def snapshot(self):
+            return {}
+
+    engine = MultiStrategyEngine({"first": Strategy("first"), "second": Strategy("second")})
+    bundle = type("Bundle", (), {"bars": {}, "bundle_id": "bundle", "minute": "04:00", "complete": True})()
+
+    result = engine.on_bundle(cast(DecisionBundle, bundle))
+
+    assert [order.strategy_id for order in result.orders] == ["first", "second"]
+    assert [order.client_order_id for order in result.orders] == ["first:first", "second:second"]
+
+
+def test_multi_strategy_engine_attributes_protective_exits_to_owner():
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+
+    class Strategy:
+        @property
+        def metadata(self):
+            return StrategyMetadata("owner", "1", "owner")
+
+        def on_closed_bar(self, _bar):
+            return (ExitAction("stop", 99.0, OrderIntent(
+                "exit", instrument, OrderSide.SELL, 1, role=OrderRole.EXIT,
+            )),)
+
+    engine = MultiStrategyEngine({"owner": Strategy()})
+    bar = MarketBar(instrument, datetime(2026, 1, 1, 4, 0, tzinfo=timezone.utc), 100, 100, 100, 100)
+
+    actions = engine.on_closed_bar(bar)
+
+    assert actions[0].intent.strategy_id == "owner"
 
 
 def test_execution_service_isolates_optional_observers_but_propagates_critical_failure():

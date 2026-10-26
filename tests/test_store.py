@@ -135,6 +135,22 @@ def test_runtime_store_preserves_warmup_event_payload(tmp_path):
     }
 
 
+def test_runtime_store_filters_decision_summary_and_cursor_by_strategy(tmp_path):
+    store = RuntimeStore(tmp_path)
+    for strategy_id, minute in (("alpha", "10:20"), ("beta", "10:19"), ("alpha", "10:18")):
+        store.append_event("CANDIDATEDECISION", {
+            "decision_at": f"2026-09-10T{minute}:00+05:30",
+            "decision_id": f"{strategy_id}-{minute}",
+            "strategy_id": strategy_id,
+            "outcome": "accepted",
+        })
+
+    rows = store.read_decision_events("2026-09-10", limit=2, strategy_id="alpha")
+    assert [row["payload"]["strategy_id"] for row in rows] == ["alpha", "alpha"]
+    summary = store.read_decision_summary("2026-09-10", strategy_id="alpha")
+    assert summary["totals"]["detections"] == 2
+
+
 def test_runtime_store_persists_order_before_external_dispatch(tmp_path):
     store = RuntimeStore(tmp_path)
     assert store.create_order_lifecycle(

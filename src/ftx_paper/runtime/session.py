@@ -21,7 +21,7 @@ from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.strategy.protocol import Strategy
 from ftx_paper.execution.cost import futures_cost
 from ftx_paper.execution.settlement import ExitValidationError, validate_exit_order
-from .engine import PaperEngine
+from .engine import PaperEngine, StrategyDispatchError
 from .facades import FeedController, FeedManager, OrderManager, PnlManager, StrategyRunner
 from .event_bus import EventBus
 from ftx_paper.execution import ExecutionService, PaperExecutionCoordinator
@@ -81,6 +81,9 @@ class RuntimeSession:
                 strategy.portfolio = self.portfolio
             if hasattr(strategy, "capital_context"):
                 strategy.capital_context = self.capital_context
+        bind_context = getattr(self.engine, "set_account_context", None)
+        if callable(bind_context):
+            bind_context(self.portfolio, self.capital_context)
         self.account = (
             AccountAggregate(self.portfolio, self.capital_context)
             if self.portfolio is not None and self.capital_context is not None else None
@@ -116,18 +119,65 @@ class RuntimeSession:
     def _restore_strategy_state(self) -> None:
         """Restore the strategy-owned portfolio and risk state before execution wiring."""
         strategy = getattr(self.engine, "strategy", None)
+        restore_many = getattr(self.engine, "restore_snapshots", None)
         restore = getattr(type(strategy), "from_snapshot", None) if strategy is not None else None
         raw_snapshot = self.store.read_status().get("strategy_snapshot")
+        if callable(restore_many) and isinstance(raw_snapshot, Mapping) and self.capital_profile is not None:
+            restore_many(raw_snapshot, capital_profile=self.capital_profile)
+            return
         if not callable(restore) or not isinstance(raw_snapshot, Mapping) or self.capital_profile is None:
             return
         restored = restore(raw_snapshot, capital_profile=self.capital_profile)
         self.engine.strategy = cast(Strategy, restored)
 
     def _persist_strategy_state(self) -> None:
-        strategy = getattr(self.engine, "strategy", None)
-        snapshot = getattr(strategy, "snapshot", None)
+        snapshot = getattr(self.engine, "snapshot", None)
+        if not callable(snapshot):
+            strategy = getattr(self.engine, "strategy", None)
+            snapshot = getattr(strategy, "snapshot", None)
         if callable(snapshot):
             self.store.patch_status({"strategy_snapshot": snapshot()})
+
+    def strategy_status(self) -> tuple[dict[str, object], ...]:
+        status = getattr(self.engine, "strategy_status", None)
+        return cast(tuple[dict[str, object], ...], status()) if callable(status) else ()
+
+    def _record_strategy_failure(self, error: StrategyDispatchError, *, timestamp: str,
+                                 session_date: str | None = None) -> None:
+        self._halt_strategy_runtime()
+        self.store.append_event("STRATEGY_ERROR", {
+            "strategy_id": error.strategy_id,
+            "error_type": type(error.cause).__name__,
+            "reason": str(error.cause),
+            "decision_source": "live",
+            "session_date": session_date,
+            "execution_allowed": True,
+        }, f"strategy_error:live:{timestamp}:{error.strategy_id}", timestamp=timestamp)
+        self.store.patch_status({
+            "state": "ERROR", "health_state": "FAILED",
+            "error": str(error), "failed_strategy_id": error.strategy_id,
+        })
+
+    def _halt_strategy_runtime(self) -> None:
+        self._stopping = True
+        self._stop_event.set()
+        self._market_wait.set()
+        if self.feed is not None:
+            try:
+                self.feed.stop()
+            except Exception:
+                logger.exception("Runtime feed failed after strategy failure")
+        if self.broker is not None:
+            try:
+                self.broker.close()
+            except Exception:
+                logger.exception("Runtime broker failed after strategy failure")
+        worker = self._thread
+        if worker is not None and worker is not threading.current_thread():
+            worker.join(timeout=30.0)
+            if worker.is_alive():
+                logger.error("Runtime worker did not stop after strategy failure")
+        self._release_feed_lease()
 
     def start(self) -> None:
         with self._lock:
@@ -149,8 +199,9 @@ class RuntimeSession:
                                      "error": None, "started_at": datetime.now(timezone.utc).isoformat(),
                                      "initial_capital": self.capital_profile.initial_capital if self.capital_profile else None,
                                      "max_daily_loss": self.capital_profile.max_daily_loss if self.capital_profile else None,
-                                     "max_net_directional_lots": self.capital_profile.max_net_directional_lots if self.capital_profile else None,
-                                     "capital": (
+                                      "max_net_directional_lots": self.capital_profile.max_net_directional_lots if self.capital_profile else None,
+                                      "strategies": self.strategy_status(),
+                                      "capital": (
                                          self.portfolio.equity
                                          if self.portfolio is not None
                                          else None
@@ -429,17 +480,33 @@ class RuntimeSession:
         """Persist a bundle result, with live execution kept behind the source gate."""
         active_engine = engine
         context = self.account.context() if source == "live" and self.account is not None else None
-        if context is None:
-            result = active_engine.on_bundle(bundle)
-        else:
-            try:
-                result = active_engine.on_bundle(bundle, context=context)
-            except TypeError as exc:
-                if "context" not in str(exc):
-                    raise
-                result = active_engine.on_bundle(bundle)
         decision_at = _bundle_timestamp(bundle.trading_date, bundle.minute)
         timestamp = serialize_datetime(decision_at)
+        try:
+            if context is None:
+                result = active_engine.on_bundle(bundle)
+            else:
+                try:
+                    result = active_engine.on_bundle(bundle, context=context)
+                except TypeError as exc:
+                    if "context" not in str(exc):
+                        raise
+                    result = active_engine.on_bundle(bundle)
+        except StrategyDispatchError as exc:
+            self._halt_strategy_runtime()
+            self.store.append_event("STRATEGY_ERROR", {
+                "strategy_id": exc.strategy_id,
+                "error_type": type(exc.cause).__name__,
+                "reason": str(exc.cause),
+                "decision_source": source,
+                "session_date": bundle.trading_date,
+                "execution_allowed": source == "live",
+            }, f"strategy_error:{source}:{bundle.bundle_id}:{exc.strategy_id}", timestamp=timestamp)
+            self.store.patch_status({
+                "state": "ERROR", "health_state": "FAILED",
+                "error": str(exc), "failed_strategy_id": exc.strategy_id,
+            })
+            return
         for event in result.events:
             self._persist_engine_event(event, source=source, bundle_id=bundle.bundle_id,
                                         session_date=bundle.trading_date, decision_at=decision_at, timestamp=timestamp,
@@ -519,6 +586,7 @@ class RuntimeSession:
                 self._persist_strategy_state()
             if order.role is OrderRole.ENTRY and order.cell and session_date:
                 self.engine.cancel_entry(cell=order.cell,
+                                         strategy_id=order.strategy_id,
                                          direction="long" if order.side is OrderSide.BUY else "short",
                                          quantity=order.quantity, date=session_date, vehicle=order.vehicle)
         def compensate_fills(fills: tuple, broker_order_id: str) -> bool:
@@ -907,15 +975,25 @@ class RuntimeSession:
             bundle = self._aggregator.ingest(bar)
             # Settle positions carried into this bar before evaluating a new
             # bundle, matching the deterministic replay ordering.
-            for action in self.engine.on_closed_bar(bar):
+            try:
+                exit_actions = self.engine.on_closed_bar(bar)
+            except StrategyDispatchError as exc:
+                self._record_strategy_failure(
+                    exc, timestamp=bar.timestamp.isoformat(),
+                    session_date=bar.timestamp.astimezone(IST).date().isoformat(),
+                )
+                return
+            for action in exit_actions:
                 filled = self._execute_paper_order(
                     action.intent,
                     session_date=bar.timestamp.astimezone(IST).date().isoformat(),
                     timestamp=bar.timestamp.isoformat(),
                 )
-                self.engine.settle_exit(action.intent.client_order_id, filled=filled)
+                self.engine.settle_exit(action.intent.client_order_id, filled=filled,
+                                        strategy_id=action.intent.strategy_id)
                 if filled and action.cell is not None:
                     self.engine.record_exit(
+                        strategy_id=action.intent.strategy_id,
                         cell=action.cell,
                         reason=action.reason,
                         entry_bar=action.intent.entry_bar or 0,
@@ -961,16 +1039,25 @@ class RuntimeSession:
                 return
             if isinstance(self.broker, PaperBroker):
                 self.broker.update_price(bar.instrument.symbol, bar.close)
-            result = self.engine.on_tick(bar)
+            try:
+                result = self.engine.on_tick(bar)
+            except StrategyDispatchError as exc:
+                self._record_strategy_failure(
+                    exc, timestamp=bar.timestamp.isoformat(),
+                    session_date=bar.timestamp.astimezone(IST).date().isoformat(),
+                )
+                return
             for action in result:
                 filled = self._execute_paper_order(
                     action.intent,
                     session_date=bar.timestamp.astimezone(IST).date().isoformat(),
                     timestamp=bar.timestamp.isoformat(),
                 )
-                self.engine.settle_exit(action.intent.client_order_id, filled=filled)
+                self.engine.settle_exit(action.intent.client_order_id, filled=filled,
+                                        strategy_id=action.intent.strategy_id)
                 if filled and action.cell is not None:
                     self.engine.record_exit(
+                        strategy_id=action.intent.strategy_id,
                         cell=action.cell,
                         reason=action.reason,
                         entry_bar=action.intent.entry_bar or 0,

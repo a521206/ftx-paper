@@ -879,7 +879,7 @@
 
     .decision-row {
       display: grid;
-      grid-template-columns: 130px 1fr 110px 1fr 100px;
+      grid-template-columns: 130px 130px 1fr 110px 1fr 100px;
       gap: 12px;
       align-items: center;
       font-size: 14px;
@@ -1064,6 +1064,7 @@
     ];
 
     let selectedDecisionSession = new URLSearchParams(location.search).get('session');
+    const selectedStrategy = new URLSearchParams(location.search).get('strategy_id') || '';
     const decisionDate = new URLSearchParams(location.search).get('date') || new Intl.DateTimeFormat('en-CA', {
       timeZone: 'Asia/Kolkata',
     }).format(new Date());
@@ -1082,6 +1083,12 @@
     let sharedData = { runtime: {}, broker: {} };
     const replayDetails = new Map();
     let latestData = null;
+
+    function strategyQuery(path) {
+      if (!selectedStrategy) return path;
+      const separator = path.includes('?') ? '&' : '?';
+      return `${path}${separator}strategy_id=${encodeURIComponent(selectedStrategy)}`;
+    }
     let replaySelectionInFlight = false;
     const replaySearch = new URLSearchParams(location.search);
     let replayRangeState = {
@@ -1130,6 +1137,7 @@
         <thead>
           <tr>
             <th>Time</th>
+            <th>Strategy</th>
             <th>Type</th>
             <th>Details</th>
           </tr>
@@ -1139,6 +1147,7 @@
             .map(
               (x) => `<tr>
                 <td>${date(x.created_at)}</td>
+                <td>${esc(x.payload?.strategy_id || 'Unattributed')}</td>
                 <td>${badge(x.event_type)}</td>
                 <td>
                   <details>
@@ -1276,6 +1285,7 @@
             return `<details>
             <summary class="decision-row">
               <span>${date(decisionAt)}</span>
+              <span>${esc(x.strategy_id || x.payload?.strategy_id || 'Unattributed')}</span>
               <span>${esc(cell || '—')}</span>
               <span>${badge(direction || '—', direction === 'long' ? 'good' : direction === 'short' ? 'bad' : 'subtle')}</span>
               <span>${esc(displayDetail)}</span>
@@ -1624,6 +1634,7 @@
         <div class="toolbar">
           <strong>Runtime controls</strong>
           <div>
+            <select id="strategy-filter" aria-label="Strategy view"><option value="">All strategies</option>${(runtime.strategies || []).map((item) => `<option value="${esc(item.strategy_id)}"${selectedStrategy === item.strategy_id ? ' selected' : ''}>${esc(item.name || item.strategy_id)}</option>`).join('')}</select>
             <button id="connect">${esc(connectText)}</button>
             <button data-cmd="restart" class="secondary">Restart</button>
             <button data-cmd="stop" class="danger">Stop</button>
@@ -1683,6 +1694,8 @@
         body = performancePage(data.replays.runs || [], runtime, data.broker || {}, data.replayDates || []);
       } else if (page === 'dashboard') {
         body = `<div class="card">
+          ${runtime.failed_strategy_id ? `<div class="flash">Strategy ${esc(runtime.failed_strategy_id)} failed; the shared runtime is stopped.</div>` : ''}
+          <p class="label">Shared portfolio</p>
           <div class="section-head">
             <h2>Session overview</h2>
             <a href="/capital">View all</a>
@@ -1794,13 +1807,20 @@
     }
 
     function wire() {
+      document.getElementById('strategy-filter')?.addEventListener('change', (event) => {
+        const query = new URLSearchParams(location.search);
+        if (event.target.value) query.set('strategy_id', event.target.value);
+        else query.delete('strategy_id');
+        location.search = query.toString();
+      });
       document.getElementById('load-more-decisions')?.addEventListener('click', async (event) => {
         const button = event.currentTarget;
         if (!latestData?.decisions?.next_cursor) return;
         button.disabled = true;
         try {
-          const query = new URLSearchParams({ date: latestData.decisions.date || decisionDate, before: latestData.decisions.next_cursor, limit: '50' });
-          if (selectedDecisionSession) query.set('session', selectedDecisionSession);
+           const query = new URLSearchParams({ date: latestData.decisions.date || decisionDate, before: latestData.decisions.next_cursor, limit: '50' });
+           if (selectedDecisionSession) query.set('session', selectedDecisionSession);
+           if (selectedStrategy) query.set('strategy_id', selectedStrategy);
           const next = await get(`/api/v1/decisions?${query.toString()}`);
           latestData.decisions.decisions.push(...next.decisions);
           latestData.decisions.has_more = next.has_more;
@@ -1916,19 +1936,19 @@
           dashboard: {
             capital: '/api/v1/capital',
             positions: '/api/v1/positions',
-            decisions: '/api/v1/decisions',
+            decisions: strategyQuery('/api/v1/decisions'),
           },
           decisions: {
-            decisions: `/api/v1/decisions?${new URLSearchParams({ date: decisionDate, limit: '50', ...(selectedDecisionSession ? { session: selectedDecisionSession } : {}) }).toString()}`,
+            decisions: strategyQuery(`/api/v1/decisions?${new URLSearchParams({ date: decisionDate, limit: '50', ...(selectedDecisionSession ? { session: selectedDecisionSession } : {}) }).toString()}`),
           },
           positions: { positions: '/api/v1/positions' },
-          trades: { trades: '/api/v1/trades' },
+          trades: { trades: strategyQuery('/api/v1/trades') },
           capital: { capital: '/api/v1/capital' },
           replay: {
             replays: '/api/v1/replay',
             replayDates: '/api/v1/replay/dates',
           },
-          activity: { events: '/api/v1/events?limit=100' },
+          activity: { events: strategyQuery('/api/v1/events?limit=100') },
         }[page] || {};
 
         const responseEntries = await Promise.all(

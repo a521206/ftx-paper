@@ -499,9 +499,11 @@ class ReplayWorker:
                         status="FILLED", quantity=action.intent.quantity,
                         filled_quantity=action.intent.quantity, price=exit_price,
                     ))
-                    engine.settle_exit(action.intent.client_order_id, filled=True)
+                    engine.settle_exit(action.intent.client_order_id, filled=True,
+                                        strategy_id=action.intent.strategy_id)
                     if realized is not None:
-                        engine.record_exit(cell=realized.cell.name, reason=action.reason,
+                        engine.record_exit(strategy_id=action.intent.strategy_id,
+                                           cell=realized.cell.name, reason=action.reason,
                                            entry_bar=realized.entry_bar, exit_bar=engine.bars_seen,
                                            date=date, vehicle=action.intent.vehicle,
                                            direction="long" if action.intent.side.value == "SELL" else "short",
@@ -665,7 +667,8 @@ class ReplayWorker:
                                 timestamp=futures_bar.timestamp.isoformat(),
                                 cost=_execution_cost(open_trade),
                             )
-                        engine.record_exit(cell=realized.cell.name, reason=order.reason,
+                        engine.record_exit(strategy_id=order.strategy_id,
+                                           cell=realized.cell.name, reason=order.reason,
                                            entry_bar=realized.entry_bar, exit_bar=engine.bars_seen,
                                            date=date, vehicle=order.vehicle,
                                            direction="long" if order.side.value == "SELL" else "short",
