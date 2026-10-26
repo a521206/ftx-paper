@@ -5,6 +5,16 @@
 Changes intended for the next production release go here. Move them into a
 dated version section when production is pushed.
 
+## 0.2.1 - 2026-10-26
+
+Minor IIFL XTS market-data fixes.
+
+### Fixed
+
+- Corrected XTS REST and WebSocket deployment paths for IIFL market-data sessions.
+- Added typed XTS authentication and transport failures with one-time token refresh.
+- Made startup backfill and runtime shutdown cancellation-safe for XTS sessions.
+
 ## 0.2.0 - 2026-10-24
 
 This release records the changes brought in by the latest merge/pull, including
