@@ -9,13 +9,22 @@ from .adapter import (
 )
 from .auth import XTSAuth
 from .client import XTSClient
+from .config import XTSMarketDataConfig
+from .exceptions import XTSApiError, XTSAuthenticationError, XTSError, XTSTransportError
 from .feed import XTSFeed, create_xts_socket, is_nse_market_open
 from .protocol import exchange_code_for_segment, normalize_segment
+from .session import XTSMarketDataSession
 
 __all__ = [
     "XTSAuth",
     "XTSBroker",
     "XTSClient",
+    "XTSMarketDataConfig",
+    "XTSMarketDataSession",
+    "XTSError",
+    "XTSApiError",
+    "XTSAuthenticationError",
+    "XTSTransportError",
     "XTSFeed",
     "XTSInstrument",
     "classify_runtime_roles",

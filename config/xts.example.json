@@ -1,7 +1,9 @@
 {
   "app_key": "YOUR_XTS_APP_KEY",
   "secret_key": "YOUR_XTS_SECRET_KEY",
-  "root_url": "https://ttblaze.iifl.com",
+  "base_url": "https://ttblaze.iifl.com",
+  "market_data_path": "/apibinarymarketdata",
+  "websocket_path": "/apibinarymarketdata/socket.io/",
   "source": "WEBAPI",
   "instruments": [
     {

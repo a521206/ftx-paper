@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 from ftx_paper.contracts import MarketBar
 
 from .socket import AsyncXTSSocket
+from .session import XTSMarketDataSession
 
 IST = ZoneInfo("Asia/Kolkata")
 logger = logging.getLogger(__name__)
@@ -33,9 +34,26 @@ def is_nse_market_open(now: datetime | None = None) -> bool:
     return datetime_time(9, 15) <= market_time <= datetime_time(15, 30)
 
 
-def create_xts_socket(token: str, user_id: str = "", **kwargs: Any) -> AsyncXTSSocket:
+def create_xts_socket(
+    token: str | None = None,
+    user_id: str = "",
+    *,
+    root_url: str,
+    market_data_path: str,
+    token_session: XTSMarketDataSession | None = None,
+    client: Any = None,
+    **kwargs: Any,
+) -> AsyncXTSSocket:
     """Return an asynchronous Symphony / IIFL XTS WebSocket transport."""
-    return AsyncXTSSocket(token, user_id=user_id, **kwargs)
+    return AsyncXTSSocket(
+        token,
+        user_id=user_id,
+        root_url=root_url,
+        market_data_path=market_data_path,
+        token_session=token_session,
+        client=client,
+        **kwargs,
+    )
 
 
 @dataclass(frozen=True, slots=True)

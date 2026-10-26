@@ -11,14 +11,16 @@ from zoneinfo import ZoneInfo
 
 from ftx_paper.ports.records import AuthToken
 
-from .client import DEFAULT_ROOT_URL, XTSClient
+from .client import XTSClient
+from .config import XTSMarketDataConfig
+from .session import XTSMarketDataSession
 
 IST = ZoneInfo("Asia/Kolkata")
 logger = logging.getLogger(__name__)
 
 
 class XTSAuth:
-    """Token persistence and automated session login for Symphony / IIFL XTS."""
+    """Token persistence and automated XTS market-data login."""
 
     provider: str = "xts"
 
@@ -28,14 +30,23 @@ class XTSAuth:
         app_key: str,
         secret_key: str,
         *,
-        root_url: str = DEFAULT_ROOT_URL,
+        root_url: str = "https://developers.symphonyfintech.in",
+        market_data_path: str = "/apimarketdata",
+        websocket_path: str = "/apibinarymarketdata/socket.io/",
         source: str = "WEBAPI",
         token_repository: Any | None = None,
     ) -> None:
         self.token_db = Path(token_db)
         self.app_key = app_key.strip()
         self.secret_key = secret_key.strip()
-        self.root_url = root_url.rstrip("/")
+        deployment = XTSMarketDataConfig(
+            base_url=root_url,
+            market_data_path=market_data_path,
+            websocket_path=websocket_path,
+        )
+        self.root_url = deployment.base_url.rstrip("/")
+        self.market_data_path = deployment.market_data_path
+        self.websocket_path = deployment.websocket_path
         self.source = source.strip()
         self.user_id = ""
         self._last_auto_login_attempt: float = 0.0
@@ -64,7 +75,12 @@ class XTSAuth:
 
         app_key = str(raw.get("app_key") or raw.get("appKey") or "").strip()
         secret_key = str(raw.get("secret_key") or raw.get("secretKey") or "").strip()
-        root_url = str(raw.get("root_url") or raw.get("rootUrl") or DEFAULT_ROOT_URL).strip()
+        root_url = str(raw.get("base_url") or raw.get("root_url") or raw.get("rootUrl") or "").strip()
+        market_data_path = str(raw.get("market_data_path") or raw.get("marketDataPath") or "").strip()
+        websocket_path = str(raw.get("websocket_path") or raw.get("websocketPath") or "").strip()
+        root_url = root_url or "https://developers.symphonyfintech.in"
+        market_data_path = market_data_path or "/apimarketdata"
+        websocket_path = websocket_path or "/apibinarymarketdata/socket.io/"
         source = str(raw.get("source") or "WEBAPI").strip()
 
         db_path = token_db or raw.get("auth_db") or (config_path.parent.parent / "data" / "auth.sqlite3")
@@ -74,6 +90,8 @@ class XTSAuth:
             app_key=app_key,
             secret_key=secret_key,
             root_url=root_url,
+            market_data_path=market_data_path,
+            websocket_path=websocket_path,
             source=source,
         )
 
@@ -110,7 +128,7 @@ class XTSAuth:
         if not self.app_key or not self.secret_key:
             raise ValueError("XTS app_key and secret_key are required for login")
 
-        client = XTSClient(root_url=self.root_url)
+        client = XTSClient(root_url=self.root_url, market_data_path=self.market_data_path)
         client.login(self.app_key, self.secret_key, self.source)
         token = client.token
         if not token:
@@ -127,8 +145,16 @@ class XTSAuth:
         token = self.access_token()
         if not token:
             raise RuntimeError("No valid XTS access token available. Please configure valid app_key and secret_key.")
+        session = XTSMarketDataSession(
+            token,
+            self.user_id,
+            refresh=self.login,
+            user_id_provider=lambda: self.user_id,
+        )
         return XTSClient(
             token=token,
             user_id=self.user_id,
             root_url=self.root_url,
+            market_data_path=self.market_data_path,
+            token_session=session,
         )

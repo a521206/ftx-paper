@@ -106,6 +106,7 @@ class RuntimeSession:
         self._thread = None
         self._lock = threading.RLock()
         self._stopping = False
+        self._stop_event = threading.Event()
         self._started = threading.Event()
         self._market_wait = threading.Event()
         self._aggregator: CompletedBarAggregator | None = None
@@ -140,6 +141,7 @@ class RuntimeSession:
             if self._feed_lease_id is None:
                 self._feed_lease_id = self.store.acquire_process_lease(self.LIVE_FEED_LEASE)
             self._stopping = False
+            self._stop_event.clear()
             self._started.clear()
             self._market_wait.clear()
             self.store.patch_status({"state": "STARTING", "health_state": "STARTING",
@@ -198,10 +200,18 @@ class RuntimeSession:
                 )
 
             client = self.client_factory() if self.client_factory else self.auth.authenticated_client()
+            if hasattr(client, "cancel_event"):
+                client.cancel_event = self._stop_event
             resolved: list[Any] = list(cast(Sequence[Any], resolve_instruments(
                 client, self.specifications, contract_store=self.store,
             )))
+            if self._stop_event.is_set():
+                self._release_feed_lease()
+                return
             discovered_options = cast(Sequence[Any], discover_option_surface_contracts(client, underlying="NIFTY"))
+            if self._stop_event.is_set():
+                self._release_feed_lease()
+                return
             resolved_keys = {(str(item["exchange"]), str(item["symbol"])) for item in resolved}
             resolved.extend(
                 item for item in discovered_options
@@ -232,14 +242,29 @@ class RuntimeSession:
                 self.broker = PaperBroker()
             if not isinstance(self.broker, PaperBroker):
                 raise TypeError("runtime order execution must use PaperBroker")
-            backfill = load_startup_backfill(client, cast(Any, resolved), contract_store=self.store)
+            backfill_kwargs: dict[str, Any] = {"contract_store": self.store}
+            if provider == "xts":
+                backfill_kwargs["stop_event"] = self._stop_event
+            backfill = load_startup_backfill(client, cast(Any, resolved), **backfill_kwargs)
+            if self._stop_event.is_set():
+                self._release_feed_lease()
+                return
             self.store.append_market_bars(backfill, source="historical_backfill")
             access_token = self._wait_for_session_readiness(is_nse_market_open)
             if access_token is None:
+                self._release_feed_lease()
                 return
             normalize = self.normalize_payload or LiveMarketNormalizer(resolved, expiry_normalizer=instrument_expiry_iso)
             if provider == "xts":
-                xts_socket = create_xts_socket(access_token, user_id=getattr(self.auth, "user_id", ""), root_url=getattr(self.auth, "root_url", "https://ttblaze.iifl.com"))
+                xts_socket = create_xts_socket(
+                    access_token,
+                    user_id=getattr(self.auth, "user_id", ""),
+                    root_url=self.auth.root_url,
+                    market_data_path=self.auth.market_data_path,
+                    token_session=getattr(client, "session", None),
+                    websocket_path=getattr(self.auth, "websocket_path", None),
+                    client=client,
+                )
                 xts_feed_type = self.feed_factory or XTSFeed
                 xts_tokens = [(item.get("segment_id", 1), int(item["instrument_token"])) for item in resolved]
                 self.feed = xts_feed_type(
@@ -302,11 +327,19 @@ class RuntimeSession:
             self._replaying = False
             if self.broker is not None:
                 self.broker.close()
-            logger.exception("Runtime worker failed during startup")
-            self.store.patch_status({"state": "ERROR", "health_state": "FAILED",
-                                     "feed_connected": False, "error": str(exc)})
-            self._release_feed_lease()
+            if not self._stop_event.is_set():
+                logger.exception("Runtime worker failed during startup")
+                self.store.patch_status({"state": "ERROR", "health_state": "FAILED",
+                                         "feed_connected": False, "error": str(exc)})
+                self._release_feed_lease()
+            else:
+                self._release_feed_lease()
             self._started.set()
+        finally:
+            # If stop() timed out joining this worker, release ownership when
+            # the in-flight startup operation eventually returns.
+            if self._stop_event.is_set():
+                self._release_feed_lease()
 
     def _wait_for_session_readiness(self, is_market_open: Callable[[datetime | None], bool]) -> str | None:
         """Wait without opening a feed until today's token and market are ready."""
@@ -1013,6 +1046,7 @@ class RuntimeSession:
 
     def stop(self) -> None:
         self._stopping = True
+        self._stop_event.set()
         self._market_wait.set()
         with self._lock:
             startup = self._thread
@@ -1027,25 +1061,26 @@ class RuntimeSession:
         except Exception:
             feed_stopped = False
             logger.exception("Runtime feed failed while stopping")
-        finally:
-            try:
-                if broker:
-                    broker.close()
-            except Exception:
-                feed_stopped = False
-                logger.exception("Runtime broker failed while stopping")
-            finally:
-                with self._lock:
-                    self._release_feed_lease()
-                    final_state = "STOPPED" if feed_stopped else "ERROR"
-                    self.store.patch_status({"state": final_state, "health_state": final_state,
-                                             "feed_connected": False, "bars_seen": self.engine.bars_seen,
-                                             "pending_bundle_minutes": [], "pending_bundle_details": []})
+        try:
+            if broker:
+                broker.close()
+        except Exception:
+            feed_stopped = False
+            logger.exception("Runtime broker failed while stopping")
         if startup and startup is not threading.current_thread():
-            startup.join()
+            # Backfill and auth calls are bounded, but do not let shutdown hang
+            # forever if a broker library ignores its request timeout.
+            startup.join(timeout=30.0)
+        startup_stopped = startup is None or not startup.is_alive()
+        if not startup_stopped:
+            logger.error("Runtime startup worker did not stop within 30 seconds")
         with self._lock:
             try:
-                final_state = "STOPPED" if feed_stopped else "ERROR"
+                final_state = "STOPPED" if feed_stopped and startup_stopped else "ERROR"
+                if not startup_stopped:
+                    self.store.patch_status({"error": "startup worker did not stop within timeout"})
+                if startup_stopped:
+                    self._release_feed_lease()
                 self.store.patch_status({"state": final_state, "health_state": final_state,
                                          "feed_connected": False, "bars_seen": self.engine.bars_seen})
             except Exception as exc:

@@ -6,18 +6,19 @@ import json
 import logging
 from datetime import date, datetime
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import requests
 
+from .exceptions import XTSApiError, XTSAuthenticationError, XTSTransportError
 from .protocol import exchange_code_for_segment, normalize_segment
+from .session import XTSMarketDataSession
 
 IST = ZoneInfo("Asia/Kolkata")
 logger = logging.getLogger(__name__)
-
-DEFAULT_ROOT_URL = "https://ttblaze.iifl.com"
-
 
 def _format_xts_datetime(dt: datetime | date | str) -> str:
     """Format datetime as 'mmm dd yyyy HHMMSS' expected by XTS OHLC API."""
@@ -61,24 +62,42 @@ class XTSClient:
         token: str | None = None,
         user_id: str | None = None,
         *,
-        root_url: str = DEFAULT_ROOT_URL,
+        root_url: str = "https://developers.symphonyfintech.in",
+        market_data_path: str = "/apimarketdata",
         session: requests.Session | None = None,
         cache_dir: Path | None = None,
         timeout: float = 15.0,
+        refresh_token: Callable[[], str] | None = None,
+        token_session: XTSMarketDataSession | None = None,
     ) -> None:
         self.token = token
         self.user_id = user_id
         norm_root = root_url.rstrip("/")
-        if norm_root.endswith("/apibinarymarketdata") or norm_root.endswith("/marketdata"):
-            self.root_url = norm_root
-        else:
-            self.root_url = f"{norm_root}/apibinarymarketdata"
+        parsed_root = urlparse(norm_root)
+        if parsed_root.scheme not in {"http", "https"} or not parsed_root.netloc:
+            raise ValueError("XTS root_url must be an absolute HTTP(S) URL")
+        path = market_data_path.strip()
+        if not path.startswith("/"):
+            raise ValueError("XTS market_data_path must start with '/'")
+        self.root_url = (
+            norm_root
+            if norm_root.endswith(path) or norm_root.endswith(("/apimarketdata", "/apibinarymarketdata"))
+            else f"{norm_root}/{path.lstrip('/')}"
+        )
         self._session = session or requests.Session()
         self.cache_dir = cache_dir
         self.timeout = timeout
+        self.session = token_session
+        if self.session is None and token is not None and refresh_token is not None:
+            self.session = XTSMarketDataSession(token, user_id or "", refresh=refresh_token)
         self._master_cache: dict[str, list[dict[str, Any]]] = {}
+        self.cancel_event: Any = None
 
     def _headers(self) -> dict[str, str]:
+        if self.session is not None:
+            state = self.session.snapshot()
+            self.token = state.token
+            self.user_id = state.user_id
         headers = {"Content-Type": "application/json"}
         if self.token:
             headers["Authorization"] = self.token
@@ -98,32 +117,73 @@ class XTSClient:
             "source": source.strip(),
         }
         resp = self._session.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=self.timeout)
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            raise XTSTransportError("XTS login request failed") from exc
         data = resp.json()
         if str(data.get("type", "")).lower() != "success":
             desc = data.get("description") or data.get("message") or "XTS login failed"
-            raise RuntimeError(f"XTS login error: {desc}")
+            raise XTSAuthenticationError(f"XTS login error: {desc}")
         result = data.get("result", {})
         token = str(result.get("token", "")).strip()
         user_id = str(result.get("userID", "")).strip()
         if not token:
-            raise RuntimeError("XTS login did not return a session token")
+            raise XTSAuthenticationError("XTS login did not return a session token")
         self.token = token
         self.user_id = user_id
         return data
 
+    @staticmethod
+    def _is_auth_expired(response: requests.Response, data: Any) -> bool:
+        text = response.text.lower()
+        if "e-session-0007" in text:
+            return True
+        if isinstance(data, dict):
+            description = " ".join(str(data.get(key) or "") for key in ("code", "description", "message", "error")).lower()
+            return str(data.get("type", "")).lower() == "error" and (
+                "invalid token" in description or "e-session-0007" in description
+            )
+        return False
+
+    def _request(self, method: str, url: str, *, retry: bool = True, **kwargs: Any) -> requests.Response:
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            raise XTSTransportError("XTS request cancelled")
+        state = self.session.snapshot() if self.session is not None else None
+        headers = kwargs.pop("headers", self._headers())
+        timeout = kwargs.pop("timeout", self.timeout)
+        try:
+            request = getattr(self._session, method.lower())
+            response = request(url, headers=headers, timeout=timeout, **kwargs)
+        except requests.RequestException as exc:
+            raise XTSTransportError(f"XTS {method} request failed") from exc
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            raise XTSTransportError("XTS request cancelled")
+        try:
+            data = response.json()
+        except ValueError:
+            data = None
+        if self._is_auth_expired(response, data):
+            if not retry or self.session is None or state is None:
+                raise XTSAuthenticationError("XTS session token is invalid")
+            self.session.refresh_if_stale(state.generation)
+            return self._request(method, url, retry=False, headers=self._headers(), **kwargs)
+        if response.status_code == 400 and "already subscribed" in response.text.lower():
+            return response
+        if response.status_code >= 400:
+            description = data.get("description") if isinstance(data, dict) else response.text
+            raise XTSApiError(f"XTS API error ({response.status_code}): {description}")
+        if isinstance(data, dict) and str(data.get("type", "")).lower() == "error":
+            raise XTSApiError(str(data.get("description") or data.get("message") or "XTS API error"))
+        return response
+
     def search(self, search_string: str) -> list[dict[str, Any]]:
         """Search instruments using searchString."""
         url = f"{self.root_url}/instruments/search"
-        try:
-            resp = self._session.get(url, params={"searchString": search_string}, headers=self._headers(), timeout=self.timeout)
-            if resp.status_code != 200:
-                return []
-            data = resp.json()
-            result = data.get("result", [])
-            return list(result) if isinstance(result, list) else []
-        except Exception:
-            return []
+        resp = self._request("GET", url, params={"searchString": search_string})
+        data = resp.json()
+        result = data.get("result", [])
+        return list(result) if isinstance(result, list) else []
 
     def subscription(
         self,
@@ -144,7 +204,7 @@ class XTSClient:
                 "instruments": batch,
                 "xtsMessageCode": message_code,
             }
-            resp = self._session.post(url, json=payload, headers=self._headers(), timeout=self.timeout)
+            resp = self._request("POST", url, json=payload)
             if resp.status_code == 400 and ("Already Subscribed" in resp.text or "already subscribed" in resp.text.lower()):
                 last_resp = resp.json()
                 continue
@@ -165,8 +225,7 @@ class XTSClient:
             "xtsMessageCode": message_code,
             "publishFormat": "JSON",
         }
-        resp = self._session.post(url, json=payload, headers=self._headers(), timeout=self.timeout)
-        resp.raise_for_status()
+        resp = self._request("POST", url, json=payload)
         return resp.json()
 
     def ohlc(
@@ -187,14 +246,10 @@ class XTSClient:
             "endTime": _format_xts_datetime(end_time),
             "compressionValue": compression,
         }
-        resp = self._session.get(url, params=params, headers=self._headers(), timeout=self.timeout)
-        if resp.status_code != 200:
-            logger.warning("XTS OHLC HTTP %d: %s", resp.status_code, resp.text)
-            return []
+        resp = self._request("GET", url, params=params)
         data = resp.json()
         if str(data.get("type", "")).lower() != "success":
-            logger.warning("XTS OHLC returned error: %s", data.get("description"))
-            return []
+            raise XTSApiError(str(data.get("description") or "XTS OHLC returned an invalid response"))
 
         result = data.get("result", {})
         raw_bars = result.get("dataReponse") or result.get("dataResponse") or ""
@@ -254,8 +309,7 @@ class XTSClient:
             else:
                 norm_list.append(str(s).upper())
 
-        resp = self._session.post(url, json={"exchangeSegmentList": norm_list}, headers=self._headers(), timeout=45.0)
-        resp.raise_for_status()
+        resp = self._request("POST", url, json={"exchangeSegmentList": norm_list}, timeout=45.0)
         data = resp.json()
         result = data.get("result", "")
         if isinstance(result, list):

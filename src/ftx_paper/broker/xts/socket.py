@@ -12,13 +12,15 @@ from threading import Event, RLock, Thread, current_thread
 from time import monotonic
 from typing import Any
 
-from .client import DEFAULT_ROOT_URL, XTSClient
+from .client import XTSClient
+from .exceptions import XTSAuthenticationError
 from .protocol import (
     build_subscription_payload,
     decode_binary_packets,
     decode_touchline_data,
     extract_socket_io_data,
 )
+from .session import XTSMarketDataSession
 
 logger = logging.getLogger(__name__)
 
@@ -42,16 +44,29 @@ class AsyncXTSSocket:
 
     def __init__(
         self,
-        token: str,
+        token: str | None = None,
         user_id: str = "",
         *,
-        root_url: str = DEFAULT_ROOT_URL,
+        root_url: str = "https://developers.symphonyfintech.in/apimarketdata",
+        market_data_path: str = "/apimarketdata",
         client: XTSClient | None = None,
+        token_session: XTSMarketDataSession | None = None,
+        websocket_path: str | None = None,
     ) -> None:
-        self._token = token
+        if token_session is None and token is None:
+            raise ValueError("XTS socket requires a token or token session")
+        self._token = token or ""
+        self._token_session = token_session
         self._user_id = user_id
         self._root_url = root_url.rstrip("/")
-        self._client = client or XTSClient(token=token, user_id=user_id, root_url=self._root_url)
+        self._websocket_path = websocket_path
+        self._client = client or XTSClient(
+            token=token,
+            user_id=user_id,
+            root_url=self._root_url,
+            market_data_path=market_data_path,
+            token_session=token_session,
+        )
         self._instruments: list[tuple[str | int, int]] = []
         self._connected = False
         self._websocket: Any = None
@@ -64,6 +79,7 @@ class AsyncXTSSocket:
         self._last_activity = 0.0
         self._close_notified = False
         self._state = SocketState.STOPPED
+        self._auth_refresh_attempts = 0
         self._on_message: Callable[[Mapping[str, Any]], None] | None = None
         self._on_close: Callable[..., None] | None = None
         self._lifecycle_lock = RLock()
@@ -101,6 +117,8 @@ class AsyncXTSSocket:
                     payload = build_subscription_payload(self._instruments, message_code=1502)
                     self._client.subscription(payload["instruments"], message_code=1502)
                     logger.info("Subscribed %d instruments to XTS 1502 touchline feed", len(self._instruments))
+                except XTSAuthenticationError:
+                    raise
                 except Exception as exc:
                     logger.warning("XTS REST subscription failed: %s", exc)
 
@@ -160,13 +178,17 @@ class AsyncXTSSocket:
             return ShutdownResult(stopped=not worker_alive, worker_alive=worker_alive)
 
     def _build_ws_url(self) -> str:
+        if self._token_session is not None:
+            state = self._token_session.snapshot()
+            self._token = state.token
+            self._user_id = state.user_id
         base_api = getattr(self._client, "root_url", self._root_url)
         parsed = urllib.parse.urlparse(base_api)
         scheme = "wss" if parsed.scheme in ("https", "wss") else "ws"
         netloc = parsed.netloc or parsed.path
-        path = parsed.path.rstrip("/") if parsed.netloc else ""
-        if not path:
-            path = "/apibinarymarketdata"
+        path = (self._websocket_path or (
+            f"{parsed.path.rstrip('/')}/socket.io/" if parsed.netloc else "/socket.io/"
+        )).rstrip("/")
         user_id = self._user_id or getattr(self._client, "user_id", "")
         if not user_id and self._token:
             try:
@@ -188,7 +210,20 @@ class AsyncXTSSocket:
             "EIO": "3",
             "transport": "websocket",
         })
-        return f"{scheme}://{netloc}{path}/socket.io/?{query}"
+        return f"{scheme}://{netloc}{path}/?{query}"
+
+    def _refresh_after_auth_failure(self) -> None:
+        if self._token_session is None:
+            raise XTSAuthenticationError("XTS WebSocket authentication failed without a refresh session")
+        self._auth_refresh_attempts += 1
+        if self._auth_refresh_attempts > 1:
+            with self._lifecycle_lock:
+                self._connected = False
+                self._state = SocketState.FAILED
+            self._stop_event.set()
+            raise XTSAuthenticationError("XTS WebSocket authentication failed after refresh")
+        generation = self._token_session.snapshot().generation
+        self._token_session.refresh_if_stale(generation)
 
     def _run_thread(self) -> None:
         loop = asyncio.new_event_loop()
@@ -217,11 +252,11 @@ class AsyncXTSSocket:
     async def _run_session(self) -> None:
         import websockets
 
-        ws_url = self._build_ws_url()
         reconnect_delay = 1.0
 
         while not self._stop_event.is_set():
             try:
+                ws_url = self._build_ws_url()
                 logger.info("Connecting to XTS WebSocket at %s", ws_url.split("?")[0])
                 async with websockets.connect(
                     ws_url,
@@ -281,6 +316,16 @@ class AsyncXTSSocket:
             if text.startswith("451-") or "xts-binary-packet" in text:
                 continue
 
+            if "invalid token" in text.lower() or "e-session-0007" in text.lower():
+                with self._lifecycle_lock:
+                    self._connected = False
+                    self._state = SocketState.CONNECTING
+                try:
+                    self._refresh_after_auth_failure()
+                except XTSAuthenticationError as exc:
+                    logger.error("XTS WebSocket authentication refresh failed: %s", exc)
+                break
+
             # Engine.IO Handshake packet
             if text.startswith("0{"):
                 # Send Socket.IO connect frame
@@ -292,6 +337,7 @@ class AsyncXTSSocket:
                     self._connected = True
                     self._state = SocketState.CONNECTED
                     self._connection_done.set()
+                    self._auth_refresh_attempts = 0
                 logger.info("XTS WebSocket connected and handshake completed")
 
                 # Resubscribe instruments

@@ -6,6 +6,7 @@ from ftx_paper.broker.xts.adapter import (
     load_startup_backfill,
     resolve_instruments,
 )
+from ftx_paper.broker.xts.exceptions import XTSAuthenticationError
 
 
 class MockXTSClient:
@@ -91,3 +92,19 @@ def test_load_startup_backfill():
     assert b.instrument.symbol == "Nifty 50"
     assert b.open == 25000.0
     assert b.close == 25020.0
+
+
+def test_load_startup_backfill_aborts_on_expired_session():
+    class ExpiredClient(MockXTSClient):
+        def ohlc(self, segment, token, start, end, compression=60):
+            raise XTSAuthenticationError("XTS session token is invalid")
+
+    instruments = [
+        {"instrument_token": 26000, "segment_id": 1, "exchange": "NSE", "symbol": "Nifty 50", "instrument_type": "INDEX"},
+        {"instrument_token": 26001, "segment_id": 1, "exchange": "NSE", "symbol": "India VIX", "instrument_type": "INDEX"},
+    ]
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="authentication expired"):
+        load_startup_backfill(ExpiredClient([]), instruments)
