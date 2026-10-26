@@ -40,12 +40,18 @@ graph TD
     subgraph Components ["Application Components"]
         FEED[Phase 1: Feed Manager Component<br/>Priority: XTS > SHOONYA > FYERS<br/>Segments: NSE, NFO, BSE, BSEFO, MCX, MCXFO]
         ORDER[Phase 2: Broker Order Manager<br/>XTS, KotakNeo, Shoonya, Zerodha, Dhan, Fyers<br/>Parallel Multi-Client Dispatch & Reconciler]
-        STRAT[Phase 3: Strategy Manager<br/>In-process initially; isolated process when justified<br/>Multi-Leg Tracking & Strategy Duplication]
+        subgraph STRAT ["Phase 3: Strategy Manager"]
+            MANAGER[Manager<br/>Dispatches data and collects intents]
+            INST[Strategy Instances<br/>Independent state per strategy and account]
+        end
     end
 
     FEED -->|Normalized ticks / completed bars| BUS
-    BUS -->|Completed bars / risk ticks| STRAT
-    STRAT -->|Order Signals| ORDER
+    BUS -->|Bars / risk updates| MANAGER
+    MANAGER -->|Bars / execution updates| INST
+    INST -->|Order intents| MANAGER
+    MANAGER -->|Order signals| ORDER
+    MANAGER -->|Decisions / status| BUS
     ORDER -->|Execution and reconciliation events| BUS
     BUS --> API
     API -->|HTTP / WebSocket| UI
@@ -53,7 +59,7 @@ graph TD
     ORDER --> MAPPER
     FEED --> STORE
     ORDER --> STORE
-    STRAT --> STORE
+    MANAGER --> STORE
     MAPPER --> STORE
     API --> STORE
     STORE <--> DB
