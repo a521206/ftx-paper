@@ -11,6 +11,11 @@ The first implementation should remain simple and component-based. Separate
 services, process isolation, and additional broker integrations are future
 extension points, not prerequisites for the initial version.
 
+Microservices are not the default framework for every component in this
+system. A service boundary will be used only where independent deployment,
+scaling, or fault isolation provides a clear benefit. Components that do not
+need those properties will remain modules in the main application.
+
 ---
 
 ## 🏗️ System Architecture
@@ -24,27 +29,34 @@ graph TD
         LOGS_PAGE[Logs & Events: 3-Part Views & Error Banner]
     end
 
-    subgraph Core ["Local IPC & Shared Database"]
+    subgraph Core ["Shared Runtime Services"]
         DB[(Shared SQLite WAL Database)]
+        STORE[Runtime & Storage Facade]
         BUS[Local Low-Latency Event Bus]
         MAPPER[Universal Symbol Mapper & Expiry Auto-Roll]
+        API[API / WebSocket Gateway]
     end
 
-    subgraph Microservices ["Component Microservices (Same Codebase / Zero Network Latency)"]
-        FEED[Phase 1: Feed Manager Microservice<br/>Priority: XTS > SHOONYA > FYERS<br/>Segments: NSE, NFO, BSE, BSEFO, MCX, MCXFO]
+    subgraph Components ["Application Components"]
+        FEED[Phase 1: Feed Manager Component<br/>Priority: XTS > SHOONYA > FYERS<br/>Segments: NSE, NFO, BSE, BSEFO, MCX, MCXFO]
         ORDER[Phase 2: Broker Order Manager<br/>XTS, KotakNeo, Shoonya, Zerodha, Dhan, Fyers<br/>Parallel Multi-Client Dispatch & Reconciler]
-        STRAT[Phase 3: Strategy Manager Supervisor<br/>Isolated OS Process Containers<br/>Multi-Leg Tracking & Strategy Duplication]
+        STRAT[Phase 3: Strategy Manager<br/>In-process initially; isolated process when justified<br/>Multi-Leg Tracking & Strategy Duplication]
     end
 
-    FEED -->|Ticks / OHLC| BUS
-    BUS -->|Real-Time Ticks| STRAT
+    FEED -->|Normalized ticks / completed bars| BUS
+    BUS -->|Completed bars / risk ticks| STRAT
     STRAT -->|Order Signals| ORDER
-    ORDER -->|Reconciliation Reports| BUS
-    BUS -->|WebSocket /ws/live| UI
-    FEED <--> DB
-    ORDER <--> DB
-    STRAT <--> DB
-    MAPPER <--> DB
+    ORDER -->|Execution and reconciliation events| BUS
+    BUS --> API
+    API -->|HTTP / WebSocket| UI
+    FEED --> MAPPER
+    ORDER --> MAPPER
+    FEED --> STORE
+    ORDER --> STORE
+    STRAT --> STORE
+    MAPPER --> STORE
+    API --> STORE
+    STORE <--> DB
 ```
 
 ---
@@ -86,57 +98,130 @@ Broker adapters convert historical rows and live ticks into one common
 - **Failover:** Reconnect and restore subscriptions, backfill any missing
   interval, and ignore duplicate bars after switching providers.
 
-### 2. Phase 2: Broker Order Manager (Independent Module)
+### 2. Phase 2: Broker Order Manager (Component)
+- **Role:** Accepts strategy order intents, applies account controls, and dispatches
+  them to the selected account's execution adapter.
+- **Default shape:** An application component owned by the API runtime. A separate
+  service is only considered if there is a clear operational need.
 - **Supported Brokers:** XTS, Kotak Neo, Shoonya, Zerodha, Dhan, Fyers.
-- **Universal Symbol Mapping:** Unified canonical token resolver (`NSE:NIFTY`, `NFO:...`, `MCX:...`) mapping to broker-specific trading symbols and exchange tokens across all 6 brokers.
-- **Parallel Multi-Client Routing:** When a single strategy generates a signal mapped to multiple client accounts, orders are fired concurrently with zero head-of-line blocking.
-- **Paper vs. Live Execution Mode:** Per-account mode switch with simulation of fills, slippage, and margins.
-- **Order Reconciliation Engine:** Processes WebSocket and Webhook execution reports, syncing positions and trade records.
-- **Prominent Emergency Square-Off:** Single-click square-off available at both Account level and Strategy level.
+- **Symbol Mapping:** Resolves canonical instruments to broker-specific symbols,
+  using the Feed Manager's instrument metadata.
+- **Multi-Client Routing:** Sends an independent order to each mapped account and
+  records each account's result separately.
+- **Paper vs. Live:** The execution mode may be set as a system default, overridden
+  for a portfolio, or overridden for an individual strategy. The most specific
+  setting is used for each order. Paper execution simulates fills; live execution,
+  when enabled later, is the only path that submits provider orders. Paper and live
+  orders and positions remain separate.
+- **Controls:** Account-level and strategy-level square-off commands go through the
+  API and are recorded with the resulting order, position, and audit updates.
 
-### 3. Phase 3: Strategy Manager (Independent Module) Core Module
-- **Process Container Isolation:** Each strategy instance runs inside an isolated OS process (`multiprocessing.Process`). A fault, unhandled exception, or code modification in one strategy will **never** disturb another strategy or crash the engine.
-- **Multi-Leg Price Tracking:** Tracks entry, exit, and real-time PnL across all legs (e.g. 0DTE Short Straddles with Call & Put legs).
-- **Strategy Duplication:** Clones tested strategy templates with customized parameters or symbols while maintaining separate runtime state.
-- **Chronological Decision Trail:**
-  1. `Candle Fetch Success`
-  2. `ENTRY CONDITION MATCH / NOT MATCH`
-  3. `ORDER SENT TO BROKER`
-  4. `ORDER FILLED / FAILED`
-  5. `TRADE ACTIVE`
-  6. `TRACKING SL / TARGET`
+### 3. Phase 3: Strategy Manager (Component)
+- **Default shape:** An in-process component managed by the API runtime. Process
+  isolation is not required for the first version.
+- **Multiple strategies:** Runs multiple configured strategy instances in the same
+  runtime. Each instance has its own name, parameters, lifecycle, and state, while
+  sharing the Feed Manager and Order Manager.
+- **Data flow:** Each strategy declares its instruments, timeframe, and lookback.
+  The Manager requests normalized historical bars from the Feed Manager before
+  starting it, then supplies new completed bars through the same flow. The strategy
+  keeps the required history in memory for indicators such as moving averages; it
+  does not access brokers or storage directly.
+- **Manager and strategy operation:** The Manager dispatches bars to enabled
+  strategies, collects entry/exit/adjustment intents, and sends them to the Order
+  Manager. Execution results are sent back to the relevant strategy so it can update
+  its state. A failure in one strategy should not stop the others.
+- **Account scope:** Each strategy is assigned to one or more permitted accounts.
+  The same strategy configuration can run for several accounts, with separate state
+  and order results for each account.
+- **Position management:** The account portfolio owns the net position, balance,
+  reservations, and risk. Strategy attribution records which strategy opened or
+  changed a position, but strategies do not maintain competing positions. If
+  multiple strategies trade the same instrument, account-level limits and the net
+  position apply to all of them.
+- **Execution boundary:** Strategies emit order intents; the Order Manager selects
+  the account's execution mode and owns authorization, fills, position updates, and
+  persistence.
+- **Paper and live:** A strategy inherits the system or portfolio mode unless it has
+  an explicit mode. Paper and live execution use separate portfolios and order
+  streams, so strategies under one account may use different modes without mixing
+  positions. Paper positions are never treated as live positions.
+- **Duplication:** Creates a new configured strategy with independent state. It does
+  not copy orders or positions.
 
----
+### 4. Web UI (Presentation Client)
 
-## 🖥️ Web Trading Dashboard Features
+The dashboard is a presentation client of the API/WebSocket Gateway. It uses HTTP
+for page data, WebSocket events for live updates, and API commands for all actions.
+
+The UI does not access the database, event bus, broker adapters, or strategy
+components directly. It displays API projections and sends user actions through the
+API, including strategy control, account actions, and square-off commands.
+
+Users see only the accounts and portfolios permitted by their role. The active
+account and portfolio context is clear when viewing positions, orders, PnL, or
+strategy state.
+
+#### Dashboard Features
 
 1. **Header:**
-   - Consolidated PnL Widget: **U** (Unrealised), **R** (Running/Realised), **T** (Total).
-   - Role Switcher: **ADMIN** (displays raw keys, internal names, and slugs) vs **USER** (displays clean strategy names without slugs).
-   - Theme Switcher: Seamless Dark and Light theme toggle.
-   - Live WebSocket pulse indicator.
+    - Consolidated PnL Widget: **U** (Unrealised), **R** (Running/Realised), **T** (Total).
+    - Role-based interface: **ADMIN** displays raw keys, internal names, and slugs;
+      **USER** displays clean strategy names without slugs. The API determines the
+      role and permissions.
 2. **Streaming Ticker Row:**
-   - Default instruments (`NIFTY`, `BANKNIFTY`, `SENSEX`, `CRUDEOIL`, `NATURALGAS`, `GOLD`, `SILVER`) with real-time green/red tick direction flashing.
+    - Displays real-time prices for default instruments (`NIFTY`, `BANKNIFTY`,
+      `SENSEX`, `CRUDEOIL`, `NATURALGAS`, `GOLD`, `SILVER`).
 3. **Client Cards Grid:**
-   - Multi-broker account status, Paper/Live switcher, prominent **SQUARE OFF** button, and side drawer for:
-     - Net & Day Positions
-     - OrderBook
-     - Executed Trades
-     - Holdings
-     - Margins & Balance Equity
+   - Multi-broker account status, effective Paper/Live mode, mode inherited from the
+     system or portfolio where applicable, prominent **SQUARE OFF** button, and side
+     drawer for:
+      - Net & Day Positions
+      - OrderBook with pending, rejected, partially filled, and completed orders
+      - Executed Trades
+      - Holdings
+      - Margins & Balance Equity
 4. **Strategy Lists Table:**
-   - Client mapping, status, last trade state, start/end times, U/R/T PnL with multi-leg breakdown.
-   - Action Menu: Enable/Disable, Square Off, Interactive Candlestick/Line Chart modal, Recent Trades modal, Decision Audit Timeline modal, Duplicate modal.
+    - Client mapping, effective Paper/Live mode, status, last trade state, start/end
+      times, U/R/T PnL with multi-leg breakdown.
+    - Actions: Enable/Disable, Square Off, view charts, review trades and decision
+      history, and duplicate a strategy.
 5. **Strategies Page (Admin Only):**
-   - Catalog of registered strategy templates ready to deploy to client accounts.
+    - Catalog of registered strategy templates.
+    - Configure a strategy, assign it to permitted accounts, select its effective
+      Paper/Live mode, and start or stop it.
 6. **Status & Diagnostics Page:**
-   - Feed Manager Health Card with latency, packets, and Manual Failover button.
-   - **Diagnostic Test Cases Suite:**
-     - Test 1: Symbol Subscription & OHLC fetch for 1 symbol across all 6 segments (`NSE`, `NFO`, `BSE`, `BSEFO`, `MCX`, `MCXFO`).
-     - Test 2: Real-time order execution test across all 6 segments.
+    - Runtime, Feed Manager, Order Manager, and Strategy Manager health.
+    - Connection state, recent errors, active accounts, pending orders, and last
+      update time.
+    - Basic risk and operational alerts, such as margin warnings, feed failures, and
+      live-mode warnings.
 7. **Logs & Events Page:**
-   - Clean, zero-noise interface with 3 tabs:
+   - Three simple views:
      - 1. Broker API Log (`ERROR` / `SUCCESS`)
      - 2. Feed Subscription (`ERROR` / `SUCCESS` / `DATA_RECEIVING`)
-     - 3. Strategy Decision Log
-   - **High-Visibility Prompt Error Banner:** Prominently highlights critical issues at the top of the page with a **DISMISS** action so errors are immediately resolved.
+     - 3. Strategy and execution audit timeline
+
+## System-Wide Ownership And Operations
+
+#### Ownership
+
+- **Runtime:** The API process owns one active runtime and its components for each
+  runtime directory. A second process must not mutate the same runtime state.
+- **Storage:** The storage facade owns SQLite access and persistence for accounts,
+  strategies, orders, positions, market bars, and audit events.
+- **Account state:** The account portfolio is the source of truth for balances and
+  positions. Strategy state provides attribution but does not replace the portfolio.
+- **Client boundary:** The API/WebSocket Gateway is the only client boundary. The UI
+  does not access storage or component internals.
+
+#### Operational Responsibilities
+
+- **Feed Manager:** Owns provider connections, historical warmup, live subscriptions,
+  bar aggregation, and feed health. It does not place orders.
+- **Order Manager:** Owns account routing, execution mode, orders, fills, and position
+  updates. It does not generate strategy decisions.
+- **Strategy Manager:** Owns strategy configuration, evaluation, and decision records.
+  It consumes Feed Manager data and emits order intents.
+- **Operators:** Monitor health, review errors, authorize live mode and square-off,
+  and use the API rather than accessing storage or components directly.
