@@ -15,7 +15,7 @@ from ftx_paper.domain.decision_context import (
     MarginSnapshot,
 )
 from ftx_paper.execution.events import ExecutionNotification
-from ftx_paper.contracts import MarketRole
+from ftx_paper.contracts import Instrument, MarketRole, OrderIntent, OrderRole, OrderSide
 from ftx_paper.market.bundles import DecisionBundle
 
 from .coordinator import SharedDecisionCoordinator
@@ -76,8 +76,6 @@ class OrderflowConfig:
             raise ValueError("orderflow requires futures as the enabled vehicle")
         if self.response_window_candles <= 0:
             raise ValueError("response window must be positive")
-        if self.execution_mode is not ExecutionMode.DIAGNOSTIC:
-            raise ValueError("executable orderflow policy is deferred to a later phase")
         if self.timezone != "Asia/Kolkata":
             raise ValueError("orderflow currently requires the Asia/Kolkata timezone")
         if len(self.market_session) != 2 or self.market_session[0] >= self.market_session[1]:
@@ -528,10 +526,39 @@ class OrderflowPolicy:
                             opportunity.lifecycle_id,
                             evidence_ids=evidence_ids,
                         )
+                        accepted = admission.status.value == "PASSED" and claim.accepted
+                        order = None
+                        if accepted and self.execution_mode is ExecutionMode.EXECUTABLE:
+                            instrument = futures.instrument if futures is not None else next(
+                                (item.instrument for item in bundle.bars.values()),
+                                Instrument(observation.instrument, "NFO", "FUTURES"),
+                            )
+                            available_lots = (
+                                int(context.margin.available // context.margin.required_per_lot)
+                                if context.margin.required_per_lot > 0
+                                else int(context.margin.available > 0)
+                            )
+                            quantity = max(0, min(available_lots, 1))
+                            if quantity > 0 and instrument is not None:
+                                order = OrderIntent(
+                                    client_order_id=f"orderflow-entry:{_decision_id(
+                                        opportunity.lifecycle_id,
+                                    )}",
+                                    instrument=instrument,
+                                    side=OrderSide.BUY if direction == "long" else OrderSide.SELL,
+                                    quantity=quantity,
+                                    reason="causally_accepted_orderflow_opportunity",
+                                    cell=opportunity.template_id or "orderflow",
+                                    stop_price=opportunity.setup.failure_boundary,
+                                    exit_mode=self.config.exit_policy,
+                                    role=OrderRole.ENTRY,
+                                    entry_bar=context.as_of.minute,
+                                    strategy_id=self.config.name,
+                                )
                         results.append(PolicyDecision({
                             **base,
                             "decision_stage": "admission",
-                            "outcome": "accepted" if admission.status.value == "PASSED" and claim.accepted else "rejected",
+                             "outcome": "accepted" if accepted else "rejected",
                             "reason": "orderflow_admission",
                             "decision_id": admission.decision_id,
                             "opportunity_id": opportunity.lifecycle_id,
@@ -544,7 +571,7 @@ class OrderflowPolicy:
                             "admission_reason": admission.reason,
                             "admission_predicates": [asdict(item) for item in admission.predicates],
                              "source_observation_ids": list(evidence_ids),
-                        }))
+                         }, order=order))
             previous_opportunities = dict(self._opportunities)
             if observation.timeframe == "5m":
                 for key, item in tuple(self._opportunities.items()):

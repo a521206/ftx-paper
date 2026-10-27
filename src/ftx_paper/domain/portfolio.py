@@ -299,6 +299,30 @@ class PortfolioState:
         self.state_revision += 1
         return {"entry_order_id": entry_id, "gross_pnl": gross, "costs": float(cost), "net_pnl": net}
 
+    def settle_partial_exit(
+        self, order: OrderIntent, *, price: float, quantity: int, cost: float = 0.0,
+    ) -> SettlementResult | None:
+        """Realize part of a position while retaining its remaining reservation."""
+        if quantity <= 0:
+            raise ValueError("partial exit quantity must be positive")
+        entry_id = order.entry_order_id
+        if entry_id is None or entry_id not in self.positions:
+            raise ValueError("exit_without_matching_entry")
+        position = self.positions[entry_id]
+        if quantity >= position.quantity:
+            raise ValueError("partial exit must leave a position open")
+        signed = 1.0 if position.side is OrderSide.BUY else -1.0
+        gross = (float(price) - position.entry_price) * NIFTY_LOT_SIZE * quantity * signed
+        net = gross - float(cost)
+        self.positions[entry_id] = replace(position, quantity=position.quantity - quantity)
+        self.realized_pnl += net
+        self.total_costs += float(cost)
+        self.equity += net
+        self.peak_equity = max(self.peak_equity, self.equity)
+        self.pending_orders[order.client_order_id] = "partially_settled"
+        self.state_revision += 1
+        return {"entry_order_id": entry_id, "gross_pnl": gross, "costs": float(cost), "net_pnl": net}
+
     def reset(self) -> None:
         self.equity = self.peak_equity = self.daily_baseline = float(self.initial_capital)
         self.realized_pnl = self.total_costs = 0.0

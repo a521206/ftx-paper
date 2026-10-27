@@ -20,6 +20,8 @@ from ftx_paper.strategy import (
     OrderflowObservationContext,
     OrderflowStrategy,
 )
+from ftx_paper.strategy.orderflow import OrderflowConfig
+from ftx_paper.strategy.policy_contract import ExecutionMode
 
 
 UTC = timezone.utc
@@ -225,6 +227,72 @@ def test_response_and_admission_use_completed_causal_evidence() -> None:
     assert admission.payload["reason"] == "orderflow_admission"
     assert admission.payload["outcome"] == "accepted"
     assert admission.order is None
+
+
+def test_orderflow_executable_mode_emits_bounded_futures_entry() -> None:
+    bundle, account = _context(response_close=101.0)
+    account = replace(account, margin=MarginSnapshot(0.0, 10_000.0, 1_000.0))
+    strategy = OrderflowStrategy(OrderflowConfig(execution_mode=ExecutionMode.EXECUTABLE))
+
+    events = strategy.evaluate(bundle, account)
+
+    admission = next(event for event in events if event.payload.get("decision_stage") == "admission")
+    assert admission.order is not None
+    assert admission.order.instrument.symbol == "NIFTYFUT"
+    assert admission.order.quantity == 1
+    assert admission.order.client_order_id.startswith("orderflow-entry")
+    assert admission.order.stop_price == 99.5
+
+
+def test_diagnostic_and_executable_projections_share_decisions_but_not_orders() -> None:
+    bundle, account = _context(response_close=101.0)
+    executable = OrderflowStrategy(OrderflowConfig(execution_mode=ExecutionMode.EXECUTABLE))
+    diagnostic = OrderflowStrategy()
+
+    diagnostic_events = diagnostic.evaluate(bundle, account)
+    executable_events = executable.evaluate(bundle, account)
+
+    assert [item.payload for item in diagnostic_events] != []
+    assert [item.payload["decision_id"] for item in diagnostic_events] == [
+        item.payload["decision_id"] for item in executable_events
+    ]
+    assert all(item.order is None for item in diagnostic_events)
+    assert sum(item.order is not None for item in executable_events) == 1
+
+
+def test_executable_orderflow_does_not_duplicate_entry_on_replay() -> None:
+    bundle, account = _context(response_close=101.0)
+    strategy = OrderflowStrategy(OrderflowConfig(execution_mode=ExecutionMode.EXECUTABLE))
+
+    first = strategy.evaluate(bundle, account)
+    second = strategy.evaluate(bundle, account)
+
+    assert sum(item.order is not None for item in first) == 1
+    assert second == ()
+
+
+def test_p9_paired_replay_matches_decisions_while_projecting_execution_only_on_opt_in() -> None:
+    bundle, account = _context(response_close=101.0)
+    diagnostic = PaperEngine(OrderflowStrategy()).on_bundle(bundle, context=account)
+    executable = PaperEngine(
+        OrderflowStrategy(OrderflowConfig(execution_mode=ExecutionMode.EXECUTABLE)),
+    ).on_bundle(bundle, context=account)
+
+    def behavior(event: dict[str, object]) -> dict[str, object]:
+        value = dict(event)
+        value.pop("config_hash", None)
+        decision_view = value.get("decision_view")
+        if isinstance(decision_view, dict):
+            decision_view = dict(decision_view)
+            decision_view.pop("config_hash", None)
+            value["decision_view"] = decision_view
+        return value
+
+    assert [behavior(event) for event in diagnostic.events] == [
+        behavior(event) for event in executable.events
+    ]
+    assert diagnostic.orders == ()
+    assert len(executable.orders) == 1
 
 
 def test_gap_closes_active_interaction_without_order() -> None:

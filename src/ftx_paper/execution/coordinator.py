@@ -40,6 +40,14 @@ class PaperExecutionCoordinator:
             return result
         return self.portfolio.settle_exit(order, price=price, cost=cost)
 
+    def partial_exit(
+        self, order: OrderIntent, *, price: float, quantity: int, cost: float = 0.0,
+    ) -> SettlementResult | None:
+        self._require_futures(order)
+        if order.role is not OrderRole.EXIT:
+            raise ValueError("only exit orders may partially settle")
+        return self.portfolio.settle_partial_exit(order, price=price, quantity=quantity, cost=cost)
+
     def cancel(self, order: OrderIntent) -> bool:
         return self.portfolio.cancel_entry(order.client_order_id)
 

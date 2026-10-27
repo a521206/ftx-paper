@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 import math
 
@@ -33,6 +33,49 @@ class ExecutionProposal:
     def __post_init__(self) -> None:
         if not self.intent_id.strip() or not self.instrument.strip() or self.quantity <= 0:
             raise ValueError("execution proposal identity and quantity are required")
+
+
+def next_available_bar(available_at: datetime, *, minutes: int = 1) -> datetime:
+    """Return the first bar boundary on which completed evidence can execute."""
+    if available_at.tzinfo is None or available_at.utcoffset() is None:
+        raise ValueError("available_at must be timezone-aware")
+    if minutes <= 0:
+        raise ValueError("minutes must be positive")
+    return available_at + timedelta(minutes=minutes)
+
+
+def entry_size_against_failure_boundary(
+    *, direction: str, entry_price: float, failure_boundary: float,
+    risk_budget_bp: float = 20.0,
+) -> tuple[float, dict[str, float]]:
+    """Normalize size so actual fill risk remains within the fixed budget."""
+    if direction not in {"long", "short"} or entry_price <= 0 or risk_budget_bp <= 0:
+        return 0.0, {}
+    protective = (
+        failure_boundary < entry_price if direction == "long"
+        else failure_boundary > entry_price
+    )
+    actual = abs(entry_price - failure_boundary) / entry_price * 10000.0
+    if not protective or actual <= 0:
+        return 0.0, {"actual_risk_bp": actual}
+    quantity = min(1.0, risk_budget_bp / actual)
+    return quantity, {
+        "actual_risk_bp": actual,
+        "risk_budget_bp": risk_budget_bp,
+        "risk_adjusted_quantity": quantity,
+        "effective_risk_bp": actual * quantity,
+    }
+
+
+def arbitrate_execution_proposals(
+    proposals: tuple[ExecutionProposal, ...],
+) -> tuple[ExecutionProposal, ...]:
+    """Keep one deterministic proposal per causal intent/instrument boundary."""
+    selected: dict[tuple[str, str, str, float], ExecutionProposal] = {}
+    for proposal in sorted(proposals, key=lambda item: (item.intent_id, item.instrument, item.entry_price)):
+        key = (proposal.intent_id, proposal.instrument, proposal.direction, proposal.entry_price)
+        selected.setdefault(key, proposal)
+    return tuple(selected.values())
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,5 +136,6 @@ class OrderflowExecutionCoordinator:
 
 __all__ = [
     "ExecutionAuthorization", "ExecutionProposal", "ExecutionState",
-    "ExecutionStatus", "OrderflowExecutionCoordinator",
+    "ExecutionStatus", "OrderflowExecutionCoordinator", "arbitrate_execution_proposals",
+    "entry_size_against_failure_boundary", "next_available_bar",
 ]

@@ -9,9 +9,10 @@ may inform design decisions, but FTX Paper owns its implementation, fixtures,
 runtime state, and tests. It must not import NiftyZoning, read its runtime state,
 or modify its files.
 
-Parity, artifact comparison, normalization, and mismatch reporting are not
-implementation work. They belong in a separate parity document and are not
-acceptance criteria for this plan.
+Producer-neutral parity artifacts, normalization, and mismatch reporting remain
+separate deliverables. The paired replay validation required by Phase 9 is part
+of this plan: it compares Paper's diagnostic decisions with its opt-in
+executable projections and validates the resulting simulated lifecycle.
 
 ## Goals And Guardrails
 
@@ -31,6 +32,78 @@ diagnostic. Diagnostic processing must create zero executable entries, stops,
 exits, fills, reservations, or portfolio mutations. An explicit opt-in
 execution mode is a later product decision, not an implicit consequence of
 implementing the execution layer.
+
+## Phase 9 Scope Decisions
+
+These decisions resolve the remaining P9 scope without adding a new trade
+template or treating VWAP as executable policy.
+
+### Authoritative Executable Scope
+
+The authoritative scope is the executable behavior already represented by
+NiftyZoning's causal orderflow pipeline, with Paper's explicit VWAP execution
+exclusions applied below. Paper may read those modules and tests as a behavioral reference only;
+it must not import, execute, or modify NiftyZoning. The scope includes only
+remaining canonical location/response/opportunity templates and their defined
+admission, trigger, management, exit, duplicate, and settlement rules. It
+explicitly excludes `reversal_at_vwap`, VWAP location templates, VWAP legacy
+cell policies, and `OR_VWAP` stop policy. VWAP calculation and diagnostic
+location detection remain available as evidence, but never authorize an order.
+
+If the reference does not define a policy, transition, fill rule, or accounting
+result, Paper records an explicit unavailable reason and does not infer a
+replacement rule.
+
+### Validated NiftyZoning Behavior
+
+The read-only validation against `C:\Users\agraw\Python\NiftyZoning` found the
+following executable contracts to reproduce:
+
+- `src/orderflow/state_machine.py` publishes session-extrema replacements,
+  manages existing execution state, updates permissions, advances interactions,
+  expires opportunities before formation, admits eligible opportunities,
+  evaluates management, evaluates new entries, and selects proposals in that
+  causal order.
+- `src/orderflow/execution.py` ranks same-bar proposals by setup availability,
+  structural rank, lifecycle identity, and intent identity; suppresses duplicate
+  causal identities; applies active-position/regime/portfolio gates; and records
+  denied proposals rather than silently dropping them.
+- The same execution module uses next-available-bar timing for selected entries,
+  discretionary exits, partial 3R exits, and protective-stop exits, while
+  preserving observed and available timestamps separately.
+- `src/orderflow/lifecycle.py` owns reservations, entry fills, partial-exit
+  fills, exit fills, idempotent lifecycle transitions, and realized points from
+  the authoritative fill sequence. Paper maps these responsibilities to its
+  existing `PaperExecutionCoordinator` and portfolio/ledger boundaries rather
+  than copying NiftyZoning's owner.
+- `src/orderflow/templates.py` defines the remaining response, trigger,
+  conflict-group, exit-rule, and expiry identities. Its `OR_VWAP` stop policy
+  and any VWAP execution location are reference evidence only and are excluded
+  from Paper's executable template registry by this plan.
+
+### Paper Execution Opt-In
+
+Executable orderflow is enabled only by constructing the existing
+`OrderflowConfig` with `execution_mode=ExecutionMode.EXECUTABLE` and passing
+that config through the existing strategy factory/runtime composition. The
+default remains `ExecutionMode.DIAGNOSTIC`; no environment or implicit
+eligibility path may switch it on. Enabling the mode authorizes proposals to
+the existing Paper execution owner, but does not authorize broker/live
+execution. The current `OrderflowPolicy` validation that rejects executable
+mode is removed only when Phase 9 implementation begins, after Phases 0-8 are
+validated.
+
+### Parity Coverage
+
+Paired replay validation covers the complete defined Paper projection, not just
+decision labels: canonical decisions and predicates, accepted intents,
+risk/sizing, trigger and entry timing, position management, exits, duplicate
+handling, fills/partial fills, reservations, settlement, and ledger results.
+The diagnostic side must remain mutation-free; the executable side may mutate
+only the existing Paper portfolio, capital, and execution state. Comparisons
+are made at each causal boundary using canonical IDs, evidence, timestamps,
+availability, generations, source IDs, and unavailable reasons. VWAP-specific
+templates are absent from all paired fixtures.
 
 ## Runtime Shape
 
@@ -568,6 +641,15 @@ Required behavior:
   same-timestamp reference replacement and permission changes.
 - Apply session deadlines, exit priority, stop/target rules, protective-stop
   updates, and next-bar-open timing without same-bar hindsight.
+- Reproduce the reference's management sequencing: execute already-available
+  pending exits, evaluate/update the position exit plan, update protective
+  stops and trailing state, then queue newly observed exits for the next
+  available bar. A same-bar bar touching multiple levels follows the reference
+  exit-priority rule.
+- Preserve the reference template-owned trigger and exit semantics for
+  recovery/rejection and acceptance responses, including breakout versus
+  pullback triggers and conditional target interactions. Do not substitute
+  generic VWAP stops for templates whose stop policy is unavailable in Paper.
 - Record attempts, fills, partial exits, reservations, realized points, exit
   reasons, and settlement through one execution owner with explicit timestamps.
 - Enforce execution-group claims, duplicate-entry ownership, active-position
@@ -586,6 +668,9 @@ Exit criteria:
   settlement behavior are covered without future-bar inputs.
 - Duplicate-entry and duplicate-fill probes leave one authoritative lifecycle
   and ledger result.
+- Paired diagnostic/executable replay fixtures agree on every defined decision,
+  intent, fill, exit, settlement, and ledger projection; unavailable fields are
+  compared as unavailable with their reasons rather than coerced to values.
 
 Phase 9 conformance tests:
 
@@ -597,6 +682,9 @@ Phase 9 conformance tests:
 - `test_execution_group_and_active_position_constraints_are_enforced`
 - `test_execution_owner_records_typed_fill_exit_and_ledger_lineage`
 - `test_diagnostic_mode_remains_mutation_free_after_execution_is_enabled`
+- `test_paired_replay_matches_diagnostic_decisions_and_executable_projections`
+- `test_paired_replay_matches_fills_exits_settlement_and_ledger`
+- `test_paired_replay_marks_reference_undefined_behavior_unavailable`
 
 ### Phase 10: Runtime Event And Replay Reporting
 
@@ -926,8 +1014,9 @@ assert project behavior and causal contracts, not implementation structure.
 
 The implementation is complete only when all phases through Phase 10 meet their
 exit criteria. A separate parity effort may later compare independently
-produced artifacts, but parity results must not change the implementation
-contracts or be used as a substitute for these tests.
+produced producer-neutral artifacts, but those artifact comparisons must not
+change the implementation contracts or be used as a substitute for the paired
+replay tests defined in Phase 9.
 
 ## Verified Implementation Gaps
 
