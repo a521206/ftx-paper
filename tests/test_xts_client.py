@@ -46,3 +46,25 @@ def test_expired_token_code_is_recognized_in_structured_response():
         assert str(exc) == "XTS session token is invalid"
     else:
         raise AssertionError("expected invalid-token failure")
+
+
+def test_missing_authorization_is_refreshed_once():
+    expired = MagicMock(
+        status_code=400,
+        text='{"type":"error","description":"Token/Authorization not found"}',
+        json=lambda: {"type": "error", "description": "Token/Authorization not found"},
+    )
+    valid = MagicMock(
+        status_code=200,
+        text='{"type":"success"}',
+        json=lambda: {"type": "success", "result": {"dataResponse": "1|1|2|0|1|10|0"}},
+    )
+    session = MagicMock()
+    session.get.side_effect = [expired, valid]
+    refresh = MagicMock(return_value="new-token")
+    client = XTSClient(token="old-token", session=session, refresh_token=refresh)
+
+    assert client.ohlc(1, 2, "2026-10-26", "2026-10-27")
+    refresh.assert_called_once_with()
+    assert client.token == "new-token"
+    assert session.get.call_count == 2

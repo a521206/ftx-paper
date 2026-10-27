@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+from threading import Event
 
 from ftx_paper.broker.xts.adapter import (
     classify_runtime_roles,
@@ -6,7 +7,7 @@ from ftx_paper.broker.xts.adapter import (
     load_startup_backfill,
     resolve_instruments,
 )
-from ftx_paper.broker.xts.exceptions import XTSAuthenticationError
+from ftx_paper.broker.xts.exceptions import XTSAuthenticationError, XTSTransportError
 
 
 class MockXTSClient:
@@ -108,3 +109,18 @@ def test_load_startup_backfill_aborts_on_expired_session():
 
     with pytest.raises(RuntimeError, match="authentication expired"):
         load_startup_backfill(ExpiredClient([]), instruments)
+
+
+def test_load_startup_backfill_stops_quietly_when_request_is_cancelled():
+    stop_event = Event()
+
+    class CancelledClient(MockXTSClient):
+        def ohlc(self, segment, token, start, end, compression=60):
+            stop_event.set()
+            raise XTSTransportError("XTS request cancelled")
+
+    instruments = [
+        {"instrument_token": 26000, "segment_id": 1, "exchange": "NSE", "symbol": "Nifty 50", "instrument_type": "INDEX"},
+    ]
+
+    assert load_startup_backfill(CancelledClient([]), instruments, stop_event=stop_event) == ()

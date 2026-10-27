@@ -137,12 +137,19 @@ class XTSClient:
     @staticmethod
     def _is_auth_expired(response: requests.Response, data: Any) -> bool:
         text = response.text.lower()
-        if "e-session-0007" in text:
+        if (
+            "e-session-0007" in text
+            or "token/authorization not found" in text
+            or "authorization not found" in text
+        ):
             return True
         if isinstance(data, dict):
             description = " ".join(str(data.get(key) or "") for key in ("code", "description", "message", "error")).lower()
             return str(data.get("type", "")).lower() == "error" and (
-                "invalid token" in description or "e-session-0007" in description
+                "invalid token" in description
+                or "e-session-0007" in description
+                or "token/authorization not found" in description
+                or "authorization not found" in description
             )
         return False
 

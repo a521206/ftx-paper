@@ -25,7 +25,7 @@ from ftx_paper.contracts import (
 )
 
 from .protocol import exchange_code_for_segment, normalize_segment
-from .exceptions import XTSAuthenticationError
+from .exceptions import XTSAuthenticationError, XTSTransportError
 
 IST = ZoneInfo("Asia/Kolkata")
 logger = logging.getLogger(__name__)
@@ -398,6 +398,11 @@ def load_startup_backfill(
             )
         except XTSAuthenticationError as exc:
             raise XTSAuthenticationError("XTS authentication expired during historical warmup") from exc
+        except XTSTransportError as exc:
+            if stop_event is not None and stop_event.is_set() and "cancelled" in str(exc).lower():
+                return tuple(bars)
+            logger.warning("XTS OHLC historical warmup failed for %s (%s): %s", item["symbol"], token, exc)
+            rows = []
         except Exception as exc:
             logger.warning("XTS OHLC historical warmup failed for %s (%s): %s", item["symbol"], token, exc)
             rows = []
