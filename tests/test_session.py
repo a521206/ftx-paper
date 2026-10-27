@@ -180,9 +180,9 @@ def test_replay_rollover_selects_september_through_expiry_session(tmp_path):
     store.append_market_bars(bars, source="fixture")
     worker = ReplayWorker(store)
 
-    assert worker.input_manifest("2026-09-28")["futures_source"]["selected_expiry"] == "2026-09-29"
-    assert worker.input_manifest("2026-09-29")["futures_source"]["selected_expiry"] == "2026-09-29"
-    assert worker.input_manifest("2026-09-30")["futures_source"]["selected_expiry"] == "2026-10-27"
+    assert worker.input_manifest("2026-09-28")["futures_source"]["selected_expiry"] == ""
+    assert worker.input_manifest("2026-09-29")["futures_source"]["selected_expiry"] == ""
+    assert worker.input_manifest("2026-09-30")["futures_source"]["selected_expiry"] == ""
 
 
 def test_replay_manifest_marks_missing_option_input_unavailable(tmp_path):
@@ -240,8 +240,10 @@ def test_replay_prior_day_levels_follow_rollover_source_independently(tmp_path):
     worker = ReplayWorker(store)
     assert worker._prior_day_levels("2026-09-29") == (110.0, 90.0)
     provenance = worker.input_manifest("2026-09-29")["futures_source"]
-    assert provenance["selected_symbol"] == "NIFTY26SEPFUT"
-    assert provenance["selected_expiry"] == "2026-09-30"
+    assert provenance["selected_symbol"] == "NIFTY"
+    assert provenance["selected_expiry"] == ""
+    assert provenance["source_contract_symbol"] == "NIFTY26SEPFUT"
+    assert provenance["source_contract_expiry"] == "2026-09-30"
     assert provenance["rollover_policy_version"] == "canonical-expiry-session"
     assert provenance["rollover_decision"] == {
         "rule": "keep the nearest contract through its expiry session",
@@ -290,8 +292,10 @@ def test_replay_resolves_current_then_prior_source_once(tmp_path):
 
     assert {bar.instrument.symbol for bar in bars} == {"NIFTY01OCTFUT"}
     assert levels == (23124.1, 22792.9)
-    assert manifest["provenance"]["current"]["selected_symbol"] == "NIFTY01OCTFUT"
-    assert manifest["provenance"]["prior"]["selected_symbol"] == "NIFTY26SEPFUT"
+    assert manifest["provenance"]["current"]["selected_symbol"] == "NIFTY"
+    assert manifest["provenance"]["current"]["source_contract_symbol"] == "NIFTY01OCTFUT"
+    assert manifest["provenance"]["prior"]["selected_symbol"] == "NIFTY"
+    assert manifest["provenance"]["prior"]["source_contract_symbol"] == "NIFTY26SEPFUT"
     assert resolver.calls == ["2026-09-29", "2026-09-28"]
 
 

@@ -14,7 +14,8 @@ def _artifact(*, timezone="America/New_York"):
         {"strategy": {"algorithm": "flow"}, "bars_seen": 1,
          "metadata": {"timezone": timezone, "input_fingerprint": "fixture"}},
         request={"session_date": "2026-01-05", "timezone": timezone},
-        layer_records={"decisions": [{"event_type": "ACCEPTEDDECISION", "timestamp": "2026-01-05T14:30:00Z"}]},
+         layer_records={"decisions": [{"event_type": "POLICY_DECISION", "decision_id": "accepted",
+                                        "outcome": "accepted", "decision_at": "2026-01-05T14:30:00Z"}]},
     )
 
 
@@ -47,8 +48,9 @@ def test_records_use_canonical_kinds_and_neutral_identity() -> None:
         {"strategy": {}, "bars_seen": 1, "metadata": {"input_fingerprint": "fixture"}},
         request={"session_date": "2026-01-05"},
         layer_records={
-            "decisions": [{"event_type": "ACCEPTEDDECISION", "timestamp": "2026-01-05T14:30:00Z",
-                           "cell": "A", "client_order_id": "producer-local"}],
+             "decisions": [{"event_type": "POLICY_DECISION", "decision_id": "accepted", "outcome": "accepted",
+                            "decision_at": "2026-01-05T14:30:00Z",
+                            "cell": "A", "client_order_id": "producer-local"}],
             "execution": [{"event_type": "ORDER_INTENT", "timestamp": "2026-01-05T14:30:00Z",
                             "cell": "A", "client_order_id": "producer-local"},
                            {"event_type": "FILL", "fill_timestamp": "2026-01-05T14:31:00Z",
@@ -128,7 +130,7 @@ def test_missing_record_timestamp_is_rejected() -> None:
         build_parity_artifact(
             {"strategy": {}, "bars_seen": 1, "metadata": {}},
             request={"session_date": "2026-01-05"},
-            layer_records={"decisions": [{"event_type": "ACCEPTEDDECISION"}]},
+        layer_records={"decisions": [{"event_type": "POLICY_DECISION", "decision_id": "missing"}]},
         )
 
 
