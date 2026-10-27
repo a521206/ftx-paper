@@ -33,3 +33,5 @@ def test_opportunity_timeout_counts_only_configured_timeframe() -> None:
     assert expired.advance_timeout(timeframe="5m", at=at) == expired
     expired = expired.advance_timeout(timeframe="5m", at=at + timedelta(minutes=20))
     assert expired.status is OpportunityStatus.EXPIRED
+    assert expired.transitions[-1].reason == "evidence_timeout"
+    assert expired.transitions[-1].evidence_ids == ("2026-01-01T09:45:00+00:00",)

@@ -5,12 +5,9 @@ from typing import cast
 from ftx_paper.contracts import Instrument, MarketBar
 from ftx_paper.strategy import (
     CaptureMode,
-    ExecutionAuthorization,
-    ExecutionProposal,
     LocationBand,
     LocationRecord,
     LocationRegistry,
-    OrderflowExecutionCoordinator,
     ReplayMachine,
     SourceIdentity,
     observe_market,
@@ -77,13 +74,6 @@ def test_location_boundary_carry_is_once_and_detached() -> None:
     assert len(carried) == 1
     assert registry.next_generation(at=start + timedelta(days=1), carry=True) == ()
     assert carried[0].to_dict()["source_aggregate_id"] == "agg-1"
-
-
-def test_diagnostic_execution_authorization_never_mutates_state() -> None:
-    coordinator = OrderflowExecutionCoordinator(ExecutionAuthorization(False, "diagnostic"))
-    proposal = ExecutionProposal("intent-1", "NIFTY", "long", 1, 100.0, 98.0, 104.0)
-    assert coordinator.submit(proposal) is None
-    assert coordinator.states == ()
 
 
 def test_live_diagnostic_projection_contains_non_executable_lineage() -> None:

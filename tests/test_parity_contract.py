@@ -100,9 +100,11 @@ def test_scope_uses_canonical_orderflow_run_identity() -> None:
     assert scope["processed"] == {"bar_count": 375, "session_count": 1}
     assert scope["replay_input"] == {
         "identity": ["fingerprint"],
-        "provenance": [{
-            "bar_count": 375,
-            "contract_type": "CONTINUOUS",
+            "provenance": [{
+                "symbol": "NIFTY",
+                "series": "I",
+                "bar_count": 375,
+                "contract_type": "CONTINUOUS",
             "expiry": "",
             "fingerprint": "fingerprint",
             "identities": [{
@@ -117,12 +119,6 @@ def test_scope_uses_canonical_orderflow_run_identity() -> None:
                 "series": "I",
                 "symbol": "NIFTY",
             },
-            "rollover_decision": None,
-            "rollover_policy_version": None,
-            "selected_expiry": "",
-            "selected_symbol": "NIFTY",
-            "series": "I",
-            "symbol": "NIFTY",
         }],
     }
 

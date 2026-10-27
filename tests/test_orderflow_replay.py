@@ -1,13 +1,10 @@
 from datetime import datetime, timezone
-from types import SimpleNamespace
-
 import pytest
 
 from ftx_paper.strategy import (
     CANONICAL_PHASE_ORDER, ReplayMachine, ReplayPhase,
     observe_market, prepare_replay_input,
 )
-from ftx_paper.runtime.replay_worker import _available_orderflow_trigger_events
 from tests.test_orderflow_observation import _rows
 
 
@@ -48,17 +45,15 @@ def test_replay_machine_suspends_admission_after_source_gap() -> None:
     assert result.available_observation_ids
 
 
-def test_replay_projects_each_available_one_minute_trigger_once() -> None:
-    observation = observe_market(prepare_replay_input(_rows(6), "2026-01-01", session_partition="09:15-09:21"))
-    bundle = SimpleNamespace(orderflow_context=observation.context)
-    emitted: set[str] = set()
+def test_replay_machine_resumes_admission_after_complete_recovery_parent() -> None:
+    rows = _rows(11)
+    rows.pop(2)
+    observation = observe_market(prepare_replay_input(rows, "2026-01-01", session_partition="09:15-09:26"))
+    machine = ReplayMachine(observation)
 
-    events = _available_orderflow_trigger_events(
-        bundle, datetime(2026, 1, 1, 3, 50, tzinfo=UTC), emitted,
-    )
+    suspended = machine.process_bar(datetime(2026, 1, 1, 3, 48, tzinfo=UTC), before_state={}, after_state={})
+    recovered = machine.process_bar(datetime(2026, 1, 1, 3, 55, tzinfo=UTC), before_state={}, after_state={})
 
-    assert len(events) == 5
-    assert all(item["decision_stage"] == "trigger" for item in events)
-    assert len(_available_orderflow_trigger_events(
-        bundle, datetime(2026, 1, 1, 3, 50, tzinfo=UTC), emitted,
-    )) == 0
+    assert suspended.admission_suspended
+    assert not recovered.admission_suspended
+

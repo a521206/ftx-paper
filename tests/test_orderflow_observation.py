@@ -29,7 +29,6 @@ def test_observe_market_reports_source_gap_and_does_not_fabricate_parent() -> No
     assert len(observation.gaps) == 1
     assert observation.gaps[0].start == datetime(2026, 1, 1, 3, 47, tzinfo=timezone.utc)
     assert observation.context.observations_for("5m") == ()
-    assert observation.gaps[0].start == datetime(2026, 1, 1, 3, 47, tzinfo=timezone.utc)
 
 
 def test_market_observation_as_of_filters_future_aggregates() -> None:

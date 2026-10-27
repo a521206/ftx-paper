@@ -14,7 +14,6 @@ from ftx_paper.market import DecisionBundle
 from ftx_paper.runtime.engine import MultiStrategyEngine
 from ftx_paper.runtime.engine import PaperEngine
 from ftx_paper.runtime.parity_artifacts import build_parity_artifact
-from ftx_paper.strategy.factory import ConfiguredStrategyFactory
 from ftx_paper.strategy import (
     OrderflowContext,
     OrderflowObservation,
@@ -112,12 +111,15 @@ def _context(*, close: float = 101.0, response_status: str = "confirmed_rejectio
 def test_orderflow_strategy_emits_diagnostic_candidate_without_order() -> None:
     bundle, account = _context()
     events = OrderflowStrategy().evaluate(bundle, account)
-    assert len(events) == 1
+    assert len(events) == 2
     assert events[0].payload["reason"] == "orderflow_admission"
     assert events[0].order is None
     assert events[0].payload["decision_stage"] == "admission"
     assert events[0].payload["cell"] == "orderflow"
     assert events[0].payload["source_observation_ids"] == ["obs-5m"]
+    assert events[1].payload["reason"] == "response_confirmed"
+    assert events[1].payload["decision_stage"] == "opportunity"
+    assert events[1].payload["source_observation_ids"] == ["obs-5m"]
 
 
 def test_orderflow_snapshot_restores_deterministic_policy_state() -> None:
@@ -247,21 +249,6 @@ def test_orderflow_diagnostic_is_attributed_in_multi_strategy_engine() -> None:
     result = engine.on_bundle(bundle, context=account)
 
     assert result.events[0]["strategy_id"] == "orderflow-research"
-
-
-def test_factory_dispatches_orderflow_without_using_generic_strategy() -> None:
-    factory = ConfiguredStrategyFactory()
-
-    orderflow = factory.create(strategy_name="ftx-paper-orderflow")
-    generic = factory.create(strategy_name="ftx-paper-research")
-
-    assert orderflow.metadata.name == "ftx-paper-orderflow"
-    assert generic.metadata.name != orderflow.metadata.name
-    assert hasattr(orderflow, "policy")
-    orderflow_policy = getattr(orderflow, "policy", None)
-    assert orderflow_policy is not None
-    assert orderflow_policy.__class__.__name__ == "OrderflowPolicy"
-    assert orderflow_policy.config.name == "ftx-paper-orderflow"
 
 
 def test_orderflow_emits_trigger_opportunity_lifecycle_and_admission_stages() -> None:

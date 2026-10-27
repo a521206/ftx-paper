@@ -161,12 +161,19 @@ def test_diagnostic_coordinator_rejects_accidental_order_payload() -> None:
     event = SharedDecisionCoordinator(Policy()).evaluate(
         DecisionBundle("bundle", "2026-01-01", "10:00", {}, ()), context
     )[0]
+    repeat = SharedDecisionCoordinator(Policy()).evaluate(
+        DecisionBundle("bundle", "2026-01-01", "10:00", {}, ()), context
+    )[0]
     assert event.payload["outcome"] == "rejected"
     assert event.payload["reason"] == "diagnostic_policy_order_forbidden"
     assert event.payload["decision_view"]["schema_version"] == 1
     assert event.payload["decision_view"]["policy"]["outcome"] == "rejected"
     assert event.payload["decision_view"]["policy"]["reason_code"] == "diagnostic_policy_order_forbidden"
-    assert event.payload["decision_view"]["decision_id"] == "candidate"
+    decision_id = event.payload["decision_view"]["decision_id"]
+    assert isinstance(decision_id, str)
+    assert len(decision_id) == 24
+    assert decision_id != "candidate"
+    assert repeat.payload["decision_view"]["decision_id"] == decision_id
 
 
 def test_decision_view_accepts_strategy_specific_structured_fields() -> None:
