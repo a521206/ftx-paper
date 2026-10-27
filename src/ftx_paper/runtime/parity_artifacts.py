@@ -33,6 +33,40 @@ def _canonical_json(value: Any) -> str:
     return json.dumps(_jsonable(value), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
+def _decision_value(record: Mapping[str, Any], name: str) -> Any:
+    """Read a decision field from the producer payload or its canonical view."""
+    value = record.get(name)
+    if value is not None:
+        return value
+    view = record.get("decision_view")
+    if isinstance(view, Mapping):
+        value = view.get(name)
+        if value is not None:
+            return value
+        policy = view.get("policy")
+        if isinstance(policy, Mapping):
+            return policy.get(name)
+    return None
+
+
+def _native_kind(record: Mapping[str, Any], *, kind: str) -> str:
+    """Preserve Paper's native decision reason instead of its envelope type."""
+    explicit = record.get("native_kind")
+    if explicit:
+        return str(explicit).lower()
+    reason = _decision_value(record, "reason") or _decision_value(record, "reason_code")
+    if reason:
+        return str(reason).lower()
+    stage = _decision_value(record, "decision_stage") or _decision_value(record, "stage")
+    return str(stage or kind).lower()
+
+
+def _is_structural_decision(record: Mapping[str, Any]) -> bool:
+    """Exclude interaction reference closures from comparable decisions."""
+    reason = _decision_value(record, "reason") or _decision_value(record, "reason_code")
+    return str(reason).upper() != "REFERENCE_REPLACED"
+
+
 def strategy_payload_hash(strategy: Mapping[str, Any] | None) -> tuple[dict[str, Any], str]:
     payload = {str(key): _jsonable(value) for key, value in (strategy or {}).items()}
     return payload, hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
@@ -100,7 +134,7 @@ def _record(record: Mapping[str, Any], *, kind: str, sequence: int) -> dict[str,
         outcome = record.get("outcome", values.get("outcome"))
         evidence = record.get("evidence")
     occurred_at = _timestamp(record)
-    native_kind = str(record.get("native_kind") or record.get("event_type") or kind).lower()
+    native_kind = _native_kind(record, kind=kind)
     comparison_identity = record.get("comparison_identity") or record.get("identity")
     identity_basis = {
         "kind": kind,
@@ -177,12 +211,13 @@ def build_parity_artifact(
     source_decisions = list(layer_records.get("decisions", ()))
     source_decisions = [event for event in source_decisions
                         if is_decision_event(str(event.get("event_type", "")), event)
-                        and (str(event.get("outcome", "")).lower() in {"", "accepted", "rejected"}
-                             or str(event.get("reason", "")).lower() == "setup_candidate_formed"
+                        and _is_structural_decision(event)
+                        and (str(_decision_value(event, "outcome") or "").lower() in {"", "accepted", "rejected"}
+                             or str(_decision_value(event, "reason") or "").lower() == "setup_candidate_formed"
                              or str(event.get("event_type", "")).upper() == "EXITDECISION")]
-    decisions = [_record(event, kind=("candidate" if str(event.get("reason", "")).lower() == "setup_candidate_formed"
-                                      else "exit" if str(event.get("event_type", "")).upper() == "EXITDECISION"
-                                      else str(event.get("outcome", "rejected"))), sequence=index)
+    decisions = [_record(event, kind=("candidate" if str(_decision_value(event, "reason") or "").lower() == "setup_candidate_formed"
+                                       else "exit" if str(event.get("event_type", "")).upper() == "EXITDECISION"
+                                       else str(_decision_value(event, "outcome") or "rejected")), sequence=index)
                  for index, event in enumerate(source_decisions)]
     execution_types = {"ORDER_INTENT", "ORDER_AUTHORIZED", "ORDER_ACK", "FILL", "ORDER_UNFILLED", "ORDER_SUPPRESSED", "RISK_REJECTED", "RESERVATION", "AUTHORIZATION", "SUBMISSION", "PENDING_EXIT", "EXIT_FILL", "CANCELLATION", "SETTLEMENT"}
     source_execution = [event for event in layer_records.get("execution", ())

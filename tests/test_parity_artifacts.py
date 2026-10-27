@@ -88,7 +88,7 @@ def test_projection_preserves_decision_lineage_and_excludes_extensions() -> None
         }]},
     )
     record = artifact["layers"]["decision"][0]
-    assert record["native_kind"] == "policy_decision"
+    assert record["native_kind"] == "admission"
     assert record["stage"] == "admission"
     assert record["outcome"] == "accepted"
     assert record["causal_parent_id"] == "p1"
@@ -119,3 +119,65 @@ def test_ledger_projection_does_not_invent_closeout() -> None:
         request={"session_date": "2026-01-05"},
     )
     assert artifact["layers"]["portfolio_ledger"] == []
+
+
+def test_projection_excludes_reference_replacement_and_preserves_native_reason() -> None:
+    decisions = [
+        {
+            "event_type": "POLICY_DECISION",
+            "decision_at": "2026-01-05T14:30:00Z",
+            "outcome": "rejected",
+            "decision_stage": "lifecycle",
+            "reason": "REFERENCE_REPLACED",
+            "interaction_id": "interaction-1",
+        },
+        {
+            "event_type": "POLICY_DECISION",
+            "decision_at": "2026-01-05T14:31:00Z",
+            "outcome": "rejected",
+            "decision_stage": "lifecycle",
+            "reason": "setup_expired",
+            "opportunity_id": "opportunity-1",
+        },
+    ]
+    artifact = build_parity_artifact(
+        {"strategy": {}, "bars_seen": 1, "metadata": {"input_fingerprint": "fixture"}},
+        request={"session_date": "2026-01-05"},
+        layer_records={"decisions": decisions},
+    )
+
+    records = artifact["layers"]["decision"]
+    assert len(records) == 1
+    assert records[0]["native_kind"] == "setup_expired"
+
+
+def test_projection_reads_reason_and_outcome_from_canonical_policy_view() -> None:
+    decisions = [
+        {
+            "event_type": "POLICY_DECISION",
+            "decision_id": "interaction-1",
+            "decision_at": "2026-01-05T14:30:00Z",
+            "decision_view": {
+                "stage": "lifecycle",
+                "policy": {"outcome": "rejected", "reason_code": "REFERENCE_REPLACED"},
+            },
+        },
+        {
+            "event_type": "POLICY_DECISION",
+            "decision_id": "opportunity-1",
+            "decision_at": "2026-01-05T14:31:00Z",
+            "decision_view": {
+                "stage": "lifecycle",
+                "policy": {"outcome": "rejected", "reason_code": "setup_expired"},
+            },
+        },
+    ]
+    artifact = build_parity_artifact(
+        {"strategy": {}, "bars_seen": 1, "metadata": {"input_fingerprint": "fixture"}},
+        request={"session_date": "2026-01-05"},
+        layer_records={"decisions": decisions},
+    )
+
+    records = artifact["layers"]["decision"]
+    assert len(records) == 1
+    assert records[0]["native_kind"] == "setup_expired"
