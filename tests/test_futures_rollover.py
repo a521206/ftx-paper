@@ -64,6 +64,12 @@ def test_front_contract_returns_none_without_an_unexpired_contract():
     assert select_front_futures_contract(contracts, session_date=date(2026, 9, 30)) is None
 
 
+def test_replay_data_end_is_exclusive_like_canonical_orderflow():
+    assert FuturesSessionSourceResolver._in_session({"minute": "2026-09-29T09:15:00+05:30"})
+    assert FuturesSessionSourceResolver._in_session({"minute": "2026-09-29T15:29:00+05:30"})
+    assert not FuturesSessionSourceResolver._in_session({"minute": "2026-09-29T15:30:00+05:30"})
+
+
 def test_parse_expiry_accepts_datetime_date_and_iso_text_only():
     assert parse_expiry(datetime(2026, 9, 29, 15, 30, tzinfo=timezone.utc)) == date(2026, 9, 29)
     assert parse_expiry(date(2026, 9, 29)) == date(2026, 9, 29)

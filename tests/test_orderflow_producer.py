@@ -7,12 +7,12 @@ from ftx_paper.strategy import CausalOrderflowProducer
 def test_causal_producer_builds_complete_five_minute_context() -> None:
     producer = CausalOrderflowProducer()
     instrument = Instrument("NIFTYFUT", "NSE", "FUTURES")
-    start = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
+    start = datetime(2026, 1, 1, 3, 45, tzinfo=timezone.utc)
     for index in range(5):
         timestamp = start + timedelta(minutes=index)
         producer.ingest(MarketBar(instrument, timestamp, 99.0, 102.0, 98.0, 100.0 + index, 10.0))
 
-    context = producer.context("2026-01-01", "15:34")
+    context = producer.context("2026-01-01", "09:34")
 
     assert context is not None
     parent = context.observations_for("5m")[0]
@@ -34,12 +34,12 @@ def test_causal_producer_builds_complete_five_minute_context() -> None:
 def test_causal_producer_keeps_later_parent_windows_complete() -> None:
     producer = CausalOrderflowProducer()
     instrument = Instrument("NIFTYFUT", "NSE", "FUTURES")
-    start = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
+    start = datetime(2026, 1, 1, 3, 45, tzinfo=timezone.utc)
     for index in range(10):
         timestamp = start + timedelta(minutes=index)
         producer.ingest(MarketBar(instrument, timestamp, 99.0, 102.0, 98.0, 100.0 + index, 10.0))
 
-    context = producer.context("2026-01-01", "15:40")
+    context = producer.context("2026-01-01", "09:40")
 
     assert context is not None
     parents = context.observations_for("5m")
@@ -49,3 +49,30 @@ def test_causal_producer_keeps_later_parent_windows_complete() -> None:
         tuple(item.observation_id for item in context.observations_for("1m")[:5]),
         tuple(item.observation_id for item in context.observations_for("1m")[5:10]),
     ]
+
+
+def test_causal_producer_allows_interleaved_source_instruments() -> None:
+    producer = CausalOrderflowProducer()
+    timestamp = datetime(2026, 1, 1, 3, 45, tzinfo=timezone.utc)
+    for symbol in ("NIFTYFUT", "BANKFUT"):
+        producer.ingest(MarketBar(
+            Instrument(symbol, "NSE", "FUTURES"), timestamp,
+            99.0, 102.0, 98.0, 100.0, 10.0,
+        ))
+
+    context = producer.context("2026-01-01", "09:15")
+
+    assert context is not None
+    assert len(context.observations_for("1m")) == 1
+
+
+def test_causal_producer_uses_configured_session_alignment() -> None:
+    producer = CausalOrderflowProducer(session_start="10:00", session_end="10:30")
+    instrument = Instrument("NIFTYFUT", "NSE", "FUTURES")
+    start = datetime(2026, 1, 1, 4, 30, tzinfo=timezone.utc)
+    for index in range(5):
+        timestamp = start + timedelta(minutes=index)
+        producer.ingest(MarketBar(instrument, timestamp, 99.0, 102.0, 98.0, 100.0, 10.0))
+    context = producer.context("2026-01-01", "10:04")
+    assert context is not None
+    assert context.observations_for("5m")[0].interval_start == start

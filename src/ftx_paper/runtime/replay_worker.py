@@ -19,6 +19,7 @@ from ftx_paper.market.requirements import FeatureRequirement
 from ftx_paper.domain import AccountAggregate, PortfolioState
 from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.runtime.engine import PaperEngine
+from ftx_paper.runtime.events import is_decision_event
 from ftx_paper.strategy.orderflow_producer import CausalOrderflowProducer
 from ftx_paper.runtime.futures_source import FuturesSessionSourceResolver
 from ftx_paper.runtime.parity_artifacts import build_parity_artifact
@@ -40,7 +41,7 @@ from ftx_paper.config import (
 )
 
 _EXECUTION_EVENT_TYPES = frozenset({
-    "ORDER_INTENT", "ORDER_AUTHORIZED", "ORDER_ACK", "FILL", "EXECUTEDDECISION",
+    "ORDER_INTENT", "ORDER_AUTHORIZED", "ORDER_ACK", "FILL",
     "ORDER_UNFILLED", "ORDER_SUPPRESSED", "RISK_REJECTED",
 })
 
@@ -547,11 +548,6 @@ class ReplayWorker:
                                        "fill_timestamp": futures_bar.timestamp.isoformat(), "price": exit_price,
                                        "quantity": action.intent.quantity, "vehicle": action.intent.vehicle,
                                        "source": "replay", "session_date": date})
-                    all_events.append({"event_type": "EXECUTEDDECISION", "decision_id": action.intent.client_order_id,
-                                       "client_order_id": action.intent.client_order_id,
-                                       "fill_timestamp": futures_bar.timestamp.isoformat(), "price": exit_price,
-                                       "quantity": action.intent.quantity, "vehicle": action.intent.vehicle,
-                                       "source": "replay", "session_date": date, "status": "FILLED"})
                     engine.on_execution_event(ExecutionNotification(
                         event_type="FILLED", client_order_id=action.intent.client_order_id,
                         status="FILLED", quantity=action.intent.quantity,
@@ -640,10 +636,6 @@ class ReplayWorker:
                                            "price": fill_price, "quantity": order.quantity,
                                            "vehicle": order.vehicle, "source": "replay",
                                             "session_date": date})
-                        all_events.append({"event_type": "EXECUTEDDECISION", "decision_id": order.client_order_id,
-                                           "client_order_id": order.client_order_id, "fill_timestamp": futures_bar.timestamp.isoformat(),
-                                           "price": fill_price, "quantity": order.quantity, "vehicle": order.vehicle,
-                                           "source": "replay", "session_date": date, "status": "FILLED"})
                         engine.register_entry(order, fill_price=fill_price,
                                               entry_fill_time=futures_bar.timestamp,
                                               reference_price=futures_bar.close)
@@ -738,7 +730,7 @@ class ReplayWorker:
                         max_drawdown = min(max_drawdown, current_equity - peak_equity)
                 for event in result.events:
                     event_type = str(event.get("event_type", "")).upper()
-                    if event_type.endswith("DECISION"):
+                    if is_decision_event(event_type, event):
                         parity_records["decisions"].append(dict(event))
                 for event in all_events[event_start:]:
                     event_type = str(event.get("event_type", "")).upper()
@@ -823,7 +815,7 @@ class ReplayWorker:
                 execution_by_decision.setdefault(decision_id, []).append(item)
         normalized_decisions = []
         for event in all_events:
-            if not str(event.get("event_type", "")).endswith("DECISION"):
+            if not is_decision_event(str(event.get("event_type", "")), event):
                 continue
             normalized = self._normalize_decision(event)
             decision_id = event.get("decision_id")
@@ -851,7 +843,7 @@ class ReplayWorker:
             "bars_seen": bars_seen,
             "directional_exposure": directional_exposure,
             "events": all_events,
-            "decisions": [event for event in all_events if str(event.get("event_type", "")).endswith("DECISION")],
+            "decisions": [event for event in all_events if is_decision_event(str(event.get("event_type", "")), event)],
             "decision_trace_schema_version": 1,
             "decision_trace": normalized_decisions,
             "trace_schema_version": 1,
@@ -897,7 +889,6 @@ class ReplayWorker:
         evidence = dict(view["evidence"])
         metrics = dict(evidence.get("metrics") or {})
         return {
-            "candidate_identity": view.get("decision_id"),
             "decision_id": view.get("decision_id"),
             "decision_stage": view.get("stage") or event_type.lower().removesuffix("decision"),
             "outcome": policy.get("outcome") or event_type.lower(),
@@ -1096,7 +1087,7 @@ class ReplayWorker:
             timestamp = datetime.fromisoformat(str(row["minute"]))
             local_timestamp = timestamp.astimezone(IST)
             minute_of_day = local_timestamp.hour * 60 + local_timestamp.minute
-            if not SESSION_OPEN_MINUTES <= minute_of_day <= SESSION_DATA_END_MINUTES:
+            if not SESSION_OPEN_MINUTES <= minute_of_day < SESSION_DATA_END_MINUTES:
                 continue
             bars.append(MarketBar(
                 instrument=Instrument(symbol=str(row["symbol"]), exchange=str(row["exchange"]),

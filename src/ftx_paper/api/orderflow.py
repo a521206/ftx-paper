@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from datetime import datetime
 from typing import Any
 
 
@@ -19,6 +20,18 @@ def _direction(value: Any) -> str | None:
         return None
     text = str(value).upper()
     return {"BUY": "LONG", "SELL": "SHORT", "BULLISH": "LONG", "BEARISH": "SHORT"}.get(text, text)
+
+
+def _five_minute_bar(value: Any) -> tuple[datetime, str] | None:
+    """Return the session-aligned 5m bar and its stable display timestamp."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    start = timestamp.replace(minute=timestamp.minute - timestamp.minute % 5, second=0, microsecond=0)
+    return start, start.isoformat()
 
 
 def build_orderflow_projection(
@@ -52,7 +65,8 @@ def build_orderflow_projection(
     outcome = str(raw_outcome) if raw_outcome is not None else None
     reason = _first(policy.get("message"), policy.get("reason_code"), view.get("detail"))
     action_name = "Exit / manage position" if str(view.get("event_type", "")).upper() == "EXITDECISION" else (
-        "Trade now" if outcome in {"accepted", "triggered", "filled"} else
+        "Trade now" if outcome in {"filled"} else
+        "Eligible diagnostic candidate" if outcome in {"accepted", "triggered"} else
         "Wait for confirmation" if str(state.get("response_state", "")).upper() in {"PENDING_RESPONSE", "CONFIRMED"} and outcome == "rejected" else
         "No trade" if outcome is not None else None
     )
@@ -74,7 +88,7 @@ def build_orderflow_projection(
             "response_status": row_state.get("response_state"),
             "implication": _direction(_first(row_view.get("direction"), _mapping(row_view.get("subject")).get("direction"))),
         }
-    sequence = []
+    sequence_by_bar: dict[tuple[datetime, str], dict[str, Any]] = {}
     views_by_id = {str(_mapping(row.get("decision_view")).get("decision_id")): _mapping(row.get("decision_view")) for row in canonical}
     for row in sorted(events, key=lambda item: str(item.get("created_at") or item.get("payload", {}).get("decision_at") or "")):
         payload = _mapping(row.get("payload"))
@@ -88,15 +102,21 @@ def build_orderflow_projection(
             row_state = _mapping(row_evidence.get("state"))
             row_policy = _mapping(row_view.get("policy"))
             event_type = str(row.get("event_type") or "").upper()
-            lifecycle_transition = {"FILL": "entry accepted", "EXECUTEDDECISION": "entry accepted", "ORDER_SUPPRESSED": "entry rejected", "RISK_REJECTED": "entry rejected", "EXITDECISION": "exit / manage"}.get(event_type)
-            sequence.append({
-                "time": _first(row.get("created_at"), row_view.get("at"), payload.get("decision_at")),
+            lifecycle_transition = {"FILL": "entry accepted", "ORDER_SUPPRESSED": "entry rejected", "RISK_REJECTED": "entry rejected"}.get(event_type)
+            decision_time = _first(row_view.get("at"), payload.get("decision_at"), row.get("created_at"))
+            bar = _five_minute_bar(decision_time)
+            if bar is None:
+                continue
+            sequence_by_bar[bar] = {
+                "time": bar[1],
+                "timeframe": "5m",
                 "location": _first(row_view.get("context"), _mapping(row_view.get("subject")).get("location")),
                 "transition": _first(lifecycle_transition, row_state.get("response_state"), row_state.get("interaction_state"), row_policy.get("reason_code"), row_view.get("stage")),
                 "direction": _direction(_first(row_view.get("direction"), _mapping(row_view.get("subject")).get("direction"))),
                 "implication": _first(row_policy.get("message"), row_policy.get("reason_code"), row_view.get("display_outcome")),
                 "evidence": row,
-            })
+            }
+    sequence = [sequence_by_bar[key] for key in sorted(sequence_by_bar)]
     return {
         "as_of": _first(view.get("at"), latest.get("created_at")),
         "updated_at": as_of,

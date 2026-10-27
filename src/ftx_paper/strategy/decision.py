@@ -121,7 +121,7 @@ class LiveDecision:
 
 @dataclass(frozen=True, slots=True)
 class CandidateDecision:
-    """One terminal decision for a candidate.
+    """One terminal policy decision with a dedicated decision identity.
 
     Candidate observations and terminal outcomes are intentionally not emitted
     as separate decision events.  Execution remains a separate lifecycle.
@@ -130,16 +130,18 @@ class CandidateDecision:
     payload: dict[str, object]
     order: OrderIntent | None = None
 
-    event_type: str = "CANDIDATEDECISION"
+    event_type: str = "POLICY_DECISION"
 
     def __post_init__(self) -> None:
         outcome = self.payload.get("outcome")
-        if outcome not in {"accepted", "rejected", "cancelled", "superseded", "recorded"}:
-            raise ValueError("CandidateDecision requires a terminal outcome")
-        if not self.payload.get("decision_id") and not self.payload.get("candidate_id"):
-            raise ValueError("CandidateDecision requires a candidate identifier")
+        if outcome not in {"accepted", "rejected", "cancelled", "superseded", "recorded", "unavailable"}:
+            raise ValueError("policy decision requires a valid outcome")
+        if not self.payload.get("decision_id"):
+            raise ValueError("CandidateDecision requires a dedicated decision identifier")
         if outcome == "rejected" and not self.payload.get("reason"):
-            raise ValueError("rejected CandidateDecision requires a reason")
+            raise ValueError("rejected policy decision requires a reason")
+        if outcome == "unavailable" and not self.payload.get("reason"):
+            raise ValueError("unavailable policy decision requires a reason")
 
 
 DecisionEvent = LiveDecision | CandidateDecision
@@ -409,16 +411,14 @@ class IndependentLiveDecisionEngine:
         session_selected = self._session_selected(decision_session)
         for cell, cell_policy in policies:
             direction = cell_policy.direction.value.lower() if cell_policy is not None else "NONE"
-            profile_id = self.capital_context.profile.candidate_id if self.capital_context is not None else "baseline"
-            candidate_id = sha256(f"{profile_id}:{decision_at.isoformat()}:{sequence}:{cell.name}".encode()).hexdigest()[:24]
-            candidate = {**base, "decision_id": candidate_id, "cell": cell.name, "locations": [item.value for item in cell.ordered_locations], "direction": direction,
+            profile_id = self.capital_context.profile.profile_id if self.capital_context is not None else "baseline"
+            decision_id = sha256(f"{profile_id}:{decision_at.isoformat()}:{sequence}:{cell.name}".encode()).hexdigest()[:24]
+            candidate = {**base, "decision_id": decision_id, "cell": cell.name, "locations": [item.value for item in cell.ordered_locations], "direction": direction,
                          "setup_type": score_setup_type, "score": score, "score_factors": score_factors,
                          "score_multiplier": score_multiplier, "sequence": sequence,
                          "feature_values": feature_values, "entry_price": current, "outcome": "candidate",
                          "exit_mode": cell_policy.exit_mode.value if cell_policy is not None else "signal",
-                         "candidate_id": candidate_id,
-                         "research_candidate_id": profile_id,
-                         "capital_policy_version": self.capital_context.profile.schema_version if self.capital_context is not None else 1}
+                          "capital_policy_version": self.capital_context.profile.schema_version if self.capital_context is not None else 1}
             candidate.update(_synthetic_settlement_metadata(bundle))
             candidate.update(vix_at_event=vix_at_event, pcr_at_event=pcr, stop_basis=stop_basis,
                              transitions=[{"reference": item.reference.value, "kind": item.kind.value,
@@ -450,7 +450,7 @@ class IndependentLiveDecisionEngine:
             if reason:
                 events.append(CandidateDecision(
                     {**candidate, "outcome": "rejected", "decision_stage": "policy", "reason": reason,
-                     "decision_id": candidate_id},
+                     "decision_id": decision_id},
                 ))
                 continue
             if cell_policy is None:
@@ -463,7 +463,7 @@ class IndependentLiveDecisionEngine:
             if thesis_reason is not None:
                 events.append(CandidateDecision(
                     {**candidate, "outcome": "rejected", "decision_stage": "thesis", "reason": thesis_reason,
-                      "decision_id": candidate_id},
+                       "decision_id": decision_id},
                 ))
                 continue
             for vehicle in ("futures",):
@@ -504,7 +504,7 @@ class IndependentLiveDecisionEngine:
                     stability_multiplier=stability,
                     drawdown_multiplier=drawdown_scale,
                     vehicle_limit_lots=None,
-                    candidate_id=candidate_id,
+                     decision_id=decision_id,
                 ))
                 normalized_direction = "long" if direction in {"long", "buy"} else "short"
                 risk_scope = "|".join((
@@ -594,10 +594,10 @@ class IndependentLiveDecisionEngine:
                 if gate_reason is not None:
                     events.append(CandidateDecision(
                         {**vehicle_candidate, "outcome": "rejected", "decision_stage": "risk", "reason": gate_reason,
-                          "decision_id": candidate_id},
+                           "decision_id": decision_id},
                     ))
                     continue
-                order = OrderIntent(candidate_id + f":{vehicle}", futures.instrument, side, quantity,
+                order = OrderIntent(decision_id + f":{vehicle}", futures.instrument, side, quantity,
                                     reason="live_policy_accepted", cell=cell.name, stop_price=stop,
                                     exit_mode=cell_policy.exit_mode.value, entry_bar=sequence,
                     role=OrderRole.ENTRY, vehicle=vehicle)

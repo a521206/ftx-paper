@@ -13,8 +13,21 @@ from ftx_paper.strategy import (
     OrderflowObservationContext,
     PolicyDecision,
     SharedDecisionCoordinator,
+    UnavailableReason,
+    UnavailableValue,
+    stable_orderflow_id,
     feature_union,
 )
+
+
+def test_unavailable_values_and_scoped_ids_are_typed_and_deterministic() -> None:
+    unavailable = UnavailableValue(UnavailableReason.GAP, datetime(2026, 1, 1, tzinfo=UTC))
+
+    assert unavailable.status == "UNAVAILABLE"
+    assert unavailable.reason is UnavailableReason.GAP
+    assert stable_orderflow_id("observation", "session", "5m", 1) == stable_orderflow_id(
+        "observation", "session", "5m", 1,
+    )
 
 
 UTC = timezone.utc

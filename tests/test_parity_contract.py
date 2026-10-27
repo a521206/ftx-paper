@@ -69,6 +69,64 @@ def test_observed_empty_scope_is_complete() -> None:
     assert artifact["manifest"]["layers"]["decision"]["status"] == "MATCHED"
 
 
+def test_scope_uses_canonical_orderflow_run_identity() -> None:
+    artifact = build_parity_artifact(
+        {
+            "strategy": {},
+            "bars_seen": 375,
+            "metadata": {
+                "timezone": "Asia/Kolkata",
+                "input_fingerprint": "fingerprint",
+                "input_provenance": {"current": {
+                    "selected_symbol": "NIFTY",
+                    "selected_expiry": "",
+                    "instrument_type": "CONTINUOUS",
+                    "source_bar_count": 375,
+                }},
+            },
+        },
+        request={
+            "session_date": "2026-09-29",
+            "strategy_id": "ftx-paper-orderflow",
+            "vehicles": ["futures"],
+        },
+    )
+
+    scope = artifact["scope"]
+    assert scope["requested_date_from"] == "2026-09-29"
+    assert scope["effective_date_to"] == "2026-09-29"
+    assert scope["sessions"] == ["orderflow"]
+    assert scope["vehicles"] == ["futures"]
+    assert scope["processed"] == {"bar_count": 375, "session_count": 1}
+    assert scope["replay_input"] == {
+        "identity": ["fingerprint"],
+        "provenance": [{
+            "bar_count": 375,
+            "contract_type": "CONTINUOUS",
+            "expiry": "",
+            "fingerprint": "fingerprint",
+            "identities": [{
+                "contract_type": "CONTINUOUS",
+                "expiry": "",
+                "series": "I",
+                "symbol": "NIFTY",
+            }],
+            "identity": {
+                "contract_type": "CONTINUOUS",
+                "expiry": "",
+                "series": "I",
+                "symbol": "NIFTY",
+            },
+            "rollover_decision": None,
+            "rollover_policy_version": None,
+            "selected_expiry": "",
+            "selected_symbol": "NIFTY",
+            "series": "I",
+            "symbol": "NIFTY",
+        }],
+    }
+
+
 def test_missing_record_timestamp_is_rejected() -> None:
     with pytest.raises(ValueError, match="occurred_at"):
         build_parity_artifact(

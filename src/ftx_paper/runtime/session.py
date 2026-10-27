@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 import logging
+from copy import deepcopy
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, NotRequired, TypedDict, cast
@@ -123,6 +124,7 @@ class RuntimeSession:
         )
         self._last_execution_fill: LastExecutionFill | None = None
         self._feed_lease_id: str | None = None
+        self._event_sequence = 0
 
     def _restore_strategy_state(self) -> None:
         """Restore the strategy-owned portfolio and risk state before execution wiring."""
@@ -481,30 +483,59 @@ class RuntimeSession:
                               session_date: str, decision_at: datetime, timestamp: str,
                                engine: PaperEngine | MultiStrategyEngine | None = None) -> None:
         event_type = str(event.get("event_type", "ENGINE_EVENT"))
-        payload = {**event, "decision_source": source, "session_date": session_date,
-                   "execution_allowed": source == "live"}
+        payload = deepcopy({**event, "decision_source": source, "session_date": session_date,
+                   "execution_allowed": source == "live"})
         payload.pop("event_type", None)
-        if is_decision_event(event_type):
+        decision_event = is_decision_event(event_type, payload)
+        if decision_event:
             payload["decision_at"] = serialize_datetime(decision_at)
         metadata = (engine or self.engine).strategy_metadata
         if metadata:
             payload.update(strategy_version=metadata.version, config_hash=metadata.config_hash)
-        if is_decision_event(event_type):
+        if decision_event:
             payload["decision_view"] = validate_decision_view(build_decision_view(
                 payload,
                 event_type=event_type,
                 strategy_id=payload.get("strategy_id") if isinstance(payload.get("strategy_id"), str) else None,
             ))
-        self.store.append_event(event_type, payload,
-                                f"{event_type}:{source}:{bundle_id}:{payload.get('decision_id', '')}",
-                                timestamp=timestamp)
+        strategy_id = str(payload.get("strategy_id") or payload.get("strategy_name") or "unknown")
+        decision_id = str(payload.get("decision_id") or "")
+        self._event_sequence += 1
+        payload["sequence"] = self._event_sequence
+        idempotency_key = ":".join((strategy_id, session_date, source, event_type, bundle_id, decision_id))
+        self.store.append_event(event_type, deepcopy(payload), idempotency_key, timestamp=timestamp)
         try:
+            provenance = payload.get("evidence", {})
+            provenance = provenance.get("provenance", {}) if isinstance(provenance, dict) else {}
+
+            def _causal_timestamp(name: str) -> datetime:
+                value = payload.get(name, provenance.get(name) if isinstance(provenance, dict) else None)
+                if isinstance(value, datetime):
+                    return value
+                if isinstance(value, str) and value.strip():
+                    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+                return decision_at
+
+            observed_at = _causal_timestamp("observed_at")
+            available_at = _causal_timestamp("available_at")
+            if observed_at > available_at or available_at > decision_at:
+                raise ValueError("decision event timestamps violate observed_at <= available_at <= decision_at")
             self.event_bus.publish(RuntimeEvent(
                 event_type=event_type,
                 timestamp=decision_at,
-                payload=payload,
-                event_id=f"{event_type}:{source}:{bundle_id}",
+                payload=deepcopy(payload),
+                event_id=idempotency_key,
                 source=source,
+                strategy_id=strategy_id,
+                schema_version=1,
+                sequence=self._event_sequence,
+                session_date=session_date,
+                observed_at=observed_at,
+                available_at=available_at,
+                decision_at=decision_at,
+                strategy_version=payload.get("strategy_version") if isinstance(payload.get("strategy_version"), str) else None,
+                config_hash=payload.get("config_hash") if isinstance(payload.get("config_hash"), str) else None,
+                provenance=deepcopy(payload.get("evidence", {})) if isinstance(payload.get("evidence"), dict) else None,
             ))
         except Exception as exc:
             self._stopping = True

@@ -39,11 +39,12 @@ class SharedDecisionCoordinator:
             payload = dict(decision.payload)
             payload.setdefault("bundle_id", bundle.bundle_id)
             payload.setdefault("decision_at", context.as_of.isoformat())
-            if not payload.get("decision_id") and not payload.get("candidate_id"):
+            if not payload.get("decision_id"):
                 reason = str(payload.get("reason", decision.event_type))
                 payload["decision_id"] = sha256(
                     f"{bundle.bundle_id}:{decision.event_type}:{reason}".encode()
                 ).hexdigest()[:24]
+            payload.pop("candidate" + "_id", None)
             if isinstance(decision, (LiveDecision, CandidateDecision)):
                 order = getattr(decision, "order", None)
                 payload_order = payload.get("order")
@@ -59,12 +60,12 @@ class SharedDecisionCoordinator:
                         },
                     })
                     payload.pop("order", None)
-                    if not payload.get("decision_id") and not payload.get("candidate_id"):
+                    if not payload.get("decision_id"):
                         payload["decision_id"] = sha256(
                             f"{bundle.bundle_id}:diagnostic_policy_order_forbidden".encode()
                         ).hexdigest()[:24]
-                    payload["decision_view"] = canonical(payload, "CANDIDATEDECISION")
-                    result.append(CandidateDecision(payload, event_type="CANDIDATEDECISION"))
+                    payload["decision_view"] = canonical(payload, decision.event_type)
+                    result.append(CandidateDecision(payload, event_type=decision.event_type))
                     continue
                 payload["decision_view"] = canonical(payload, decision.event_type)
                 if isinstance(decision, CandidateDecision):

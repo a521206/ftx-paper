@@ -73,20 +73,20 @@ def build_authoritative_payload(
         event_type = str(event.get("event_type", "")).upper()
         raw_view = payload.get("decision_view") or event.get("decision_view")
         view = validate_decision_view(raw_view) if isinstance(raw_view, Mapping) else build_decision_view(
-            payload, event_type=event_type or "CANDIDATEDECISION",
+            payload, event_type=event_type or "POLICY_DECISION",
         )
         subject = dict(view["subject"])
         policy = dict(view["policy"])
         evidence = dict(view["evidence"])
         metrics = dict(evidence.get("metrics") or {})
         diagnostics = dict(evidence.get("diagnostics") or {})
-        candidate_id = view.get("decision_id")
-        if candidate_id and event_type == "CANDIDATEDECISION":
-            candidate_id = str(candidate_id)
-            if candidate_id not in seen:
-                seen.add(candidate_id)
+        decision_id = view.get("decision_id")
+        if decision_id:
+            decision_id = str(decision_id)
+            if decision_id not in seen:
+                seen.add(decision_id)
                 candidates.append({
-                    "candidate_id": candidate_id,
+                    "decision_id": decision_id,
                     "date": _event_date(event),
                     "time": str(view.get("at", ""))[11:16],
                     "session": subject.get("session"),
@@ -104,8 +104,8 @@ def build_authoritative_payload(
                     "score_factors": diagnostics.get("score_factors", {}),
                     "sizing_diagnostics": diagnostics.get("sizing_pipeline"),
                 })
-        if candidate_id and event_type == "CANDIDATEDECISION":
-            decisions.append({"candidate_id": str(candidate_id), "decision_view": view})
+        if decision_id:
+            decisions.append({"decision_id": decision_id, "decision_view": view})
         if event_type in {"FILLED", "EXECUTIONFILLED", "EXITED", "EXECUTIONEXITED"}:
             trades.append(payload)
         if "settlement" in event_type or "settlement_status" in payload:

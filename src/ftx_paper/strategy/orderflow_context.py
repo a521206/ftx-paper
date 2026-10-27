@@ -1,0 +1,235 @@
+"""Versioned market context and opening-gap state for causal orderflow use."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, asdict
+from datetime import datetime
+from collections.abc import Iterable
+from collections.abc import Sequence, Mapping
+
+
+@dataclass(frozen=True, slots=True)
+class ValueReference:
+    """A prior-session value projection published only when complete."""
+
+    reference_id: str
+    high: float | None
+    low: float | None
+    available_at: datetime | None
+    source_ids: tuple[str, ...] = ()
+    complete: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.reference_id.strip():
+            raise ValueError("value reference identity is required")
+        if self.complete and (self.high is None or self.low is None):
+            raise ValueError("complete value reference requires both bounds")
+        if self.high is not None and self.low is not None and self.low > self.high:
+            raise ValueError("value reference bounds are inverted")
+        if self.complete and not self.source_ids:
+            raise ValueError("complete value reference requires source IDs")
+        if self.complete and self.available_at is None:
+            raise ValueError("complete value reference requires availability")
+
+
+@dataclass(frozen=True, slots=True)
+class SessionLevels:
+    session_date: str
+    opening_range_high: float | None = None
+    opening_range_low: float | None = None
+    prior_value_high: float | None = None
+    prior_value_low: float | None = None
+    prior_profile_complete: bool = False
+    available_at: datetime | None = None
+    source_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.session_date.strip():
+            raise ValueError("session levels require a session date")
+        if self.opening_range_high is not None and self.opening_range_low is not None:
+            if self.opening_range_low > self.opening_range_high:
+                raise ValueError("opening range bounds are inverted")
+        if self.prior_value_high is not None and self.prior_value_low is not None:
+            if self.prior_value_low > self.prior_value_high:
+                raise ValueError("prior value bounds are inverted")
+
+
+@dataclass(frozen=True, slots=True)
+class OpeningGapState:
+    status: str
+    gap_points: float | None = None
+    reference_price: float | None = None
+    observed_at: datetime | None = None
+    evidence_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.status not in {"UNAVAILABLE", "NONE", "UP", "DOWN", "RECOVERED"}:
+            raise ValueError("invalid opening gap status")
+        if self.status == "UNAVAILABLE" and self.gap_points is not None:
+            raise ValueError("unavailable opening gap cannot have a value")
+
+
+@dataclass(frozen=True, slots=True)
+class ContextVersion:
+    context_id: str
+    version: int
+    available_at: datetime
+    levels: SessionLevels
+    opening_gap: OpeningGapState
+    permission: str
+    evidence_ids: tuple[str, ...] = ()
+    value_reference: ValueReference | None = None
+
+    def __post_init__(self) -> None:
+        if not self.context_id.strip() or self.version < 1:
+            raise ValueError("context identity and positive version are required")
+        if self.permission not in {"UNAVAILABLE", "LONG", "SHORT", "BOTH", "NONE"}:
+            raise ValueError("invalid context permission")
+        if len(self.evidence_ids) != len(set(self.evidence_ids)):
+            raise ValueError("context evidence IDs must be unique")
+        if self.available_at.tzinfo is None or self.available_at.utcoffset() is None:
+            raise ValueError("context availability must be timezone-aware")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "context_id": self.context_id, "version": self.version,
+            "available_at": self.available_at.isoformat(),
+            "levels": asdict(self.levels), "opening_gap": asdict(self.opening_gap),
+            "permission": self.permission, "evidence_ids": list(self.evidence_ids),
+            "value_reference": asdict(self.value_reference) if self.value_reference else None,
+        }
+
+
+class ContextHistory:
+    """Append-only context versions resolved strictly as-of a replay clock."""
+
+    def __init__(self, versions: Iterable[ContextVersion] = ()) -> None:
+        self._versions: list[ContextVersion] = []
+        for version in versions:
+            self.publish(version)
+
+    def publish(self, version: ContextVersion) -> None:
+        if self._versions and version.available_at < self._versions[-1].available_at:
+            raise ValueError("context versions must be published in availability order")
+        if self._versions and version.version <= self._versions[-1].version:
+            raise ValueError("context versions must increase")
+        self._versions.append(version)
+
+    def as_of(self, cutoff: datetime) -> ContextVersion | None:
+        available = [version for version in self._versions if version.available_at <= cutoff]
+        return available[-1] if available else None
+
+    @property
+    def versions(self) -> tuple[ContextVersion, ...]:
+        return tuple(self._versions)
+
+    def to_dict(self) -> dict[str, object]:
+        return {"schema_version": 1, "versions": [version.to_dict() for version in self._versions]}
+
+
+def classify_opening_gap(
+    *, opening_price: float | None, prior_close: float | None,
+    observed_at: datetime | None = None, tolerance: float = 0.0,
+) -> OpeningGapState:
+    if opening_price is None or prior_close is None:
+        return OpeningGapState("UNAVAILABLE", observed_at=observed_at)
+    gap = opening_price - prior_close
+    if abs(gap) <= tolerance:
+        status = "NONE"
+    elif gap > 0:
+        status = "UP"
+    else:
+        status = "DOWN"
+    return OpeningGapState(status, gap, prior_close, observed_at)
+
+
+def derive_session_levels(
+    observations: Sequence[object],
+    *,
+    session_date: str,
+    prior_high: float | None = None,
+    prior_low: float | None = None,
+    prior_complete: bool = False,
+) -> SessionLevels:
+    """Derive levels from completed 5m observations only."""
+    completed = [
+        item for item in observations
+        if getattr(item, "timeframe", None) == "5m"
+        and getattr(getattr(item, "context", None), "completeness", None) == "complete"
+        and getattr(getattr(item, "context", None), "availability_status", None) == "available"
+    ]
+    opening = next((item for item in completed if getattr(item, "interval_start", None) is not None), None)
+    features: Mapping[str, object] = getattr(opening, "features", {}) if opening is not None else {}
+    high = features.get("high")
+    low = features.get("low")
+    return SessionLevels(
+        session_date,
+        float(high) if isinstance(high, (int, float)) and not isinstance(high, bool) else None,
+        float(low) if isinstance(low, (int, float)) and not isinstance(low, bool) else None,
+        prior_high if prior_complete else None,
+        prior_low if prior_complete else None,
+        prior_complete,
+        getattr(opening, "available_at", None) if opening is not None else None,
+        (getattr(opening, "observation_id"),) if opening is not None else (),
+    )
+
+
+def permission_for_context(
+    *,
+    opening_gap: OpeningGapState,
+    relation: str | None,
+    evidence_ids: tuple[str, ...],
+) -> tuple[str, tuple[str, ...]]:
+    """Return directional permission without treating unavailable evidence as neutral."""
+    if opening_gap.status == "UNAVAILABLE" or relation is None:
+        return "UNAVAILABLE", evidence_ids
+    if opening_gap.status == "UP" and relation == "above_value":
+        return "SHORT", evidence_ids
+    if opening_gap.status == "DOWN" and relation == "below_value":
+        return "LONG", evidence_ids
+    return "BOTH", evidence_ids
+
+
+def admission_recovery_available(
+    *, recovery_timeframe: str, completed_timeframe: str,
+    gap_end: datetime, evidence_available_at: datetime,
+) -> bool:
+    """Return true only for completed 5m evidence after a source gap."""
+    return (
+        recovery_timeframe == "5m"
+        and completed_timeframe == "5m"
+        and evidence_available_at >= gap_end
+    )
+
+
+def advance_opening_gap(
+    state: OpeningGapState,
+    *,
+    close: float | None,
+    available_at: datetime,
+    evidence_id: str,
+    timeframe: str = "1m",
+    complete: bool = True,
+) -> OpeningGapState:
+    """Advance a gap only from one completed, causally available candle."""
+    if timeframe != "1m" or not complete or close is None or state.status in {"UNAVAILABLE", "NONE", "RECOVERED"}:
+        return state
+    if state.reference_price is None:
+        return state
+    recovered = (
+        (state.status == "UP" and close <= state.reference_price)
+        or (state.status == "DOWN" and close >= state.reference_price)
+    )
+    if evidence_id in state.evidence_ids or not recovered:
+        return state
+    return OpeningGapState(
+        "RECOVERED", state.gap_points, state.reference_price,
+        available_at, (*state.evidence_ids, evidence_id),
+    )
+
+
+__all__ = [
+    "ContextHistory", "ContextVersion", "OpeningGapState", "SessionLevels", "ValueReference",
+    "advance_opening_gap", "classify_opening_gap", "derive_session_levels",
+    "permission_for_context", "admission_recovery_available",
+]

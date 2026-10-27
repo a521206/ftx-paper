@@ -37,7 +37,7 @@ def test_orderflow_projection_calculates_risk_reward_for_trade_action():
     )
     result = build_orderflow_projection([{"decision_view": view}], [], [], [])
     assert result["bias"] == "SHORT"
-    assert result["action"]["name"] == "Trade now"
+    assert result["action"]["name"] == "Eligible diagnostic candidate"
     assert result["action"]["risk_reward"] == 2.0
 
 
@@ -60,3 +60,23 @@ def test_orderflow_projection_uses_explicit_market_state_and_labels_positions():
 
     assert result["market_state"] == "TRENDING"
     assert result["position_scope"] == "shared_portfolio"
+
+
+def test_orderflow_projection_collapses_transitions_to_five_minute_bars():
+    first = _view(at="2026-10-27T10:01:00+05:30", policy={"outcome": "rejected", "reason_code": "first"})
+    second = _view(at="2026-10-27T10:04:00+05:30", policy={"outcome": "rejected", "reason_code": "latest"})
+    third = _view(at="2026-10-27T10:05:00+05:30", policy={"outcome": "rejected", "reason_code": "next_bar"})
+    events = [
+        {"created_at": "2026-10-27T10:01:02+05:30", "event_type": "CANDIDATEDECISION", "decision_view": first, "payload": {}},
+        {"created_at": "2026-10-27T10:04:02+05:30", "event_type": "CANDIDATEDECISION", "decision_view": second, "payload": {}},
+        {"created_at": "2026-10-27T10:05:02+05:30", "event_type": "CANDIDATEDECISION", "decision_view": third, "payload": {}},
+    ]
+
+    sequence = build_orderflow_projection([{"decision_view": third}], events, [], [])['sequence']
+
+    assert [item["time"] for item in sequence] == [
+        "2026-10-27T10:00:00+05:30",
+        "2026-10-27T10:05:00+05:30",
+    ]
+    assert [item["timeframe"] for item in sequence] == ["5m", "5m"]
+    assert sequence[0]["implication"] == "latest"

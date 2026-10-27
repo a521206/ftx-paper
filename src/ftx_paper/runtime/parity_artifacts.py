@@ -7,6 +7,8 @@ import hashlib
 import json
 from typing import Any
 
+from ftx_paper.runtime.events import is_decision_event
+
 
 PARITY_ARTIFACT_SCHEMA_VERSION = 2
 PARITY_CONTRACT_ID = "producer_replay_parity"
@@ -33,6 +35,41 @@ def _canonical_json(value: Any) -> str:
 def strategy_payload_hash(strategy: Mapping[str, Any] | None) -> tuple[dict[str, Any], str]:
     payload = {str(key): _jsonable(value) for key, value in (strategy or {}).items()}
     return payload, hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def _replay_input(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    """Expose selected-source identity in the canonical replay-input shape."""
+    provenance = metadata.get("input_provenance")
+    current = provenance.get("current") if isinstance(provenance, Mapping) else None
+    if not isinstance(current, Mapping):
+        current = {}
+    fingerprint = metadata.get("input_fingerprint") or current.get("source_fingerprint")
+    symbol = str(current.get("selected_symbol") or current.get("symbol") or "NIFTY")
+    expiry = str(current.get("selected_expiry") or current.get("expiry") or "")
+    instrument_type = str(current.get("instrument_type") or "FUT").upper()
+    contract_type = "CONTINUOUS" if not expiry else instrument_type
+    identity = {
+        "symbol": symbol,
+        "series": "I",
+        "contract_type": contract_type,
+        "expiry": expiry,
+    }
+    source = {
+        "symbol": symbol,
+        "series": "I",
+        "contract_type": contract_type,
+        "expiry": expiry,
+        "bar_count": int(current.get("source_bar_count") or metadata.get("input_bar_count") or 0),
+        "fingerprint": fingerprint,
+        "identity": identity,
+        "identities": [identity],
+    }
+    if isinstance(current, Mapping):
+        source["selected_symbol"] = current.get("selected_symbol")
+        source["selected_expiry"] = current.get("selected_expiry")
+        source["rollover_policy_version"] = current.get("rollover_policy_version")
+        source["rollover_decision"] = current.get("rollover_decision")
+    return {"identity": [fingerprint] if fingerprint else [], "provenance": [source]}
 
 
 def _timestamp(record: Mapping[str, Any]) -> str:
@@ -102,11 +139,8 @@ def build_parity_artifact(
     layer_records = layer_records or {}
     source_decisions = list(layer_records.get("decisions", ()))
     source_decisions = [event for event in source_decisions
-                        if str(event.get("event_type", "")).upper().endswith("DECISION")
-                        and str(event.get("event_type", "")).upper() != "EXECUTEDDECISION"]
-    decision_kinds = {"CANDIDATEDECISION": "candidate", "ACCEPTEDDECISION": "accepted",
-                      "REJECTEDDECISION": "rejected", "EXITDECISION": "exit"}
-    decisions = [_record(event, kind=decision_kinds.get(str(event.get("event_type", "")).upper(), "candidate"), sequence=index)
+                        if is_decision_event(str(event.get("event_type", "")), event)]
+    decisions = [_record(event, kind=str(event.get("outcome", "recorded")), sequence=index)
                  for index, event in enumerate(source_decisions)]
     execution_types = {"ORDER_INTENT", "ORDER_AUTHORIZED", "ORDER_ACK", "FILL", "ORDER_UNFILLED", "ORDER_SUPPRESSED", "RISK_REJECTED"}
     source_execution = [event for event in layer_records.get("execution", ())
@@ -135,17 +169,29 @@ def build_parity_artifact(
             ledger_records.append(_record({"occurred_at": occurred_at, "values": row},
                                           kind="closeout", sequence=len(ledger_records)))
     strategy, strategy_hash = strategy_payload_hash(result.get("strategy"))
-    timezone_name = str(request.get("timezone") or result.get("metadata", {}).get("timezone") or "UTC")
+    metadata = result.get("metadata", {})
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    timezone_name = str(request.get("timezone") or metadata.get("timezone") or "Asia/Kolkata")
     session_date = str(request.get("session_date", ""))[:10]
-    scope = {"requested_date_from": session_date, "requested_date_to": session_date,
-             "effective_date_from": session_date, "effective_date_to": session_date,
-             "timezone": timezone_name,
-             "applicable_partitions": list(request.get("partitions", request.get("vehicles", ()))),
-             "replay_input": {"identity": result.get("metadata", {}).get("input_fingerprint"),
-                              "provenance": result.get("metadata", {}).get("input_provenance", {})},
-             "processed": {"bar_count": int(result.get("bars_seen", 0)),
-                           "record_count": len(source_decisions)}}
-    input_identity = result.get("metadata", {}).get("input_fingerprint")
+    requested_from = str(request.get("date_from") or session_date)[:10]
+    requested_to = str(request.get("date_to") or session_date)[:10]
+    replay_input = _replay_input(metadata)
+    scope = {
+        "requested_date_from": requested_from,
+        "requested_date_to": requested_to,
+        "effective_date_from": session_date,
+        "effective_date_to": session_date,
+        "timezone": timezone_name,
+        "sessions": ["orderflow"] if str(request.get("strategy_id", "")).startswith("ftx-paper-orderflow") else [],
+        "vehicles": list(request.get("vehicles", ())),
+        "partitions": {"source": ["orderflow"]} if str(request.get("strategy_id", "")).startswith("ftx-paper-orderflow") else {},
+        "replay_input": replay_input,
+        "processed": {
+            "bar_count": int(result.get("bars_seen", 0)),
+            "session_count": 1 if session_date else 0,
+        },
+    }
+    input_identity = metadata.get("input_fingerprint")
     coverage = _coverage(decisions, int(result.get("bars_seen", 0)), result.get("unavailable_fields", ()),
                          execution_observed=True, ledger_observed=True, input_identity=input_identity)
     layers = {

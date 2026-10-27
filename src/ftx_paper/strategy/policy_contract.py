@@ -27,7 +27,7 @@ class PolicyDecision:
     """Policy output before shared coordination and order authorization."""
 
     payload: Mapping[str, object]
-    event_type: str = "CANDIDATEDECISION"
+    event_type: str = "POLICY_DECISION"
     order: OrderIntent | None = None
 
     def __post_init__(self) -> None:

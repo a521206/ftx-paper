@@ -6,9 +6,45 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from types import MappingProxyType
+from enum import StrEnum
+import hashlib
+import json
 
 
-FeatureValue = float | int | str | None
+class UnavailableReason(StrEnum):
+    MISSING_SOURCE = "missing_source"
+    INCOMPLETE_AGGREGATE = "incomplete_aggregate"
+    FUTURE_EVIDENCE = "future_evidence"
+    GAP = "source_gap"
+    NOT_APPLICABLE = "not_applicable"
+
+
+@dataclass(frozen=True, slots=True)
+class UnavailableValue:
+    reason: UnavailableReason | str
+    available_at: datetime | None = None
+
+    @property
+    def status(self) -> str:
+        return "UNAVAILABLE"
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "status": self.status,
+            "reason": str(self.reason),
+            "available_at": self.available_at.isoformat() if self.available_at else None,
+        }
+
+
+FeatureValue = float | int | str | UnavailableValue | None
+
+
+def stable_orderflow_id(kind: str, *scope: object) -> str:
+    """Build a deterministic ID scoped to the complete causal identity."""
+    if not kind.strip():
+        raise ValueError("orderflow ID kind is required")
+    payload = json.dumps((kind, *scope), default=str, sort_keys=True, separators=(",", ":"))
+    return f"{kind}:{hashlib.sha256(payload.encode()).hexdigest()[:24]}"
 
 
 def _mapping(value: Mapping[str, str] | Mapping[str, FeatureValue]) -> MappingProxyType:
@@ -75,6 +111,10 @@ class OrderflowObservation:
 
     def available_by(self, cutoff: datetime) -> bool:
         return self.available_at <= cutoff
+
+    @property
+    def aggregate_id(self) -> str:
+        return self.observation_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,6 +226,9 @@ class OrderflowContext:
 
 __all__ = [
     "FeatureValue",
+    "UnavailableReason",
+    "UnavailableValue",
+    "stable_orderflow_id",
     "OrderflowContext",
     "OrderflowObservation",
     "OrderflowObservationContext",

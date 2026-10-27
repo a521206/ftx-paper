@@ -73,12 +73,9 @@ class PaperEngine:
             else self.strategy.on_bundle(bundle),
         )
         orders = tuple(order for item in decisions if (order := item.order) is not None)
-        events = tuple(
-            {"event_type": item.event_type, **dict(item.payload)}
-            for item in decisions
-            if self.emit_rejected_decisions
-            or item.event_type not in {"REJECTEDDECISION", "SIZING_REJECTED"}
-        )
+        # Every policy decision is a diagnostic fact, including rejection and
+        # unavailable outcomes.
+        events = tuple({"event_type": item.event_type, **dict(item.payload)} for item in decisions)
         return EngineResult(orders=orders, events=events)
 
     def on_execution_event(self, event: ExecutionNotification) -> None:

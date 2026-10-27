@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
+from datetime import datetime
 
 
 DECISION_VIEW_SCHEMA_VERSION = 1
-_POLICY_OUTCOMES = frozenset({"accepted", "rejected", "cancelled", "superseded", "recorded", "triggered"})
+_POLICY_OUTCOMES = frozenset({"accepted", "rejected", "cancelled", "superseded", "recorded", "triggered", "unavailable"})
 
 
 def _value(payload: Mapping[str, Any], *keys: str) -> Any:
@@ -36,8 +37,9 @@ def build_decision_view(
     """Build the persisted, strategy-neutral view from a decision payload.
 
     Strategies may provide ``subject``, ``policy`` and ``evidence`` directly.
-    The flat-field fallback keeps previously persisted decisions readable while
-    strategies migrate to the structured contract.
+    The flat-field fallback keeps previously persisted fields readable while
+    strategies migrate to the structured contract. Decision identity is not
+    migrated from strategy-specific candidate identifiers.
     """
     subject = _mapping(payload.get("subject"))
     _set_if_missing(subject, "instrument", _value(payload, "instrument", "symbol", "market", "contract"))
@@ -70,7 +72,7 @@ def build_decision_view(
     for key in (
         "bundle_id", "decision_source", "session_date", "source_observation_id", "source_observation_ids",
         "response_evidence_ids", "feature_version", "availability_cutoff", "timeframe", "instrument",
-        "available_at", "observed_at", "interval_start", "interval_end", "generation", "interaction_id",
+        "available_at", "observed_at", "expected_available_at", "interval_start", "interval_end", "generation", "interaction_id",
         "opportunity_id", "replay_provenance", "template_id", "template_version", "reference_level",
         "lower_band", "upper_band",
     ):
@@ -105,7 +107,7 @@ def build_decision_view(
         "strategy_id": resolved_strategy_id,
         "strategy_version": _value(payload, "strategy_version"),
         "config_hash": _value(payload, "config_hash"),
-        "decision_id": _value(payload, "decision_id", "candidate_id"),
+        "decision_id": _value(payload, "decision_id"),
         "stage": _value(payload, "decision_stage", "stage"),
         "subject": subject,
         "policy": policy,
@@ -128,12 +130,28 @@ def validate_decision_view(view: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("unsupported decision view schema version")
     if not isinstance(view["at"], str) or not view["at"].strip():
         raise ValueError("decision view at must be a non-empty ISO timestamp")
+    try:
+        parsed_at = datetime.fromisoformat(view["at"].replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("decision view at must be an ISO timestamp") from exc
+    if parsed_at.tzinfo is None or parsed_at.utcoffset() is None:
+        raise ValueError("decision view at must be timezone-aware")
     for key in ("subject", "policy", "evidence"):
         if not isinstance(view[key], Mapping):
             raise ValueError(f"decision view {key} must be an object")
     outcome = view["policy"].get("outcome")
     if outcome not in _POLICY_OUTCOMES:
         raise ValueError("decision view policy outcome is invalid")
+    if view.get("outcome") not in (None, outcome):
+        raise ValueError("decision view outcome conflicts with policy outcome")
+    if outcome == "unavailable":
+        provenance = view["evidence"].get("provenance", {})
+        if not view["policy"].get("reason_code"):
+            raise ValueError("unavailable decision requires a reason code")
+        if not isinstance(provenance, Mapping) or not provenance.get("available_at"):
+            raise ValueError("unavailable decision requires an availability boundary")
+    if outcome == "rejected" and not view["policy"].get("reason_code"):
+        raise ValueError("rejected decision requires a reason code")
     return dict(view)
 
 

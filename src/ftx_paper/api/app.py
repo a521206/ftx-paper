@@ -642,7 +642,6 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
                 status = {
                     "ORDER_SUPPRESSED": "replayed",
                     "ORDER_ACK": "acknowledged",
-                    "EXECUTEDDECISION": "filled",
                     "FILL": "filled",
                     "ORDER_UNFILLED": "unfilled",
                     "EXECUTION_ERROR": "execution_error",

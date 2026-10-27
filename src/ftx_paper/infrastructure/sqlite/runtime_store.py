@@ -9,15 +9,15 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, TypedDict
 from uuid import uuid4
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
 from ftx_paper.config import IST
 from ftx_paper.contracts import (
-    MarketBar, MarketRole, OptionRole, OrderLifecycle, OrderLifecycleState, is_legal_order_transition,
+    MarketBar, MarketRole, OptionRole, OrderLifecycle, OrderLifecycleState, build_decision_view,
+    is_legal_order_transition, validate_decision_view,
     role_to_key,
 )
 from ftx_paper.runtime.events import (
-    DECISION_EVENT_TYPES,
     EXECUTION_EVENT_TYPES,
     LEGACY_DECISION_TIME_FIELDS,
     RISK_EVENT_TYPES,
@@ -542,7 +542,15 @@ class SqliteRuntimeStore:
                      *, timestamp: str | None = None) -> bool:
         event_type = str(event_type).upper()
         payload = dict(payload)
-        if is_decision_event(event_type):
+        if (
+            "decision_view" not in payload
+            and payload.get("decision_id")
+            and payload.get("outcome") in {"accepted", "rejected", "cancelled", "superseded", "recorded", "triggered", "unavailable"}
+        ):
+            payload["decision_view"] = validate_decision_view(
+                build_decision_view(payload, event_type=event_type)
+            )
+        if is_decision_event(event_type, payload):
             if "decision_at" not in payload:
                 raise DecisionTimestampError("decision events require canonical payload field 'decision_at'")
             normalized = parse_decision_at(payload["decision_at"])
@@ -838,9 +846,13 @@ class SqliteRuntimeStore:
             created = datetime.fromisoformat(str(raw_created_at).replace("Z", "+00:00"))
             if created.tzinfo is None or created.utcoffset() is None:
                 raise ValueError(f"event {event_type} has timezone-naive created_at")
-            if is_decision_event(event_type):
+            if is_decision_event(event_type, payload):
                 payload["decision_at"] = parse_decision_at(payload.get("decision_at"))
-            result.append({"event_type": event_type, "category": event_category(event_type),
+                view = payload.get("decision_view")
+                if not isinstance(view, Mapping):
+                    raise ValueError("decision event is missing its canonical decision view")
+                payload["decision_view"] = validate_decision_view(view)
+            result.append({"event_type": event_type, "category": event_category(event_type, payload),
                            "payload": payload, "created_at": created})
         return result
 
@@ -877,9 +889,7 @@ class SqliteRuntimeStore:
         self, session_date: str, *, strategy_id: str | None = None, canonical_only: bool = False,
     ) -> DecisionSummaryReport:
         """Aggregate a complete session day without decoding event payloads."""
-        event_types = tuple(sorted(DECISION_EVENT_TYPES))
-        event_placeholders = ", ".join("?" for _ in event_types)
-        executed_types = ("FILL", "EXECUTEDDECISION")
+        executed_types = ("FILL",)
         executed_placeholders = ", ".join("?" for _ in executed_types)
         strategy_clause = ""
         if strategy_id is not None:
@@ -893,7 +903,7 @@ class SqliteRuntimeStore:
             "AND json_extract(lifecycle.payload, '$.decision_id') = "
             "json_extract(decision.payload, '$.decision_id')) THEN 1 ELSE 0 END) "
             "FROM runtime_events decision "
-            f"WHERE event_type IN ({event_placeholders}) "
+            "WHERE json_type(payload, '$.decision_view') = 'object' "
             "AND substr(json_extract(payload, '$.decision_at'), 1, 10) = ? "
             + canonical_clause
             + strategy_clause +
@@ -902,7 +912,7 @@ class SqliteRuntimeStore:
             "GROUP BY event_type, substr(json_extract(payload, '$.decision_at'), 12, 5), "
             "json_extract(payload, '$.outcome')"
         )
-        params: list[Any] = [*executed_types, *event_types]
+        params: list[Any] = [*executed_types]
         params.append(session_date)
         if strategy_id is not None:
             params.append(strategy_id)
@@ -929,9 +939,9 @@ class SqliteRuntimeStore:
             stats = sessions[session_name]
             amount = int(count)
             stats["detections"] += amount
-            stats["candidates"] += amount if "CANDIDATE" in event_type else 0
-            stats["accepted"] += amount if event_type == "CANDIDATEDECISION" and outcome == "accepted" else 0
-            stats["rejected"] += amount if event_type == "CANDIDATEDECISION" and outcome == "rejected" else 0
+            stats["candidates"] += amount
+            stats["accepted"] += amount if outcome == "accepted" else 0
+            stats["rejected"] += amount if outcome == "rejected" else 0
             stats["executed"] += int(executed or 0)
         for stats in sessions.values():
             for key in totals:
@@ -950,17 +960,15 @@ class SqliteRuntimeStore:
         """
         if limit < 1:
             return []
-        event_types = tuple(sorted(DECISION_EVENT_TYPES))
-        placeholders = ", ".join("?" for _ in event_types)
         sql = (
             "SELECT id, event_type, payload, created_at FROM runtime_events "
-            f"WHERE event_type IN ({placeholders}) "
+            "WHERE json_type(payload, '$.decision_view') = 'object' "
             "AND json_extract(payload, '$.decision_at') <> ''"
             + (" AND json_type(payload, '$.decision_view') = 'object'" if canonical_only else "")
             + " AND (json_extract(payload, '$.decision_source') IS NULL "
             "OR lower(json_extract(payload, '$.decision_source')) <> 'replay')"
         )
-        params: list[Any] = list(event_types)
+        params: list[Any] = []
         if session_date:
             sql += " AND substr(json_extract(payload, '$.decision_at'), 1, 10) = ?"
             params.append(session_date)

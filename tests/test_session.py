@@ -335,7 +335,7 @@ def test_replay_input_window_matches_canonical_session_close(tmp_path):
     ), source="fixture")
 
     bars = ReplayWorker(store)._bars("2026-09-29")
-    assert [bar.timestamp.strftime("%H:%M") for bar in bars] == ["09:15", "15:30"]
+    assert [bar.timestamp.strftime("%H:%M") for bar in bars] == ["09:15"]
 
 
 def test_replay_marks_expired_only_futures_input_unavailable(tmp_path):

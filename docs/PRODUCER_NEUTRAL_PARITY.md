@@ -109,6 +109,40 @@ Legacy artifacts may remain readable, but they are comparable only after being
 represented in this four-layer shape with equivalent scope and coverage. Readers
 must not invent missing records or values.
 
+## Orderflow Replay Conformance
+
+The `ftx-paper-orderflow` replay must emit the same producer-neutral decision
+population as the canonical orderflow replay for the requested scope. The
+Paper strategy must not fall back to the generic VWAP candidate path.
+
+The Sep 29, 2026 comparison exposed a producer mismatch:
+
+- Canonical orderflow emitted 809 decision-layer records.
+- Paper emitted 78 decision-layer records.
+- Paper records were limited to trigger, opportunity, and admission decisions;
+  canonical records also included the complete causal decision lifecycle.
+- Run scope matched after excluding the expected futures source-identity
+  difference between canonical continuous data and Paper's nearest dated
+  contract.
+
+For `ftx-paper-orderflow`, the Paper producer must:
+
+1. Dispatch explicitly to the orderflow strategy implementation.
+2. Emit every decision-bearing candidate, accepted, rejected, and exit record
+   in causal sequence order, including non-executable outcomes.
+3. Preserve producer-neutral identity fields, decision timestamps, direction,
+   cell, outcome, and rejection reason when available.
+4. Preserve orderflow evidence and lifecycle details as diagnostic `values`,
+   without replacing the shared decision record with one record per bar.
+5. Keep execution and ledger facts in their respective layers; they must not be
+   represented as additional decision records.
+
+The parity artifact remains four-layer. P1-P10 diagnostic stages are not
+parity layers and must not be mapped into, duplicated across, or substituted for
+the four contract layers. A decision-count mismatch is a producer conformance
+failure and must be fixed in Paper's replay/strategy path, not hidden by the
+comparator or by filtering canonical records.
+
 ## Non-goals
 
 This version does not require producer-neutral parity for every feature,

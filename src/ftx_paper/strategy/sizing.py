@@ -19,7 +19,7 @@ class SizingPipelineInput:
     stability_multiplier: float = 1.0
     drawdown_multiplier: float = 1.0
     vehicle_limit_lots: int | None = None
-    candidate_id: str = ""
+    decision_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,7 +32,7 @@ class SizingPipelineDecision:
     stability_multiplier: float
     vehicle_limit_lots: int | None
     rationale: str
-    candidate_id: str = ""
+    decision_id: str = ""
     stage_results: tuple[tuple[str, int], ...] = ()
     policy_version: int = 1
     metadata: dict[str, object] = field(default_factory=dict)
@@ -87,10 +87,10 @@ class SizingPipeline:
             stability_multiplier=stability,
             vehicle_limit_lots=vehicle_limit,
             rationale=rationale,
-            candidate_id=inputs.candidate_id,
+            decision_id=inputs.decision_id,
             stage_results=tuple(stages),
             policy_version=self.context.profile.schema_version if self.context is not None else 1,
-            metadata={"candidate_id": inputs.candidate_id, "stage_results": tuple(stages), "drawdown_multiplier": drawdown},
+            metadata={"decision_id": inputs.decision_id, "stage_results": tuple(stages), "drawdown_multiplier": drawdown},
         )
 
     @staticmethod
@@ -104,9 +104,9 @@ class SizingPipeline:
             stability_multiplier=float(inputs.stability_multiplier),
             vehicle_limit_lots=inputs.vehicle_limit_lots,
             rationale=reason or "risk_blocked",
-            candidate_id=inputs.candidate_id,
+            decision_id=inputs.decision_id,
             stage_results=(("risk", 0),),
-            metadata={"candidate_id": inputs.candidate_id, "block_reason": reason or "risk_blocked"},
+            metadata={"decision_id": inputs.decision_id, "block_reason": reason or "risk_blocked"},
         )
 
 

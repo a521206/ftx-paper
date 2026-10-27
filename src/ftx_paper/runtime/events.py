@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime, time
 
 from ftx_paper.config import IST
 
 
-DECISION_EVENT_TYPES = frozenset({
-    "CANDIDATEDECISION",
-    "EXITDECISION",
-})
+DECISION_EVENT_TYPES = frozenset({"POLICY_DECISION"})
 
 # These names are rejected on new decision events. They are retained only so
 # callers get a clear validation error instead of silently storing old fields.
@@ -62,7 +60,7 @@ def decision_session_bucket(value: datetime) -> str:
         return "Afternoon"
     return "Post"
 
-RISK_EVENT_TYPES = frozenset({"SIZING_REJECTED", "RISK_REJECTED"})
+RISK_EVENT_TYPES = frozenset({"RISK_REJECTED"})
 
 EXECUTION_EVENT_TYPES = frozenset({
     "ORDER_INTENT",
@@ -71,15 +69,13 @@ EXECUTION_EVENT_TYPES = frozenset({
     "FILL",
     "ORDER_UNFILLED",
     "EXECUTION_ERROR",
-    # Kept for reading old paper-trading records.
-    "EXECUTEDDECISION",
 })
 
 
-def event_category(event_type: str) -> str:
+def event_category(event_type: str, payload: Mapping[str, object] | None = None) -> str:
     """Return the simple UI category for an event type."""
     normalized = str(event_type).upper()
-    if normalized in DECISION_EVENT_TYPES:
+    if is_decision_event(normalized, payload):
         return "decision"
     if normalized in RISK_EVENT_TYPES:
         return "risk"
@@ -88,8 +84,17 @@ def event_category(event_type: str) -> str:
     return "runtime"
 
 
-def is_decision_event(event_type: str) -> bool:
-    return str(event_type).upper() in DECISION_EVENT_TYPES
+def is_decision_event(event_type: str, payload: Mapping[str, object] | None = None) -> bool:
+    """Identify a decision from its generic projection, not its name suffix."""
+    normalized = str(event_type).upper()
+    if normalized in DECISION_EVENT_TYPES:
+        return True
+    if payload is None:
+        return False
+    projection = payload.get("decision_view")
+    return isinstance(projection, Mapping) and bool(
+        projection.get("decision_id") and isinstance(projection.get("policy"), Mapping)
+    )
 
 
 __all__ = [

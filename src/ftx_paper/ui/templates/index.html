@@ -1028,30 +1028,35 @@
     }
 
     .orderflow-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 14px; }
-    .orderflow-stat, .orderflow-location, .orderflow-sequence, .orderflow-action { background: var(--panel-2, #101822); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+    .orderflow-stat, .orderflow-location, .orderflow-sequence, .orderflow-action { background: var(--md-surface-container-low); color: var(--md-on-surface); border: 1px solid var(--md-outline-variant); border-radius: 10px; padding: 14px; }
     .orderflow-stat strong { display: block; font-size: 1.05rem; margin-top: 5px; }
-    .orderflow-action { border-color: var(--accent); margin-bottom: 14px; }
+    .orderflow-action { border-color: var(--md-primary); margin-bottom: 14px; }
     .orderflow-action h2 { margin: 0 0 12px; font-size: 1.45rem; }
     .orderflow-action-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; }
-    .orderflow-action-grid span, .orderflow-location span { display: block; color: var(--muted); font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; }
+    .orderflow-action-grid span, .orderflow-location span { display: block; color: var(--md-on-surface-variant); font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; }
     .orderflow-action-grid strong { display: block; margin-top: 4px; }
     .orderflow-locations { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }
     .orderflow-location h3 { margin: 0 0 9px; font-size: 1rem; }
     .orderflow-location p { margin: 7px 0 0; }
-    .orderflow-sequence { padding: 0; overflow: hidden; }
-    .orderflow-sequence-row { display: grid; grid-template-columns: 150px 1fr 1fr 90px 1.4fr; gap: 10px; align-items: center; padding: 11px 14px; border-bottom: 1px solid var(--line); }
+    .orderflow-sequence { padding: 14px; overflow: hidden; }
+    .orderflow-sequence > .section-head { position: sticky; top: 0; z-index: 1; background: var(--md-surface-container-low); padding-bottom: 10px; }
+    .orderflow-sequence-row { border-bottom: 1px solid var(--md-outline-variant); }
+    .orderflow-sequence-row summary { display: grid; grid-template-columns: 150px 1fr 1fr 90px 1.4fr; gap: 10px; align-items: center; padding: 11px 8px; }
     .orderflow-sequence-row:last-child { border-bottom: 0; }
     .orderflow-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-    .context-hero { display: grid; grid-template-columns: minmax(0, 1.35fr) repeat(4, minmax(140px, 1fr)); gap: 10px; margin-bottom: 14px; }
+    .context-hero { display: grid; grid-template-columns: minmax(220px, 1.4fr) repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
     .context-hero > div { background: var(--md-surface-container-low); border: 1px solid var(--md-outline-variant); border-radius: 12px; padding: 16px; }
     .context-hero .context-read { background: var(--md-primary-container); border-color: var(--md-primary); }
     .context-read h2 { margin: 5px 0 8px; font-size: 24px; }
     .context-read p { margin: 0; color: var(--md-on-primary-container); line-height: 1.5; }
-    .context-value { display: block; margin-top: 7px; font-size: 18px; font-weight: 700; }
+    .context-value { display: block; margin-top: 7px; font-size: 16px; line-height: 1.4; font-weight: 700; overflow-wrap: anywhere; }
     .context-section { margin-bottom: 14px; }
     .context-section .section-head { margin-bottom: 10px; }
     .context-evidence { color: var(--md-on-surface-variant); font-size: 12px; line-height: 1.5; }
-    @media (max-width: 800px) { .orderflow-grid, .orderflow-locations, .orderflow-action-grid, .orderflow-columns, .context-hero { grid-template-columns: 1fr 1fr; } .context-hero .context-read { grid-column: 1 / -1; } .orderflow-sequence-row { grid-template-columns: 1fr 1fr; } }
+    .context-section.orderflow-sequence { max-height: 620px; overflow-y: auto; }
+    .orderflow-sequence-row:nth-of-type(even) { background: var(--md-surface); }
+    .orderflow-sequence-row summary > span { min-width: 0; overflow-wrap: anywhere; }
+    @media (max-width: 800px) { .orderflow-grid, .orderflow-locations, .orderflow-action-grid, .orderflow-columns { grid-template-columns: 1fr 1fr; } .context-hero { grid-template-columns: repeat(2, minmax(0, 1fr)); } .context-hero .context-read { grid-column: 1 / -1; } .orderflow-sequence-row summary { grid-template-columns: 1fr 1fr; } }
     @media (max-width: 480px) { .orderflow-grid, .orderflow-locations, .orderflow-action-grid, .orderflow-columns { grid-template-columns: 1fr; } }
     @media (max-width: 480px) { .context-hero { grid-template-columns: 1fr; } .context-hero .context-read { grid-column: auto; } }
   </style>
@@ -1339,28 +1344,30 @@
     }
 
     function orderflowContextPage(model) {
-      const action = model.action;
-      const setup = model.setup;
-      const locations = model.locations;
-      const sequence = model.sequence;
+      const action = model.action || {};
+      const setup = model.setup || {};
+      const locations = Array.isArray(model.locations) ? model.locations : [];
+      const sequence = Array.isArray(model.sequence) ? model.sequence : [];
       const hasValue = (value) => value != null && value !== '';
-      const actionComplete = action && hasValue(action.name) && hasValue(action.direction) && hasValue(action.entry_trigger) && hasValue(action.reason) && (hasValue(action.stop_basis) || hasValue(action.stop_price)) && (hasValue(action.exit_condition) || hasValue(action.target));
-      if (!model.as_of || !model.updated_at || !model.bias || !model.market_state || !actionComplete || !setup?.name || !Array.isArray(locations) || !Array.isArray(sequence)) {
-        return '<div class="card empty">Orderflow context is unavailable for this session.</div>';
+      if (!model.as_of || !model.updated_at || !hasValue(action.name)) {
+        return '<div class="card empty"><h2>Orderflow context unavailable</h2><p>The UI did not receive a canonical orderflow decision payload for this session. Check the API connection and reload the page.</p></div>';
       }
-      const read = action.reason ?? action.outcome;
+      const outcome = String(action.outcome || '').toLowerCase();
+      const isNoTrade = action.name === 'No trade' || outcome === 'rejected';
+      const read = action.reason || action.outcome || 'No current orderflow decision was reported.';
       const field = (value) => value == null || value === '' ? 'Unavailable' : esc(value);
       const locationCards = locations.length ? locations.map((item) => `<article class="orderflow-location"><h3>${field(item.name)}</h3><span>Reference / distance</span><strong>${field(item.reference)} · ${field(item.distance)}</strong><p>${badge(field(item.interaction_status), 'subtle')} ${badge(field(item.response_status), item.response_status === 'CONFIRMED' ? 'good' : 'warn')}</p><p>Flow implication: <strong>${field(item.implication)}</strong></p></article>`).join('') : '<div class="empty">No orderflow locations observed.</div>';
       const sequenceRows = sequence.length ? sequence.slice().reverse().map((item) => `<details class="orderflow-sequence-row"><summary><span>${field(date(item.time))}</span><span>${field(item.location)}</span><span>${field(item.transition)}</span><span>${badge(field(item.direction), item.direction === 'LONG' ? 'good' : item.direction === 'SHORT' ? 'bad' : 'subtle')}</span><span>${field(item.implication)}</span></summary><div class="payload">${esc(JSON.stringify(item.evidence || {}, null, 2))}</div></details>`).join('') : '<div class="empty">No orderflow transitions observed.</div>';
       return `<div class="context-hero">
-        <div class="context-read"><div class="label">Orderflow read</div><h2>${esc(setup.name)}</h2><p>${field(read)}</p></div>
-        <div><div class="label">Bias</div><span class="context-value">${esc(model.bias)}</span></div>
-        <div><div class="label">Market state</div><span class="context-value">${esc(model.market_state)}</span></div>
+        <div class="context-read"><div class="label">Orderflow read</div><h2>${field(action.name)}</h2><p>${field(read)}</p><span class="badge ${isNoTrade ? 'warn' : 'good'}">${isNoTrade ? 'Stand aside' : 'Actionable context'}</span></div>
+        <div><div class="label">Bias</div><span class="context-value">${field(model.bias)}</span></div>
+        <div><div class="label">Market state</div><span class="context-value">${field(model.market_state)}</span></div>
+        <div><div class="label">Setup / location</div><span class="context-value">${field(setup.name || setup.location)}</span></div>
         <div><div class="label">Decision at</div><span class="context-value">${esc(date(model.as_of))}</span></div>
         <div><div class="label">Updated at</div><span class="context-value">${esc(date(model.updated_at))}</span></div>
       </div>
       <section class="card context-section"><div class="section-head"><div><h2>Location response</h2><div class="context-evidence">Only orderflow interaction and response states are shown. No strategy-neutral event data is mixed in.</div></div><span class="badge"><strong>${locations.length}</strong> locations</span></div><div class="orderflow-locations">${locationCards}</div></section>
-      <section class="card orderflow-sequence context-section"><div class="section-head"><div><h2>Flow sequence</h2><div class="context-evidence">Chronological transitions from the canonical orderflow decision stream.</div></div><span class="badge"><strong>${sequence.length}</strong> transitions</span></div>${sequenceRows}</section>
+       <section class="card orderflow-sequence context-section"><div class="section-head"><div><h2>Flow sequence</h2><div class="context-evidence">One transition per completed 5m bar from the canonical orderflow decision stream.</div></div><span class="badge"><strong>${sequence.length}</strong> 5m bars</span></div>${sequenceRows}</section>
       <details class="card"><summary>Canonical provenance</summary><div class="payload">${esc(JSON.stringify(model.provenance, null, 2))}</div></details>`;
     }
 
@@ -2181,6 +2188,7 @@
         const capital = responseData.capital || {};
         const positions = responseData.positions || { positions: [] };
         const trades = responseData.trades || { trades: [] };
+        const orderflow = responseData.orderflow || {};
         const decisionsData = responseData.decisions || { decisions: [] };
         const events = responseData.events || { events: [] };
         const replays = responseData.replays || { runs: [] };
@@ -2191,6 +2199,7 @@
           capital,
           positions,
           trades,
+          orderflow,
           decisions: decisionsData,
           events,
           replays,

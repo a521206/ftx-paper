@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from .mappers import event_from_row
 from .connection import SqliteDatabase
 from ftx_paper.ports.records import StoredEvent
+from ftx_paper.contracts import validate_decision_view
 
 
 class SqliteEventRepository:
@@ -36,7 +37,10 @@ class SqliteEventQueryRepository:
         connection = self._database.connect()
         try:
             connection.row_factory = sqlite3.Row
-            sql = "SELECT id, event_type, payload, created_at FROM runtime_events WHERE event_type IN ('CANDIDATEDECISION', 'EXITDECISION')"
+            sql = (
+                "SELECT id, event_type, payload, created_at FROM runtime_events "
+                "WHERE json_type(payload, '$.decision_view') = 'object'"
+            )
             params = []
             if session_date:
                 sql += " AND substr(json_extract(payload, '$.decision_at'), 1, 10) = ?"
@@ -60,6 +64,15 @@ class SqliteEventQueryRepository:
                     params.append(upper)
             sql += " ORDER BY id DESC LIMIT ?"
             params.append(limit)
-            return tuple(event_from_row(row) for row in connection.execute(sql, params).fetchall())
+            events = []
+            for row in connection.execute(sql, params).fetchall():
+                event = event_from_row(row)
+                payload = dict(event.payload)
+                view = payload.get("decision_view")
+                if not isinstance(view, Mapping):
+                    raise ValueError("stored decision event is missing its decision view")
+                payload["decision_view"] = validate_decision_view(view)
+                events.append(StoredEvent(event.id, event.event_type, payload, event.created_at))
+            return tuple(events)
         finally:
             connection.close()

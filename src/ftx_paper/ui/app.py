@@ -10,6 +10,12 @@ def create_ui_app(api_base_url: str | None = None) -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
     configured_api = api_base_url or os.getenv("FTX_API_BASE_URL", "http://127.0.0.1:8501")
 
+    @app.after_request
+    def disable_html_caching(response):
+        if response.mimetype == "text/html":
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
     @app.get("/")
     @app.get("/<page>")
     def index(page: str = "dashboard"):

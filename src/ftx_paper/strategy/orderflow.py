@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 import hashlib
 import json
 import math
@@ -21,8 +21,13 @@ from ftx_paper.contracts import MarketRole
 from ftx_paper.market.bundles import DecisionBundle
 
 from .coordinator import SharedDecisionCoordinator
-from .orderflow_contract import OrderflowObservation
+from .orderflow_contract import OrderflowObservation, stable_orderflow_id
 from .orderflow_trigger import observe_trigger
+from .orderflow_opportunity import (
+    ExecutionGroupRegistry, SetupOpportunity, advance_timeouts_before_formation,
+)
+from .orderflow_admission import evaluate_admission
+from .orderflow_capture import CaptureMode
 from .policy_contract import ExecutionMode, FeatureRequirement, PolicyDecision
 from .protocol import StrategyMetadata
 from .snapshot_envelope import unwrap_snapshot, wrap_snapshot
@@ -55,6 +60,11 @@ class OrderflowConfig:
     feature_set: tuple[str, ...] = ("close", "vwap", "volume")
     enabled_vehicles: tuple[str, ...] = ("futures",)
     execution_mode: ExecutionMode = ExecutionMode.DIAGNOSTIC
+    timezone: str = "Asia/Kolkata"
+    market_session: tuple[str, str] = ("09:15", "15:30")
+    vehicle: str = "futures"
+    replay_mode: str = "causal"
+    capture_mode: CaptureMode = CaptureMode.FULL
 
     def __post_init__(self) -> None:
         if self.interaction_band <= 0:
@@ -69,11 +79,20 @@ class OrderflowConfig:
             raise ValueError("response window must be positive")
         if self.execution_mode is not ExecutionMode.DIAGNOSTIC:
             raise ValueError("executable orderflow policy is deferred to a later phase")
+        if self.timezone != "Asia/Kolkata":
+            raise ValueError("orderflow currently requires the Asia/Kolkata timezone")
+        if len(self.market_session) != 2 or self.market_session[0] >= self.market_session[1]:
+            raise ValueError("market_session must be an increasing start/end pair")
+        if self.vehicle != "futures":
+            raise ValueError("orderflow currently supports futures only")
+        if self.replay_mode != "causal":
+            raise ValueError("orderflow currently requires causal replay mode")
 
     @property
     def config_hash(self) -> str:
         payload = asdict(self)
         payload["execution_mode"] = self.execution_mode.value
+        payload["capture_mode"] = self.capture_mode.value
         return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -115,6 +134,10 @@ class InteractionState:
 def _number(observation: OrderflowObservation, name: str) -> float | None:
     value = observation.features.get(name)
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _decision_id(*parts: object) -> str:
+    return hashlib.sha256("|".join(str(part) for part in parts).encode()).hexdigest()[:24]
 
 
 def _response_candle(observation: OrderflowObservation) -> tuple[float, float, float, float] | None:
@@ -176,6 +199,10 @@ class OrderflowPolicy:
         self._interactions: dict[str, InteractionState] = {}
         self._session_id: str | None = None
         self._processed_observation_ids: set[str] = set()
+        self._admission_suspended = False
+        self._gap_end: datetime | None = None
+        self._opportunities: dict[str, SetupOpportunity] = {}
+        self._execution_groups = ExecutionGroupRegistry()
 
     @property
     def execution_mode(self) -> ExecutionMode:
@@ -197,6 +224,7 @@ class OrderflowPolicy:
             "config_hash": self.config.config_hash,
             "bundle_id": bundle.bundle_id,
             "decision_at": context.as_of.isoformat(),
+            "available_at": context.as_of.isoformat(),
             "availability_cutoff": orderflow.cutoff.isoformat() if orderflow else None,
             "feature_version": self.config.vwap_calculation_version,
             "decision_stage": "trigger",
@@ -206,19 +234,29 @@ class OrderflowPolicy:
             "evidence": {"metrics": {}, "state": {}, "provenance": {}},
         }
         if orderflow is None or orderflow.session_id != bundle.trading_date:
-            return (PolicyDecision({**base, "outcome": "rejected", "reason": "orderflow_context_unavailable",
-                                    "candidate_id": hashlib.sha256(bundle.bundle_id.encode()).hexdigest()[:24]}),)
+            return (PolicyDecision({**base, "outcome": "unavailable", "reason": "orderflow_context_unavailable",
+                                    "decision_id": _decision_id("unavailable", "context", bundle.bundle_id)}),)
+        session_transitions: list[PolicyDecision] = []
         if self._session_id != orderflow.session_id:
+            session_transitions = [PolicyDecision({
+                **base, "outcome": "recorded", "reason": "session_boundary",
+                "decision_id": _decision_id("lifecycle", item.interaction_id, bundle.trading_date, "session_end"),
+                "interaction_id": item.interaction_id, "interaction_state": "ENDED",
+                "decision_stage": "lifecycle",
+            }) for item in self._interactions.values() if item.state in {"CREATED", "ACTIVE"}]
             self._interactions.clear()
             self._processed_observation_ids.clear()
+            self._admission_suspended = False
+            self._gap_end = None
+            self._opportunities.clear()
             self._session_id = orderflow.session_id
 
         observations = orderflow.observations_for(self.config.response_timeframe)
         if not observations:
-            return (PolicyDecision({**base, "outcome": "rejected", "reason": "required_features_unavailable",
-                                    "candidate_id": hashlib.sha256(bundle.bundle_id.encode()).hexdigest()[:24]}),)
+            return (*session_transitions, PolicyDecision({**base, "outcome": "unavailable", "reason": "required_features_unavailable",
+                                    "decision_id": _decision_id("unavailable", "features", bundle.bundle_id)}))
 
-        results: list[PolicyDecision] = []
+        results: list[PolicyDecision] = list(session_transitions)
         futures = bundle.bars.get(MarketRole.FUTURES)
         expected_instrument = futures.instrument.symbol if futures is not None else None
         for observation in observations:
@@ -232,6 +270,19 @@ class OrderflowPolicy:
                 continue
             if observation.context is None or observation.context.session_id != orderflow.session_id:
                 continue
+            gap_status = observation.context.replay_provenance.get("gap_status")
+            if gap_status == "source_gap":
+                self._admission_suspended = True
+                self._gap_end = observation.interval_end or observation.available_at
+            elif (
+                self._admission_suspended
+                and gap_status == "none"
+                and observation.timeframe == "5m"
+                and self._gap_end is not None
+                and observation.available_at >= self._gap_end
+            ):
+                self._admission_suspended = False
+                self._gap_end = None
             if observation.feature_version != self.config.vwap_calculation_version:
                 continue
             if not orderflow.validate_complete_parent(observation):
@@ -242,9 +293,9 @@ class OrderflowPolicy:
             if vwap is None or close is None:
                 results.append(PolicyDecision({
                     **base,
-                    "outcome": "rejected",
+                    "outcome": "unavailable",
                     "reason": "required_feature_missing",
-                    "candidate_id": observation.observation_id,
+                    "decision_id": _decision_id("unavailable", "feature", observation.observation_id),
                     "source_observation_ids": [observation.observation_id],
                 }))
                 continue
@@ -273,7 +324,25 @@ class OrderflowPolicy:
                 "lower_band": vwap - self.config.interaction_band,
                 "upper_band": vwap + self.config.interaction_band,
             }
+            if self._admission_suspended:
+                results.append(PolicyDecision({
+                    **base, **provenance,
+                    "outcome": "unavailable",
+                    "reason": "admission_suspended_after_source_gap",
+                    "decision_id": _decision_id("unavailable", "gap", observation.observation_id),
+                    "source_observation_ids": [observation.observation_id],
+                    "expected_available_at": self._gap_end.isoformat() if self._gap_end else None,
+                }))
+                continue
             generation = observation.context.generation if observation.context else None
+            self._opportunities = {
+                key: value for key, value in (
+                    (key, advance_timeouts_before_formation((item,), timeframe=observation.timeframe,
+                                                            at=observation.available_at,
+                                                            evidence_id=observation.observation_id)[0])
+                    for key, item in self._opportunities.items()
+                )
+            }
             previous = next(
                 (
                     item for item in self._interactions.values()
@@ -295,7 +364,7 @@ class OrderflowPolicy:
                 else abs(close - vwap) <= self.config.interaction_band
             )
             if previous is None and not inside_band:
-                candidate_id = hashlib.sha256(
+                decision_id = hashlib.sha256(
                     f"{self.config.name}:{observation.observation_id}:trigger".encode()
                 ).hexdigest()[:24]
                 results.append(PolicyDecision({
@@ -306,7 +375,7 @@ class OrderflowPolicy:
                     "subject": {"vehicle": "futures", "location": observation.location or "orderflow"},
                     "outcome": "rejected",
                     "reason": "no_orderflow_interaction",
-                    "candidate_id": candidate_id,
+                    "decision_id": decision_id,
                     "source_observation_ids": [observation.observation_id],
                 }))
                 continue
@@ -360,7 +429,7 @@ class OrderflowPolicy:
                                  "direction": previous.response_direction},
                     "outcome": "rejected",
                     "reason": "interaction_ended",
-                    "candidate_id": interaction_id,
+                    "decision_id": _decision_id("lifecycle", interaction_id, observation.observation_id, "ended"),
                     "interaction_id": interaction_id,
                     "interaction_state": ended.state,
                     "response_state": ended.response_state,
@@ -370,19 +439,34 @@ class OrderflowPolicy:
             previous = replace(previous, state="ACTIVE")
             if previous.response_state == "INVALIDATED":
                 self._interactions[interaction_id] = previous
+                self._opportunities = {
+                    key: value.invalidate(
+                        at=observation.available_at, reason="response_invalidated",
+                        evidence_ids=(observation.observation_id,),
+                    ) if value.response_episode_id == f"response-{interaction_id}" else value
+                    for key, value in self._opportunities.items()
+                }
                 results.append(PolicyDecision({
                     **base, **provenance, "decision_stage": "lifecycle",
                     "cell": observation.location or "orderflow",
                     "subject": {"vehicle": "futures", "location": observation.location or "orderflow",
                                  "direction": previous.response_direction},
                     "outcome": "rejected",
-                    "reason": "response_invalidated", "candidate_id": interaction_id,
+                    "reason": "response_invalidated", "decision_id": _decision_id("response", interaction_id, observation.observation_id, "invalidated"),
                     "interaction_id": interaction_id, "response_state": previous.response_state,
                     "response_evidence_ids": list(previous.response_evidence_ids),
                 }))
                 continue
             if previous.response_state != "CONFIRMED":
                 self._interactions[interaction_id] = previous
+                if previous.response_state == "EXPIRED":
+                    self._opportunities = {
+                        key: value.advance_timeout(
+                            timeframe=observation.timeframe, at=observation.available_at,
+                            evidence_id=observation.observation_id,
+                        ) if value.response_episode_id == f"response-{interaction_id}" else value
+                        for key, value in self._opportunities.items()
+                    }
                 results.append(PolicyDecision({
                     **base,
                     **provenance,
@@ -392,7 +476,7 @@ class OrderflowPolicy:
                                  "direction": previous.response_direction},
                     "outcome": "rejected",
                     "reason": "response_expired" if previous.response_state == "EXPIRED" else "response_pending",
-                    "candidate_id": interaction_id,
+                    "decision_id": _decision_id("response", interaction_id, observation.observation_id, previous.response_state),
                     "interaction_id": interaction_id,
                     "response_state": previous.response_state,
                     "response_evidence_ids": list(previous.response_evidence_ids),
@@ -400,13 +484,67 @@ class OrderflowPolicy:
                 continue
             previous = replace(previous, response_state="CONFIRMED")
             self._interactions[interaction_id] = previous
+            formed_at = observation.available_at
+            opportunity = SetupOpportunity.create(
+                interaction_id=interaction_id,
+                direction=previous.response_direction or "long",
+                formed_at=formed_at,
+                expires_at=formed_at + timedelta(minutes=self.config.response_window_candles),
+                entry_lower=previous.lower_band,
+                entry_upper=previous.upper_band,
+                failure_boundary=previous.lower_band if previous.response_direction == "long" else previous.upper_band,
+                evidence_ids=previous.response_evidence_ids,
+                evidence_timeframe=observation.timeframe,
+                regime_version=generation,
+            )
+            admission = evaluate_admission(
+                opportunity,
+                context_available=orderflow is not None,
+                regime_allowed=not self._admission_suspended,
+                opening_gap_allowed=not self._admission_suspended,
+                active_position_allowed=context.exposure.open_positions == 0,
+                exposure_allowed=context.exposure.net_directional_lots == 0,
+                allocation_allowed=context.margin.available > 0,
+                sizing_allowed=True,
+                risk_allowed=context.capital.daily_loss >= 0,
+                setup_valid=True,
+                direction_matches=True,
+                confirmations_available=True,
+                current_at=observation.available_at,
+            )
+            self._opportunities[opportunity.lifecycle_id] = opportunity
+            claim = self._execution_groups.claim(
+                opportunity.execution_group_id, opportunity.lifecycle_id,
+                evidence_ids=opportunity.setup.evidence_ids,
+            )
+            if not claim.accepted:
+                admission = evaluate_admission(
+                    opportunity, context_available=orderflow is not None,
+                    regime_allowed=not self._admission_suspended,
+                    opening_gap_allowed=not self._admission_suspended,
+                    active_position_allowed=context.exposure.open_positions == 0,
+                    exposure_allowed=context.exposure.net_directional_lots == 0,
+                    allocation_allowed=context.margin.available > 0,
+                    sizing_allowed=True, risk_allowed=context.capital.daily_loss >= 0,
+                    setup_valid=False, current_at=observation.available_at,
+                )
             payload = {
                 **base,
                 **provenance,
-                "outcome": "accepted",
                 "reason": "orderflow_admission",
-                "candidate_id": interaction_id,
-                "opportunity_id": interaction_id,
+                "decision_id": admission.decision_id,
+                "opportunity_id": opportunity.lifecycle_id,
+                "setup_id": stable_orderflow_id(
+                    "setup", interaction_id, observation.observation_id,
+                    previous.response_direction, generation, self.config.config_hash,
+                ),
+                "execution_group_id": stable_orderflow_id(
+                    "execution_group", interaction_id, generation, self.config.config_hash,
+                ),
+                "outcome": "accepted" if admission.status.value == "PASSED" and claim.accepted else "rejected",
+                "admission_status": admission.status.value,
+                "admission_reason": admission.reason,
+                "admission_predicates": [asdict(item) for item in admission.predicates],
                 "interaction_id": interaction_id,
                 "source_observation_ids": [observation.observation_id],
                 "response_evidence_ids": list(observation.evidence_ids),
@@ -419,6 +557,14 @@ class OrderflowPolicy:
                 "decision_stage": "admission",
                 "cell": observation.location or "orderflow",
                 "direction": previous.response_direction,
+                "diagnostic_intent": {
+                    "intent_id": stable_orderflow_id(
+                        "diagnostic_intent", interaction_id, observation.observation_id,
+                    ),
+                    "opportunity_id": interaction_id,
+                    "executable": False,
+                    "evidence_ids": list(previous.response_evidence_ids),
+                },
                 "subject": {"vehicle": "futures", "location": observation.location or "orderflow",
                              "direction": previous.response_direction},
             }
@@ -449,9 +595,15 @@ class OrderflowPolicy:
             raise ValueError("orderflow snapshot config must be an object")
         values = dict(raw_config)
         allowed_config = set(OrderflowConfig.__dataclass_fields__)
+        values.setdefault("timezone", "Asia/Kolkata")
+        values.setdefault("market_session", ("09:15", "15:30"))
+        values.setdefault("vehicle", "futures")
+        values.setdefault("replay_mode", "causal")
+        values.setdefault("capture_mode", CaptureMode.FULL)
         if set(values) != allowed_config:
             raise ValueError("orderflow snapshot config fields are invalid")
         values["execution_mode"] = ExecutionMode(values.get("execution_mode", "diagnostic"))
+        values["capture_mode"] = CaptureMode(values.get("capture_mode", CaptureMode.FULL))
         try:
             policy = cls(OrderflowConfig(**values))
         except (TypeError, ValueError) as exc:

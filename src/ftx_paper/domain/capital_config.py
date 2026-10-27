@@ -47,7 +47,7 @@ class ResearchCapitalProfile:
     max_drawdown_fraction: float = 0.15
     # Keep the same stable candidate identifier as Pipeline research while
     # retaining an independently owned Paper profile and implementation.
-    candidate_id: str = "r0.03-l8-n12-dd2f6c5b1246"
+    profile_id: str = "r0.03-l8-n12-dd2f6c5b1246"
     risk_per_trade: float = 0.03
     max_lots: int = 8
     max_net_directional_lots: float = 12.0
@@ -84,8 +84,8 @@ class ResearchCapitalProfile:
         stability = tuple(sorted((str(key), float(value)) for key, value in self.stability_policy))
         if any(value <= 0 or value > 1 for _, value in stability):
             raise ValueError("stability values must be greater than zero and at most one")
-        if not self.candidate_id:
-            raise ValueError("candidate_id must be non-empty")
+        if not self.profile_id:
+            raise ValueError("profile_id must be non-empty")
         object.__setattr__(self, "selected_sessions", sessions)
         object.__setattr__(self, "enabled_vehicles", vehicles)
         object.__setattr__(self, "vehicle_limits", limits)
