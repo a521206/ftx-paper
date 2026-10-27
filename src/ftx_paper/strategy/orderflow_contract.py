@@ -122,10 +122,16 @@ class OrderflowContext:
     ) -> bool:
         """Require exactly five ordered children covering a complete 5m parent."""
         children = self.observations_for(child_timeframe)
-        if parent.timeframe != "5m" or len(children) != 5:
+        if parent.timeframe != "5m":
             return False
-        child_ids = tuple(item.observation_id for item in children)
-        if len(set(child_ids)) != 5 or any(item.timeframe != child_timeframe for item in children):
+        child_ids = tuple(parent.context.child_observation_ids) if parent.context is not None else ()
+        if len(child_ids) != 5:
+            return False
+        by_id = {item.observation_id: item for item in children}
+        if len(by_id) != len(children) or any(item_id not in by_id for item_id in child_ids):
+            return False
+        children = tuple(by_id[item_id] for item_id in child_ids)
+        if any(item.timeframe != child_timeframe for item in children):
             return False
         if (
             parent.context is None

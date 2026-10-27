@@ -191,6 +191,7 @@ class OrderflowPolicy:
     def evaluate(self, bundle: DecisionBundle, context: DecisionContext) -> tuple[PolicyDecision, ...]:
         orderflow = bundle.orderflow_context
         base = {
+            "strategy_id": self.config.name,
             "strategy_name": self.config.name,
             "strategy_version": self.config.version,
             "config_hash": self.config.config_hash,
@@ -198,14 +199,15 @@ class OrderflowPolicy:
             "decision_at": context.as_of.isoformat(),
             "availability_cutoff": orderflow.cutoff.isoformat() if orderflow else None,
             "feature_version": self.config.vwap_calculation_version,
-            "decision_stage": "interaction_response",
-            "cell": "vwap_zone",
-            "subject": {"vehicle": "futures", "location": "vwap_zone"},
+            "decision_stage": "trigger",
+            "cell": "orderflow",
+            "subject": {"vehicle": "futures", "location": "orderflow"},
             "policy": {},
             "evidence": {"metrics": {}, "state": {}, "provenance": {}},
         }
         if orderflow is None or orderflow.session_id != bundle.trading_date:
-            return (PolicyDecision({**base, "outcome": "rejected", "reason": "orderflow_context_unavailable"}),)
+            return (PolicyDecision({**base, "outcome": "rejected", "reason": "orderflow_context_unavailable",
+                                    "candidate_id": hashlib.sha256(bundle.bundle_id.encode()).hexdigest()[:24]}),)
         if self._session_id != orderflow.session_id:
             self._interactions.clear()
             self._processed_observation_ids.clear()
@@ -213,7 +215,8 @@ class OrderflowPolicy:
 
         observations = orderflow.observations_for(self.config.response_timeframe)
         if not observations:
-            return (PolicyDecision({**base, "outcome": "rejected", "reason": "required_features_unavailable"}),)
+            return (PolicyDecision({**base, "outcome": "rejected", "reason": "required_features_unavailable",
+                                    "candidate_id": hashlib.sha256(bundle.bundle_id.encode()).hexdigest()[:24]}),)
 
         results: list[PolicyDecision] = []
         futures = bundle.bars.get(MarketRole.FUTURES)
@@ -292,6 +295,20 @@ class OrderflowPolicy:
                 else abs(close - vwap) <= self.config.interaction_band
             )
             if previous is None and not inside_band:
+                candidate_id = hashlib.sha256(
+                    f"{self.config.name}:{observation.observation_id}:trigger".encode()
+                ).hexdigest()[:24]
+                results.append(PolicyDecision({
+                    **base,
+                    **provenance,
+                    "decision_stage": "trigger",
+                    "cell": observation.location or "orderflow",
+                    "subject": {"vehicle": "futures", "location": observation.location or "orderflow"},
+                    "outcome": "rejected",
+                    "reason": "no_orderflow_interaction",
+                    "candidate_id": candidate_id,
+                    "source_observation_ids": [observation.observation_id],
+                }))
                 continue
             interaction_id = previous.interaction_id if previous is not None else (
                 observation.interaction_id or hashlib.sha256(
@@ -317,7 +334,7 @@ class OrderflowPolicy:
             previous = _advance_response(
                 previous, observation, max_candles=self.config.response_window_candles,
             )
-            provenance["cell"] = observation.location or "vwap_zone"
+            provenance["cell"] = observation.location or "orderflow"
             provenance["direction"] = previous.response_direction
             if not inside_band:
                 terminal_response = previous.response_state
@@ -337,6 +354,10 @@ class OrderflowPolicy:
                 results.append(PolicyDecision({
                     **base,
                     **provenance,
+                    "decision_stage": "lifecycle",
+                    "cell": observation.location or "orderflow",
+                    "subject": {"vehicle": "futures", "location": observation.location or "orderflow",
+                                 "direction": previous.response_direction},
                     "outcome": "rejected",
                     "reason": "interaction_ended",
                     "candidate_id": interaction_id,
@@ -350,7 +371,11 @@ class OrderflowPolicy:
             if previous.response_state == "INVALIDATED":
                 self._interactions[interaction_id] = previous
                 results.append(PolicyDecision({
-                    **base, **provenance, "outcome": "rejected",
+                    **base, **provenance, "decision_stage": "lifecycle",
+                    "cell": observation.location or "orderflow",
+                    "subject": {"vehicle": "futures", "location": observation.location or "orderflow",
+                                 "direction": previous.response_direction},
+                    "outcome": "rejected",
                     "reason": "response_invalidated", "candidate_id": interaction_id,
                     "interaction_id": interaction_id, "response_state": previous.response_state,
                     "response_evidence_ids": list(previous.response_evidence_ids),
@@ -361,6 +386,10 @@ class OrderflowPolicy:
                 results.append(PolicyDecision({
                     **base,
                     **provenance,
+                    "decision_stage": "opportunity",
+                    "cell": observation.location or "orderflow",
+                    "subject": {"vehicle": "futures", "location": observation.location or "orderflow",
+                                 "direction": previous.response_direction},
                     "outcome": "rejected",
                     "reason": "response_expired" if previous.response_state == "EXPIRED" else "response_pending",
                     "candidate_id": interaction_id,
@@ -375,28 +404,28 @@ class OrderflowPolicy:
                 **base,
                 **provenance,
                 "outcome": "accepted",
-                "reason": "diagnostic_vwap_interaction",
+                "reason": "orderflow_admission",
                 "candidate_id": interaction_id,
                 "opportunity_id": interaction_id,
                 "interaction_id": interaction_id,
                 "source_observation_ids": [observation.observation_id],
                 "response_evidence_ids": list(observation.evidence_ids),
-                "template_id": "vwap_rejection_diagnostic",
+                "template_id": "orderflow_lifecycle",
                 "template_version": "1",
                 "feature_values": dict(observation.features),
                 "trigger": asdict(trigger),
                 "interaction_state": previous.state,
                 "response_state": previous.response_state,
-                "decision_stage": "interaction_response",
-                "cell": observation.location or "vwap_zone",
+                "decision_stage": "admission",
+                "cell": observation.location or "orderflow",
                 "direction": previous.response_direction,
+                "subject": {"vehicle": "futures", "location": observation.location or "orderflow",
+                             "direction": previous.response_direction},
             }
             results.append(PolicyDecision(payload))
         if not results and all(observation.observation_id in self._processed_observation_ids for observation in observations):
             return ()
-        return tuple(results) or (
-            PolicyDecision({**base, "outcome": "recorded", "reason": "no_vwap_interaction"}),
-        )
+        return tuple(results)
 
     def on_execution_event(self, event: ExecutionNotification) -> None:
         # Diagnostic mode cannot own execution state.
@@ -500,7 +529,7 @@ class OrderflowStrategy:
 
     def snapshot(self) -> Mapping[str, object]:
         return wrap_snapshot(
-            strategy_id="orderflow-research",
+            strategy_id=ORDERFLOW_NAME,
             metadata={"name": self.metadata.name, "version": self.metadata.version,
                       "config_hash": self.metadata.config_hash},
             payload=self.policy.snapshot(),
