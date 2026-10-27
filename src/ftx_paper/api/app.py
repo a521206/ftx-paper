@@ -20,6 +20,7 @@ from ftx_paper.runtime.events import (
 from ftx_paper.runtime.events import serialize_datetime
 from ftx_paper.runtime.parity_artifacts import PARITY_LAYERS, parity_layer_records, read_parity_artifact
 from .schemas import error_payload, openapi_document
+from .orderflow import build_orderflow_projection
 
 INVALID_STRATEGY = object()
 
@@ -726,6 +727,31 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
         rows = [event for event in filter_attributed(store.read_events(1000), selected)
                 if event["event_type"] in {"FILL", "TRADE"}]
         return jsonify({"trades": rows})
+
+    @app.get("/api/v1/orderflow")
+    def orderflow():
+        selected_date = request.args.get("date") or datetime.now(IST).date().isoformat()
+        try:
+            parsed_date = datetime.strptime(selected_date, "%Y-%m-%d").date()
+        except ValueError:
+            return jsonify(error_payload("invalid_date", "date must be YYYY-MM-DD")), 400
+        if parsed_date.isoformat() != selected_date:
+            return jsonify(error_payload("invalid_date", "date must be YYYY-MM-DD")), 400
+        strategy_id = request.args.get("strategy_id", "orderflow-research")
+        if strategy_id != "orderflow-research":
+            return jsonify(error_payload("invalid_strategy", "orderflow endpoint requires orderflow-research")), 400
+        decision_rows = store.read_decision_events(session_date=selected_date, strategy_id=strategy_id, limit=100, canonical_only=True)
+        decisions_for_projection = []
+        for row in decision_rows:
+            payload = dict(row.get("payload", {}))
+            view = validate_decision_view(payload["decision_view"])
+            decisions_for_projection.append({**row, "decision_view": view})
+        lifecycle = store.read_decision_lifecycle_events([str(_row.get("payload", {}).get("decision_id")) for _row in decision_rows])
+        events = [*decisions_for_projection, *lifecycle]
+        trades = [event for event in filter_attributed(store.read_events(1000), strategy_id) if event["event_type"] in {"FILL", "TRADE"}]
+        return jsonify(json_safe(build_orderflow_projection(
+            decisions_for_projection, events, store.read_status().get("open_positions", []), trades, as_of=datetime.now(IST).isoformat(),
+        )))
 
     @app.get("/api/v1/audit")
     def audit():

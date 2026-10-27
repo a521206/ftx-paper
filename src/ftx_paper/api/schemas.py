@@ -85,6 +85,7 @@ def openapi_document() -> dict[str, Any]:
             "/api/v1/positions": {"get": {"responses": {"200": {"description": "Open positions"}}}},
             "/api/v1/capital": {"get": {"responses": {"200": {"description": "Capital"}}}},
             "/api/v1/trades": {"get": {"parameters": [{"name": "strategy_id", "in": "query", "schema": {"type": "string"}}], "responses": {"200": {"description": "Trades, optionally filtered by strategy"}}}},
+            "/api/v1/orderflow": {"get": {"parameters": [{"name": "date", "in": "query", "schema": {"type": "string", "format": "date"}}, {"name": "strategy_id", "in": "query", "schema": {"type": "string", "default": "orderflow-research"}}], "responses": {"200": {"description": "Trader-facing orderflow projection"}}}},
             "/api/v1/replay": {
                 "get": {"responses": {"200": {"description": "Replay runs"}}},
                 "post": {"responses": {"202": {"description": "Replay queued"}, "400": {"description": "Invalid request"}}},
