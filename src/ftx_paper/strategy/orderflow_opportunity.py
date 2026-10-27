@@ -151,6 +151,10 @@ class SetupOpportunity:
     timeout_count: int = 0
     timeout_evidence_ids: tuple[str, ...] = ()
     transitions: tuple["OpportunityTransition", ...] = ()
+    template_id: str = ""
+    policy_version: str = ""
+    context_relation: str | None = None
+    source_interaction_id: str | None = None
 
     @property
     def decision_id(self) -> str:
@@ -209,6 +213,9 @@ class SetupOpportunity:
             evidence_ids=tuple(getattr(response, "evidence_ids")),
             evidence_timeframe=str(getattr(interaction, "timeframe")),
             regime_version=regime_version,
+            template_id=str(getattr(response, "template_id", "")),
+            policy_version=str(getattr(response, "policy_version", "")),
+            conflict_group_id=getattr(response, "execution_conflict_group", None),
         )
 
     @classmethod
@@ -216,11 +223,13 @@ class SetupOpportunity:
         cls, *, interaction_id: str, direction: str, formed_at: datetime,
         expires_at: datetime, entry_lower: float, entry_upper: float,
         failure_boundary: float, evidence_ids: tuple[str, ...],
-        evidence_timeframe: str = "5m", regime_version: int | None = None,
+         evidence_timeframe: str = "5m", regime_version: int | None = None,
+         template_id: str = "", policy_version: str = "", conflict_group_id: str | None = None,
+         context_relation: str | None = None,
     ) -> "SetupOpportunity":
         seed = (
             f"{interaction_id}|{formed_at.isoformat()}|{direction}|{evidence_ids}|"
-            f"{evidence_timeframe}|{regime_version}"
+            f"{evidence_timeframe}|{regime_version}|{template_id}|{policy_version}"
         )
         digest = hashlib.sha256(seed.encode()).hexdigest()[:24]
         setup = StructuralSetup(
@@ -229,11 +238,13 @@ class SetupOpportunity:
             context_version=regime_version,
         )
         return cls(
-            f"lifecycle-{digest}", f"response-{interaction_id}", f"execution-{digest}",
+            f"lifecycle-{digest}", f"response-{interaction_id}:{template_id or 'default'}",
+            conflict_group_id or f"execution:{digest}",
             setup, OpportunityStatus.ACTIVE, regime_version, evidence_timeframe,
             transitions=(OpportunityTransition(
                 OpportunityStatus.ACTIVE, formed_at, "formed", evidence_ids,
-            ),),
+            ),), template_id=template_id, policy_version=policy_version,
+            context_relation=context_relation, source_interaction_id=interaction_id,
         )
 
     def advance_timeout(self, *, timeframe: str, at: datetime, evidence_id: str | None = None) -> "SetupOpportunity":
@@ -300,6 +311,10 @@ class SetupOpportunity:
                 }
                 for item in self.transitions
             ],
+            "template_id": self.template_id,
+            "policy_version": self.policy_version,
+            "context_relation": self.context_relation,
+            "source_interaction_id": self.source_interaction_id,
         }
 
     @classmethod
@@ -348,6 +363,9 @@ class SetupOpportunity:
             regime_version,
             str(raw["evidence_timeframe"]), timeout_count,
             strings(raw.get("timeout_evidence_ids", ()), "timeout_evidence_ids"), transitions,
+            str(raw.get("template_id", "")), str(raw.get("policy_version", "")),
+            str(raw["context_relation"]) if raw.get("context_relation") is not None else None,
+            str(raw["source_interaction_id"]) if raw.get("source_interaction_id") is not None else None,
         )
 
 

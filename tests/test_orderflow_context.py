@@ -4,7 +4,7 @@ import pytest
 
 from ftx_paper.strategy import (
     ContextHistory, ContextVersion, OpeningGapState, SessionLevels,
-    classify_opening_gap,
+    advance_opening_gap, classify_opening_gap,
 )
 
 
@@ -41,3 +41,13 @@ def test_opening_gap_classification_preserves_unavailable_state() -> None:
     assert classify_opening_gap(opening_price=102, prior_close=100).status == "UP"
     assert classify_opening_gap(opening_price=98, prior_close=100).status == "DOWN"
     assert classify_opening_gap(opening_price=100, prior_close=100).status == "NONE"
+
+
+def test_opening_gap_recovery_is_explicit_and_causal() -> None:
+    state = OpeningGapState("GAP_ACCEPTED", 2.0, 100.0)
+    recovered = advance_opening_gap(
+        state, close=99.5, available_at=datetime(2026, 1, 1, 9, 20, tzinfo=UTC),
+        evidence_id="obs-1",
+    )
+    assert recovered.status == "RETURN_TO_VALUE"
+    assert recovered.evidence_ids == ("obs-1",)

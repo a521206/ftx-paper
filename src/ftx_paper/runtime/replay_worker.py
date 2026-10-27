@@ -399,8 +399,10 @@ class ReplayWorker:
                 orderflow_producer,
                 tuple(getattr(getattr(strategy, "policy", None), "required_features", ())),
             )
-            trace_detector = LocationDetector()
-            trace_detector.reset(prior_day_high=prior_day_high, prior_day_low=prior_day_low)
+            native_orderflow = strategy.metadata.name == "ftx-paper-orderflow"
+            trace_detector = None if native_orderflow else LocationDetector()
+            if trace_detector is not None:
+                trace_detector.reset(prior_day_high=prior_day_high, prior_day_low=prior_day_low)
             feature_service = FeatureService(
                 self.store.feature_repository()
                 if callable(getattr(self.store, "feature_repository", None)) else None,
@@ -432,10 +434,12 @@ class ReplayWorker:
                     prior_day_low=prior_day_low,
                     expiry_dates=tuple(str(item) for item in effective_expiry_dates),
                 )
-                trace_snapshot = trace_detector.observe(
-                    futures_bar,
-                    features=(bundle.feature_snapshot.location_features
-                              if bundle.feature_snapshot is not None else None),
+                trace_snapshot = (
+                    trace_detector.observe(
+                        futures_bar,
+                        features=(bundle.feature_snapshot.location_features
+                                  if bundle.feature_snapshot is not None else None),
+                    ) if trace_detector is not None else None
                 )
                 trace_features: dict[str, Any] = {}
                 trace_locations: list[str] = []
@@ -465,15 +469,16 @@ class ReplayWorker:
                     trace_unavailable = [key for key, value in trace_features.items() if value is None]
                     unavailable_fields.update(trace_unavailable)
                 trace_bar_index = bars_seen + 1
-                trace.append({
-                    "date": date,
-                    "bar_index": trace_bar_index,
-                    "timestamp": futures_bar.timestamp.isoformat(),
-                    "features": trace_features,
-                    "locations": trace_locations,
-                    "transitions": trace_transitions,
-                    "unavailable_fields": trace_unavailable,
-                })
+                if trace_detector is not None:
+                    trace.append({
+                        "date": date,
+                        "bar_index": trace_bar_index,
+                        "timestamp": futures_bar.timestamp.isoformat(),
+                        "features": trace_features,
+                        "locations": trace_locations,
+                        "transitions": trace_transitions,
+                        "unavailable_fields": trace_unavailable,
+                    })
                 # Synthetic contract selection is anchored to the spot/index
                 # level, matching the Paper entry contract rule. Futures is
                 # still the decision and exit-state instrument.
@@ -609,7 +614,7 @@ class ReplayWorker:
                         raise
                     result = engine.on_bundle(bundle)
                 bars_seen += 1
-                trigger_events = _available_orderflow_trigger_events(
+                trigger_events = () if native_orderflow else _available_orderflow_trigger_events(
                     bundle, futures_bar.timestamp, emitted_orderflow_trigger_ids,
                 )
                 all_events.extend(trigger_events)
@@ -889,9 +894,11 @@ class ReplayWorker:
             "decisions": [event for event in all_events if is_decision_event(str(event.get("event_type", "")), event)],
             "decision_trace_schema_version": 1,
             "decision_trace": normalized_decisions,
-            "trace_schema_version": 1,
-            "trace_bar_index_base": 1,
-            "trace": trace,
+            **({
+                "trace_schema_version": 1,
+                "trace_bar_index_base": 1,
+                "trace": trace,
+            } if last_strategy_metadata.name != "ftx-paper-orderflow" else {}),
             "unavailable_fields": sorted(unavailable_fields),
             "first_divergent_stage": None,
             # Diagnostic-only trades live inside the replay run result. They

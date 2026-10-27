@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from ftx_paper.strategy import (
-    InteractionCloseReason, InteractionDetector, InteractionStatus,
+    HypothesisState, InteractionCloseReason, InteractionDetector, InteractionStatus,
     LocationBand, LocationRecord, OrderflowObservation, OrderflowObservationContext,
 )
 
@@ -69,3 +69,33 @@ def test_interaction_detector_deduplicates_by_location_observation() -> None:
     assert detector.observe(first, observation, observation_id="location-1") is not None
     assert detector.observe(second, observation, observation_id="location-2") is not None
     assert len(detector.active_interactions) == 2
+
+
+def test_wick_intersection_keeps_interaction_active_when_close_is_outside() -> None:
+    location = LocationRecord("loc-wick", "opening_range", 100, LocationBand(99, 101), 1,
+                              datetime(2026, 1, 1, 9, 15, tzinfo=UTC), "agg-1")
+    detector = InteractionDetector("1m")
+    detector.observe(location, _observation(0, 100))
+    wick = _observation(1, 103)
+    wick = OrderflowObservation(
+        wick.observation_id, wick.source_observation_id, wick.feature_version, wick.timeframe,
+        wick.instrument, wick.observed_at, wick.available_at,
+        {"open": 103, "high": 103.5, "low": 100.5, "close": 103},
+        wick.interval_start, wick.interval_end, context=wick.context,
+    )
+    advanced = detector.observe(location, wick)
+    assert advanced is not None
+    assert advanced.status is InteractionStatus.ACTIVE
+    assert advanced.contact_candles[-1].low == 100.5
+
+
+def test_hypothesis_state_snapshot_preserves_causal_lineage() -> None:
+    location = LocationRecord("loc-state", "opening_range", 100, LocationBand(99, 101), 1,
+                              datetime(2026, 1, 1, 9, 15, tzinfo=UTC), "agg-1")
+    detector = InteractionDetector("1m")
+    interaction = detector.observe(location, _observation(0, 100))
+    assert interaction is not None
+    state = HypothesisState("acceptance", "v2", "PENDING_RESPONSE", True, "long", ("e1",), expected_available_at=_observation(1, 100).available_at)
+    detector.update_response(interaction.interaction_id, state.status, state.hypothesis_id, state=state)
+    restored = InteractionDetector.from_snapshot(detector.snapshot())
+    assert restored.active_interactions[0].hypothesis_states == (state,)

@@ -35,3 +35,21 @@ def test_opportunity_timeout_counts_only_configured_timeframe() -> None:
     assert expired.status is OpportunityStatus.EXPIRED
     assert expired.transitions[-1].reason == "evidence_timeout"
     assert expired.transitions[-1].evidence_ids == ("2026-01-01T09:45:00+00:00",)
+
+
+def test_template_identity_scopes_opportunity_and_conflict_group() -> None:
+    formed = datetime(2026, 1, 1, 9, 20, tzinfo=UTC)
+    first = SetupOpportunity.create(
+        interaction_id="interaction-1", direction="long", formed_at=formed,
+        expires_at=formed + timedelta(minutes=15), entry_lower=99, entry_upper=100,
+        failure_boundary=98, evidence_ids=("e1",), template_id="acceptance-v1",
+        policy_version="p1", conflict_group_id="or-low",
+    )
+    second = SetupOpportunity.create(
+        interaction_id="interaction-1", direction="long", formed_at=formed,
+        expires_at=formed + timedelta(minutes=15), entry_lower=99, entry_upper=100,
+        failure_boundary=98, evidence_ids=("e1",), template_id="rejection-v1",
+        policy_version="p1", conflict_group_id="or-low",
+    )
+    assert first.lifecycle_id != second.lifecycle_id
+    assert first.execution_group_id == second.execution_group_id == "or-low"

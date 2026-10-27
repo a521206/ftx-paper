@@ -63,7 +63,7 @@ class OpeningGapState:
     evidence_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.status not in {"UNAVAILABLE", "NONE", "UP", "DOWN", "RECOVERED"}:
+        if self.status not in {"UNAVAILABLE", "NONE", "UP", "DOWN", "RECOVERED", "GAP_CANDIDATE", "GAP_ACCEPTED", "GAP_RECLAIMED", "RETURN_TO_VALUE", "EXPIRED"}:
             raise ValueError("invalid opening gap status")
         if self.status == "UNAVAILABLE" and self.gap_points is not None:
             raise ValueError("unavailable opening gap cannot have a value")
@@ -263,18 +263,15 @@ def advance_opening_gap(
     complete: bool = True,
 ) -> OpeningGapState:
     """Advance a gap only from one completed, causally available candle."""
-    if timeframe != "1m" or not complete or close is None or state.status in {"UNAVAILABLE", "NONE", "RECOVERED"}:
+    if timeframe != "1m" or not complete or close is None or state.status in {"UNAVAILABLE", "NONE", "RECOVERED", "EXPIRED", "RETURN_TO_VALUE"}:
         return state
     if state.reference_price is None:
         return state
-    recovered = (
-        (state.status == "UP" and close <= state.reference_price)
-        or (state.status == "DOWN" and close >= state.reference_price)
-    )
+    recovered = close <= state.reference_price if state.gap_points is not None and state.gap_points > 0 else close >= state.reference_price
     if evidence_id in state.evidence_ids or not recovered:
         return state
     return OpeningGapState(
-        "RECOVERED", state.gap_points, state.reference_price,
+        "RETURN_TO_VALUE", state.gap_points, state.reference_price,
         available_at, (*state.evidence_ids, evidence_id),
     )
 

@@ -27,7 +27,7 @@ from .orderflow_opportunity import (
 from .opportunity_timeout import advance_opportunity_timeout
 from .orderflow_admission import evaluate_admission
 from .orderflow_capture import CaptureMode
-from .orderflow_interaction import InteractionCloseReason, InteractionDetector, InteractionStatus
+from .orderflow_interaction import HypothesisState, InteractionCloseReason, InteractionDetector, InteractionStatus
 from .orderflow_location import LocationBand, LocationObservation, LocationRecord, LocationRegistry
 from .response import evaluate_policy_responses
 from .policy_contract import ExecutionMode, FeatureRequirement, PolicyDecision
@@ -152,6 +152,7 @@ class OrderflowPolicy:
                                     "decision_id": _decision_id("unavailable", "context", bundle.bundle_id)}),)
         session_transitions: list[PolicyDecision] = []
         if self._session_id != orderflow.session_id:
+            boundary = context.as_of
             session_transitions = [
                 PolicyDecision({
                     **base,
@@ -164,16 +165,19 @@ class OrderflowPolicy:
                     "interaction_state": InteractionStatus.ENDED.value,
                     "decision_stage": "lifecycle",
                 })
-                for item in self._location_detector.close_all(
-                    InteractionCloseReason.SESSION_END, context.as_of,
-                )
+                for detector in self._location_detectors.values()
+                for item in detector.close_all(InteractionCloseReason.SESSION_END, boundary)
             ]
+            # Registry generations are advanced once at the authoritative
+            # session boundary; carried references remain immutable evidence.
+            self._location_registry.next_generation(at=boundary, carry=self._session_id is not None)
             self._processed_observation_ids.clear()
             self._processed_location_observation_ids.clear()
             self._location_detectors = {timeframe: InteractionDetector(timeframe) for timeframe in ("1m", "5m")}
             self._location_detector = self._location_detectors["5m"]
             self._context_history = ContextHistory()
-            self._location_registry = LocationRegistry()
+            if self._session_id is None:
+                self._location_registry = LocationRegistry()
             self._context_version = 0
             self._session_high = None
             self._session_low = None
@@ -223,7 +227,7 @@ class OrderflowPolicy:
                         self._session_low,
                         source_ids=(observation.observation_id,),
                     ),
-                    opening_gap=OpeningGapState("UNAVAILABLE" if gap_status == "source_gap" else "NONE"),
+                    opening_gap=OpeningGapState("GAP_CANDIDATE" if gap_status == "source_gap" else "NONE", observed_at=observation.available_at, evidence_ids=(observation.observation_id,)) if gap_status == "source_gap" else OpeningGapState("NONE", observed_at=observation.available_at, evidence_ids=(observation.observation_id,)),
                     permission="UNAVAILABLE" if gap_status == "source_gap" else "BOTH",
                     evidence_ids=(observation.observation_id,),
                 ))
@@ -361,7 +365,6 @@ class OrderflowPolicy:
                     item for item in observations
                     if item.timeframe == interaction.timeframe
                     and item.observed_at > interaction.created_at
-                    and item.available_at <= min(context.as_of, orderflow.cutoff)
                 ), key=lambda item: (item.observed_at, item.available_at, item.observation_id)))
                 if not response_observations:
                     continue
@@ -371,30 +374,48 @@ class OrderflowPolicy:
                     cutoff=min(context.as_of, orderflow.cutoff),
                 )
                 for template, evaluation in evaluations:
-                    if evaluation.status is None:
-                        continue
                     hypothesis_id = template.template_id
-                    next_status = evaluation.status.value
+                    future = next((item for item in response_observations if item.available_at > min(context.as_of, orderflow.cutoff)), None)
+                    if future is not None and not any(item.available_at <= min(context.as_of, orderflow.cutoff) for item in response_observations):
+                        next_status = "UNAVAILABLE"
+                        reason = "response_evidence_unavailable_at_cutoff"
+                        evidence_ids = tuple(future.evidence_ids or (future.observation_id,))
+                        expected_available_at = future.available_at
+                        direction = None
+                        confirmation_id = None
+                    else:
+                        next_status = evaluation.status.value if evaluation.status is not None else "PENDING_RESPONSE"
+                        reason = evaluation.reason or next_status.lower()
+                        evidence_ids = evaluation.evidence_ids
+                        expected_available_at = getattr(evaluation, "expected_available_at", None)
+                        raw_direction = evaluation.direction
+                        direction = raw_direction.value if raw_direction is not None else None
+                        confirmation_id = evaluation.confirmation_observation_id
                     if next_status == "PENDING":
                         next_status = "PENDING_RESPONSE"
-                    current_status = dict(interaction.hypothesis_states).get(
-                        hypothesis_id, "PENDING_RESPONSE",
-                    )
-                    if next_status == current_status:
+                    current = next((item for item in interaction.hypothesis_states if item.hypothesis_id == hypothesis_id), None)
+                    if current is not None and tuple(evidence_ids) == current.evidence_ids and next_status == current.status:
                         continue
+                    state = HypothesisState(
+                        hypothesis_id, template.template_id, next_status,
+                        bool(evidence_ids), direction, tuple(evidence_ids), confirmation_id,
+                         evaluation.confirmation_available_at if next_status == "CONFIRMED" else None, expected_available_at,
+                        reason if next_status == "INVALIDATED" else None,
+                        reason if next_status == "EXPIRED" else None,
+                    )
                     updated = self._location_detectors[observation.timeframe].update_response(
-                        interaction.interaction_id, next_status, hypothesis_id,
+                        interaction.interaction_id, next_status, hypothesis_id, state=state,
                     )
                     if updated is None:
                         continue
                     results.append(PolicyDecision({
                     **base,
                     "decision_stage": "response",
-                    "outcome": "recorded" if next_status == "CONFIRMED" else "rejected",
-                    "reason": evaluation.reason or next_status.lower(),
+                     "outcome": "recorded" if next_status == "CONFIRMED" else "unavailable" if next_status == "UNAVAILABLE" else "rejected",
+                     "reason": reason,
                     "decision_id": _decision_id(
                         "response", interaction.interaction_id,
-                        evaluation.confirmation_observation_id or observation.observation_id,
+                         confirmation_id or (evidence_ids[-1] if evidence_ids else observation.observation_id),
                         next_status,
                     ),
                     "location": interaction.location_alias,
@@ -402,13 +423,13 @@ class OrderflowPolicy:
                     "reference_generation": interaction.reference_generation,
                     "response_state": next_status,
                     "template_id": template.template_id,
-                    "response_evidence_ids": list(evaluation.evidence_ids),
-                    "source_observation_ids": list(evaluation.evidence_ids),
-                    }))
+                     "response_evidence_ids": list(evidence_ids),
+                     "source_observation_ids": list(evidence_ids),
+                     "expected_available_at": expected_available_at.isoformat() if expected_available_at else None,
+                     }))
                     if next_status != "CONFIRMED":
                         continue
                     formed_at = evaluation.confirmation_available_at or observation.available_at
-                    direction = evaluation.direction
                     if direction is None:
                         results.append(PolicyDecision({
                             **base,
@@ -417,7 +438,7 @@ class OrderflowPolicy:
                             "reason": "response_direction_unavailable",
                             "decision_id": _decision_id("unavailable", "direction", interaction.interaction_id),
                             "interaction_id": interaction.interaction_id,
-                            "source_observation_ids": list(evaluation.evidence_ids),
+                             "source_observation_ids": list(evidence_ids),
                         }))
                         continue
                     opportunity = SetupOpportunity.create(
@@ -430,10 +451,13 @@ class OrderflowPolicy:
                         failure_boundary=(
                             interaction.band_lower if direction == "long" else interaction.band_upper
                         ) or interaction.reference_level,
-                        evidence_ids=evaluation.evidence_ids,
-                        evidence_timeframe=interaction.timeframe,
-                        regime_version=observation.context.generation if observation.context else None,
-                    )
+                         evidence_ids=evidence_ids,
+                         evidence_timeframe=interaction.timeframe,
+                         regime_version=observation.context.generation if observation.context else None,
+                         template_id=template.template_id,
+                         policy_version=template.version,
+                         conflict_group_id=template.execution_conflict_group,
+                     )
                     if opportunity.lifecycle_id not in self._opportunities:
                         current_context = self._context_history.as_of(formed_at)
                         admission = evaluate_admission(
@@ -447,15 +471,15 @@ class OrderflowPolicy:
                             sizing_allowed=context.margin.available >= 0,
                             risk_allowed=context.capital.daily_loss >= 0,
                             setup_valid=True,
-                            direction_matches=evaluation.direction is not None,
-                            confirmations_available=evaluation.confirmation_observation_id is not None,
+                             direction_matches=direction is not None,
+                             confirmations_available=confirmation_id is not None,
                             current_at=formed_at,
                         )
                         self._opportunities[opportunity.lifecycle_id] = opportunity
                         claim = self._execution_groups.claim(
                             opportunity.execution_group_id,
                             opportunity.lifecycle_id,
-                            evidence_ids=evaluation.evidence_ids,
+                             evidence_ids=evidence_ids,
                         )
                         results.append(PolicyDecision({
                             **base,
@@ -472,7 +496,7 @@ class OrderflowPolicy:
                             "admission_status": admission.status.value,
                             "admission_reason": admission.reason,
                             "admission_predicates": [asdict(item) for item in admission.predicates],
-                            "source_observation_ids": list(evaluation.evidence_ids),
+                             "source_observation_ids": list(evidence_ids),
                         }))
             previous_opportunities = dict(self._opportunities)
             if observation.timeframe == "5m":

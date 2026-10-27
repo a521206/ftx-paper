@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     )
     from .orderflow_location import LocationBand, LocationObservation, LocationRecord, LocationRegistry
     from .orderflow_interaction import (
-        InteractionCandle, InteractionCloseReason, InteractionDetector,
+        HypothesisState, InteractionCandle, InteractionCloseReason, InteractionDetector,
         InteractionStatus, LocationInteraction,
     )
     from .orderflow_response import (
@@ -157,12 +157,13 @@ def __getattr__(name: str):
         from .orderflow_location import LocationBand, LocationObservation, LocationRecord, LocationRegistry
         return {"LocationBand": LocationBand, "LocationObservation": LocationObservation,
                 "LocationRecord": LocationRecord, "LocationRegistry": LocationRegistry}[name]
-    if name in {"InteractionCandle", "InteractionCloseReason", "InteractionDetector", "InteractionStatus", "LocationInteraction"}:
+    if name in {"HypothesisState", "InteractionCandle", "InteractionCloseReason", "InteractionDetector", "InteractionStatus", "LocationInteraction"}:
         from .orderflow_interaction import (
-            InteractionCandle, InteractionCloseReason, InteractionDetector,
+            HypothesisState, InteractionCandle, InteractionCloseReason, InteractionDetector,
             InteractionStatus, LocationInteraction,
         )
         return {
+            "HypothesisState": HypothesisState,
             "InteractionCandle": InteractionCandle,
             "InteractionCloseReason": InteractionCloseReason,
             "InteractionDetector": InteractionDetector,
@@ -257,7 +258,7 @@ __all__ = [
     "advance_opening_gap", "classify_opening_gap", "derive_session_levels",
     "permission_for_context", "admission_recovery_available",
     "LocationBand", "LocationObservation", "LocationRecord", "LocationRegistry",
-    "InteractionCandle", "InteractionCloseReason", "InteractionDetector",
+    "HypothesisState", "InteractionCandle", "InteractionCloseReason", "InteractionDetector",
     "InteractionStatus", "LocationInteraction",
     "ResponseEvaluation", "ResponseHypothesis", "ResponseOutcomeStatus",
     "evaluate_response_hypotheses", "evaluate_response_window",

@@ -34,6 +34,33 @@ class InteractionCandle:
     observed_at: datetime
     available_at: datetime
     close: float
+    high: float | None = None
+    low: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class HypothesisState:
+    hypothesis_id: str
+    policy_version: str
+    status: str = "PENDING_RESPONSE"
+    armed: bool = False
+    direction: str | None = None
+    evidence_ids: tuple[str, ...] = ()
+    confirmation_observation_id: str | None = None
+    confirmation_available_at: datetime | None = None
+    expected_available_at: datetime | None = None
+    invalidation_reason: str | None = None
+    expiry_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.hypothesis_id.strip() or not self.policy_version.strip():
+            raise ValueError("hypothesis identity is required")
+        if self.status not in {"PENDING_RESPONSE", "UNAVAILABLE", "CONFIRMED", "REJECTED", "INVALIDATED", "EXPIRED"}:
+            raise ValueError("invalid hypothesis status")
+        if self.direction is not None and self.direction not in {"long", "short"}:
+            raise ValueError("invalid hypothesis direction")
+        if len(self.evidence_ids) != len(set(self.evidence_ids)):
+            raise ValueError("hypothesis evidence IDs must be unique")
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +80,7 @@ class LocationInteraction:
     response_status: str = "PENDING_RESPONSE"
     band_lower: float | None = None
     band_upper: float | None = None
-    hypothesis_states: tuple[tuple[str, str], ...] = ()
+    hypothesis_states: tuple[HypothesisState, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.interaction_id.strip() or not self.location_id.strip():
@@ -94,8 +121,15 @@ class InteractionDetector:
         if observation.context is None or observation.context.availability_status != "available":
             return None
         close = observation.features.get("close")
-        if not isinstance(close, (int, float)) or isinstance(close, bool):
+        high = observation.features.get("high", close)
+        low = observation.features.get("low", close)
+        if (
+            not isinstance(close, (int, float)) or isinstance(close, bool)
+            or not isinstance(high, (int, float)) or isinstance(high, bool)
+            or not isinstance(low, (int, float)) or isinstance(low, bool)
+        ):
             return None
+        close_value, high_value, low_value = float(close), float(high), float(low)
         key = f"{location.location_id}:{self.timeframe}"
         interaction = self._active.get(key)
         replacement = next(
@@ -117,10 +151,13 @@ class InteractionDetector:
             ))
         candle = InteractionCandle(
             observation.observation_id, observation.timeframe,
-            observation.observed_at, observation.available_at, float(close),
+            observation.observed_at, observation.available_at, close_value, high_value, low_value,
         )
-        contact = location.band.contains(float(close)) if band_contact is None else band_contact
-        inside = location.band.contains(float(close))
+        contact = (
+            location.band.lower <= high_value and low_value <= location.band.upper
+            if band_contact is None else band_contact
+        )
+        inside = location.band.lower <= high_value and low_value <= location.band.upper
         if interaction is None:
             if not contact:
                 return None
@@ -135,16 +172,16 @@ class InteractionDetector:
         if not inside:
             previous_close = interaction.contact_candles[-1].close
             crossed = (
-                (previous_close < interaction.reference_level < float(close))
-                or (previous_close > interaction.reference_level > float(close))
+                (previous_close < interaction.reference_level < close_value)
+                or (previous_close > interaction.reference_level > close_value)
             )
             if previous_close == interaction.reference_level:
                 close_reason = InteractionCloseReason.DEPARTED
             elif crossed:
                 close_reason = InteractionCloseReason.CROSS_BAND
-            elif previous_close <= interaction.reference_level and float(close) < interaction.reference_level:
+            elif previous_close <= interaction.reference_level and close_value < interaction.reference_level:
                 close_reason = InteractionCloseReason.SAME_SIDE_DEPARTURE
-            elif previous_close >= interaction.reference_level and float(close) > interaction.reference_level:
+            elif previous_close >= interaction.reference_level and close_value > interaction.reference_level:
                 close_reason = InteractionCloseReason.SAME_SIDE_DEPARTURE
             else:
                 close_reason = InteractionCloseReason.OUTSIDE_BAND_DEPARTURE
@@ -193,6 +230,8 @@ class InteractionDetector:
                         "observed_at": candle.observed_at.isoformat(),
                         "available_at": candle.available_at.isoformat(),
                         "close": candle.close,
+                        "high": candle.high,
+                        "low": candle.low,
                     }
                     for candle in item.contact_candles
                 ],
@@ -201,7 +240,22 @@ class InteractionDetector:
                 "response_status": item.response_status,
                 "band_lower": item.band_lower,
                 "band_upper": item.band_upper,
-                "hypothesis_states": [list(value) for value in item.hypothesis_states],
+                "hypothesis_states": [
+                    {
+                        "hypothesis_id": value.hypothesis_id,
+                        "policy_version": value.policy_version,
+                        "status": value.status,
+                        "armed": value.armed,
+                        "direction": value.direction,
+                        "evidence_ids": list(value.evidence_ids),
+                        "confirmation_observation_id": value.confirmation_observation_id,
+                        "confirmation_available_at": value.confirmation_available_at.isoformat() if value.confirmation_available_at else None,
+                        "expected_available_at": value.expected_available_at.isoformat() if value.expected_available_at else None,
+                        "invalidation_reason": value.invalidation_reason,
+                        "expiry_reason": value.expiry_reason,
+                    }
+                    for value in item.hypothesis_states
+                ],
             }
 
         return {
@@ -233,10 +287,32 @@ class InteractionDetector:
                     datetime.fromisoformat(str(item["observed_at"])),
                     datetime.fromisoformat(str(item["available_at"])),
                     float(item["close"]),
+                    float(item["high"]) if item.get("high") is not None else float(item["close"]),
+                    float(item["low"]) if item.get("low") is not None else float(item["close"]),
                 ))
             candles = tuple(candles_list)
             closed_at = raw.get("closed_at")
             close_reason = raw.get("close_reason")
+            def decode_hypothesis(value: object) -> HypothesisState:
+                if isinstance(value, Mapping):
+                    return HypothesisState(
+                        str(value["hypothesis_id"]), str(value.get("policy_version", "response_v1")),
+                        str(value.get("status", "PENDING_RESPONSE")), bool(value.get("armed", False)),
+                        str(value["direction"]) if value.get("direction") is not None else None,
+                        tuple(str(item) for item in value.get("evidence_ids", ())),
+                        str(value["confirmation_observation_id"]) if value.get("confirmation_observation_id") is not None else None,
+                        datetime.fromisoformat(str(value["confirmation_available_at"])) if value.get("confirmation_available_at") is not None else None,
+                        datetime.fromisoformat(str(value["expected_available_at"])) if value.get("expected_available_at") is not None else None,
+                        str(value["invalidation_reason"]) if value.get("invalidation_reason") is not None else None,
+                        str(value["expiry_reason"]) if value.get("expiry_reason") is not None else None,
+                    )
+                if isinstance(value, (list, tuple)) and len(value) == 2:
+                    return HypothesisState(str(value[0]), "response_v1", str(value[1]))
+                raise ValueError("invalid hypothesis snapshot")
+
+            raw_hypotheses = raw.get("hypothesis_states", ())
+            if not isinstance(raw_hypotheses, (list, tuple)):
+                raise ValueError("invalid hypothesis states")
             return LocationInteraction(
                 str(raw["interaction_id"]), str(raw["timeframe"]),
                 str(raw["location_id"]), str(raw["location_alias"]),
@@ -249,7 +325,7 @@ class InteractionDetector:
                 str(raw.get("response_status", "PENDING_RESPONSE")),
                 float(raw["band_lower"]) if raw.get("band_lower") is not None else None,
                 float(raw["band_upper"]) if raw.get("band_upper") is not None else None,
-                tuple((str(value[0]), str(value[1])) for value in raw.get("hypothesis_states", ())),
+                tuple(decode_hypothesis(value) for value in raw_hypotheses),
             )
 
         active = snapshot.get("active", ())
@@ -285,13 +361,13 @@ class InteractionDetector:
     def active_interactions(self) -> tuple[LocationInteraction, ...]:
         return tuple(self._active.values())
 
-    def update_response(self, interaction_id: str, response_status: str, hypothesis_id: str | None = None) -> LocationInteraction | None:
+    def update_response(self, interaction_id: str, response_status: str, hypothesis_id: str | None = None, *, state: HypothesisState | None = None) -> LocationInteraction | None:
         def update(item: LocationInteraction) -> LocationInteraction:
             if hypothesis_id is None:
                 return replace(item, response_status=response_status)
-            states = dict(item.hypothesis_states)
-            states[hypothesis_id] = response_status
-            return replace(item, hypothesis_states=tuple(sorted(states.items())))
+            states = {value.hypothesis_id: value for value in item.hypothesis_states}
+            states[hypothesis_id] = state or HypothesisState(hypothesis_id, "response_v1", response_status)
+            return replace(item, hypothesis_states=tuple(states[key] for key in sorted(states)))
         for key, interaction in self._active.items():
             if interaction.interaction_id == interaction_id:
                 updated = update(interaction)
@@ -306,6 +382,6 @@ class InteractionDetector:
 
 
 __all__ = [
-    "InteractionCandle", "InteractionCloseReason", "InteractionDetector",
+    "HypothesisState", "InteractionCandle", "InteractionCloseReason", "InteractionDetector",
     "InteractionStatus", "LocationInteraction",
 ]
