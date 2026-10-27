@@ -377,7 +377,11 @@ class ReplayWorker:
                 if cancel.is_set():
                     break
                 if orderflow_producer is not None:
-                    orderflow_producer.ingest(bar)
+                    # Orderflow observations are sourced from the selected
+                    # futures decision clock.  Feeding option bars here makes
+                    # every decision scan and sort the entire option surface.
+                    if bar.instrument.instrument_type in {"FUT", "FUTURES"}:
+                        orderflow_producer.ingest(bar)
                 feature_service.ingest(bar)
                 bundle = aggregator.ingest(bar)
                 if bundle is None:
