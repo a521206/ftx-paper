@@ -513,6 +513,24 @@ def test_setup_policy_emits_one_explicit_order_intent() -> None:
     assert intent.quantity == 2
 
 
+def test_setup_policy_cannot_trade_vwap_as_a_standalone_reference() -> None:
+    instrument = Instrument("NIFTY", "NSE", "INDEX")
+    bar = MarketBar(instrument, datetime(2026, 1, 1, 10, 30), 100, 102, 99, 101, 10)
+    features = LiveFeatureCalculator().calculate((bar,))
+
+    assert features.vwap is not None
+    assert SetupPolicy().evaluate(bar, features) is None
+
+
+def test_orderflow_templates_have_no_vwap_execution_references() -> None:
+    from ftx_paper.strategy.config import SESSION_POLICIES
+    from ftx_paper.strategy.templates import TRADE_TEMPLATES
+
+    assert all("VWAP" not in {location.value for location in template.locations} for template in TRADE_TEMPLATES.values())
+    assert "or_vwap" not in {template.stop_policy.value for template in TRADE_TEMPLATES.values()}
+    assert all("vwap_zone" not in policy.cell.name for _, policies in SESSION_POLICIES for policy in policies)
+
+
 def test_risk_sizer_enforces_drawdown_and_lot_sizing() -> None:
     sizer = RiskEngine()
     approved = sizer.size(capital=10000, equity=10000, peak_equity=10000, entry=100, stop=95)
@@ -1097,7 +1115,7 @@ def test_configured_policy_requires_exact_location_composite() -> None:
     exact = Cell(Location.VWAP_ZONE, Location.OR_HIGH, Location.PRIOR_DAY_LOW)
     with_extra_location = Cell(Location.VWAP_ZONE, Location.OR_HIGH, Location.PRIOR_DAY_LOW, Location.SESSION_HIGH)
 
-    assert _configured_policies_for_cell(engine._cell_policies, Session.MORNING, exact)
+    assert not _configured_policies_for_cell(engine._cell_policies, Session.MORNING, exact)
     assert not _configured_policies_for_cell(engine._cell_policies, Session.MORNING, with_extra_location)
 
 

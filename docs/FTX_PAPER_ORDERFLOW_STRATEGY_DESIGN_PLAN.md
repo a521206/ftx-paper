@@ -598,9 +598,11 @@ Enable the strategy in this order:
 ### Phase 9: Optional Executable VWAP Policy
 
 This phase is not part of the initial implementation. It requires explicit
-approval and a new paired validation design. It must add:
+approval and a new paired validation design. VWAP remains diagnostic-only and
+must not be an executable location, entry reference, or stop reference. The
+executable policy must instead use the canonical non-VWAP location and response
+semantics already represented by the reference implementation. It must add:
 
-- VWAP trade templates and direction rules;
 - executable response-to-opportunity mapping;
 - trigger and entry semantics;
 - stop and exit policy;
@@ -612,7 +614,8 @@ Phase 9 must also add executable-only tests for accepted `OrderIntent`
 construction and shared sizing/risk behavior. These tests do not belong to the
 diagnostic implementation's acceptance criteria.
 
-Only after those gates pass may the strategy produce VWAP entry orders.
+Only after those gates pass may the strategy produce executable orders for the
+approved non-VWAP policy set.
 
 ## Required Tests
 

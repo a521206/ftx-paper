@@ -24,7 +24,6 @@ class LocationTemplate(StrEnum):
     PD_LOW = "PD_LOW"
     SESSION_HIGH = "SESSION_HIGH"
     SESSION_LOW = "SESSION_LOW"
-    VWAP = "VWAP"
 
 
 class OpeningInteractionKind(StrEnum):
@@ -47,7 +46,6 @@ class TriggerType(StrEnum):
 
 class StopPolicy(StrEnum):
     STRUCTURAL_TRAILING = "structural_trailing"
-    OR_VWAP = "or_vwap"
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,12 +126,12 @@ TRADE_TEMPLATES: Mapping[tuple[str, str], TradeTemplate] = {
     ("5m_recovery_breakout", "PD_LOW"): _template("pd_low-long-recovery_breakout", LocationTemplate.PD_LOW, Direction.LONG, ResponseType.REJECTION, TriggerType.PULLBACK),
     ("5m_recovery_breakout", "SESSION_HIGH"): _template("session_high-short-recovery_breakout", LocationTemplate.SESSION_HIGH, Direction.SHORT, ResponseType.REJECTION, TriggerType.BREAKOUT, conflict="high-short-recovery"),
     ("5m_recovery_breakout", "SESSION_LOW"): _template("session_low-long-recovery_breakout", LocationTemplate.SESSION_LOW, Direction.LONG, ResponseType.REJECTION, TriggerType.BREAKOUT, conflict="low-long-recovery"),
-    ("5m_acceptance_breakout", "OR_HIGH"): _template("or_high-long-acceptance_breakout", LocationTemplate.OR_HIGH, Direction.LONG, ResponseType.ACCEPTANCE, TriggerType.BREAKOUT, stop=StopPolicy.OR_VWAP),
-    ("5m_acceptance_breakout", "OR_LOW"): _template("or_low-short-acceptance_breakout", LocationTemplate.OR_LOW, Direction.SHORT, ResponseType.ACCEPTANCE, TriggerType.BREAKOUT, stop=StopPolicy.OR_VWAP),
+    ("5m_acceptance_breakout", "OR_HIGH"): _template("or_high-long-acceptance_breakout", LocationTemplate.OR_HIGH, Direction.LONG, ResponseType.ACCEPTANCE, TriggerType.BREAKOUT),
+    ("5m_acceptance_breakout", "OR_LOW"): _template("or_low-short-acceptance_breakout", LocationTemplate.OR_LOW, Direction.SHORT, ResponseType.ACCEPTANCE, TriggerType.BREAKOUT),
     ("5m_acceptance_breakout", "PD_HIGH"): _template("pd_high-short-acceptance_breakout", LocationTemplate.PD_HIGH, Direction.SHORT, ResponseType.ACCEPTANCE, TriggerType.PULLBACK),
     ("5m_acceptance_breakout", "PD_LOW"): _template("pd_low-long-acceptance_breakout", LocationTemplate.PD_LOW, Direction.LONG, ResponseType.ACCEPTANCE, TriggerType.PULLBACK),
-    ("5m_acceptance_breakout", "SESSION_HIGH"): _template("session_high-long-acceptance_breakout", LocationTemplate.SESSION_HIGH, Direction.LONG, ResponseType.ACCEPTANCE, TriggerType.BREAKOUT, stop=StopPolicy.OR_VWAP),
-    ("5m_acceptance_breakout", "SESSION_LOW"): _template("session_low-short-acceptance_breakout", LocationTemplate.SESSION_LOW, Direction.SHORT, ResponseType.ACCEPTANCE, TriggerType.BREAKOUT, stop=StopPolicy.OR_VWAP),
+    ("5m_acceptance_breakout", "SESSION_HIGH"): _template("session_high-long-acceptance_breakout", LocationTemplate.SESSION_HIGH, Direction.LONG, ResponseType.ACCEPTANCE, TriggerType.BREAKOUT),
+    ("5m_acceptance_breakout", "SESSION_LOW"): _template("session_low-short-acceptance_breakout", LocationTemplate.SESSION_LOW, Direction.SHORT, ResponseType.ACCEPTANCE, TriggerType.BREAKOUT),
 }
 
 DEFAULT_TEMPLATES: Mapping[str, TradeTemplate] = {item.template_id: item for item in TRADE_TEMPLATES.values()}
