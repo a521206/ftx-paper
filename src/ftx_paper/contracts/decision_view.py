@@ -39,7 +39,6 @@ def build_decision_view(
     The flat-field fallback keeps previously persisted decisions readable while
     strategies migrate to the structured contract.
     """
-    native = all(isinstance(payload.get(key), Mapping) for key in ("subject", "policy", "evidence"))
     subject = _mapping(payload.get("subject"))
     _set_if_missing(subject, "instrument", _value(payload, "instrument", "symbol", "market", "contract"))
     _set_if_missing(subject, "vehicle", _value(payload, "vehicle"))
@@ -116,8 +115,6 @@ def build_decision_view(
         "detail": policy.get("reason_code") or policy.get("message") or event_type,
         "outcome": policy.get("outcome", "recorded"),
     }
-    if not native:
-        view["legacy_adapted"] = True
     return view
 
 

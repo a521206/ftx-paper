@@ -1,23 +1,17 @@
-"""Paper-owned producer for the versioned parity artifact.
-
-The module is intentionally data-only at its boundary.  P9 decision records
-are kept separate from P10 execution, exit, settlement, and ledger facts.
-"""
+"""Minimal producer-neutral parity artifact for Paper replays."""
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
 from typing import Any
 
-from ftx_paper.contracts import build_decision_view, validate_decision_view
 
-
-PARITY_ARTIFACT_SCHEMA_VERSION = 1
-_REQUIRED_DECISION_FIELDS = (
-    "comparison_identity", "stream_sequence", "date", "timestamp", "event_type", "stage", "outcome",
-)
+PARITY_ARTIFACT_SCHEMA_VERSION = 2
+PARITY_CONTRACT_ID = "producer_replay_parity"
+PARITY_MANIFEST_VERSION = 1
+PARITY_LAYERS = ("run_scope", "decision", "execution_settlement", "portfolio_ledger")
 
 
 def _jsonable(value: Any) -> Any:
@@ -33,305 +27,230 @@ def _jsonable(value: Any) -> Any:
 
 
 def _canonical_json(value: Any) -> str:
-    return json.dumps(_jsonable(value), sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str)
+    return json.dumps(_jsonable(value), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
 def strategy_payload_hash(strategy: Mapping[str, Any] | None) -> tuple[dict[str, Any], str]:
-    """Return the deterministic strategy-only payload and its SHA-256 hash."""
     payload = {str(key): _jsonable(value) for key, value in (strategy or {}).items()}
-    encoded = _canonical_json(payload).encode("utf-8")
-    return payload, hashlib.sha256(encoded).hexdigest()
+    return payload, hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
 
 
-def _identity(record: Mapping[str, Any]) -> str:
-    identity = {key: record.get(key) for key in (
-        "event_type", "date", "timestamp", "session", "vehicle", "cell",
-        "direction", "stage", "outcome", "reason_code",
-    )}
-    return hashlib.sha256(_canonical_json(identity).encode("utf-8")).hexdigest()
-
-
-def _timestamp(record: Mapping[str, Any]) -> str | None:
-    trigger = record.get("trigger")
-    trigger_timestamp = trigger.get("observed_at") if isinstance(trigger, Mapping) else None
-    value = (
-        record.get("timestamp")
-        or record.get("observed_at")
-        or trigger_timestamp
-        or record.get("decision_at")
-        or record.get("fill_timestamp")
-    )
+def _timestamp(record: Mapping[str, Any]) -> str:
+    value = (record.get("occurred_at") or record.get("timestamp") or record.get("decision_at")
+             or record.get("fill_timestamp"))
     if value is None:
-        return None
+        raise ValueError("parity records require occurred_at")
     parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     if parsed.tzinfo is None:
         raise ValueError("parity timestamps must be timezone-aware")
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _canonical_view(event: Mapping[str, Any]) -> dict[str, Any]:
-    payload = dict(event.get("payload", event))
-    raw = payload.get("decision_view") or event.get("decision_view")
-    if isinstance(raw, Mapping):
-        return validate_decision_view(raw)
-    view = build_decision_view(payload, event_type=str(event.get("event_type", "decision")))
-    view["legacy_adapted"] = True
-    return view
-
-
-def _record(event: Mapping[str, Any], ordinal: int) -> dict[str, Any]:
-    payload = dict(event.get("payload", event))
-    event_type = str(event.get("event_type", payload.get("event_type", ""))).upper()
-    view = _canonical_view(event)
-    subject = dict(view["subject"])
-    policy = dict(view["policy"])
-    evidence = dict(view["evidence"])
-    metrics = dict(evidence.get("metrics") or {})
-    feature_values = dict(evidence.get("features") or {})
-    diagnostics = dict(evidence.get("diagnostics") or {})
-    score_factors = dict(diagnostics.get("score_factors") or {})
-    pcr = metrics.get("pcr", metrics.get("pcr_at_event"))
-    vix = metrics.get("vix", metrics.get("vix_at_event"))
-    timestamp = _timestamp({
-        "observed_at": evidence.get("provenance", {}).get("observed_at"),
-        "trigger": evidence.get("state", {}).get("trigger"),
-        "decision_at": view.get("at"),
-    })
-    confirmation_count = metrics.get("confirmation_count")
-    if confirmation_count is None:
-        confirmation_count = sum(
-            score_factors.get(name) is True
-            for name in ("volume_climax_prior", "prior_midpoint_reclaim", "volume_drying")
-        )
-    missing_inputs = metrics.get("missing_inputs")
-    if missing_inputs is None:
-        missing_inputs = [
-            name for name in (*score_factors, "pcr_at_event", "vix_at_event")
-            if (name in score_factors and score_factors[name] is None)
-            or (name in feature_values and feature_values[name] is None)
-        ]
-    values = {key: metrics.get(key) for key in (
-        "entry_price", "stop", "score", "requested_quantity", "effective_quantity",
-    )}
-    values.update({
-        "score_factors": score_factors,
-        "feature_values": feature_values,
-        "pcr": pcr,
-        "vix": vix,
-        "confirmation_count": confirmation_count,
-        "missing_inputs": list(missing_inputs),
-    })
-    orderflow_provenance = {
-        key: evidence.get("provenance", {}).get(key) or evidence.get("state", {}).get(key)
-        for key in (
-            "feature_version", "availability_cutoff", "timeframe", "instrument",
-            "observed_at", "available_at", "interval_start", "interval_end",
-            "generation", "interaction_id", "opportunity_id", "source_observation_ids",
-            "source_observation_id", "response_evidence_ids", "response_state", "interaction_state",
-            "config_hash", "feature_values", "replay_provenance",
-            "template_id", "template_version", "trigger",
-            "decision_stage", "cell", "direction",
-            "reference_level", "lower_band", "upper_band",
-        )
-        if evidence.get("provenance", {}).get(key) is not None or evidence.get("state", {}).get(key) is not None
+def _record(record: Mapping[str, Any], *, kind: str, sequence: int) -> dict[str, Any]:
+    values = record.get("comparable_values", record.get("values", record))
+    values = dict(values) if isinstance(values, Mapping) else {}
+    if "comparable_values" not in record and "values" not in record:
+        values = {key: value for key, value in values.items() if key not in {
+            "event_type", "decision_id", "client_order_id", "producer_local_id",
+            "comparison_identity", "source", "session_date", "sequence", "stream_sequence",
+            "account_revision",
+        }}
+    occurred_at = _timestamp(record)
+    identity_basis = {
+        "kind": kind,
+        "minute": occurred_at[:16],
+        "dimensions": {key: values.get(key) for key in (
+            "cell", "vehicle", "direction", "side", "instrument", "status", "quantity",
+        ) if values.get(key) is not None},
     }
-    record = {
-        "comparison_identity": _identity({
-            "event_type": event_type, "date": str(evidence.get("provenance", {}).get("session_date") or (timestamp or ""))[:10],
-            "timestamp": timestamp, "session": subject.get("session"), "vehicle": subject.get("vehicle", "futures"),
-            "cell": subject.get("location"), "direction": subject.get("direction"),
-            "stage": view.get("stage"), "outcome": policy.get("outcome") or event_type.lower(),
-            "reason_code": policy.get("reason_code"),
-        }),
-        "producer_local_id": view.get("decision_id"),
-        "stream_sequence": ordinal,
-        "date": str(evidence.get("provenance", {}).get("session_date") or (timestamp or "")[:10])[:10],
-        "timestamp": timestamp,
-        "event_type": event_type,
-        "detector_ordinal": metrics.get("detector_emission_ordinal"),
-        "session": subject.get("session"),
-        "vehicle": subject.get("vehicle", "futures"),
-        "cell": subject.get("location"),
-        "direction": subject.get("direction"),
-        "stage": view.get("stage"), "outcome": policy.get("outcome") or event_type.lower(),
-        "reason_code": policy.get("reason_code"), "values": values,
-        "orderflow_provenance": orderflow_provenance,
-        "legacy_adapted": bool(view.get("legacy_adapted")),
-        "field_availability": {key: "available" if value not in (None, "") else "missing" for key, value in values.items()},
+    identity = hashlib.sha256(_canonical_json(identity_basis).encode("utf-8")).hexdigest()
+    return {
+        "kind": kind,
+        "occurred_at": occurred_at,
+        "sequence": sequence,
+        "identity": identity,
+        "values": _jsonable(values),
+        "unavailable": [key for key, value in values.items() if value is None],
     }
-    return _jsonable(record)
 
 
-def _coverage(records: Sequence[Mapping[str, Any]], *, bars_seen: int, unavailable: Sequence[str]) -> dict[str, Any]:
-    issues: list[str] = []
-    if not records:
-        issues.append("no_decision_records")
+def _coverage(
+    decisions: Sequence[Mapping[str, Any]], bars_seen: int, unavailable: Sequence[str],
+    *, execution_observed: bool, ledger_observed: bool, input_identity: Any,
+) -> dict[str, Any]:
+    issues = []
     if bars_seen <= 0:
         issues.append("no_completed_bars")
-    required_missing = sorted({field for record in records for field in _REQUIRED_DECISION_FIELDS if record.get(field) in (None, "")})
-    if required_missing:
-        issues.append("missing_required_fields:" + ",".join(required_missing))
-    return {
-        "complete": not issues,
-        "issues": issues,
-        "field_availability": {
-            field: "available" if all(record.get(field) not in (None, "") for record in records) else "missing"
-            for field in _REQUIRED_DECISION_FIELDS
-        },
-            "unavailable_fields": sorted(set(str(item) for item in unavailable)),
-            "record_count": len(records),
-            "bars_seen": bars_seen,
-    }
+    if not input_identity:
+        issues.append("missing_input_identity")
+    return {"complete": not issues, "issues": issues, "bars_seen": bars_seen,
+            "record_count": len(decisions),
+            "observed_layers": {"run_scope": True, "decision": bars_seen > 0,
+                                 "execution_settlement": execution_observed,
+                                 "portfolio_ledger": ledger_observed},
+            "field_availability": {"decision": bool(decisions), "execution": execution_observed,
+                                    "settlement": False, "ledger": ledger_observed},
+            "unavailable": sorted({str(item) for item in unavailable})}
 
 
 def build_parity_artifact(
     result: Mapping[str, Any], *, request: Mapping[str, Any] | None = None,
-    stage_records: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+    layer_records: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
 ) -> dict[str, Any]:
-    """Build the Paper-owned schema-v1 envelope from a replay result."""
+    """Build the four-layer artifact from producer-owned replay facts."""
     request = request or {}
-    stage_records = stage_records or {}
-    # P9 and P10 are supplied by the replay-stage producers. This builder does
-    # not derive parity stages from the legacy replay event or trace streams.
-    decisions = [_record(event, ordinal) for ordinal, event in enumerate(
-        event for event in stage_records.get("p9", ())
-        if str(event.get("event_type", "")).upper().endswith("DECISION")
-        and str(event.get("event_type", "")).upper() not in {"EXITDECISION", "EXECUTEDDECISION"}
-    )]
-    execution_types = {"ORDER_INTENT", "ORDER_AUTHORIZED", "ORDER_ACK", "FILL", "EXECUTEDDECISION", "ORDER_UNFILLED", "ORDER_SUPPRESSED", "RISK_REJECTED"}
-    execution = [_jsonable({"ordinal": ordinal, **dict(event)}) for ordinal, event in enumerate(
-        event for event in stage_records.get("p10", ())
-        if str(event.get("event_type", "")).upper() in execution_types
-    )]
-    exits = [_jsonable({"ordinal": ordinal, **dict(event)}) for ordinal, event in enumerate(
-        event for event in stage_records.get("p10", ())
-        if str(event.get("event_type", "")).upper() in {"EXITDECISION", "EXIT", "CLOSE"}
-    )]
-    strategy, strategy_hash = strategy_payload_hash(result.get("strategy"))
-    run_id = str(request.get("run_id") or result.get("run_id") or "paper-replay")
-    generated_at = str(
-        request.get("generated_at")
-        or result.get("metadata", {}).get("generated_at")
-        or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    )
-    coverage = _coverage(decisions, bars_seen=int(result.get("bars_seen", 0)), unavailable=list(result.get("unavailable_fields", ())))
-    envelope = {
-        "artifact_type": "ftx_producer_parity",
-        "schema_version": PARITY_ARTIFACT_SCHEMA_VERSION,
-        "producer": {"identifier": "ftx-paper", "source_version": str(result.get("strategy", {}).get("version", "unknown"))},
-        "run_id": run_id,
-        "scope": {"requested_date_from": str(request.get("session_date", ""))[:10], "requested_date_to": str(request.get("session_date", ""))[:10], "effective_date_from": str(request.get("session_date", ""))[:10], "effective_date_to": str(request.get("session_date", ""))[:10], "timezone": "Asia/Kolkata", "sessions": list(request.get("sessions", ())), "vehicles": list(result.get("vehicles", ())), "replay_input": {"identity": result.get("metadata", {}).get("input_fingerprint"), "provenance": result.get("metadata", {}).get("input_provenance", {}), "availability": result.get("metadata", {}).get("input_availability", {})}, "processed": {"bar_count": int(result.get("bars_seen", 0)), "session_count": 1}, "generated_at": generated_at},
-        "strategy": {"payload": strategy, "payload_hash": strategy_hash, "hash_recipe": "sha256(canonical-json(sort_keys=true,separators=(',',':'),ensure_ascii=true))"},
-        "coverage": coverage,
-        "p9": {"decision_records": decisions, "coverage": coverage},
-        "p10": {"execution": execution, "exits": exits, "synthetic_settlements": _jsonable(result.get("synthetic_settlements", [])), "ledger": _jsonable(result.get("ledger", {}))},
-    }
-    p10_records: list[Mapping[str, Any]] = [*execution, *exits]
-    p10_records.extend(
-        {"record_type": "synthetic_settlement", **dict(item)}
-        for item in result.get("synthetic_settlements", ())
-    )
+    layer_records = layer_records or {}
+    source_decisions = list(layer_records.get("decisions", ()))
+    source_decisions = [event for event in source_decisions
+                        if str(event.get("event_type", "")).upper().endswith("DECISION")
+                        and str(event.get("event_type", "")).upper() != "EXECUTEDDECISION"]
+    decision_kinds = {"CANDIDATEDECISION": "candidate", "ACCEPTEDDECISION": "accepted",
+                      "REJECTEDDECISION": "rejected", "EXITDECISION": "exit"}
+    decisions = [_record(event, kind=decision_kinds.get(str(event.get("event_type", "")).upper(), "candidate"), sequence=index)
+                 for index, event in enumerate(source_decisions)]
+    execution_types = {"ORDER_INTENT", "ORDER_AUTHORIZED", "ORDER_ACK", "FILL", "ORDER_UNFILLED", "ORDER_SUPPRESSED", "RISK_REJECTED"}
+    source_execution = [event for event in layer_records.get("execution", ())
+                        if str(event.get("event_type", "")).upper() in execution_types]
+    source_exits = [event for event in layer_records.get("execution", ())
+                    if str(event.get("event_type", "")).upper() in {"EXIT", "CLOSE"}]
+    execution_kinds = {"ORDER_INTENT": "order_intent", "FILL": "fill", "EXIT": "exit",
+                       "CLOSE": "exit"}
+    execution = [_record(event, kind=execution_kinds.get(str(event.get("event_type", "")).upper(), "order_intent"), sequence=index)
+                 for index, event in enumerate([*source_execution, *source_exits])]
+    settlements = [_record(event, kind="synthetic_settlement", sequence=index)
+                   for index, event in enumerate(result.get("synthetic_settlements", ()))]
     ledger = result.get("ledger", {})
+    ledger_records: list[dict[str, Any]] = []
     if isinstance(ledger, Mapping):
-        p10_records.extend(
-            {"record_type": "ledger", "date": str(date), "value": value}
-            for date, value in sorted(ledger.items(), key=lambda item: str(item[0]))
-        )
-    raw_stages: dict[str, Sequence[Mapping[str, Any]]] = {
-        stage: list(stage_records.get(stage, ())) for stage in _PARITY_STAGES
+        for date, row in sorted(ledger.items()):
+            if not isinstance(row, Mapping):
+                continue
+            occurred_at = f"{str(date)[:10]}T00:00:00Z"
+            reservations = row.get("reservations")
+            if isinstance(reservations, Mapping):
+                for reservation in reservations.values():
+                    if isinstance(reservation, Mapping):
+                        ledger_records.append(_record({"occurred_at": occurred_at, "values": reservation},
+                                                      kind="reservation", sequence=len(ledger_records)))
+            ledger_records.append(_record({"occurred_at": occurred_at, "values": row},
+                                          kind="closeout", sequence=len(ledger_records)))
+    strategy, strategy_hash = strategy_payload_hash(result.get("strategy"))
+    timezone_name = str(request.get("timezone") or result.get("metadata", {}).get("timezone") or "UTC")
+    session_date = str(request.get("session_date", ""))[:10]
+    scope = {"requested_date_from": session_date, "requested_date_to": session_date,
+             "effective_date_from": session_date, "effective_date_to": session_date,
+             "timezone": timezone_name,
+             "applicable_partitions": list(request.get("partitions", request.get("vehicles", ()))),
+             "replay_input": {"identity": result.get("metadata", {}).get("input_fingerprint"),
+                              "provenance": result.get("metadata", {}).get("input_provenance", {})},
+             "processed": {"bar_count": int(result.get("bars_seen", 0)),
+                           "record_count": len(source_decisions)}}
+    input_identity = result.get("metadata", {}).get("input_fingerprint")
+    coverage = _coverage(decisions, int(result.get("bars_seen", 0)), result.get("unavailable_fields", ()),
+                         execution_observed=True, ledger_observed=True, input_identity=input_identity)
+    layers = {
+        "run_scope": [_record({"occurred_at": f"{session_date}T00:00:00Z", "values": scope}, kind="run_scope", sequence=0)],
+        "decision": decisions,
+        "execution_settlement": [*execution, *settlements],
+        "portfolio_ledger": ledger_records,
     }
-    raw_stages["p9"] = decisions
-    raw_stages["p10"] = p10_records
-    envelope["stages"] = {
-        stage: _normalize_stage_records(stage, records)
-        for stage, records in raw_stages.items()
-    }
-    envelope["p9"]["decision_records"] = envelope["stages"]["p9"]
-    envelope["p10"]["execution"] = [record for record in envelope["stages"]["p10"]
-                                      if record.get("event_type") in execution_types]
-    envelope["p10"]["exits"] = [record for record in envelope["stages"]["p10"]
-                                  if record.get("event_type") in {"EXITDECISION", "EXIT", "CLOSE"}]
-    # Persist the exact stage hashes alongside the records. API reads do not
-    # regenerate parity from legacy events or traces.
-    envelope["manifest"] = build_parity_manifest(envelope)
-    return _jsonable(envelope)
+    artifact = {"artifact_type": "producer_parity", "schema_version": PARITY_ARTIFACT_SCHEMA_VERSION,
+                "contract": {"id": PARITY_CONTRACT_ID, "version": 1, "layers": list(PARITY_LAYERS)},
+                 "producer": {"name": "ftx-paper", "version": str(strategy.get("version", "unknown"))},
+                "run_id": str(request.get("run_id") or result.get("run_id") or "paper-replay"),
+                "scope": scope, "coverage": coverage,
+                "producer_configuration": {"payload": strategy, "payload_hash": strategy_hash},
+                "layers": layers}
+    artifact["manifest"] = build_parity_manifest(artifact)
+    return _jsonable(artifact)
 
 
-_PARITY_STAGES = tuple(f"p{index}" for index in range(1, 11))
-
-
-def parity_stage_records(artifact: Mapping[str, Any], stage: str) -> list[dict[str, Any]]:
-    """Return deterministic, record-oriented data for one parity stage."""
-    if stage not in _PARITY_STAGES:
-        raise ValueError(f"unsupported parity stage: {stage}")
-    stored_stages = artifact.get("stages")
-    if not isinstance(stored_stages, Mapping) or stage not in stored_stages:
-        raise ValueError(f"persisted parity stage is unavailable: {stage}")
-    return list(stored_stages[stage])
-
-
-def _normalize_stage_records(
-    stage: str, records: Sequence[Mapping[str, Any]],
-) -> list[dict[str, Any]]:
-    normalized = []
-    for ordinal, record in enumerate(records):
-        value = dict(record)
-        identity_fields = (
-            "observation_id", "interaction_id", "candidate_id", "decision_id",
-            "client_order_id", "comparison_identity", "date", "timestamp", "record_type",
-        )
-        identity = {key: value.get(key) for key in identity_fields if value.get(key) is not None}
-        if not identity:
-            identity = {"stage": stage, "record": value}
-        value.setdefault("comparison_identity", hashlib.sha256(
-            _canonical_json(identity).encode("utf-8")
-        ).hexdigest())
-        value.setdefault(
-            "timestamp",
-            value.get("observed_at") or value.get("decision_at") or value.get("fill_timestamp"),
-        )
-        value.setdefault(
-            "causal_parent_ids",
-            value.get("source_observation_ids")
-            or value.get("child_observation_ids")
-            or value.get("source_observation_id")
-            or [],
-        )
-        value.setdefault("normalized_stage", stage)
-        value.setdefault("payload", dict(record))
-        normalized.append(_jsonable(value))
-    return normalized
+def parity_layer_records(artifact: Mapping[str, Any], layer: str) -> list[dict[str, Any]]:
+    if layer not in PARITY_LAYERS:
+        raise ValueError(f"unsupported parity layer: {layer}")
+    layers = artifact.get("layers")
+    if not isinstance(layers, Mapping) or not isinstance(layers.get(layer), list):
+        raise ValueError(f"persisted parity layer is unavailable: {layer}")
+    return list(layers[layer])
 
 
 def build_parity_manifest(artifact: Mapping[str, Any]) -> dict[str, Any]:
-    """Build stage counts and hashes without duplicating the full artifact."""
-    stages: dict[str, dict[str, Any]] = {}
-    for stage in _PARITY_STAGES:
-        records = parity_stage_records(artifact, stage)
-        available = stage in {"p1", "p9", "p10"} or bool(records)
-        if stage == "p9" and not artifact.get("coverage", {}).get("complete", False):
-            status = "INCOMPLETE"
-        else:
-            status = "AVAILABLE" if available else "UNAVAILABLE"
-        stages[stage] = {
-            "status": status,
-            "record_count": len(records),
-            "sha256": hashlib.sha256(_canonical_json(records).encode("utf-8")).hexdigest(),
-        }
+    layers: dict[str, dict[str, Any]] = {}
+    for layer in PARITY_LAYERS:
+        records = parity_layer_records(artifact, layer)
+        if any(not isinstance(record, Mapping) for record in records):
+            raise ValueError(f"invalid {layer} record")
+        coverage = artifact.get("coverage", {})
+        observed = coverage.get("observed_layers", {}).get(layer, False)
+        status = "INCOMPLETE" if not coverage.get("complete", False) else ("MATCHED" if observed else "UNAVAILABLE")
+        layers[layer] = {"status": status, "count": len(records),
+                         "sha256": hashlib.sha256(_canonical_json(records).encode("utf-8")).hexdigest()}
     scope = artifact.get("scope", {})
-    replay_input = scope.get("replay_input", {}) if isinstance(scope, Mapping) else {}
-    return {
-        "manifest_version": 1,
-        "hash_algorithm": "sha256",
-        "run_id": artifact.get("run_id"),
-        "scope": scope,
-        "strategy": artifact.get("strategy", {}),
-        "source_fingerprint": replay_input,
-        "stages": stages,
-    }
+    return {"version": PARITY_MANIFEST_VERSION, "hash_algorithm": "sha256",
+            "run_id": artifact.get("run_id"), "scope": scope,
+            "contract": artifact.get("contract"), "layers": layers}
 
 
-__all__ = [
-    "PARITY_ARTIFACT_SCHEMA_VERSION", "build_parity_artifact", "build_parity_manifest",
-    "parity_stage_records", "strategy_payload_hash",
-]
+def validate_parity_artifact(artifact: Mapping[str, Any]) -> dict[str, Any]:
+    required = ("artifact_type", "schema_version", "contract", "producer", "run_id", "scope", "coverage", "producer_configuration", "layers", "manifest")
+    if any(key not in artifact for key in required) or artifact.get("artifact_type") != "producer_parity" or artifact.get("schema_version") != 2:
+        raise ValueError("invalid parity artifact envelope")
+    contract = artifact["contract"]
+    if not isinstance(contract, Mapping) or contract.get("id") != PARITY_CONTRACT_ID or contract.get("layers") != list(PARITY_LAYERS):
+        raise ValueError("invalid parity contract")
+    layers = artifact["layers"]
+    if not isinstance(layers, Mapping) or set(layers) != set(PARITY_LAYERS):
+        raise ValueError("parity artifact must declare four layers")
+    for layer in PARITY_LAYERS:
+        records = layers[layer]
+        if not isinstance(records, list):
+            raise ValueError(f"parity layer {layer} must be an array")
+        for sequence, record in enumerate(records):
+            if not isinstance(record, Mapping) or any(key not in record for key in ("kind", "occurred_at", "sequence", "identity", "values", "unavailable")):
+                raise ValueError(f"invalid {layer} record")
+            if record["sequence"] != sequence:
+                raise ValueError(f"{layer} sequence must be contiguous")
+            if not isinstance(record["occurred_at"], str):
+                raise ValueError(f"{layer} record timestamp is required")
+            _timestamp(record)
+    if artifact["manifest"] != build_parity_manifest(artifact):
+        raise ValueError("parity manifest does not match layers")
+    return dict(artifact)
+
+
+def read_parity_artifact(artifact: Mapping[str, Any]) -> dict[str, Any]:
+    return validate_parity_artifact(artifact)
+
+
+def compare_parity_manifests(left: Mapping[str, Any], right: Mapping[str, Any], *, max_context: int = 3) -> dict[str, Any]:
+    if left.get("contract") != right.get("contract") or left.get("scope") != right.get("scope"):
+        return {"status": "MISMATCHED", "layer": "run_scope"}
+    for layer in PARITY_LAYERS:
+        left_layer = left.get("layers", {}).get(layer, {})
+        right_layer = right.get("layers", {}).get(layer, {})
+        if left_layer.get("status") != right_layer.get("status"):
+            statuses = {left_layer.get("status"), right_layer.get("status")}
+            status = "INCOMPLETE" if "INCOMPLETE" in statuses else (
+                "UNAVAILABLE" if "UNAVAILABLE" in statuses else "MISMATCHED")
+            return {"status": status, "layer": layer}
+        if (left_layer.get("count"), left_layer.get("sha256")) != (right_layer.get("count"), right_layer.get("sha256")):
+            return {"status": "MISMATCHED", "layer": layer, "context_limit": max_context}
+    return {"status": "MATCHED"}
+
+
+def compare_parity_artifacts(left: Mapping[str, Any], right: Mapping[str, Any], *, max_context: int = 3,
+                             left_records: Sequence[Mapping[str, Any]] | None = None,
+                             right_records: Sequence[Mapping[str, Any]] | None = None) -> dict[str, Any]:
+    result = compare_parity_manifests(left.get("manifest", left), right.get("manifest", right), max_context=max_context)
+    if result.get("status") != "MISMATCHED" or left_records is None or right_records is None:
+        return result
+    mismatches = [{"index": index, "left": left_record, "right": right_record}
+                  for index, (left_record, right_record) in enumerate(zip(left_records, right_records))
+                  if left_record != right_record][:max_context]
+    return {**result, "context": mismatches}
+
+
+__all__ = ["PARITY_ARTIFACT_SCHEMA_VERSION", "PARITY_CONTRACT_ID", "PARITY_LAYERS",
+           "build_parity_artifact", "build_parity_manifest", "compare_parity_artifacts",
+           "compare_parity_manifests", "parity_layer_records", "read_parity_artifact",
+           "strategy_payload_hash", "validate_parity_artifact"]

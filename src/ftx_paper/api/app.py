@@ -18,7 +18,7 @@ from ftx_paper.runtime.events import (
     EXECUTION_EVENT_TYPES, RISK_EVENT_TYPES, DecisionTimestampError,
 )
 from ftx_paper.runtime.events import serialize_datetime
-from ftx_paper.runtime.parity_artifacts import parity_stage_records
+from ftx_paper.runtime.parity_artifacts import PARITY_LAYERS, parity_layer_records, read_parity_artifact
 from .schemas import error_payload, openapi_document
 
 INVALID_STRATEGY = object()
@@ -280,14 +280,17 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
         result = run.get("result")
         if not isinstance(result, dict) or not isinstance(result.get("parity_artifact"), dict):
             return jsonify(error_payload("unavailable", "parity artifact is unavailable")), 404
-        manifest = result["parity_artifact"].get("manifest")
+        try:
+            artifact = read_parity_artifact(result["parity_artifact"])
+        except ValueError:
+            return jsonify(error_payload("unavailable", "parity artifact is invalid")), 404
+        manifest = artifact.get("manifest")
         if not isinstance(manifest, dict):
             return jsonify(error_payload("unavailable", "persisted parity manifest is unavailable")), 404
-        manifest["run_id"] = run_id
-        return jsonify(json_safe(manifest))
+        return jsonify(json_safe({**manifest, "run_id": run_id, "contract": artifact.get("contract")}))
 
-    @app.get("/api/v1/replay/<run_id>/parity/<stage>")
-    def replay_parity_stage(run_id: str, stage: str):
+    @app.get("/api/v1/replay/<run_id>/parity/<layer>")
+    def replay_parity_layer(run_id: str, layer: str):
         run = store.read_replay_run(run_id)
         if run is None:
             return jsonify(error_payload("not_found", "replay not found")), 404
@@ -298,9 +301,13 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
         if not isinstance(artifact, dict):
             return jsonify(error_payload("unavailable", "parity artifact is unavailable")), 404
         try:
-            records = parity_stage_records(artifact, stage.lower())
+            artifact = read_parity_artifact(artifact)
         except ValueError:
-            return jsonify(error_payload("invalid_request", "stage must be p1 through p10")), 400
+            return jsonify(error_payload("unavailable", "parity artifact is invalid")), 404
+        try:
+            records = parity_layer_records(artifact, layer.lower())
+        except ValueError:
+            return jsonify(error_payload("invalid_request", f"layer must be one of {', '.join(PARITY_LAYERS)}")), 400
         try:
             offset = max(0, int(request.args.get("offset", 0)))
             limit = min(10_000, max(1, int(request.args.get("limit", 1_000))))
@@ -309,11 +316,15 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
         persisted_manifest = artifact.get("manifest")
         if not isinstance(persisted_manifest, dict):
             return jsonify(error_payload("unavailable", "persisted parity manifest is unavailable")), 404
-        manifest = persisted_manifest["stages"].get(stage.lower())
+        manifest = persisted_manifest["layers"].get(layer.lower())
         if not isinstance(manifest, dict):
             return jsonify(error_payload("unavailable", "parity stage is unavailable")), 404
+        if manifest.get("status") == "UNAVAILABLE":
+            return jsonify(error_payload("unavailable", "parity stage is unavailable")), 404
+        if manifest.get("status") == "INCOMPLETE":
+            return jsonify(error_payload("incomplete", "parity stage coverage is incomplete")), 409
         return jsonify(json_safe({
-            "run_id": run_id, "stage": stage.lower(), **manifest,
+            "run_id": run_id, "layer": layer.lower(), **manifest,
             "offset": offset, "limit": limit, "total_count": len(records),
             "records": records[offset:offset + limit],
             "has_more": offset + limit < len(records),

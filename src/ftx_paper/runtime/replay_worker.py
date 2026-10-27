@@ -281,10 +281,7 @@ class ReplayWorker:
         dates = [session_date]
         all_events: list[dict[str, Any]] = []
         trace: list[dict[str, Any]] = []
-        parity_stage_records: dict[str, list[dict[str, Any]]] = {
-            f"p{index}": [] for index in range(1, 11)
-        }
-        parity_seen: dict[str, set[str]] = {stage: set() for stage in parity_stage_records}
+        parity_records: dict[str, list[dict[str, Any]]] = {"decisions": [], "execution": []}
         unavailable_fields: set[str] = set()
         diagnostic_trades: list[dict[str, Any]] = []
         bars_seen = 0
@@ -386,12 +383,6 @@ class ReplayWorker:
                 if bundle is None:
                     continue
                 event_start = len(all_events)
-                orderflow_context = bundle.orderflow_context
-                if orderflow_context is not None:
-                    for observation in orderflow_context.observations:
-                        if observation.observation_id not in parity_seen["p2"]:
-                            parity_seen["p2"].add(observation.observation_id)
-                            parity_stage_records["p2"].append(asdict(observation))
                 futures_bar = bundle.bars[MarketRole.FUTURES]
                 bundle = feature_service.enrich(
                     bundle,
@@ -440,11 +431,6 @@ class ReplayWorker:
                     "locations": trace_locations,
                     "transitions": trace_transitions,
                     "unavailable_fields": trace_unavailable,
-                })
-                parity_stage_records["p3"].append({
-                    **trace[-1], "feature_availability": {
-                        key: value is not None for key, value in trace_features.items()
-                    },
                 })
                 # Synthetic contract selection is anchored to the spot/index
                 # level, matching the Paper entry contract rule. Futures is
@@ -589,10 +575,6 @@ class ReplayWorker:
                 result_events = [{**event, "source": "replay", "session_date": date} for event in result.events]
                 all_events.extend(result_events)
                 for order in result.orders:
-                    parity_stage_records["p8"].append({
-                        "order": asdict(order), "status": "proposed",
-                        "timestamp": futures_bar.timestamp.isoformat(),
-                    })
                     all_events.append({"event_type": "ORDER_INTENT",
                                        "decision_id": order.client_order_id.rsplit(":", 1)[0],
                                        "client_order_id": order.client_order_id,
@@ -609,8 +591,9 @@ class ReplayWorker:
                                 account.authorize_and_reserve(order)
                             except ValueError as exc:
                                 all_events.append({"event_type": "RISK_REJECTED",
-                                                   "decision_id": order.client_order_id,
-                                                   "reason": str(exc), "source": "replay", "session_date": date})
+                                                    "decision_id": order.client_order_id,
+                                                    "reason": str(exc), "timestamp": futures_bar.timestamp.isoformat(),
+                                                    "source": "replay", "session_date": date})
                                 all_events.append({"event_type": "ORDER_SUPPRESSED", "decision_id": order.client_order_id,
                                                    "vehicle": order.vehicle, "timestamp": futures_bar.timestamp.isoformat(),
                                                    "source": "replay", "session_date": date, "execution_allowed": False,
@@ -619,6 +602,7 @@ class ReplayWorker:
                             all_events.append({"event_type": "ORDER_AUTHORIZED",
                                                "decision_id": order.client_order_id,
                                                "account_revision": account.revision,
+                                               "timestamp": futures_bar.timestamp.isoformat(),
                                                 "source": "replay", "session_date": date})
                         all_events.append({"event_type": "ORDER_ACK", "decision_id": order.client_order_id,
                                            "client_order_id": order.client_order_id, "vehicle": order.vehicle,
@@ -750,25 +734,14 @@ class ReplayWorker:
                         max_drawdown = min(max_drawdown, current_equity - peak_equity)
                 for event in result.events:
                     event_type = str(event.get("event_type", "")).upper()
-                    if event.get("interaction_id") or event.get("source_observation_ids"):
-                        parity_stage_records["p4"].append(dict(event))
-                    if event.get("response_state") or event.get("response_evidence_ids"):
-                        parity_stage_records["p5"].append(dict(event))
-                    if event.get("candidate_id"):
-                        parity_stage_records["p6"].append(dict(event))
-                    if event.get("decision_stage"):
-                        parity_stage_records["p7"].append(dict(event))
-                        parity_stage_records["p8"].append({
-                            "comparison_source": "strategy_decision",
-                            "status": "selected" if event.get("outcome") == "accepted" else "suppressed",
-                            "decision": dict(event),
-                        })
                     if event_type.endswith("DECISION"):
-                        parity_stage_records["p9"].append(dict(event))
+                        parity_records["decisions"].append(dict(event))
                 for event in all_events[event_start:]:
                     event_type = str(event.get("event_type", "")).upper()
+                    if event_type == "EXITDECISION":
+                        parity_records["decisions"].append(dict(event))
                     if event_type in _EXECUTION_EVENT_TYPES or event_type in {"EXITDECISION", "EXIT", "CLOSE"}:
-                        parity_stage_records["p10"].append(dict(event))
+                        parity_records["execution"].append(dict(event))
             # Preserve open positions as mark-to-market/open replay results.
             diagnostic_trades.extend({**trade, "status": "open"} for trade in open_trades)
             diagnostic_trades.extend({**trade, "status": "open"} for trade in synthetic_open_trades)
@@ -902,15 +875,8 @@ class ReplayWorker:
                 "score_average": sum(scores) / len(scores) if scores else None,
             },
         }
-        parity_stage_records["p1"] = [{
-            "scope": {"requested_date": session_date, "effective_date": session_date,
-                      "timezone": "Asia/Kolkata", "vehicles": list(vehicles),
-                      "processed_bar_count": bars_seen},
-            "strategy": replay_result["strategy"],
-            "source_fingerprint": metadata["input_fingerprint"],
-        }]
         replay_result["parity_artifact"] = build_parity_artifact(
-            replay_result, request=request, stage_records=parity_stage_records,
+            replay_result, request=request, layer_records=parity_records,
         )
         return replay_result
 

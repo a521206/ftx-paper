@@ -39,7 +39,7 @@ them:
 | Futures and synthetic vehicles | Declare enabled vehicles and vehicle risk limits; preserve the existing reporting-only restrictions for synthetic positions. |
 | Cooldowns and drawdown guards | Configure cooldowns and rely on shared daily-loss, peak-drawdown, margin, and exposure guardrails. |
 | Metadata and snapshots | Return stable metadata and serializable state; version any custom snapshot fields. |
-| Replay and parity artifacts | Run the strategy through `ReplayWorker`; use input manifests, causal traces, event streams, and P9/P10 artifacts for comparison. |
+| Replay and parity artifacts | Run the strategy through `ReplayWorker`; compare the persisted `run_scope`, `decision`, `execution_settlement`, and `portfolio_ledger` layers. |
 | Multi-strategy attribution | Supply a stable `strategy_id`; the runtime handles shared portfolio execution, order attribution, and API/UI filtering. |
 
 These capabilities are shared services and contracts. A new strategy should add
