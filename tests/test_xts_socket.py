@@ -1,3 +1,7 @@
+import asyncio
+from typing import cast
+
+from ftx_paper.broker.xts.client import XTSClient
 from ftx_paper.broker.xts.socket import AsyncXTSSocket, ShutdownResult
 
 
@@ -24,3 +28,29 @@ def test_websocket_url_does_not_duplicate_socket_io_path():
     assert socket._build_ws_url().startswith(
         "wss://example.test/apibinarymarketdata/socket.io/?"
     )
+
+
+def test_xts_socket_does_not_resubscribe_after_shutdown_begins():
+    class Client:
+        def __init__(self):
+            self.calls = 0
+
+        def subscription(self, instruments, *, message_code):
+            self.calls += 1
+
+    class WebSocket:
+        async def recv(self):
+            return '0{}'
+
+        async def send(self, message):
+            socket._stop_event.set()
+
+    client = Client()
+    socket = AsyncXTSSocket(
+        token="test_token", user_id="U123", client=cast(XTSClient, client)
+    )
+    socket._instruments = [(1, 123)]
+
+    asyncio.run(socket._receive_loop(WebSocket()))
+
+    assert client.calls == 0

@@ -341,12 +341,13 @@ class AsyncXTSSocket:
                 logger.info("XTS WebSocket connected and handshake completed")
 
                 # Resubscribe instruments
-                if self._instruments:
+                if self._instruments and not self._stop_event.is_set():
                     try:
                         payload = build_subscription_payload(self._instruments, message_code=1502)
                         self._client.subscription(payload["instruments"], message_code=1502)
                     except Exception as sub_exc:
-                        logger.warning("Failed resubscribing XTS instruments: %s", sub_exc)
+                        if not self._stop_event.is_set():
+                            logger.warning("Failed resubscribing XTS instruments: %s", sub_exc)
                 continue
 
             # Engine.IO Ping from server
