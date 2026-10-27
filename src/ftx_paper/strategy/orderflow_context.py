@@ -126,6 +126,57 @@ class ContextHistory:
     def to_dict(self) -> dict[str, object]:
         return {"schema_version": 1, "versions": [version.to_dict() for version in self._versions]}
 
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, object]) -> "ContextHistory":
+        if raw.get("schema_version") != 1:
+            raise ValueError("unsupported context history schema")
+        versions = raw.get("versions")
+        if not isinstance(versions, (list, tuple)):
+            raise ValueError("context history versions must be a sequence")
+        decoded: list[ContextVersion] = []
+        for item in versions:
+            if not isinstance(item, Mapping):
+                raise ValueError("context history version must be an object")
+            levels_raw = item.get("levels")
+            gap_raw = item.get("opening_gap")
+            if not isinstance(levels_raw, Mapping) or not isinstance(gap_raw, Mapping):
+                raise ValueError("context history version payload is invalid")
+            value_raw = item.get("value_reference")
+            value = None
+            if isinstance(value_raw, Mapping):
+                raw_available = value_raw.get("available_at")
+                value = ValueReference(
+                    str(value_raw["reference_id"]),
+                    float(value_raw["high"]) if value_raw.get("high") is not None else None,
+                    float(value_raw["low"]) if value_raw.get("low") is not None else None,
+                    datetime.fromisoformat(str(raw_available)) if raw_available is not None else None,
+                    tuple(str(source_id) for source_id in value_raw.get("source_ids", ())),
+                    bool(value_raw.get("complete", False)),
+                )
+            levels = SessionLevels(
+                str(levels_raw["session_date"]),
+                float(levels_raw["opening_range_high"]) if levels_raw.get("opening_range_high") is not None else None,
+                float(levels_raw["opening_range_low"]) if levels_raw.get("opening_range_low") is not None else None,
+                float(levels_raw["prior_value_high"]) if levels_raw.get("prior_value_high") is not None else None,
+                float(levels_raw["prior_value_low"]) if levels_raw.get("prior_value_low") is not None else None,
+                bool(levels_raw.get("prior_profile_complete", False)),
+                datetime.fromisoformat(str(levels_raw["available_at"])) if levels_raw.get("available_at") is not None else None,
+                tuple(str(source_id) for source_id in levels_raw.get("source_ids", ())),
+            )
+            gap = OpeningGapState(
+                str(gap_raw["status"]),
+                float(gap_raw["gap_points"]) if gap_raw.get("gap_points") is not None else None,
+                float(gap_raw["reference_price"]) if gap_raw.get("reference_price") is not None else None,
+                datetime.fromisoformat(str(gap_raw["observed_at"])) if gap_raw.get("observed_at") is not None else None,
+                tuple(str(evidence_id) for evidence_id in gap_raw.get("evidence_ids", ())),
+            )
+            decoded.append(ContextVersion(
+                str(item["context_id"]), int(item["version"]), datetime.fromisoformat(str(item["available_at"])),
+                levels, gap, str(item["permission"]),
+                tuple(str(value) for value in item.get("evidence_ids", ())), value,
+            ))
+        return cls(decoded)
+
 
 def classify_opening_gap(
     *, opening_price: float | None, prior_close: float | None,

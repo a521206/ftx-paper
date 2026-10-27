@@ -59,6 +59,9 @@ if TYPE_CHECKING:
     from .research_policy import ResearchPolicyAdapter
     from .snapshot_envelope import unwrap_snapshot, wrap_snapshot
     from .policy_contract import ExecutionMode, PolicyDecision, StrategyPolicy
+    from .templates import Direction, LocationTemplate, OpeningInteractionKind, ResponseType, TradeTemplate, TriggerType
+    from .response import ResponseCandle, ResponseSpec, build_response_spec
+    from .opportunity import OpportunityContext, OpportunityOutcome, OpportunityOutcomeStatus, opportunity_identity
 
 
 def __getattr__(name: str):
@@ -81,6 +84,15 @@ def __getattr__(name: str):
         from .policy_contract import ExecutionMode, FeatureRequirement, PolicyDecision, StrategyPolicy
         return {"ExecutionMode": ExecutionMode, "FeatureRequirement": FeatureRequirement,
                 "PolicyDecision": PolicyDecision, "StrategyPolicy": StrategyPolicy}[name]
+    if name in {"Direction", "LocationTemplate", "OpeningInteractionKind", "ResponseType", "TradeTemplate", "TriggerType"}:
+        from .templates import Direction, LocationTemplate, OpeningInteractionKind, ResponseType, TradeTemplate, TriggerType
+        return {"Direction": Direction, "LocationTemplate": LocationTemplate, "OpeningInteractionKind": OpeningInteractionKind, "ResponseType": ResponseType, "TradeTemplate": TradeTemplate, "TriggerType": TriggerType}[name]
+    if name in {"ResponseCandle", "ResponseSpec", "build_response_spec"}:
+        from .response import ResponseCandle, ResponseSpec, build_response_spec
+        return {"ResponseCandle": ResponseCandle, "ResponseSpec": ResponseSpec, "build_response_spec": build_response_spec}[name]
+    if name in {"OpportunityContext", "OpportunityOutcome", "OpportunityOutcomeStatus", "opportunity_identity"}:
+        from .opportunity import OpportunityContext, OpportunityOutcome, OpportunityOutcomeStatus, opportunity_identity
+        return {"OpportunityContext": OpportunityContext, "OpportunityOutcome": OpportunityOutcome, "OpportunityOutcomeStatus": OpportunityOutcomeStatus, "opportunity_identity": opportunity_identity}[name]
     if name in {"LocationBand", "LocationObservation", "LocationRecord", "LocationRegistry"}:
         from .orderflow_location import LocationBand, LocationObservation, LocationRecord, LocationRegistry
         return {"LocationBand": LocationBand, "LocationObservation": LocationObservation,
@@ -256,6 +268,9 @@ __all__ = [
     "CANONICAL_PHASE_ORDER", "OrderflowRuntimeState", "ReplayBarResult", "ReplayMachine", "ReplayPhase",
     "build_multi_session_report", "build_session_summary", "causal_actions",
     "ExecutionAuthorization", "ExecutionProposal", "ExecutionState", "ExecutionStatus",
+    "Direction", "LocationTemplate", "OpeningInteractionKind", "ResponseType", "TradeTemplate", "TriggerType",
+    "ResponseCandle", "ResponseSpec", "build_response_spec",
+    "OpportunityContext", "OpportunityOutcome", "OpportunityOutcomeStatus", "opportunity_identity",
     "OrderflowExecutionCoordinator",
     "ResearchPolicyAdapter",
     "unwrap_snapshot", "wrap_snapshot",

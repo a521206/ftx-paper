@@ -185,20 +185,14 @@ def prepare_replay_input(
         for row in eligible_rows
         if selected_underlying is None or _underlying(row) == selected_underlying
     }
-    by_identity: dict[str, list[datetime]] = {}
-    for row in normalized:
-        if _identity(row) in candidates:
-            by_identity.setdefault(_identity(row), []).append(normalize_exchange_timestamp(row.timestamp))
-    for timestamps in by_identity.values():
+    # Validate each candidate stream before session-window filtering, but do
+    # not let unrelated contracts or dates poison deterministic selection.
+    for identity in candidates:
+        candidate_rows = [row for row in normalized if _identity(row) == identity]
+        timestamps = [normalize_exchange_timestamp(row.timestamp) for row in candidate_rows]
         if any(left >= right for left, right in zip(timestamps, timestamps[1:])):
             raise ValueError("orderflow source rows must be strictly chronological")
-    for identity in candidates:
-        minute_keys = [
-            normalize_exchange_timestamp(row.timestamp).astimezone(IST).strftime("%Y-%m-%dT%H:%M")
-            for row in normalized
-            if _identity(row) == identity
-            and start <= normalize_exchange_timestamp(row.timestamp).astimezone(IST).time().replace(tzinfo=None) < end
-        ]
+        minute_keys = [_session_minute(row.timestamp) for row in candidate_rows]
         if len(minute_keys) != len(set(minute_keys)):
             raise ValueError("orderflow source rows must have unique session minutes")
     if not candidates:

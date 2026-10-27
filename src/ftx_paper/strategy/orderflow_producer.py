@@ -13,7 +13,7 @@ from ftx_paper.config import IST
 
 from .orderflow_contract import (
     OrderflowContext, OrderflowObservation, OrderflowObservationContext,
-    stable_orderflow_id,
+    UnavailableValue, stable_orderflow_id,
 )
 from .orderflow_location import LocationBand, LocationObservation, LocationRecord
 
@@ -61,6 +61,7 @@ class CausalOrderflowProducer:
         self._bars: dict[tuple[str, str], list[MarketBar]] = defaultdict(list)
         self._active_date: str | None = None
         self._last_timestamps: dict[str, datetime] = {}
+        self._raw_last_timestamps: dict[str, datetime] = {}
         self._session_timezone = session_timezone
         self._session_start = datetime.strptime(session_start, "%H:%M").time()
         self._session_end = datetime.strptime(session_end, "%H:%M").time()
@@ -69,14 +70,21 @@ class CausalOrderflowProducer:
         local = bar.timestamp.astimezone(self._session_timezone)
         date = local.date().isoformat()
         local_time = local.time().replace(second=0, microsecond=0)
-        if local_time < self._session_start or local_time >= self._session_end:
-            return
         if self._active_date is not None and date != self._active_date:
             self._bars.clear()
             self._last_timestamps.clear()
+            self._raw_last_timestamps.clear()
         timestamp = bar.timestamp.astimezone(timezone.utc)
-        self._active_date = date
         identity = _source_identity(bar)
+        raw_last_timestamp = self._raw_last_timestamps.get(identity)
+        if raw_last_timestamp == timestamp:
+            raise ValueError("duplicate orderflow source bar")
+        if raw_last_timestamp is not None and timestamp < raw_last_timestamp:
+            raise ValueError("orderflow source bars must be strictly chronological")
+        self._raw_last_timestamps[identity] = timestamp
+        if local_time < self._session_start or local_time >= self._session_end:
+            return
+        self._active_date = date
         key = (date, identity)
         bars = self._bars[key]
         last_timestamp = self._last_timestamps.get(identity)
@@ -104,16 +112,26 @@ class CausalOrderflowProducer:
         if not candidates:
             return None
         bars = sorted(candidates, key=lambda item: item.timestamp)
-        stream_identity = "|".join((
-            bars[-1].instrument.symbol, bars[-1].instrument.exchange,
-            bars[-1].instrument.instrument_type, bars[-1].instrument.expiry or "",
-        ))
+        stream_identity = _source_identity(bars[-1])
         instrument = bars[-1].instrument.symbol
-        bars = [bar for bar in bars if "|".join((
-            bar.instrument.symbol, bar.instrument.exchange,
-            bar.instrument.instrument_type, bar.instrument.expiry or "",
-        )) == stream_identity]
+        bars = [bar for bar in bars if _source_identity(bar) == stream_identity]
         prefix: list[OrderflowObservation] = []
+        cumulative_volume = 0.0
+        cumulative_dollar_volume = 0.0
+        vwap_unavailable = False
+        recovery_indices: set[int] = set()
+        for gap_index in range(1, len(bars)):
+            if bars[gap_index].timestamp - bars[gap_index - 1].timestamp <= timedelta(minutes=1):
+                continue
+            for end_index in range(gap_index + 4, len(bars)):
+                window = bars[end_index - 4:end_index + 1]
+                if (
+                    len(window) == 5
+                    and all(right.timestamp - left.timestamp == timedelta(minutes=1) for left, right in zip(window, window[1:]))
+                    and ((window[0].timestamp.astimezone(self._session_timezone).hour * 60 + window[0].timestamp.astimezone(self._session_timezone).minute - (self._session_start.hour * 60 + self._session_start.minute)) % 5 == 0)
+                ):
+                    recovery_indices.add(end_index + 1)
+                    break
         for bar_index, bar in enumerate(bars):
             bar_has_gap = bool(
                 bar_index
@@ -121,6 +139,20 @@ class CausalOrderflowProducer:
             )
             volume = float(bar.volume or 0.0)
             available_at = bar.timestamp + timedelta(minutes=1)
+            if bar_index in recovery_indices:
+                vwap_unavailable = False
+                cumulative_volume = 0.0
+                cumulative_dollar_volume = 0.0
+            if bar_has_gap:
+                vwap_unavailable = True
+            if not vwap_unavailable:
+                cumulative_volume += max(0.0, volume)
+                cumulative_dollar_volume += ((bar.high + bar.low + bar.close) / 3.0) * max(0.0, volume)
+            vwap: float | UnavailableValue = (
+                cumulative_dollar_volume / cumulative_volume
+                if not vwap_unavailable and cumulative_volume > 0
+                else UnavailableValue("source_gap", available_at)
+            )
             prefix.append(OrderflowObservation(
                 observation_id=stable_orderflow_id("observation", trading_date, stream_identity, "1m", bar.timestamp.isoformat()),
                 source_observation_id=stable_orderflow_id("source", trading_date, stream_identity, bar.timestamp.isoformat()),
@@ -138,6 +170,7 @@ class CausalOrderflowProducer:
                     "close": bar.close,
                     "volume": volume,
                     "previous_close": bars[bar_index - 1].close if bar_index and not bar_has_gap else None,
+                    "vwap": vwap,
                 },
                 context=OrderflowObservationContext(
                     session_id=trading_date, completeness="complete", availability_status="available",
@@ -213,6 +246,10 @@ class CausalOrderflowProducer:
                 "close": _numeric_feature(child_features[-1], "close"),
                 "previous_close": child_features[0].get("previous_close"),
                 "volume": total_volume,
+                "vwap": (
+                    sum(((_numeric_feature(item.features, "high") + _numeric_feature(item.features, "low") + _numeric_feature(item.features, "close")) / 3.0) * _numeric_feature(item.features, "volume") for item in children) / total_volume
+                    if not parent_has_gap and total_volume > 0 else UnavailableValue("source_gap" if parent_has_gap else "missing_source", end)
+                ),
             }
             session_children = [
                 item for item in prefix if item.observed_at <= children[-1].observed_at

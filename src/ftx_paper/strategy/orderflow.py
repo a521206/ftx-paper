@@ -20,15 +20,16 @@ from ftx_paper.market.bundles import DecisionBundle
 
 from .coordinator import SharedDecisionCoordinator
 from .orderflow_contract import OrderflowObservation
+from .orderflow_context import ContextHistory, ContextVersion, OpeningGapState, SessionLevels
 from .orderflow_opportunity import (
     ExecutionGroupRegistry, OpportunityStatus, SetupOpportunity,
-    advance_timeouts_before_formation,
 )
+from .opportunity_timeout import advance_opportunity_timeout
 from .orderflow_admission import evaluate_admission
 from .orderflow_capture import CaptureMode
 from .orderflow_interaction import InteractionCloseReason, InteractionDetector, InteractionStatus
-from .orderflow_location import LocationBand, LocationObservation, LocationRecord
-from .orderflow_response import ResponseOutcomeStatus, evaluate_response_window
+from .orderflow_location import LocationBand, LocationObservation, LocationRecord, LocationRegistry
+from .response import evaluate_policy_response
 from .policy_contract import ExecutionMode, FeatureRequirement, PolicyDecision
 from .protocol import StrategyMetadata
 from .snapshot_envelope import unwrap_snapshot, wrap_snapshot
@@ -106,7 +107,13 @@ class OrderflowPolicy:
         self._session_id: str | None = None
         self._processed_observation_ids: set[str] = set()
         self._processed_location_observation_ids: set[str] = set()
-        self._location_detector = InteractionDetector("5m")
+        self._location_detectors = {timeframe: InteractionDetector(timeframe) for timeframe in ("1m", "5m")}
+        self._location_detector = self._location_detectors["5m"]
+        self._context_history = ContextHistory()
+        self._location_registry = LocationRegistry()
+        self._context_version = 0
+        self._session_high: float | None = None
+        self._session_low: float | None = None
         self._admission_suspended = False
         self._gap_end: datetime | None = None
         self._opportunities: dict[str, SetupOpportunity] = {}
@@ -163,13 +170,22 @@ class OrderflowPolicy:
             ]
             self._processed_observation_ids.clear()
             self._processed_location_observation_ids.clear()
-            self._location_detector = InteractionDetector("5m")
+            self._location_detectors = {timeframe: InteractionDetector(timeframe) for timeframe in ("1m", "5m")}
+            self._location_detector = self._location_detectors["5m"]
+            self._context_history = ContextHistory()
+            self._location_registry = LocationRegistry()
+            self._context_version = 0
+            self._session_high = None
+            self._session_low = None
             self._admission_suspended = False
             self._gap_end = None
             self._opportunities.clear()
             self._session_id = orderflow.session_id
 
-        observations = orderflow.observations_for(self.config.response_timeframe)
+        observations = tuple(sorted(
+            (*orderflow.observations_for("1m"), *orderflow.observations_for("5m")),
+            key=lambda item: (item.available_at, item.timeframe, item.observed_at, item.observation_id),
+        ))
         if not observations:
             return (*session_transitions, PolicyDecision({**base, "outcome": "unavailable", "reason": "required_features_unavailable",
                                     "decision_id": _decision_id("unavailable", "features", bundle.bundle_id)}))
@@ -180,7 +196,7 @@ class OrderflowPolicy:
         for observation in observations:
             if observation.observation_id in self._processed_observation_ids:
                 continue
-            if observation.timeframe != self.config.response_timeframe:
+            if observation.timeframe not in self._location_detectors:
                 continue
             if expected_instrument is not None and observation.instrument != expected_instrument:
                 continue
@@ -189,6 +205,28 @@ class OrderflowPolicy:
             if observation.context is None or observation.context.session_id != orderflow.session_id:
                 continue
             gap_status = observation.context.replay_provenance.get("gap_status")
+            if observation.timeframe == "5m":
+                self._context_version += 1
+                high = observation.features.get("high")
+                low = observation.features.get("low")
+                if isinstance(high, (int, float)):
+                    self._session_high = max(self._session_high or float(high), float(high))
+                if isinstance(low, (int, float)):
+                    self._session_low = min(self._session_low or float(low), float(low))
+                self._context_history.publish(ContextVersion(
+                    context_id=f"context:{orderflow.session_id}",
+                    version=self._context_version,
+                    available_at=observation.available_at,
+                    levels=SessionLevels(
+                        orderflow.session_id,
+                        self._session_high,
+                        self._session_low,
+                        source_ids=(observation.observation_id,),
+                    ),
+                    opening_gap=OpeningGapState("UNAVAILABLE" if gap_status == "source_gap" else "NONE"),
+                    permission="UNAVAILABLE" if gap_status == "source_gap" else "BOTH",
+                    evidence_ids=(observation.observation_id,),
+                ))
             if gap_status == "source_gap":
                 self._admission_suspended = True
                 self._gap_end = observation.interval_end or observation.available_at
@@ -214,7 +252,7 @@ class OrderflowPolicy:
                         "setup_id": opportunity.setup.setup_id,
                         "source_observation_ids": [observation.observation_id],
                     }))
-                for interaction in self._location_detector.observe_gap(observation.available_at):
+                for interaction in self._location_detectors[observation.timeframe].observe_gap(observation.available_at):
                     results.append(PolicyDecision({
                         **base,
                         "decision_stage": "lifecycle",
@@ -239,10 +277,28 @@ class OrderflowPolicy:
             ):
                 self._admission_suspended = False
                 self._gap_end = None
-            if not observation.location_observations and not orderflow.validate_complete_parent(observation):
+            location_observations = observation.location_observations
+            if not location_observations and observation.timeframe == "1m":
+                close = _number(observation, "close")
+                high = _number(observation, "high")
+                low = _number(observation, "low")
+                open_price = _number(observation, "open")
+                if None not in (open_price, close, high, low):
+                    assert open_price is not None and close is not None and high is not None and low is not None
+                    location_observations = tuple(
+                        LocationObservation(
+                            record.location_id, record.alias, record.generation, record.price,
+                            record.band.lower, record.band.upper, open_price,
+                            high, low, close, record.band.contains(close),
+                            record.source_aggregate_id, observation.observed_at, observation.available_at,
+                            f"{observation.observation_id}:{record.location_id}",
+                        )
+                        for record in self._location_registry.available(observation.available_at)
+                    )
+            if not location_observations and not orderflow.validate_complete_parent(observation):
                 continue
             self._processed_observation_ids.add(observation.observation_id)
-            for location_observation in observation.location_observations:
+            for location_observation in location_observations:
                 if not isinstance(location_observation, LocationObservation):
                     raise ValueError("invalid causal location observation")
                 location = LocationRecord(
@@ -256,8 +312,11 @@ class OrderflowPolicy:
                     timeframe=observation.timeframe,
                     source_identity=observation.instrument,
                 )
-                closed_before = len(self._location_detector.closed_interactions)
-                interaction = self._location_detector.observe(
+                if not any(item.location_id == location.location_id for item in self._location_registry.records):
+                    self._location_registry.publish(location)
+                detector = self._location_detectors[observation.timeframe]
+                closed_before = len(detector.closed_interactions)
+                interaction = detector.observe(
                     location,
                     observation,
                     band_contact=location_observation.band_contact,
@@ -267,7 +326,7 @@ class OrderflowPolicy:
                 if location_key in self._processed_location_observation_ids:
                     continue
                 self._processed_location_observation_ids.add(location_key)
-                for ended in self._location_detector.closed_interactions[closed_before:]:
+                for ended in detector.closed_interactions[closed_before:]:
                     results.append(PolicyDecision({
                         **base,
                         "decision_stage": "lifecycle",
@@ -297,28 +356,29 @@ class OrderflowPolicy:
                         "available_at": location_observation.available_at.isoformat(),
                         "feature_values": dict(observation.features),
                     }))
-            for interaction in self._location_detector.active_interactions:
-                response_observations = tuple(
+            for interaction in self._location_detectors[observation.timeframe].active_interactions:
+                response_observations = tuple(sorted((
                     item for item in observations
-                    if item.observed_at > interaction.created_at
+                    if item.timeframe == interaction.timeframe
+                    and item.observed_at > interaction.created_at
                     and item.available_at <= min(context.as_of, orderflow.cutoff)
-                )
+                ), key=lambda item: (item.observed_at, item.available_at, item.observation_id)))
                 if not response_observations:
                     continue
-                evaluation = evaluate_response_window(
+                evaluation = evaluate_policy_response(
                     interaction,
                     response_observations,
                     max_candles=self.config.response_window_candles,
-                    evaluation_cutoff=min(context.as_of, orderflow.cutoff),
+                    cutoff=min(context.as_of, orderflow.cutoff),
                 )
-                if evaluation.status is ResponseOutcomeStatus.UNAVAILABLE:
+                if evaluation is None or evaluation.status is None:
                     continue
                 next_status = evaluation.status.value
                 if next_status == "PENDING":
                     next_status = "PENDING_RESPONSE"
                 if next_status == interaction.response_status:
                     continue
-                updated = self._location_detector.update_response(
+                updated = self._location_detectors[observation.timeframe].update_response(
                     interaction.interaction_id, next_status,
                 )
                 if updated is None:
@@ -342,7 +402,18 @@ class OrderflowPolicy:
                 }))
                 if next_status == "CONFIRMED":
                     formed_at = evaluation.confirmation_available_at or observation.available_at
-                    direction = evaluation.direction or "long"
+                    direction = evaluation.direction
+                    if direction is None:
+                        results.append(PolicyDecision({
+                            **base,
+                            "decision_stage": "admission",
+                            "outcome": "unavailable",
+                            "reason": "response_direction_unavailable",
+                            "decision_id": _decision_id("unavailable", "direction", interaction.interaction_id),
+                            "interaction_id": interaction.interaction_id,
+                            "source_observation_ids": list(evaluation.evidence_ids),
+                        }))
+                        continue
                     opportunity = SetupOpportunity.create(
                         interaction_id=interaction.interaction_id,
                         direction=direction,
@@ -358,19 +429,20 @@ class OrderflowPolicy:
                         regime_version=observation.context.generation if observation.context else None,
                     )
                     if opportunity.lifecycle_id not in self._opportunities:
+                        current_context = self._context_history.as_of(formed_at)
                         admission = evaluate_admission(
                             opportunity,
-                            context_available=True,
-                            regime_allowed=not self._admission_suspended,
-                            opening_gap_allowed=not self._admission_suspended,
+                            context_available=current_context is not None,
+                            regime_allowed=current_context is not None and current_context.permission != "UNAVAILABLE" and not self._admission_suspended,
+                            opening_gap_allowed=current_context is not None and current_context.opening_gap.status != "UNAVAILABLE" and not self._admission_suspended,
                             active_position_allowed=context.exposure.open_positions == 0,
                             exposure_allowed=context.exposure.net_directional_lots == 0,
                             allocation_allowed=context.margin.available > 0,
-                            sizing_allowed=True,
+                            sizing_allowed=context.margin.available >= 0,
                             risk_allowed=context.capital.daily_loss >= 0,
                             setup_valid=True,
-                            direction_matches=True,
-                            confirmations_available=True,
+                            direction_matches=evaluation.direction is not None,
+                            confirmations_available=evaluation.confirmation_observation_id is not None,
                             current_at=formed_at,
                         )
                         self._opportunities[opportunity.lifecycle_id] = opportunity
@@ -396,14 +468,13 @@ class OrderflowPolicy:
                             "source_observation_ids": list(evaluation.evidence_ids),
                         }))
             previous_opportunities = dict(self._opportunities)
-            self._opportunities = {
-                key: advance_timeouts_before_formation(
-                    (item,), timeframe=observation.timeframe,
-                    at=observation.available_at,
-                    evidence_id=observation.observation_id,
-                )[0]
-                for key, item in self._opportunities.items()
-            }
+            if observation.timeframe == "5m":
+                for key, item in tuple(self._opportunities.items()):
+                    timeout = advance_opportunity_timeout(
+                        item, interaction=None, evidence=(observation,), as_of=observation.available_at,
+                    )
+                    if timeout.opportunity is not None:
+                        self._opportunities[key] = timeout.opportunity
             for opportunity_id, opportunity in self._opportunities.items():
                 previous_opportunity = previous_opportunities.get(opportunity_id)
                 if previous_opportunity is None or len(opportunity.transitions) <= len(previous_opportunity.transitions):
@@ -453,6 +524,15 @@ class OrderflowPolicy:
             "processed_observation_ids": sorted(self._processed_observation_ids),
             "processed_location_observation_ids": sorted(self._processed_location_observation_ids),
             "location_detector": self._location_detector.snapshot(),
+            "location_detectors": {
+                timeframe: detector.snapshot()
+                for timeframe, detector in self._location_detectors.items()
+            },
+            "context_history": self._context_history.to_dict(),
+            "location_registry": [item.to_dict() for item in self._location_registry.records],
+            "context_version": self._context_version,
+            "session_high": self._session_high,
+            "session_low": self._session_low,
             "admission_suspended": self._admission_suspended,
             "gap_end": self._gap_end.isoformat() if self._gap_end else None,
             "opportunities": [self._opportunities[key].snapshot() for key in sorted(self._opportunities)],
@@ -499,6 +579,21 @@ class OrderflowPolicy:
         if not isinstance(raw_location_detector, Mapping):
             raise ValueError("invalid orderflow location detector snapshot")
         policy._location_detector = InteractionDetector.from_snapshot(raw_location_detector)
+        raw_detectors = snapshot.get("location_detectors")
+        if isinstance(raw_detectors, Mapping):
+            policy._location_detectors = {
+                str(timeframe): InteractionDetector.from_snapshot(value)
+                for timeframe, value in raw_detectors.items()
+                if isinstance(value, Mapping)
+            }
+            policy._location_detectors.setdefault("5m", policy._location_detector)
+            policy._location_detector = policy._location_detectors["5m"]
+        else:
+            policy._location_detectors = {
+                "1m": InteractionDetector("1m"),
+                "5m": policy._location_detector,
+            }
+        policy._location_detector = policy._location_detectors["5m"]
         admission_suspended = snapshot.get("admission_suspended")
         gap_end = snapshot.get("gap_end")
         if "gap_end" not in snapshot or not isinstance(admission_suspended, bool):
@@ -507,6 +602,20 @@ class OrderflowPolicy:
             raise ValueError("invalid orderflow gap end")
         policy._admission_suspended = admission_suspended
         policy._gap_end = datetime.fromisoformat(gap_end) if gap_end is not None else None
+        raw_context_version = snapshot.get("context_version", 0)
+        if not isinstance(raw_context_version, int) or raw_context_version < 0:
+            raise ValueError("invalid orderflow context version")
+        policy._context_version = raw_context_version
+        raw_session_high = snapshot.get("session_high")
+        raw_session_low = snapshot.get("session_low")
+        policy._session_high = float(raw_session_high) if isinstance(raw_session_high, (int, float)) else None
+        policy._session_low = float(raw_session_low) if isinstance(raw_session_low, (int, float)) else None
+        raw_context_history = snapshot.get("context_history")
+        if isinstance(raw_context_history, Mapping):
+            policy._context_history = ContextHistory.from_dict(raw_context_history)
+        raw_location_registry = snapshot.get("location_registry")
+        if raw_location_registry is not None:
+            policy._location_registry = LocationRegistry.from_dict(raw_location_registry)
         raw_opportunities = snapshot.get("opportunities")
         if not isinstance(raw_opportunities, (list, tuple)):
             raise ValueError("invalid orderflow opportunities")

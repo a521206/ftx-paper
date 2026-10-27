@@ -165,6 +165,29 @@ class LocationRegistry:
     def records(self) -> tuple[LocationRecord, ...]:
         return tuple(self._records)
 
+    @classmethod
+    def from_dict(cls, raw: object) -> "LocationRegistry":
+        if not isinstance(raw, (list, tuple)):
+            raise ValueError("location registry snapshot must be a sequence")
+        registry = cls()
+        for item in raw:
+            if not isinstance(item, dict):
+                raise ValueError("location registry record must be an object")
+            band = item.get("band")
+            if not isinstance(band, dict):
+                raise ValueError("location registry band must be an object")
+            registry.publish(LocationRecord(
+                str(item["location_id"]), str(item["alias"]), float(item["price"]),
+                LocationBand(float(band["lower"]), float(band["upper"])), int(item["generation"]),
+                datetime.fromisoformat(str(item["available_at"])), str(item["source_aggregate_id"]),
+                int(item.get("priority", 0)), str(item.get("timeframe", "")),
+                str(item["replaced_location_id"]) if item.get("replaced_location_id") is not None else None,
+                str(item.get("location_type", "session_reference")), str(item.get("owner", "orderflow")),
+                tuple(str(value) for value in item.get("aliases", ())),
+                str(item["source_identity"]) if item.get("source_identity") is not None else None,
+            ))
+        return registry
+
     def next_generation(
         self, *, at: datetime, carry: bool = False,
     ) -> tuple[LocationRecord, ...]:
