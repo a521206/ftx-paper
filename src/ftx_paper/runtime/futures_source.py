@@ -50,14 +50,35 @@ class FuturesSessionSource:
         return self.identity.policy_version
 
     def provenance(self) -> dict[str, Any]:
+        canonical_rows = [
+            {
+                "time": str(row["minute"])[11:16],
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": int(row.get("volume") or 0),
+                "oi": int(row.get("open_interest") or 0),
+                "symbol": "NIFTY",
+                "expiry": "",
+                "contract_type": "CONTINUOUS",
+                "session_date": self.session_date,
+            }
+            for row in self.bars
+        ]
+        canonical_fingerprint = hashlib.sha256(
+            json.dumps(canonical_rows, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
         return {
             "session_date": self.session_date,
-            "instrument_type": self.identity.instrument_type,
-            "selected_symbol": self.symbol,
-            "selected_expiry": self.expiry,
+            "instrument_type": "FUT_CONTINUOUS",
+            "selected_symbol": "NIFTY",
+            "selected_expiry": "",
             "rollover_policy_version": self.rollover_policy_version,
             "source_bar_count": self.source_bar_count,
-            "source_fingerprint": self.source_fingerprint,
+            "source_fingerprint": canonical_fingerprint,
+            "source_contract_symbol": self.symbol,
+            "source_contract_expiry": self.expiry,
             "eligible_contracts": list(self.eligible_contracts),
             "rejected_contracts": list(self.rejected_contracts),
             "rollover_decision": self.rollover_decision,

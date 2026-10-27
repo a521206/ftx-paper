@@ -18,7 +18,7 @@ def _artifact() -> dict:
     return build_parity_artifact(
         result,
         request={"session_date": "2026-01-05"},
-        layer_records={"decisions": [{"event_type": "ACCEPTEDDECISION", "timestamp": "2026-01-05T14:30:00Z"}], "execution": []},
+        layer_records={"decisions": [{"event_type": "POLICY_DECISION", "timestamp": "2026-01-05T14:30:00Z"}], "execution": []},
     )
 
 
@@ -43,3 +43,15 @@ def test_manifest_comparison_detects_first_layer_difference() -> None:
 def test_observed_empty_layers_are_matchable() -> None:
     artifact = build_parity_artifact({"strategy": {}, "bars_seen": 1, "metadata": {"input_fingerprint": "fixture"}}, request={"session_date": "2026-01-05"})
     assert artifact["manifest"]["layers"]["execution_settlement"]["status"] == "MATCHED"
+
+
+def test_orderflow_scope_uses_canonical_session_and_vehicle_fields() -> None:
+    artifact = build_parity_artifact(
+        {"strategy": {}, "bars_seen": 1, "metadata": {"input_fingerprint": "fixture"}},
+        request={"session_date": "2026-01-05", "strategy_id": "ftx-paper-orderflow", "vehicles": ["futures"]},
+    )
+
+    scope = artifact["scope"]
+    assert scope["sessions"] == ["orderflow"]
+    assert scope["vehicles"] == ["futures"]
+    assert scope["partitions"] == {"source": ["orderflow"]}

@@ -43,7 +43,7 @@ def _replay_input(metadata: Mapping[str, Any]) -> dict[str, Any]:
     current = provenance.get("current") if isinstance(provenance, Mapping) else None
     if not isinstance(current, Mapping):
         current = {}
-    fingerprint = metadata.get("input_fingerprint") or current.get("source_fingerprint")
+    fingerprint = current.get("source_fingerprint") or metadata.get("input_fingerprint")
     symbol = str(current.get("selected_symbol") or current.get("symbol") or "NIFTY")
     expiry = str(current.get("selected_expiry") or current.get("expiry") or "")
     instrument_type = str(current.get("instrument_type") or "FUT").upper()
@@ -64,11 +64,6 @@ def _replay_input(metadata: Mapping[str, Any]) -> dict[str, Any]:
         "identity": identity,
         "identities": [identity],
     }
-    if isinstance(current, Mapping):
-        source["selected_symbol"] = current.get("selected_symbol")
-        source["selected_expiry"] = current.get("selected_expiry")
-        source["rollover_policy_version"] = current.get("rollover_policy_version")
-        source["rollover_decision"] = current.get("rollover_decision")
     return {"identity": [fingerprint] if fingerprint else [], "provenance": [source]}
 
 

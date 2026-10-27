@@ -112,3 +112,19 @@ def test_live_and_replay_selection_agree_across_rollover(tmp_path):
         assert live is not None and replay is not None
         assert live["tradingsymbol"] == replay.symbol
         assert parse_expiry(live["expiry"]) == date.fromisoformat(replay.expiry)
+
+
+def test_replay_provenance_uses_canonical_continuous_identity(tmp_path):
+    store = RuntimeStore(tmp_path)
+    store.append_market_bars((
+        _bars_for("NIFTY26SEPFUT", "2026-09-29", date(2026, 9, 29)),
+    ), source="fixture")
+
+    source = FuturesSessionSourceResolver(store).resolve("2026-09-29")
+
+    assert source is not None
+    provenance = source.provenance()
+    assert provenance["selected_symbol"] == "NIFTY"
+    assert provenance["selected_expiry"] == ""
+    assert provenance["instrument_type"] == "FUT_CONTINUOUS"
+    assert provenance["source_fingerprint"] != source.source_fingerprint
