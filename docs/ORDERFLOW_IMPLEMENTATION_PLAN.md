@@ -398,6 +398,15 @@ Phase 5 conformance tests:
 - `test_closes_for_cross_band_same_side_outside_band_session_gap_and_replacement`
 - `test_duplicate_observation_does_not_duplicate_interaction`
 
+Implementation gaps currently present:
+
+- The current detector decides continuation from candle close. The canonical
+  contract is high/low band intersection for each completed candle; close-only
+  continuation can miss wick contacts and create different episodes.
+- `LocationRegistry.next_generation()` exists as a helper but is not wired into
+  the live session-boundary path. Generation carry/termination must be applied
+  by the policy owner, not only tested in isolation.
+
 ### Phase 6: Response Policies
 
 Implement response hypotheses as policy-owned evaluation over completed candles.
@@ -433,6 +442,21 @@ Phase 6 conformance tests:
 - `test_rejection_acceptance_cross_band_invalidation_and_expiry_are_distinct`
 - `test_pre_event_context_is_required_when_policy_disallows_event_close`
 - `test_response_unavailable_is_not_reported_as_neutral_or_confirmed`
+
+Implementation gaps currently present:
+
+- Acceptance and rejection templates are evaluated, but the live adapter does
+  not retain per-hypothesis arming, direction, evidence, or confirmation state.
+  It recomputes a bounded prefix with `armed=False`.
+- Observations are filtered at the replay cutoff before evaluation, so delayed
+  evidence can become an empty/pending result instead of explicit `UNAVAILABLE`
+  with its expected availability boundary.
+- Response decisions are emitted only when a hypothesis status changes. The
+  causal contract requires recording each newly available outcome, including
+  repeated pending and contact-unavailable outcomes.
+- Prior-day policy behavior and pre-event-context requirements are not wired
+  through the live orderflow strategy; the generic adapter is not a substitute
+  for location-specific policies.
 
 ### Phase 7: Opportunities And Structural Setups
 
@@ -474,6 +498,18 @@ Phase 7 conformance tests:
 - `test_timeout_expires_before_same_bar_structure_formation`
 - `test_execution_group_claim_denies_duplicate_candidate_with_reason`
 - `test_setup_cannot_outlive_source_interaction_or_context_without_transition`
+
+Implementation gaps currently present:
+
+- `SetupOpportunity.create()` derives an execution group from the opportunity
+  digest and does not receive the template's canonical conflict group. Competing
+  hypotheses can claim separate groups instead of being arbitrated together.
+- Opportunity identity does not include response template/policy identity, so
+  acceptance and rejection lifecycles are not fully distinguishable when their
+  other formation fields coincide.
+- The policy forms a setup only after a confirmed response and does not yet model
+  the complete structural lifecycle: context relation, retest waiting,
+  supersession, source invalidation, and explicit denied-candidate persistence.
 
 ### Phase 8: Admission, Intent, And Trigger Eligibility
 
@@ -893,17 +929,37 @@ exit criteria. A separate parity effort may later compare independently
 produced artifacts, but parity results must not change the implementation
 contracts or be used as a substitute for these tests.
 
-## Current Baseline
+## Verified Implementation Gaps
 
-The Paper implementation now provides the causal producer, immutable context and
-location state, interaction/response lifecycle, opportunity and admission
-ownership, diagnostic execution boundary, replay capture, and strategy-neutral
-runtime reporting described by Phases 0 through 10. The conformance suites cover
-strict source validation, session-aligned aggregation, complete lineage and gap
-propagation, lifecycle expiry and requalification, stable decision identity,
-versioned projections, and detached replay records.
+The roadmap is not complete through Phase 10. The following gaps are verified
+against the current Paper source and must be resolved before the corresponding
+phase can be marked complete:
 
-The live orderflow path remains diagnostic and paper-only. Replay remains a
-replay-only consumer, and no live replay recorder or second runtime owner is
-introduced. Future work may extend parity reporting, but parity artifacts do not
-alter these contracts.
+- The replay worker still constructs the legacy `market.location.LocationDetector`
+  and emits one legacy `trace` record per futures bar. This trace is exposed by
+  the compatibility endpoint and is separate from the causal orderflow policy.
+  It must be removed from the native orderflow replay path or explicitly
+  isolated as deprecated compatibility data so two location lifecycles cannot be
+  mistaken for one authoritative state machine.
+- The causal policy emits trigger observations and lifecycle/status transitions,
+  not the full recorded hypothesis stream. Pending, unavailable, and repeated
+  causal outcomes are under-published.
+- Interaction, response, opportunity, admission, and execution-group state is
+  not yet fully independent at the persistence boundary. Hypothesis status is
+  serialized, but hypothesis evidence and arming state are not.
+- Opening-gap state is currently reduced to `UNAVAILABLE`/`NONE` in the policy
+  context update. The planned candidate, accepted, reclaimed, return-to-value,
+  and expiry transitions are not implemented in the live path.
+- Location generations and carry policy are available in model helpers but are
+  not integrated with session rollover and interaction termination.
+- Replay output contains both the new producer-neutral parity artifact and older
+  `trace`/`candidate_trace`/`decision_trace` projections. The latter are
+  compatibility views and must not be used as lifecycle inputs or parity-layer
+  counts.
+- Phase 9 remains correctly deferred: diagnostic mode must continue to create no
+  executable intents, reservations, fills, exits, or portfolio mutations.
+
+The current implementation therefore provides a substantial Phase 0-5
+foundation and partial Phase 6-8 behavior, but it must not be described as a
+complete Phase 0-10 implementation until these gaps have focused Paper-owned
+conformance tests and verified causal implementations.
