@@ -74,6 +74,8 @@ class CausalOrderflowProducer:
         self._active_date: str | None = None
         self._last_timestamps: dict[str, datetime] = {}
         self._raw_last_timestamps: dict[str, datetime] = {}
+        self._selected_identity: str | None = None
+        self._prior_bars: tuple[MarketBar, ...] = ()
         self._session_timezone = session_timezone
         self._session_start = datetime.strptime(session_start, "%H:%M").time()
         self._session_end = datetime.strptime(session_end, "%H:%M").time()
@@ -82,12 +84,24 @@ class CausalOrderflowProducer:
         local = bar.timestamp.astimezone(self._session_timezone)
         date = local.date().isoformat()
         local_time = local.time().replace(second=0, microsecond=0)
-        if self._active_date is not None and date != self._active_date:
+        if self._active_date is not None and date < self._active_date:
+            raise ValueError("orderflow source bars cannot move to an earlier session")
+        if self._active_date is not None and date > self._active_date:
+            self._prior_bars = tuple(
+                bar for bars in self._bars.values() for bar in bars
+            )
             self._bars.clear()
             self._last_timestamps.clear()
             self._raw_last_timestamps.clear()
+            self._selected_identity = None
         timestamp = bar.timestamp.astimezone(timezone.utc)
         identity = _source_identity(bar)
+        if bar.instrument.instrument_type.upper() not in {"FUT", "FUTURE", "FUTURES"}:
+            return
+        if self._selected_identity is None:
+            self._selected_identity = identity
+        elif identity != self._selected_identity:
+            raise ValueError("orderflow source identity changed within a session")
         raw_last_timestamp = self._raw_last_timestamps.get(identity)
         if raw_last_timestamp == timestamp:
             raise ValueError("duplicate orderflow source bar")
@@ -96,7 +110,7 @@ class CausalOrderflowProducer:
         self._raw_last_timestamps[identity] = timestamp
         if not source_row_is_complete(bar):
             return
-        if local_time < self._session_start or local_time >= self._session_end:
+        if local_time < self._session_start or local_time > self._session_end:
             return
         self._active_date = date
         key = (date, identity)
@@ -119,8 +133,7 @@ class CausalOrderflowProducer:
             bar for (date, _), bars in self._bars.items()
             if date == trading_date
             for bar in bars
-            if self._session_start <= bar.timestamp.astimezone(self._session_timezone).time().replace(second=0, microsecond=0) < self._session_end
-            and bar.timestamp.astimezone(self._session_timezone).strftime("%H:%M") <= minute
+            if self._session_start <= bar.timestamp.astimezone(self._session_timezone).time().replace(second=0, microsecond=0) <= self._session_end
             and bar.timestamp + timedelta(minutes=1) <= decision_cutoff
         ]
         if not candidates:
@@ -195,7 +208,11 @@ class CausalOrderflowProducer:
                     "low": bar.low,
                     "close": bar.close,
                     "volume": volume,
-                    "previous_close": bars[bar_index - 1].close if bar_index and not bar_has_gap else None,
+                    "previous_close": (
+                        bars[bar_index - 1].close if bar_index and not bar_has_gap
+                        else self._prior_bars[-1].close if bar_index == 0 and self._prior_bars
+                        else None
+                    ),
                     "vwap": vwap,
                 },
                 context=OrderflowObservationContext(
@@ -291,13 +308,22 @@ class CausalOrderflowProducer:
                 "session_high": session_high,
                 "session_low": session_low,
             }
-            if len(session_open) == 15:
+            if len(session_open) >= 5:
                 levels.update({
-                    "or_high": max(_numeric_feature(item.features, "high") for item in session_open),
-                    "or_low": min(_numeric_feature(item.features, "low") for item in session_open),
+                    "or_high": max(_numeric_feature(item.features, "high") for item in session_open[:5]),
+                    "or_low": min(_numeric_feature(item.features, "low") for item in session_open[:5]),
                 })
+            if self._prior_bars:
+                levels.update({
+                    "pd_high": max(float(item.high) for item in self._prior_bars),
+                    "pd_low": min(float(item.low) for item in self._prior_bars),
+                })
+            parent_vwap = parent_features.get("vwap")
+            if isinstance(parent_vwap, (int, float)) and not isinstance(parent_vwap, bool):
+                levels["vwap"] = float(parent_vwap)
             location_observations: list[LocationObservation] = []
             for alias, level in levels.items():
+                alias = alias.upper()
                 previous = location_records.get(alias)
                 band = LocationBand(level - atr * 0.06, level + atr * 0.06)
                 if (

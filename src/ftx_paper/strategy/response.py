@@ -207,10 +207,10 @@ def evaluate_policy_response(
         return None
     candidates = tuple(
         item for item in observations
-        if getattr(item, "timeframe", None) == getattr(interaction, "timeframe", None)
+        if getattr(item, "timeframe", None) == template.response_timeframe
         and isinstance(getattr(item, "observed_at", None), datetime)
         and isinstance(getattr(interaction, "created_at", None), datetime)
-        and getattr(item, "observed_at") > getattr(interaction, "created_at")
+        and getattr(item, "observed_at") >= getattr(interaction, "created_at")
         and isinstance(getattr(item, "available_at", None), datetime)
         and getattr(item, "available_at") <= cutoff
     )[:max_candles]
@@ -257,6 +257,7 @@ def evaluate_policy_response(
 
 def evaluate_policy_responses(
     interaction: object, observations: Sequence[object], *, max_candles: int, cutoff: object,
+    initial_armed: Mapping[str, bool] | None = None,
 ) -> tuple[tuple[TradeTemplate, ResponseEvaluation[object]], ...]:
     """Evaluate acceptance and rejection hypotheses independently."""
     alias = str(getattr(interaction, "location_alias", "")).upper()
@@ -270,12 +271,13 @@ def evaluate_policy_responses(
     results: list[tuple[TradeTemplate, ResponseEvaluation[object]]] = []
     for template in templates:
         created_at = getattr(interaction, "created_at", None)
+        response_timeframe = template.response_timeframe
         candidates = tuple(
             item for item in observations
-            if getattr(item, "timeframe", None) == getattr(interaction, "timeframe", None)
+            if getattr(item, "timeframe", None) == response_timeframe
             and isinstance(getattr(item, "observed_at", None), datetime)
             and isinstance(created_at, datetime)
-            and getattr(item, "observed_at") > created_at
+            and getattr(item, "observed_at") >= created_at
             and isinstance(getattr(item, "available_at", None), datetime)
             and getattr(item, "available_at") <= cutoff
         )[:max_candles]
@@ -290,7 +292,7 @@ def evaluate_policy_responses(
                 float(getattr(item, "features")["low"]), float(getattr(item, "features")["close"]),
             ),
             spec_for=lambda _item: spec,
-            armed=False,
+            armed=bool(initial_armed.get(template.template_id, False)) if initial_armed else False,
             pre_contact_side=getattr(interaction, "pre_contact_side", None),
         )
         results.append((template, evaluation))

@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from ftx_paper.contracts import Instrument, MarketBar
 from ftx_paper.strategy import CausalOrderflowProducer
 
@@ -53,19 +55,18 @@ def test_causal_producer_keeps_later_parent_windows_complete() -> None:
     ]
 
 
-def test_causal_producer_allows_interleaved_source_instruments() -> None:
+def test_causal_producer_rejects_mixed_source_instruments() -> None:
     producer = CausalOrderflowProducer()
     timestamp = datetime(2026, 1, 1, 3, 45, tzinfo=timezone.utc)
-    for symbol in ("NIFTYFUT", "BANKFUT"):
+    producer.ingest(MarketBar(
+        Instrument("NIFTYFUT", "NSE", "FUTURES"), timestamp,
+        99.0, 102.0, 98.0, 100.0, 10.0,
+    ))
+    with pytest.raises(ValueError, match="source identity changed"):
         producer.ingest(MarketBar(
-            Instrument(symbol, "NSE", "FUTURES"), timestamp,
+            Instrument("BANKFUT", "NSE", "FUTURES"), timestamp,
             99.0, 102.0, 98.0, 100.0, 10.0,
         ))
-
-    context = producer.context("2026-01-01", "09:15")
-
-    assert context is not None
-    assert len(context.observations_for("1m")) == 1
 
 
 def test_causal_producer_uses_configured_session_alignment() -> None:

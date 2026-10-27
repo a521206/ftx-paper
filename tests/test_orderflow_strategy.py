@@ -84,7 +84,8 @@ def _context(
         instrument="NIFTYFUT",
         observed_at=OBSERVED,
         available_at=available,
-        features={"open": 99.0, "high": 101.0, "low": 99.0,
+        features={"open": 99.0, "high": 101.0 if contact else 110.0,
+                  "low": 99.0 if contact else 109.0,
                   "close": close, "previous_close": 99.0, "vwap": 100.0,
                   "volume": 25.0},
         interval_start=OBSERVED,
@@ -156,8 +157,7 @@ def test_producer_published_location_observation_starts_diagnostic_interaction()
 
     events = OrderflowStrategy().evaluate(bundle, account)
 
-    assert len(events) == 1
-    event = events[0]
+    event = next(event for event in events if event.payload.get("decision_stage") == "opportunity")
     assert event.payload["reason"] == "location_interaction_observed"
     assert event.payload["decision_stage"] == "opportunity"
     assert event.payload["location"] == "session_high"
@@ -200,11 +200,11 @@ def test_generation_change_closes_old_interaction_and_opens_new_generation() -> 
     )
     events = strategy.evaluate(replacement, replacement_account)
 
-    assert [event.payload["reason"] for event in events] == [
-        "REFERENCE_REPLACED", "location_interaction_observed",
-    ]
-    assert events[0].payload["interaction_id"] == "session-g1:5m"
-    assert events[1].payload["interaction_id"] == "session-g2:5m"
+    lifecycle = [event for event in events if event.payload.get("reason") == "REFERENCE_REPLACED"]
+    observed = [event for event in events if event.payload.get("reason") == "location_interaction_observed"]
+    assert lifecycle and observed
+    assert lifecycle[0].payload["interaction_id"] == "session-g1:5m"
+    assert observed[-1].payload["interaction_id"] == "session-g2:5m"
 
 
 def test_non_contact_location_observation_does_not_start_interaction() -> None:
@@ -221,7 +221,7 @@ def test_response_and_admission_use_completed_causal_evidence() -> None:
     response = next(event for event in events if event.payload.get("decision_stage") == "response")
     admission = next(event for event in events if event.payload.get("decision_stage") == "admission")
     assert response.payload["response_state"] == "CONFIRMED"
-    assert response.payload["response_evidence_ids"] == ["response-evidence-obs-5m"]
+    assert response.payload["response_evidence_ids"] == ["obs-5m"]
     assert admission.payload["reason"] == "orderflow_admission"
     assert admission.payload["outcome"] == "accepted"
     assert admission.order is None

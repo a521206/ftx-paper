@@ -20,7 +20,10 @@ from ftx_paper.market.bundles import DecisionBundle
 
 from .coordinator import SharedDecisionCoordinator
 from .orderflow_contract import OrderflowObservation
-from .orderflow_context import ContextHistory, ContextVersion, OpeningGapState, SessionLevels
+from .orderflow_context import (
+    ContextHistory, ContextVersion, OpeningGapState, SessionLevels,
+    classify_opening_gap,
+)
 from .orderflow_opportunity import (
     ExecutionGroupRegistry, OpportunityStatus, SetupOpportunity,
 )
@@ -149,7 +152,9 @@ class OrderflowPolicy:
         }
         if orderflow is None or orderflow.session_id != bundle.trading_date:
             return (PolicyDecision({**base, "outcome": "unavailable", "reason": "orderflow_context_unavailable",
-                                    "decision_id": _decision_id("unavailable", "context", bundle.bundle_id)}),)
+                                     "decision_id": _decision_id(
+                                         "unavailable", bundle.trading_date, "context", bundle.bundle_id,
+                                     )}),)
         session_transitions: list[PolicyDecision] = []
         if self._session_id != orderflow.session_id:
             boundary = context.as_of
@@ -192,7 +197,9 @@ class OrderflowPolicy:
         ))
         if not observations:
             return (*session_transitions, PolicyDecision({**base, "outcome": "unavailable", "reason": "required_features_unavailable",
-                                    "decision_id": _decision_id("unavailable", "features", bundle.bundle_id)}))
+                                     "decision_id": _decision_id(
+                                         "unavailable", orderflow.session_id, "features", bundle.bundle_id,
+                                     )}))
 
         results: list[PolicyDecision] = list(session_transitions)
         futures = bundle.bars.get(MarketRole.FUTURES)
@@ -217,17 +224,34 @@ class OrderflowPolicy:
                     self._session_high = max(self._session_high or float(high), float(high))
                 if isinstance(low, (int, float)):
                     self._session_low = min(self._session_low or float(low), float(low))
+                level_values = {
+                    item.location_alias.upper(): item.reference
+                    for item in observation.location_observations
+                }
+                opening_gap = classify_opening_gap(
+                    opening_price=_number(observation, "open"),
+                    prior_close=_number(observation, "previous_close"),
+                    observed_at=observation.available_at,
+                )
                 self._context_history.publish(ContextVersion(
                     context_id=f"context:{orderflow.session_id}",
                     version=self._context_version,
                     available_at=observation.available_at,
                     levels=SessionLevels(
                         orderflow.session_id,
-                        self._session_high,
-                        self._session_low,
+                        level_values.get("OR_HIGH"),
+                        level_values.get("OR_LOW"),
+                        level_values.get("PD_HIGH"),
+                        level_values.get("PD_LOW"),
+                        "PD_HIGH" in level_values and "PD_LOW" in level_values,
+                        observation.available_at,
                         source_ids=(observation.observation_id,),
                     ),
-                    opening_gap=OpeningGapState("GAP_CANDIDATE" if gap_status == "source_gap" else "NONE", observed_at=observation.available_at, evidence_ids=(observation.observation_id,)) if gap_status == "source_gap" else OpeningGapState("NONE", observed_at=observation.available_at, evidence_ids=(observation.observation_id,)),
+                    opening_gap=opening_gap if opening_gap.status != "UNAVAILABLE" else OpeningGapState(
+                        "GAP_CANDIDATE" if gap_status == "source_gap" else "UNAVAILABLE",
+                        observed_at=observation.available_at,
+                        evidence_ids=(observation.observation_id,),
+                    ),
                     permission="UNAVAILABLE" if gap_status == "source_gap" else "BOTH",
                     evidence_ids=(observation.observation_id,),
                 ))
@@ -277,7 +301,7 @@ class OrderflowPolicy:
                 and gap_status == "none"
                 and observation.timeframe == "5m"
                 and self._gap_end is not None
-                and observation.available_at >= self._gap_end
+                and observation.available_at > self._gap_end
             ):
                 self._admission_suspended = False
                 self._gap_end = None
@@ -305,6 +329,10 @@ class OrderflowPolicy:
             for location_observation in location_observations:
                 if not isinstance(location_observation, LocationObservation):
                     raise ValueError("invalid causal location observation")
+                location_key = location_observation.observation_id
+                if location_key in self._processed_location_observation_ids:
+                    continue
+                self._processed_location_observation_ids.add(location_key)
                 location = LocationRecord(
                     location_observation.location_id,
                     location_observation.location_alias,
@@ -323,13 +351,8 @@ class OrderflowPolicy:
                 interaction = detector.observe(
                     location,
                     observation,
-                    band_contact=location_observation.band_contact,
                     observation_id=location_observation.observation_id,
                 )
-                location_key = location_observation.observation_id
-                if location_key in self._processed_location_observation_ids:
-                    continue
-                self._processed_location_observation_ids.add(location_key)
                 for ended in detector.closed_interactions[closed_before:]:
                     results.append(PolicyDecision({
                         **base,
@@ -361,10 +384,12 @@ class OrderflowPolicy:
                         "feature_values": dict(observation.features),
                     }))
             for interaction in self._location_detectors[observation.timeframe].active_interactions:
+                if interaction.timeframe != self.config.response_timeframe:
+                    continue
                 response_observations = tuple(sorted((
                     item for item in observations
-                    if item.timeframe == interaction.timeframe
-                    and item.observed_at > interaction.created_at
+                    if item.timeframe == self.config.response_timeframe
+                    and item.observed_at >= interaction.created_at
                 ), key=lambda item: (item.observed_at, item.available_at, item.observation_id)))
                 if not response_observations:
                     continue
@@ -372,6 +397,10 @@ class OrderflowPolicy:
                     interaction, response_observations,
                     max_candles=self.config.response_window_candles,
                     cutoff=min(context.as_of, orderflow.cutoff),
+                    initial_armed={
+                        item.hypothesis_id: item.armed
+                        for item in interaction.hypothesis_states
+                    },
                 )
                 for template, evaluation in evaluations:
                     hypothesis_id = template.template_id
@@ -398,7 +427,7 @@ class OrderflowPolicy:
                         continue
                     state = HypothesisState(
                         hypothesis_id, template.template_id, next_status,
-                        bool(evidence_ids), direction, tuple(evidence_ids), confirmation_id,
+                        evaluation.armed, direction, tuple(evidence_ids), confirmation_id,
                          evaluation.confirmation_available_at if next_status == "CONFIRMED" else None, expected_available_at,
                         reason if next_status == "INVALIDATED" else None,
                         reason if next_status == "EXPIRED" else None,
@@ -451,35 +480,56 @@ class OrderflowPolicy:
                         failure_boundary=(
                             interaction.band_lower if direction == "long" else interaction.band_upper
                         ) or interaction.reference_level,
-                         evidence_ids=evidence_ids,
-                         evidence_timeframe=interaction.timeframe,
-                         regime_version=observation.context.generation if observation.context else None,
-                         template_id=template.template_id,
-                         policy_version=template.version,
-                         conflict_group_id=template.execution_conflict_group,
-                     )
+                        evidence_ids=evidence_ids,
+                        evidence_timeframe=interaction.timeframe,
+                        regime_version=observation.context.generation if observation.context else None,
+                        template_id=template.template_id,
+                        policy_version=template.version,
+                        conflict_group_id=template.execution_conflict_group,
+                    )
                     if opportunity.lifecycle_id not in self._opportunities:
                         current_context = self._context_history.as_of(formed_at)
                         admission = evaluate_admission(
                             opportunity,
                             context_available=current_context is not None,
-                            regime_allowed=current_context is not None and current_context.permission != "UNAVAILABLE" and not self._admission_suspended,
-                            opening_gap_allowed=current_context is not None and current_context.opening_gap.status != "UNAVAILABLE" and not self._admission_suspended,
-                            active_position_allowed=context.exposure.open_positions == 0,
+                            regime_allowed=(
+                                current_context is not None
+                                and current_context.permission != "UNAVAILABLE"
+                                and (
+                                    (
+                                        direction == "long"
+                                        and current_context.permission in {"LONG", "BOTH"}
+                                    )
+                                    or (
+                                        direction == "short"
+                                        and current_context.permission in {"SHORT", "BOTH"}
+                                    )
+                                )
+                                and not self._admission_suspended
+                            ),
+                            opening_gap_allowed=(
+                                current_context is not None
+                                and current_context.opening_gap.status != "UNAVAILABLE"
+                                and not self._admission_suspended
+                            ),
+                            active_position_allowed=(
+                                context.exposure.open_positions == 0
+                                or interaction.location_alias not in {"SESSION_HIGH", "SESSION_LOW"}
+                            ),
                             exposure_allowed=context.exposure.net_directional_lots == 0,
                             allocation_allowed=context.margin.available > 0,
                             sizing_allowed=context.margin.available >= 0,
                             risk_allowed=context.capital.daily_loss >= 0,
                             setup_valid=True,
-                             direction_matches=direction is not None,
-                             confirmations_available=confirmation_id is not None,
+                            direction_matches=direction is not None,
+                            confirmations_available=confirmation_id is not None,
                             current_at=formed_at,
                         )
                         self._opportunities[opportunity.lifecycle_id] = opportunity
                         claim = self._execution_groups.claim(
                             opportunity.execution_group_id,
                             opportunity.lifecycle_id,
-                             evidence_ids=evidence_ids,
+                            evidence_ids=evidence_ids,
                         )
                         results.append(PolicyDecision({
                             **base,

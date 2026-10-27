@@ -202,7 +202,7 @@ class OrderflowContext:
             return False
         if parent.location is not None and any(item.location != parent.location for item in children):
             return False
-        if any(not item.available_by(self.cutoff) for item in children):
+        if any(not item.available_by(parent.available_at) for item in children):
             return False
         parent_context = parent.context
         for index, child in enumerate(children):
