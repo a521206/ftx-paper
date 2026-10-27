@@ -87,8 +87,21 @@ def _record(record: Mapping[str, Any], *, kind: str, sequence: int) -> dict[str,
             "event_type", "decision_id", "client_order_id", "producer_local_id",
             "comparison_identity", "source", "session_date", "sequence", "stream_sequence",
             "account_revision",
+            "producer_extensions",
+            "decision_view",
         }}
+    view = record.get("decision_view")
+    if isinstance(view, Mapping):
+        stage = record.get("stage") or view.get("stage")
+        outcome = record.get("outcome") or view.get("outcome")
+        evidence = record.get("evidence") or view.get("evidence")
+    else:
+        stage = record.get("stage")
+        outcome = record.get("outcome", values.get("outcome"))
+        evidence = record.get("evidence")
     occurred_at = _timestamp(record)
+    native_kind = str(record.get("native_kind") or record.get("event_type") or kind).lower()
+    comparison_identity = record.get("comparison_identity") or record.get("identity")
     identity_basis = {
         "kind": kind,
         "minute": occurred_at[:16],
@@ -97,8 +110,17 @@ def _record(record: Mapping[str, Any], *, kind: str, sequence: int) -> dict[str,
         ) if values.get(key) is not None},
     }
     identity = hashlib.sha256(_canonical_json(identity_basis).encode("utf-8")).hexdigest()
+    if not isinstance(evidence, Mapping):
+        evidence = {}
     return {
         "kind": kind,
+        "native_kind": native_kind,
+        "stage": stage,
+        "outcome": outcome,
+        "comparison_identity": comparison_identity or identity,
+        "causal_parent_id": record.get("causal_parent_id") or record.get("decision_id"),
+        "evidence": _jsonable(dict(evidence)),
+        "producer_extensions": _jsonable(record.get("producer_extensions", {})),
         "occurred_at": occurred_at,
         "sequence": sequence,
         "identity": identity,
@@ -156,38 +178,35 @@ def build_parity_artifact(
     source_decisions = [event for event in source_decisions
                         if is_decision_event(str(event.get("event_type", "")), event)
                         and (str(event.get("outcome", "")).lower() in {"", "accepted", "rejected"}
-                             or str(event.get("decision_stage", "")).lower() == "opportunity"
+                             or str(event.get("reason", "")).lower() == "setup_candidate_formed"
                              or str(event.get("event_type", "")).upper() == "EXITDECISION")]
-    decisions = [_record(event, kind=("candidate" if str(event.get("decision_stage", "")).lower() == "opportunity"
+    decisions = [_record(event, kind=("candidate" if str(event.get("reason", "")).lower() == "setup_candidate_formed"
                                       else "exit" if str(event.get("event_type", "")).upper() == "EXITDECISION"
                                       else str(event.get("outcome", "rejected"))), sequence=index)
                  for index, event in enumerate(source_decisions)]
-    execution_types = {"ORDER_INTENT", "ORDER_AUTHORIZED", "ORDER_ACK", "FILL", "ORDER_UNFILLED", "ORDER_SUPPRESSED", "RISK_REJECTED"}
+    execution_types = {"ORDER_INTENT", "ORDER_AUTHORIZED", "ORDER_ACK", "FILL", "ORDER_UNFILLED", "ORDER_SUPPRESSED", "RISK_REJECTED", "RESERVATION", "AUTHORIZATION", "SUBMISSION", "PENDING_EXIT", "EXIT_FILL", "CANCELLATION", "SETTLEMENT"}
     source_execution = [event for event in layer_records.get("execution", ())
                         if str(event.get("event_type", "")).upper() in execution_types]
     source_exits = [event for event in layer_records.get("execution", ())
                     if str(event.get("event_type", "")).upper() in {"EXIT", "CLOSE"}]
-    execution_kinds = {"ORDER_INTENT": "order_intent", "FILL": "fill", "EXIT": "exit",
-                       "CLOSE": "exit"}
+    execution_kinds = {"ORDER_INTENT": "order_intent", "ORDER_AUTHORIZED": "authorization",
+                       "ORDER_ACK": "submission", "AUTHORIZATION": "authorization",
+                       "SUBMISSION": "submission", "RESERVATION": "reservation", "FILL": "fill",
+                       "EXIT_FILL": "exit_fill", "PENDING_EXIT": "pending_exit",
+                       "CANCELLATION": "cancellation", "SETTLEMENT": "settlement",
+                       "EXIT": "exit", "CLOSE": "exit"}
     execution = [_record(event, kind=execution_kinds.get(str(event.get("event_type", "")).upper(), "order_intent"), sequence=index)
                  for index, event in enumerate([*source_execution, *source_exits])]
-    settlements = [_record(event, kind="synthetic_settlement", sequence=index)
+    settlements = [_record(event, kind="synthetic_settlement", sequence=len(execution) + index)
                    for index, event in enumerate(result.get("synthetic_settlements", ()))]
-    ledger = result.get("ledger", {})
     ledger_records: list[dict[str, Any]] = []
-    if isinstance(ledger, Mapping):
-        for date, row in sorted(ledger.items()):
-            if not isinstance(row, Mapping):
-                continue
-            occurred_at = f"{str(date)[:10]}T00:00:00Z"
-            reservations = row.get("reservations")
-            if isinstance(reservations, Mapping):
-                for reservation in reservations.values():
-                    if isinstance(reservation, Mapping):
-                        ledger_records.append(_record({"occurred_at": occurred_at, "values": reservation},
-                                                      kind="reservation", sequence=len(ledger_records)))
-            ledger_records.append(_record({"occurred_at": occurred_at, "values": row},
-                                          kind="closeout", sequence=len(ledger_records)))
+    for event in layer_records.get("ledger", ()):
+        if isinstance(event, Mapping):
+            ledger_records.append(_record(
+                event,
+                kind=str(event.get("kind") or event.get("event_type") or "ledger_mutation").lower(),
+                sequence=len(ledger_records),
+            ))
     strategy, strategy_hash = strategy_payload_hash(result.get("strategy"))
     metadata = result.get("metadata", {})
     metadata = metadata if isinstance(metadata, Mapping) else {}
@@ -206,14 +225,27 @@ def build_parity_artifact(
         "vehicles": list(request.get("vehicles", ())),
         "partitions": {"source": ["orderflow"]} if str(request.get("strategy_id", "")).startswith("ftx-paper-orderflow") else {},
         "replay_input": replay_input,
+        "counts": {
+            "selected_source_rows": int(metadata.get("selected_source_rows", metadata.get("input_bar_count", 0))),
+            "filtered_source_rows": int(metadata.get("filtered_source_rows", metadata.get("input_bar_count", 0))),
+            "completed_causal_bars": int(result.get("causal_bars_seen", 0)),
+            "incomplete_causal_bars": int(metadata.get("incomplete_causal_bars", 0)),
+            "processed_decision_bars": int(metadata.get("processed_decision_bars", result.get("bars_seen", 0))),
+        },
         "processed": {
-            "bar_count": int(result.get("bars_seen", 0)),
+            "bar_count": int(result.get("causal_bars_seen", result.get("bars_seen", 0))),
             "session_count": 1 if session_date else 0,
         },
     }
     input_identity = metadata.get("input_fingerprint")
-    coverage = _coverage(decisions, int(result.get("bars_seen", 0)), result.get("unavailable_fields", ()),
-                         execution_observed=True, ledger_observed=True, input_identity=input_identity)
+    coverage = _coverage(
+        decisions,
+        int(result.get("causal_bars_seen", result.get("bars_seen", 0))),
+        result.get("unavailable_fields", ()),
+        execution_observed=bool(execution or settlements),
+        ledger_observed=bool(ledger_records),
+        input_identity=input_identity,
+    )
     layers = {
         "run_scope": [_record({"occurred_at": f"{session_date}T00:00:00Z", "values": scope}, kind="run_scope", sequence=0)],
         "decision": decisions,
@@ -241,6 +273,12 @@ def parity_layer_records(artifact: Mapping[str, Any], layer: str) -> list[dict[s
 
 
 def build_parity_manifest(artifact: Mapping[str, Any]) -> dict[str, Any]:
+    def canonical_records(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {key: value for key, value in record.items() if key != "producer_extensions"}
+            for record in records
+        ]
+
     layers: dict[str, dict[str, Any]] = {}
     for layer in PARITY_LAYERS:
         records = parity_layer_records(artifact, layer)
@@ -252,7 +290,7 @@ def build_parity_manifest(artifact: Mapping[str, Any]) -> dict[str, Any]:
         # comparison can establish MATCHED.
         status = "INCOMPLETE" if not coverage.get("complete", False) else "UNAVAILABLE"
         layers[layer] = {"status": status, "observed": bool(observed), "count": len(records),
-                         "sha256": hashlib.sha256(_canonical_json(records).encode("utf-8")).hexdigest()}
+                         "sha256": hashlib.sha256(_canonical_json(canonical_records(records)).encode("utf-8")).hexdigest()}
     scope = artifact.get("scope", {})
     return {"version": PARITY_MANIFEST_VERSION, "hash_algorithm": "sha256",
             "run_id": artifact.get("run_id"), "scope": scope,
@@ -328,6 +366,14 @@ def compare_parity_artifacts(left: Mapping[str, Any], right: Mapping[str, Any], 
                 "right": len(parity_layer_records(right, layer))}
         for layer in PARITY_LAYERS
     }
+    if result.get("status") == "UNAVAILABLE" and result.get("layer") in PARITY_LAYERS:
+        layer = str(result["layer"])
+        left_manifest_layer = left["manifest"]["layers"][layer]
+        right_manifest_layer = right["manifest"]["layers"][layer]
+        if (left_manifest_layer.get("count"), left_manifest_layer.get("sha256")) != (
+            right_manifest_layer.get("count"), right_manifest_layer.get("sha256")
+        ):
+            result = {"status": "MISMATCHED", "layer": layer, "context_limit": max_context}
     result = {**result, "scope": {"left": left.get("scope"), "right": right.get("scope")},
               "counts": counts}
     if result.get("layer") == "run_scope" and left.get("scope") != right.get("scope"):

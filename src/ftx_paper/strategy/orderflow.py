@@ -15,7 +15,8 @@ from ftx_paper.domain.decision_context import (
     MarginSnapshot,
 )
 from ftx_paper.execution.events import ExecutionNotification
-from ftx_paper.contracts import Instrument, MarketRole, OrderIntent, OrderRole, OrderSide
+from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OrderIntent, OrderRole, OrderSide
+from ftx_paper.config import SESSION_EXIT_DEADLINE_TIME
 from ftx_paper.market.bundles import DecisionBundle
 
 from .coordinator import SharedDecisionCoordinator
@@ -36,6 +37,7 @@ from .response import evaluate_policy_responses
 from .policy_contract import ExecutionMode, FeatureRequirement, PolicyDecision
 from .protocol import StrategyMetadata
 from .snapshot_envelope import unwrap_snapshot, wrap_snapshot
+from .exits import ExitAction, ExitStateMachine, PositionState
 
 
 ORDERFLOW_NAME = "ftx-paper-orderflow"
@@ -521,6 +523,24 @@ class OrderflowPolicy:
                             current_at=formed_at,
                         )
                         self._opportunities[opportunity.lifecycle_id] = opportunity
+                        results.append(PolicyDecision({
+                            **base,
+                            "decision_stage": "opportunity",
+                            "outcome": "recorded",
+                            "reason": "setup_candidate_formed",
+                            "decision_id": _decision_id(
+                                "candidate", opportunity.lifecycle_id,
+                            ),
+                            "opportunity_id": opportunity.lifecycle_id,
+                            "setup_id": opportunity.setup.setup_id,
+                            "interaction_id": interaction.interaction_id,
+                            "location": interaction.location_alias,
+                            "direction": direction,
+                            "template_id": template.template_id,
+                            "source_observation_ids": list(evidence_ids),
+                            "observed_at": formed_at.isoformat(),
+                            "available_at": formed_at.isoformat(),
+                        }))
                         claim = self._execution_groups.claim(
                             opportunity.execution_group_id,
                             opportunity.lifecycle_id,
@@ -548,7 +568,7 @@ class OrderflowPolicy:
                                     side=OrderSide.BUY if direction == "long" else OrderSide.SELL,
                                     quantity=quantity,
                                     reason="causally_accepted_orderflow_opportunity",
-                                    cell=opportunity.template_id or "orderflow",
+                                     cell=interaction.location_alias.lower(),
                                     stop_price=opportunity.setup.failure_boundary,
                                     exit_mode=self.config.exit_policy,
                                     role=OrderRole.ENTRY,
@@ -744,6 +764,8 @@ class OrderflowStrategy:
     def __init__(self, config: OrderflowConfig = OrderflowConfig()) -> None:
         self.policy = OrderflowPolicy(config)
         self.coordinator = SharedDecisionCoordinator(self.policy)
+        self._decision_positions: dict[str, tuple[PositionState, ExitStateMachine]] = {}
+        self._pending_exits: dict[str, str] = {}
 
     @property
     def metadata(self) -> StrategyMetadata:
@@ -780,6 +802,48 @@ class OrderflowStrategy:
     def on_execution_event(self, event: ExecutionNotification) -> None:
         self.coordinator.on_execution_event(event)
 
+    def register_entry(self, order: OrderIntent, *, fill_price: float | None = None,
+                       entry_fill_time: datetime | str | None = None,
+                       reference_price: float | None = None) -> None:
+        """Attach the executable orderflow entry to its causal exit state."""
+        if order.stop_price is None or order.client_order_id in self._decision_positions:
+            return
+        if isinstance(entry_fill_time, str):
+            entry_fill_time = datetime.fromisoformat(entry_fill_time)
+        position = PositionState(
+            order.instrument, fill_price if fill_price is not None else 0.0,
+            order.stop_price, order.quantity, order.side, cell=order.cell,
+            exit_mode=order.exit_mode or "signal", entry_fill_time=entry_fill_time,
+            exit_reference_price=reference_price, vehicle=order.vehicle,
+            synthetic_legs=order.synthetic_legs, entry_bar=order.entry_bar,
+            entry_order_id=order.client_order_id,
+        )
+        self._decision_positions[order.client_order_id] = (
+            position, ExitStateMachine(close_time=SESSION_EXIT_DEADLINE_TIME),
+        )
+
+    def on_closed_bar(self, bar: MarketBar) -> tuple[ExitAction, ...]:
+        actions: list[ExitAction] = []
+        for order_id, (position, exits) in tuple(self._decision_positions.items()):
+            if bar.instrument != position.instrument or order_id in self._pending_exits.values():
+                continue
+            if position.entry_fill_time is not None and bar.timestamp < position.entry_fill_time:
+                continue
+            action = exits.evaluate(
+                position, timestamp=bar.timestamp, high=bar.high, low=bar.low,
+                close=bar.close, open=bar.open, volume=bar.volume,
+                client_order_id=f"exit-{order_id}-{bar.timestamp.isoformat()}",
+            )
+            if action is not None:
+                actions.append(action)
+                self._pending_exits[action.intent.client_order_id] = order_id
+        return tuple(actions)
+
+    def settle_exit(self, exit_order_id: str, *, filled: bool, **_kwargs: object) -> None:
+        entry_order_id = self._pending_exits.pop(exit_order_id, None)
+        if filled and entry_order_id is not None:
+            self._decision_positions.pop(entry_order_id, None)
+
     def snapshot(self) -> Mapping[str, object]:
         return wrap_snapshot(
             strategy_id=ORDERFLOW_NAME,
@@ -794,6 +858,8 @@ class OrderflowStrategy:
         strategy = cls.__new__(cls)
         strategy.policy = OrderflowPolicy.from_snapshot(payload)
         strategy.coordinator = SharedDecisionCoordinator(strategy.policy)
+        strategy._decision_positions = {}
+        strategy._pending_exits = {}
         return strategy
 
 

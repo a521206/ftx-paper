@@ -71,3 +71,51 @@ def test_decision_diagnostics_exposes_paper_stage_and_reason_counts() -> None:
     assert diagnostics["kind_counts"] == {"accepted": 1, "recorded": 1, "rejected": 1}
     assert diagnostics["stage_counts"] == {"admission": 1, "trigger": 2}
     assert diagnostics["reason_counts"]["trigger_observation"] == 1
+
+
+def test_projection_preserves_decision_lineage_and_excludes_extensions() -> None:
+    artifact = build_parity_artifact(
+        {"strategy": {}, "bars_seen": 1, "metadata": {"input_fingerprint": "fixture"}},
+        request={"session_date": "2026-01-05"},
+        layer_records={"decisions": [{
+            "event_type": "POLICY_DECISION", "decision_id": "d1",
+            "decision_at": "2026-01-05T14:30:00+05:30", "stage": "admission",
+            "outcome": "accepted", "causal_parent_id": "p1",
+            "decision_view": {"stage": "admission", "outcome": "accepted",
+                              "evidence": {"timestamps": ["2026-01-05T14:29:00Z"],
+                                           "references": ["bar-1"]}},
+            "producer_extensions": {"paper_only": True}, "quantity": 1,
+        }]},
+    )
+    record = artifact["layers"]["decision"][0]
+    assert record["native_kind"] == "policy_decision"
+    assert record["stage"] == "admission"
+    assert record["outcome"] == "accepted"
+    assert record["causal_parent_id"] == "p1"
+    assert record["evidence"]["references"] == ["bar-1"]
+    assert record["producer_extensions"] == {"paper_only": True}
+    assert "paper_only" not in record["values"]
+
+    artifact["layers"]["decision"][0]["producer_extensions"] = {"paper_only": False}
+    assert artifact["manifest"] == build_parity_artifact(
+        {"strategy": {}, "bars_seen": 1, "metadata": {"input_fingerprint": "fixture"}},
+        request={"session_date": "2026-01-05"},
+        layer_records={"decisions": [{
+            "event_type": "POLICY_DECISION", "decision_id": "d1",
+            "decision_at": "2026-01-05T14:30:00+05:30", "stage": "admission",
+            "outcome": "accepted", "causal_parent_id": "p1",
+            "decision_view": {"stage": "admission", "outcome": "accepted",
+                              "evidence": {"timestamps": ["2026-01-05T14:29:00Z"],
+                                           "references": ["bar-1"]}},
+            "producer_extensions": {"paper_only": True}, "quantity": 1,
+        }]},
+    )["manifest"]
+
+
+def test_ledger_projection_does_not_invent_closeout() -> None:
+    artifact = build_parity_artifact(
+        {"strategy": {}, "bars_seen": 1, "metadata": {"input_fingerprint": "fixture"},
+         "ledger": {"2026-01-05": {"net_pnl_rs": 2.0}}},
+        request={"session_date": "2026-01-05"},
+    )
+    assert artifact["layers"]["portfolio_ledger"] == []

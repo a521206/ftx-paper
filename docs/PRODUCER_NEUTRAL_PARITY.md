@@ -121,15 +121,36 @@ The `ftx-paper-orderflow` replay must emit the same producer-neutral decision
 population as the canonical orderflow replay for the requested scope. The
 Paper strategy must not fall back to the generic VWAP candidate path.
 
-The Sep 29, 2026 comparison exposed a producer mismatch:
+The canonical research replay is not itself a parity artifact. It uses the
+`orderflow_state_machine_multi_session_replay` envelope and declares
+`research_only: true`; it has no `producer_parity` envelope or four comparable
+layers. A canonical adapter must first project its recorded facts into this
+contract. The adapter must not infer records from summary counters or invent
+execution/ledger values that the canonical replay did not publish. Until that
+projection exists, a comparison is `INCOMPLETE` at `run_scope`, not a decision
+or execution mismatch.
 
-- Canonical orderflow emitted 809 decision-layer records.
-- Paper emitted 78 decision-layer records.
-- Paper records were limited to trigger, opportunity, and admission decisions;
-  canonical records also included the complete causal decision lifecycle.
-- Run scope matched after excluding the expected futures source-identity
-  difference between canonical continuous data and Paper's nearest dated
-  contract.
+The latest Sep 29, 2026 Paper replay after lifecycle integration reported:
+
+- Source futures bars: 375.
+- Causal Paper bars: 375.
+- Structural candidates: 31.
+- Accepted entries, fills, exits, and closed trades: 14 each.
+- Paper parity records: 4,680 decision, 98 execution/settlement, and 1 ledger.
+- Canonical summary: 356 processed bars, 17 setup candidates, 4 filled entries,
+  and 4 exits.
+
+These results expose two producer conformance failures after normalization:
+
+1. Run scope differs. The adapter and Paper must expose selected source rows,
+   filtered rows, completed causal bars, gap/incomplete bars, and processed
+   decision bars separately. `source_bar_count` must not be compared as
+   `processed.bar_count`.
+2. Decision and lifecycle populations differ. Paper must emit one record for
+   each decision-bearing candidate, acceptance, rejection, cancellation,
+   invalidation, expiry, and exit in causal sequence. Repeated location
+   observations and interaction closures are diagnostic values, not structural
+   candidates or replacement decision records.
 
 For `ftx-paper-orderflow`, the Paper producer must:
 
@@ -139,9 +160,22 @@ For `ftx-paper-orderflow`, the Paper producer must:
 3. Preserve producer-neutral identity fields, decision timestamps, direction,
    cell, outcome, and rejection reason when available.
 4. Preserve orderflow evidence and lifecycle details as diagnostic `values`,
-   without replacing the shared decision record with one record per bar.
+   without replacing the shared decision record with one record per bar or
+   promoting every location interaction to a `candidate`.
 5. Keep execution and ledger facts in their respective layers; they must not be
    represented as additional decision records.
+
+The parity workflow must compare in this order:
+
+1. Normalize both artifacts into the same envelope and compare `run_scope`.
+2. Compare decision counts, kinds, identities, timestamps, directions, cells,
+   outcomes, and rejection reasons.
+3. Compare accepted intents, reservations, fills, exits, and settlements.
+4. Compare trade-level ledger mutations before daily closeout totals.
+
+The first mismatching layer is the diagnostic boundary. A missing canonical
+projection is an artifact-coverage problem; it must not be resolved by filtering
+Paper records or weakening the comparator.
 
 The parity artifact remains four-layer. P1-P10 diagnostic stages are not
 parity layers and must not be mapped into, duplicated across, or substituted for

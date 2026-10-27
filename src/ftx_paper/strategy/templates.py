@@ -157,7 +157,7 @@ LONG_RECOVERY_LOW = TradeTemplate(
 
 
 TRADE_TEMPLATES: Mapping[tuple[str, str], TradeTemplate] = {
-    ("5m_recovery_breakout", "OR_HIGH"): _template("or_high-short-recovery_breakout", LocationTemplate.OR_HIGH, Direction.SHORT, ResponseType.REJECTION, TriggerType.BREAKOUT, conflict="high-short-recovery", exits=(TRADE_EXITS["short_to_or_low"],)),
+    ("5m_recovery_breakout", "OR_HIGH"): _template("or_high-short-recovery_breakout", LocationTemplate.OR_HIGH, Direction.SHORT, ResponseType.REJECTION, TriggerType.BREAKOUT, conflict="high-short-recovery"),
     ("5m_recovery_breakout", "OR_LOW"): LONG_RECOVERY_LOW,
     ("5m_recovery_breakout", "PD_HIGH"): _template("pd_high-short-recovery_breakout", LocationTemplate.PD_HIGH, Direction.SHORT, ResponseType.REJECTION, TriggerType.PULLBACK, exits=(TRADE_EXITS["pd_high_short"],)),
     ("5m_recovery_breakout", "PD_LOW"): _template("pd_low-long-recovery_breakout", LocationTemplate.PD_LOW, Direction.LONG, ResponseType.REJECTION, TriggerType.PULLBACK, exits=(TRADE_EXITS["pd_low_long"],)),

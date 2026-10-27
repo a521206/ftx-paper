@@ -11,6 +11,7 @@ from ftx_paper.domain.decision_context import (
     MarginSnapshot,
 )
 from ftx_paper.market import DecisionBundle
+from ftx_paper.contracts import Instrument, MarketBar, OrderIntent, OrderRole, OrderSide
 from ftx_paper.runtime.engine import MultiStrategyEngine, PaperEngine
 from ftx_paper.runtime.parity_artifacts import build_parity_artifact
 from ftx_paper.strategy import (
@@ -242,6 +243,28 @@ def test_orderflow_executable_mode_emits_bounded_futures_entry() -> None:
     assert admission.order.quantity == 1
     assert admission.order.client_order_id.startswith("orderflow-entry")
     assert admission.order.stop_price == 99.5
+
+
+def test_executable_orderflow_registers_and_settles_protective_exit() -> None:
+    strategy = OrderflowStrategy(OrderflowConfig(execution_mode=ExecutionMode.EXECUTABLE))
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    entry = OrderIntent(
+        "entry-1", instrument, OrderSide.BUY, 1, stop_price=99.0,
+        role=OrderRole.ENTRY, cell="OR_HIGH", exit_mode="signal",
+    )
+    entry_time = OBSERVED
+    strategy.register_entry(entry, fill_price=100.0, entry_fill_time=entry_time)
+
+    actions = strategy.on_closed_bar(MarketBar(
+        instrument, entry_time + timedelta(minutes=1), 100.0, 101.0, 98.5, 99.0,
+    ))
+
+    assert len(actions) == 1
+    assert actions[0].reason == "hard_stop"
+    strategy.settle_exit(actions[0].intent.client_order_id, filled=True)
+    assert strategy.on_closed_bar(MarketBar(
+        instrument, entry_time + timedelta(minutes=2), 100.0, 101.0, 99.5, 100.0,
+    )) == ()
 
 
 def test_diagnostic_and_executable_projections_share_decisions_but_not_orders() -> None:

@@ -46,6 +46,8 @@ from ftx_paper.config import (
 _EXECUTION_EVENT_TYPES = frozenset({
     "ORDER_INTENT", "ORDER_AUTHORIZED", "ORDER_ACK", "FILL",
     "ORDER_UNFILLED", "ORDER_SUPPRESSED", "RISK_REJECTED",
+    "RESERVATION", "AUTHORIZATION", "SUBMISSION", "PENDING_EXIT",
+    "EXIT_FILL", "CANCELLATION", "SETTLEMENT",
 })
 
 
@@ -319,11 +321,12 @@ class ReplayWorker:
             raise ValueError("emit_rejected_decisions must be a boolean")
         dates = [session_date]
         all_events: list[dict[str, Any]] = []
-        parity_records: dict[str, list[dict[str, Any]]] = {"decisions": [], "execution": []}
+        parity_records: dict[str, list[dict[str, Any]]] = {"decisions": [], "execution": [], "ledger": []}
         emitted_orderflow_trigger_ids: set[str] = set()
         unavailable_fields: set[str] = set()
         diagnostic_trades: list[dict[str, Any]] = []
         bars_seen = 0
+        causal_bars_seen = 0
         initial_capital = self.capital_profile.initial_capital
         current_equity = initial_capital
         peak_equity = initial_capital
@@ -574,6 +577,25 @@ class ReplayWorker:
                         raise
                     result = engine.on_bundle(bundle)
                 bars_seen += 1
+                # Scope parity by evidence actually available to orderflow,
+                # rather than by every futures-clocked bundle.  A source row
+                # carrying a gap status is retained for diagnostics but is not
+                # a processed causal decision bar.
+                orderflow_context = bundle.orderflow_context
+                if orderflow_context is not None:
+                    current_observation = next(
+                        (
+                            item for item in reversed(orderflow_context.observations_for("1m"))
+                            if item.observed_at == futures_bar.timestamp
+                        ),
+                        None,
+                    )
+                    if (
+                        current_observation is not None
+                        and current_observation.context is not None
+                        and current_observation.context.replay_provenance.get("gap_status") == "none"
+                    ):
+                        causal_bars_seen += 1
                 trigger_events = () if native_orderflow else _available_orderflow_trigger_events(
                     bundle, futures_bar.timestamp, emitted_orderflow_trigger_ids,
                 )
@@ -607,11 +629,22 @@ class ReplayWorker:
                                                    "source": "replay", "session_date": date, "execution_allowed": False,
                                                    "reason": str(exc)})
                                 continue
+                            reservation_event = {"event_type": "RESERVATION", "decision_id": order.client_order_id,
+                                                 "client_order_id": order.client_order_id,
+                                                 "timestamp": futures_bar.timestamp.isoformat(),
+                                                 "quantity": order.quantity, "vehicle": order.vehicle,
+                                                 "source": "replay", "session_date": date}
+                            all_events.append(reservation_event)
+                            parity_records["ledger"].append({**reservation_event, "kind": "reservation"})
                             all_events.append({"event_type": "ORDER_AUTHORIZED",
                                                "decision_id": order.client_order_id,
                                                "account_revision": account.revision,
                                                "timestamp": futures_bar.timestamp.isoformat(),
                                                 "source": "replay", "session_date": date})
+                        all_events.append({"event_type": "SUBMISSION", "decision_id": order.client_order_id,
+                                           "client_order_id": order.client_order_id,
+                                           "timestamp": futures_bar.timestamp.isoformat(),
+                                           "source": "replay", "session_date": date})
                         all_events.append({"event_type": "ORDER_ACK", "decision_id": order.client_order_id,
                                            "client_order_id": order.client_order_id, "vehicle": order.vehicle,
                                            "timestamp": futures_bar.timestamp.isoformat(), "source": "replay",
@@ -628,6 +661,8 @@ class ReplayWorker:
                             all_events.append({"event_type": "ORDER_UNFILLED", "decision_id": order.client_order_id,
                                                "vehicle": order.vehicle, "timestamp": futures_bar.timestamp.isoformat(),
                                                "source": "replay", "session_date": date, "reason": "missing_synthetic_future_quote"})
+                            parity_records["ledger"].append({"event_type": "CANCELLATION", "decision_id": order.client_order_id,
+                                                              "timestamp": futures_bar.timestamp.isoformat(), "reason": "missing_synthetic_future_quote"})
                             continue
                         fill_price = entry_quote.price if entry_quote is not None else futures_bar.close
                         for event in reversed(all_events):
@@ -643,7 +678,10 @@ class ReplayWorker:
                                            "fill_timestamp": futures_bar.timestamp.isoformat(),
                                            "price": fill_price, "quantity": order.quantity,
                                            "vehicle": order.vehicle, "source": "replay",
-                                            "session_date": date})
+                                             "session_date": date})
+                        parity_records["ledger"].append({"event_type": "FILL", "decision_id": order.client_order_id,
+                                                          "timestamp": futures_bar.timestamp.isoformat(),
+                                                          "quantity": order.quantity, "price": fill_price})
                         engine.register_entry(order, fill_price=fill_price,
                                               entry_fill_time=futures_bar.timestamp,
                                               reference_price=futures_bar.close)
@@ -700,6 +738,10 @@ class ReplayWorker:
                                     "quote_source": "same_minute_bundle",
                             })
                     elif order.role is OrderRole.EXIT:
+                        all_events.append({"event_type": "PENDING_EXIT", "decision_id": order.client_order_id,
+                                           "client_order_id": order.client_order_id,
+                                           "timestamp": futures_bar.timestamp.isoformat(),
+                                           "source": "replay", "session_date": date})
                         try:
                             open_trade = self._matching_trade(open_trades, order)
                         except ExitValidationError as exc:
@@ -727,6 +769,18 @@ class ReplayWorker:
                                 timestamp=futures_bar.timestamp.isoformat(),
                                 cost=_execution_cost(open_trade),
                             )
+                        exit_timestamp = futures_bar.timestamp.isoformat()
+                        all_events.append({"event_type": "EXIT_FILL", "decision_id": order.client_order_id,
+                                           "client_order_id": order.client_order_id, "fill_timestamp": exit_timestamp,
+                                           "quantity": order.quantity,
+                                           "price": exit_quote.price if exit_quote is not None else futures_bar.close,
+                                           "source": "replay", "session_date": date})
+                        all_events.append({"event_type": "SETTLEMENT", "decision_id": order.client_order_id,
+                                           "timestamp": exit_timestamp, "source": "replay", "session_date": date})
+                        parity_records["ledger"].extend([
+                            {"event_type": "EXIT_SETTLEMENT", "decision_id": order.client_order_id,
+                             "timestamp": exit_timestamp, "quantity": order.quantity},
+                        ])
                         engine.record_exit(strategy_id=order.strategy_id,
                                            cell=realized.cell.name, reason=order.reason,
                                            entry_bar=realized.entry_bar, exit_bar=engine.bars_seen,
@@ -808,6 +862,14 @@ class ReplayWorker:
             "input_fingerprint": input_manifest["input_fingerprint"],
             "input_provenance": input_manifest["provenance"],
             "input_availability": input_manifest["availability"],
+            "selected_source_rows": int(
+                ((input_manifest.get("provenance") or {}).get("current") or {}).get(
+                    "source_bar_count", input_manifest.get("raw_bar_count", 0),
+                )
+            ),
+            "filtered_source_rows": int(input_manifest.get("bar_count", 0)),
+            "processed_decision_bars": int(bars_seen),
+            "incomplete_causal_bars": max(0, int(bars_seen) - int(causal_bars_seen)),
             "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "directional_exposure": directional_exposure,
             "requested_parameters": {
@@ -849,6 +911,7 @@ class ReplayWorker:
                                "max_lots": self.capital_profile.max_lots,
                                "lot_size": NIFTY_LOT_SIZE},
             "bars_seen": bars_seen,
+            "causal_bars_seen": causal_bars_seen,
             "directional_exposure": directional_exposure,
             "events": all_events,
             "decisions": [event for event in all_events if is_decision_event(str(event.get("event_type", "")), event)],
