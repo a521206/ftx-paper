@@ -13,7 +13,7 @@ from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, O
 from ftx_paper.domain.capital import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE, CapitalRuntimeContext
 from ftx_paper.market import AggregatorConfig, Cell, CompletedBarAggregator, InstrumentKey, LocationDetector
 from ftx_paper.market.requirements import FeatureRequirement
-from ftx_paper.market.features import option_pcr_at_event, vix_open_and_event
+from ftx_paper.market.features import option_pcr_at_event
 from ftx_paper.domain import AccountAggregate, PortfolioState
 from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.runtime.engine import PaperEngine
@@ -36,6 +36,11 @@ from ftx_paper.config import (
     SESSION_DATA_END_MINUTES,
     SESSION_OPEN_MINUTES,
 )
+
+_EXECUTION_EVENT_TYPES = frozenset({
+    "ORDER_INTENT", "ORDER_AUTHORIZED", "ORDER_ACK", "FILL", "EXECUTEDDECISION",
+    "ORDER_UNFILLED", "ORDER_SUPPRESSED", "RISK_REJECTED",
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,20 +111,28 @@ class ReplayWorker:
             raise RuntimeError("replay queue is full") from None
         return run_id
 
-    def input_manifest(self, session_date: str) -> dict[str, Any]:
+    def input_manifest(
+        self,
+        session_date: str,
+        *,
+        rows: list[dict[str, Any]] | None = None,
+        bars: tuple[MarketBar, ...] | None = None,
+        futures_source: Any | None = None,
+    ) -> dict[str, Any]:
         """Return the deterministic, API-safe inputs used by a replay date."""
-        rows = self.store.read_market_bars(session_date)
-        futures_source = self._resolve_source(session_date)
+        loaded_rows = rows if rows is not None else self.store.read_market_bars(session_date)
+        futures_source = futures_source if futures_source is not None else self._resolve_source(session_date)
         # Reuse the rows already loaded above.  A manifest is metadata-only,
         # but _bars still applies the canonical contract and session filters.
-        try:
-            bars = self._bars(session_date, rows=rows, futures_source=futures_source)
-        except TypeError as exc:
-            # Preserve compatibility with lightweight test doubles that still
-            # expose the original one-argument _bars hook.
-            if "unexpected keyword argument 'rows'" not in str(exc):
-                raise
-            bars = self._bars(session_date)
+        if bars is None:
+            try:
+                bars = self._bars(session_date, rows=loaded_rows, futures_source=futures_source)
+            except TypeError as exc:
+                # Preserve compatibility with lightweight test doubles that still
+                # expose the original one-argument _bars hook.
+                if "unexpected keyword argument 'rows'" not in str(exc):
+                    raise
+                bars = self._bars(session_date)
         replay_rows = [
             {
                 "symbol": bar.instrument.symbol,
@@ -155,7 +168,7 @@ class ReplayWorker:
         option_rows = [row for row in replay_rows if str(row.get("instrument_type", "")).upper() in {"CE", "PE"}]
         option_minutes = {str(row.get("minute")) for row in option_rows}
         futures_minutes = {
-            str(row.get("minute")) for row in rows
+            str(row.get("minute")) for row in loaded_rows
             if str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
         }
         source_provenance = {
@@ -167,7 +180,7 @@ class ReplayWorker:
             "date": session_date,
             "session_date": session_date,
             "bar_count": len(strategy_rows),
-            "raw_bar_count": len(rows),
+            "raw_bar_count": len(loaded_rows),
             "supporting_bar_count": len(bars) - len(strategy_rows),
             "futures_source": futures_source.provenance() if futures_source is not None else None,
             "provenance": source_provenance,
@@ -292,7 +305,9 @@ class ReplayWorker:
                 "pending_orders": {},
                 "settled_orders": [],
             })
-            bars = self._bars(date)
+            rows = self.store.read_market_bars(date)
+            futures_source = self._resolve_source(date)
+            bars = self._bars(date, rows=rows, futures_source=futures_source)
             prior_day_high, prior_day_low = self._prior_day_levels(date, available_dates)
             # Historical replay databases may not contain the imported expiry
             # calendar. Infer an expiry session from the option bars themselves
@@ -338,7 +353,7 @@ class ReplayWorker:
             )
             trace_detector = LocationDetector()
             trace_detector.reset(prior_day_high=prior_day_high, prior_day_low=prior_day_low)
-            trace_vix_history: list[MarketBar] = []
+            trace_vix_first: float | None = None
             trace_vix_open: float | None = None
             open_trades: list[dict[str, Any]] = []
             # Synthetic is a reporting-only view of the accepted futures
@@ -364,10 +379,13 @@ class ReplayWorker:
                     bundle.supporting_inputs or {}
                 ).get("bars", {}).get(MarketRole.VIX)
                 if current_vix is not None:
-                    trace_vix_history.append(current_vix)
-                    opening, _ = vix_open_and_event(tuple(trace_vix_history), current_vix)
-                    if opening is not None:
-                        trace_vix_open = opening
+                    current_vix_close = float(current_vix.close)
+                    if trace_vix_first is None:
+                        trace_vix_first = current_vix_close
+                    vix_timestamp = current_vix.timestamp.astimezone(IST)
+                    vix_minute = vix_timestamp.hour * 60 + vix_timestamp.minute
+                    if trace_vix_open is None and vix_minute >= SESSION_OPEN_MINUTES:
+                        trace_vix_open = current_vix_close
                 if trace_snapshot is not None:
                     trace_features = {
                         "vwap": trace_snapshot.features.vwap,
@@ -379,7 +397,7 @@ class ReplayWorker:
                         "prior_day_high": trace_snapshot.features.prior_day_high,
                         "prior_day_low": trace_snapshot.features.prior_day_low,
                         "vix": current_vix.close if current_vix is not None else None,
-                        "vix_open": trace_vix_open,
+                        "vix_open": trace_vix_open if trace_vix_open is not None else trace_vix_first,
                         "pcr": self._bundle_pcr(bundle, effective_expiry_dates),
                     }
                     trace_locations = [item.value for item in trace_snapshot.locations]
@@ -745,7 +763,9 @@ class ReplayWorker:
             position.quantity * (1 if position.side is OrderSide.BUY else -1)
             for position in (last_portfolio.positions.values() if last_portfolio is not None else ())
         )
-        input_manifest = self.input_manifest(session_date)
+        input_manifest = self.input_manifest(
+            session_date, rows=rows, bars=bars, futures_source=futures_source,
+        )
         metadata = {
             "api_version": "1.1",
             "strategy_version": last_strategy_metadata.version,
@@ -761,17 +781,18 @@ class ReplayWorker:
                 "emit_rejected_decisions": emit_rejected_decisions,
             },
         }
+        execution_by_decision: dict[Any, list[dict[str, Any]]] = {}
+        for item in all_events:
+            decision_id = item.get("decision_id")
+            if decision_id and str(item.get("event_type", "")) in _EXECUTION_EVENT_TYPES:
+                execution_by_decision.setdefault(decision_id, []).append(item)
         normalized_decisions = []
         for event in all_events:
             if not str(event.get("event_type", "")).endswith("DECISION"):
                 continue
             normalized = self._normalize_decision(event)
             decision_id = event.get("decision_id")
-            linked = [item for item in all_events if decision_id and item.get("decision_id") == decision_id]
-            execution_events = [item for item in linked if str(item.get("event_type", "")) in {
-                "ORDER_INTENT", "ORDER_AUTHORIZED", "ORDER_ACK", "FILL", "EXECUTEDDECISION",
-                "ORDER_UNFILLED", "ORDER_SUPPRESSED", "RISK_REJECTED",
-            }]
+            execution_events = execution_by_decision.get(decision_id, [])
             normalized["execution"].update({
                 "event_types": [str(item.get("event_type")) for item in execution_events],
                 "client_order_id": next((item.get("client_order_id") for item in execution_events
@@ -1041,7 +1062,8 @@ class ReplayWorker:
             if instrument_type not in {"FUT", "FUTURES", "INDEX", "EQ", "CE", "PE"}:
                 continue
             timestamp = datetime.fromisoformat(str(row["minute"]))
-            minute_of_day = timestamp.astimezone(IST).hour * 60 + timestamp.astimezone(IST).minute
+            local_timestamp = timestamp.astimezone(IST)
+            minute_of_day = local_timestamp.hour * 60 + local_timestamp.minute
             if not SESSION_OPEN_MINUTES <= minute_of_day <= SESSION_DATA_END_MINUTES:
                 continue
             bars.append(MarketBar(
