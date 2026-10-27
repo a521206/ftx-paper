@@ -134,7 +134,7 @@ class CandidateDecision:
 
     def __post_init__(self) -> None:
         outcome = self.payload.get("outcome")
-        if outcome not in {"accepted", "rejected", "cancelled", "superseded"}:
+        if outcome not in {"accepted", "rejected", "cancelled", "superseded", "recorded"}:
             raise ValueError("CandidateDecision requires a terminal outcome")
         if not self.payload.get("decision_id") and not self.payload.get("candidate_id"):
             raise ValueError("CandidateDecision requires a candidate identifier")

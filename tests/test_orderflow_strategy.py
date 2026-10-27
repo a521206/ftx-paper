@@ -130,6 +130,16 @@ def test_orderflow_on_bundle_reports_missing_context() -> None:
     assert events[0].payload["reason"] == "orderflow_context_unavailable"
 
 
+def test_orderflow_without_interaction_is_recorded_not_rejected() -> None:
+    bundle, account = _context()
+    account = replace(account, as_of=account.as_of - timedelta(seconds=1))
+
+    events = OrderflowStrategy().evaluate(bundle, account)
+
+    assert events[0].payload["outcome"] == "recorded"
+    assert events[0].payload["reason"] == "no_vwap_interaction"
+
+
 def test_diagnostic_trigger_is_never_eligible() -> None:
     bundle, _ = _context()
     observation = bundle.orderflow_context.observations_for("5m")[0]

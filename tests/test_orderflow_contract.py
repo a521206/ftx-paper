@@ -133,7 +133,10 @@ def test_diagnostic_coordinator_rejects_accidental_order_payload() -> None:
         required_features: tuple[FeatureRequirement, ...] = ()
 
         def evaluate(self, bundle, context):
-            return (PolicyDecision({"candidate_id": "candidate", "outcome": "accepted", "order": "bad"}),)
+            return (PolicyDecision({
+                "candidate_id": "candidate", "outcome": "accepted", "order": "bad",
+                "policy": {"outcome": "accepted", "reason_code": "would_trade"},
+            }),)
 
         def on_execution_event(self, event):
             return None
@@ -149,6 +152,7 @@ def test_diagnostic_coordinator_rejects_accidental_order_payload() -> None:
     assert event.payload["reason"] == "diagnostic_policy_order_forbidden"
     assert event.payload["decision_view"]["schema_version"] == 1
     assert event.payload["decision_view"]["policy"]["outcome"] == "rejected"
+    assert event.payload["decision_view"]["policy"]["reason_code"] == "diagnostic_policy_order_forbidden"
     assert event.payload["decision_view"]["decision_id"] == "candidate"
 
 

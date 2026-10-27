@@ -48,9 +48,15 @@ class SharedDecisionCoordinator:
                 order = getattr(decision, "order", None)
                 payload_order = payload.get("order")
                 if self.policy.execution_mode is ExecutionMode.DIAGNOSTIC and (order is not None or payload_order is not None):
+                    policy = payload.get("policy")
                     payload.update({
                         "outcome": "rejected",
                         "reason": "diagnostic_policy_order_forbidden",
+                        "policy": {
+                            **(policy if isinstance(policy, Mapping) else {}),
+                            "outcome": "rejected",
+                            "reason_code": "diagnostic_policy_order_forbidden",
+                        },
                     })
                     payload.pop("order", None)
                     if not payload.get("decision_id") and not payload.get("candidate_id"):
@@ -70,8 +76,14 @@ class SharedDecisionCoordinator:
             if self.policy.execution_mode is ExecutionMode.DIAGNOSTIC and (
                 order is not None or payload.get("order") is not None
             ):
+                policy = payload.get("policy")
                 payload["outcome"] = "rejected"
                 payload["reason"] = "diagnostic_policy_order_forbidden"
+                payload["policy"] = {
+                    **(policy if isinstance(policy, Mapping) else {}),
+                    "outcome": "rejected",
+                    "reason_code": "diagnostic_policy_order_forbidden",
+                }
                 payload.pop("order", None)
                 order = None
             payload["decision_view"] = canonical(payload, decision.event_type)

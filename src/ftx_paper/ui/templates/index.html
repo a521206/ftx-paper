@@ -1045,6 +1045,7 @@
         ('decisions', 'Decision review'),
         ('positions', 'Positions'),
         ('trades', 'Trades'),
+        ('market-context', 'Market context'),
         ('capital', 'Capital'),
         ('replay', 'Replay'),
         ('activity', 'Activity')
@@ -1305,6 +1306,24 @@
           <select id="activity-type" aria-label="Filter by event type"><option value="">All event types</option>${types.map((x) => option(x, x.toUpperCase())).join('')}</select>
         </div>
         <div id="activity-list">${activityStream(rows)}</div>
+      </div>`;
+    }
+
+    function marketContextPage(rows) {
+      const contextRows = (rows || []).filter((row) => row.payload?.strategy_id === 'orderflow-research');
+      if (!contextRows.length) return '<div class="card empty">No orderflow market context recorded</div>';
+      return `<div class="card">
+        <div class="section-head"><div><h2>Orderflow market context</h2><div class="label">VWAP interactions and response evidence are diagnostic observations, not trade decisions.</div></div><span class="badge"><strong>${contextRows.length}</strong> observations</span></div>
+        <table><thead><tr><th>Time</th><th>Context</th><th>Reason</th><th>State</th><th>Evidence</th></tr></thead><tbody>
+          ${contextRows.map((row) => {
+            const payload = row.payload || {};
+            const view = row.decision_view || {};
+            const policy = view.policy || {};
+            const evidence = view.evidence || {};
+            const state = evidence.state || {};
+            return `<tr><td>${esc(date(view.at || payload.decision_at || row.created_at))}</td><td>${esc(view.context || payload.cell || 'VWAP')}</td><td>${esc(policy.reason_code || payload.reason || 'Observed')}</td><td>${esc(state.interaction_state || state.response_state || 'Recorded')}</td><td><details><summary>View evidence</summary><div class="payload">${esc(JSON.stringify(evidence, null, 2))}</div></details></td></tr>`;
+          }).join('')}
+        </tbody></table>
       </div>`;
     }
 
@@ -1912,6 +1931,8 @@
         </div>`;
       } else if (page === 'activity') {
         body = activityPage(data.events.events || []);
+      } else if (page === 'market-context') {
+        body = marketContextPage(data.marketContext?.events || []);
       } else {
         body = `<div class="card">
           <h2>${page[0].toUpperCase() + page.slice(1)}</h2>
@@ -2078,6 +2099,7 @@
             replayDates: '/api/v1/replay/dates',
           },
           activity: { events: strategyQuery('/api/v1/events?limit=100') },
+          'market-context': { marketContext: '/api/v1/events?strategy_id=orderflow-research&limit=100' },
         }[page] || {};
 
         const responseEntries = await Promise.all(
@@ -2096,6 +2118,7 @@
         const trades = responseData.trades || { trades: [] };
         const decisionsData = responseData.decisions || { decisions: [] };
         const events = responseData.events || { events: [] };
+        const marketContext = responseData.marketContext || { events: [] };
         const replays = responseData.replays || { runs: [] };
         const replayDates = responseData.replayDates || { dates: [] };
 
@@ -2106,6 +2129,7 @@
           trades,
           decisions: decisionsData,
           events,
+          marketContext,
           replays,
           replayDates: replayDates.dates || [],
         });

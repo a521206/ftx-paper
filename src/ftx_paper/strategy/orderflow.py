@@ -395,7 +395,7 @@ class OrderflowPolicy:
         if not results and all(observation.observation_id in self._processed_observation_ids for observation in observations):
             return ()
         return tuple(results) or (
-            PolicyDecision({**base, "outcome": "rejected", "reason": "no_vwap_interaction"}),
+            PolicyDecision({**base, "outcome": "recorded", "reason": "no_vwap_interaction"}),
         )
 
     def on_execution_event(self, event: ExecutionNotification) -> None:

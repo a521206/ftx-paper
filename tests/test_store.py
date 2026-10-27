@@ -144,11 +144,18 @@ def test_runtime_store_filters_decision_summary_and_cursor_by_strategy(tmp_path)
             "strategy_id": strategy_id,
             "outcome": "accepted",
         })
+    store.append_event("CANDIDATEDECISION", {
+        "decision_at": "2026-09-10T10:17:00+05:30",
+        "decision_id": "alpha-recorded",
+        "strategy_id": "alpha",
+        "outcome": "recorded",
+    })
 
-    rows = store.read_decision_events("2026-09-10", limit=2, strategy_id="alpha")
-    assert [row["payload"]["strategy_id"] for row in rows] == ["alpha", "alpha"]
+    rows = store.read_decision_events("2026-09-10", limit=3, strategy_id="alpha")
+    assert [row["payload"]["strategy_id"] for row in rows] == ["alpha", "alpha", "alpha"]
     summary = store.read_decision_summary("2026-09-10", strategy_id="alpha")
-    assert summary["totals"]["detections"] == 2
+    assert summary["totals"]["detections"] == 3
+    assert summary["totals"]["rejected"] == 0
 
 
 def test_runtime_store_persists_order_before_external_dispatch(tmp_path):
