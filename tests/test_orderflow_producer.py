@@ -17,4 +17,15 @@ def test_causal_producer_builds_complete_five_minute_context() -> None:
     assert context is not None
     parent = context.observations_for("5m")[0]
     assert context.validate_complete_parent(parent)
+    assert parent.features["open"] == 99.0
+    assert parent.features["high"] == 102.0
+    assert parent.features["low"] == 98.0
+    assert parent.features["close"] == 104.0
+    assert parent.features["volume"] == 50.0
     assert parent.features["vwap"] is not None
+    assert parent.observed_at == start
+    assert parent.available_at == start + timedelta(minutes=5)
+    assert parent.context is not None
+    assert parent.context.replay_provenance["input_availability"] == "complete"
+    assert parent.context.replay_provenance["gap_status"] == "none"
+    assert parent.context.replay_provenance["source_fingerprint"]

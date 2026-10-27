@@ -50,7 +50,15 @@ def _identity(record: Mapping[str, Any]) -> str:
 
 
 def _timestamp(record: Mapping[str, Any]) -> str | None:
-    value = record.get("timestamp") or record.get("decision_at") or record.get("fill_timestamp")
+    trigger = record.get("trigger")
+    trigger_timestamp = trigger.get("observed_at") if isinstance(trigger, Mapping) else None
+    value = (
+        record.get("timestamp")
+        or record.get("observed_at")
+        or trigger_timestamp
+        or record.get("decision_at")
+        or record.get("fill_timestamp")
+    )
     if value is None:
         return None
     parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
@@ -99,11 +107,13 @@ def _record(event: Mapping[str, Any], ordinal: int) -> dict[str, Any]:
         key: payload.get(key)
         for key in (
             "feature_version", "availability_cutoff", "timeframe", "instrument",
+            "observed_at", "available_at", "interval_start", "interval_end",
             "generation", "interaction_id", "opportunity_id", "source_observation_ids",
             "source_observation_id", "response_evidence_ids", "response_state", "interaction_state",
             "config_hash", "feature_values", "replay_provenance",
             "template_id", "template_version", "trigger",
             "decision_stage", "cell", "direction",
+            "reference_level", "lower_band", "upper_band",
         )
         if payload.get(key) is not None
     }

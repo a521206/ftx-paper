@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
+import hashlib
 
 from ftx_paper.contracts import MarketBar, market_minute_key
 from ftx_paper.config import IST
@@ -11,7 +13,16 @@ from ftx_paper.config import IST
 from .orderflow_contract import OrderflowContext, OrderflowObservation, OrderflowObservationContext
 
 
+def _numeric_feature(features: Mapping[str, object], name: str) -> float:
+    value = features.get(name)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError(f"orderflow child feature {name!r} must be numeric")
+    return float(value)
+
+
 class CausalOrderflowProducer:
+    _PRODUCER_VERSION = "causal_orderflow_v2"
+
     def __init__(self) -> None:
         self._bars: dict[tuple[str, str], list[MarketBar]] = defaultdict(list)
         self._active_date: str | None = None
@@ -63,6 +74,9 @@ class CausalOrderflowProducer:
                 interval_start=bar.timestamp,
                 interval_end=available_at,
                 features={
+                    "open": bar.open,
+                    "high": bar.high,
+                    "low": bar.low,
                     "close": bar.close,
                     "vwap": cumulative_value / cumulative_volume if cumulative_volume else None,
                     "volume": volume,
@@ -70,7 +84,12 @@ class CausalOrderflowProducer:
                 },
                 context=OrderflowObservationContext(
                     session_id=trading_date, completeness="complete", availability_status="available",
-                    replay_provenance={"producer": "ftx-paper"}, generation=1,
+                    replay_provenance={
+                        "producer": "ftx-paper",
+                        "producer_version": self._PRODUCER_VERSION,
+                        "input_availability": "complete",
+                        "gap_status": "none",
+                    }, generation=1,
                     causal_sequence=1,
                 ),
             ))
@@ -93,6 +112,21 @@ class CausalOrderflowProducer:
             if len(child_intervals) != 5:
                 continue
             parent_id = f"{instrument}:5m:{start.isoformat()}"
+            child_ids = tuple(item.observation_id for item in children)
+            source_fingerprint = hashlib.sha256(
+                "|".join(child_ids).encode("utf-8")
+            ).hexdigest()
+            child_features = [item.features for item in children]
+            total_volume = sum(_numeric_feature(item, "volume") for item in child_features)
+            parent_features = {
+                "open": _numeric_feature(child_features[0], "open"),
+                "high": max(_numeric_feature(item, "high") for item in child_features),
+                "low": min(_numeric_feature(item, "low") for item in child_features),
+                "close": _numeric_feature(child_features[-1], "close"),
+                "previous_close": child_features[0].get("previous_close"),
+                "vwap": child_features[-1].get("vwap"),
+                "volume": total_volume,
+            }
             five_minute.append(OrderflowObservation(
                 observation_id=parent_id,
                 source_observation_id=parent_id,
@@ -103,11 +137,17 @@ class CausalOrderflowProducer:
                 available_at=end,
                 interval_start=start,
                 interval_end=end,
-                features=dict(children[-1].features),
+                features=parent_features,
                 context=OrderflowObservationContext(
                     session_id=trading_date, completeness="complete", availability_status="available",
-                    replay_provenance={"producer": "ftx-paper"}, generation=1,
-                    child_observation_ids=tuple(item.observation_id for item in children),
+                    replay_provenance={
+                        "producer": "ftx-paper",
+                        "producer_version": self._PRODUCER_VERSION,
+                        "input_availability": "complete",
+                        "gap_status": "none",
+                        "source_fingerprint": source_fingerprint,
+                    }, generation=1,
+                    child_observation_ids=child_ids,
                     child_intervals=child_intervals,
                     causal_sequence=1,
                 ),

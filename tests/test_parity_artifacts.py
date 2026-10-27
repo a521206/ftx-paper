@@ -113,6 +113,30 @@ def test_p9_preserves_orderflow_provenance() -> None:
     }
 
 
+def test_p9_uses_source_observation_time_and_preserves_availability() -> None:
+    result = {
+        "strategy": {},
+        "vehicles": ["futures"],
+        "bars_seen": 1,
+        "events": [{
+            "event_type": "CANDIDATEDECISION",
+            "decision_at": "2026-01-05T10:05:00+05:30",
+            "session_date": "2026-01-05",
+            "outcome": "accepted",
+            "observed_at": "2026-01-05T10:00:00+05:30",
+            "available_at": "2026-01-05T10:05:00+05:30",
+            "timeframe": "5m",
+            "trigger": {"observed_at": "2026-01-05T10:00:00+05:30"},
+        }],
+    }
+
+    record = build_parity_artifact(result, request={"session_date": "2026-01-05"})["p9"]["decision_records"][0]
+
+    assert record["timestamp"] == "2026-01-05T04:30:00Z"
+    assert record["orderflow_provenance"]["observed_at"] == "2026-01-05T10:00:00+05:30"
+    assert record["orderflow_provenance"]["available_at"] == "2026-01-05T10:05:00+05:30"
+
+
 def test_shared_fixture_contract_and_strategy_fingerprint():
     fixture = json.loads(Path("tests/fixtures/ftx_producer_parity_v1.json").read_text())
     assert fixture["artifact_type"] == "ftx_producer_parity"

@@ -249,6 +249,11 @@ class OrderflowPolicy:
                 trigger_type=self.config.trigger_type,
             )
             provenance = {
+                "timestamp": observation.observed_at.isoformat(),
+                "observed_at": observation.observed_at.isoformat(),
+                "available_at": observation.available_at.isoformat(),
+                "interval_start": observation.interval_start.isoformat() if observation.interval_start else None,
+                "interval_end": observation.interval_end.isoformat() if observation.interval_end else None,
                 "source_observation_id": observation.source_observation_id,
                 "source_observation_ids": [observation.observation_id],
                 "response_evidence_ids": list(observation.evidence_ids),
@@ -258,6 +263,9 @@ class OrderflowPolicy:
                 "replay_provenance": dict(observation.context.replay_provenance) if observation.context else {},
                 "trigger": asdict(trigger),
                 "location": observation.location,
+                "reference_level": vwap,
+                "lower_band": vwap - self.config.interaction_band,
+                "upper_band": vwap + self.config.interaction_band,
             }
             generation = observation.context.generation if observation.context else None
             previous = next(
@@ -267,6 +275,9 @@ class OrderflowPolicy:
                     and item.instrument == observation.instrument
                     and item.generation == generation
                     and item.location == observation.location
+                    and math.isclose(item.reference_level, vwap, rel_tol=0.0, abs_tol=1e-9)
+                    and math.isclose(item.lower_band, vwap - self.config.interaction_band, rel_tol=0.0, abs_tol=1e-9)
+                    and math.isclose(item.upper_band, vwap + self.config.interaction_band, rel_tol=0.0, abs_tol=1e-9)
                     and (observation.interaction_id is None or item.interaction_id == observation.interaction_id)
                     and item.state == "ACTIVE"
                 ),
