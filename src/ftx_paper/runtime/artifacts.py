@@ -10,6 +10,8 @@ import json
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from ftx_paper.contracts import build_decision_view, validate_decision_view
+
 
 ARTIFACT_SCHEMA_VERSION = 2
 
@@ -69,7 +71,16 @@ def build_authoritative_payload(
     for event in ordered:
         payload = dict(event.get("payload", event))
         event_type = str(event.get("event_type", "")).upper()
-        candidate_id = payload.get("candidate_id") or payload.get("decision_id")
+        raw_view = payload.get("decision_view") or event.get("decision_view")
+        view = validate_decision_view(raw_view) if isinstance(raw_view, Mapping) else build_decision_view(
+            payload, event_type=event_type or "CANDIDATEDECISION",
+        )
+        subject = dict(view["subject"])
+        policy = dict(view["policy"])
+        evidence = dict(view["evidence"])
+        metrics = dict(evidence.get("metrics") or {})
+        diagnostics = dict(evidence.get("diagnostics") or {})
+        candidate_id = view.get("decision_id")
         if candidate_id and event_type == "CANDIDATEDECISION":
             candidate_id = str(candidate_id)
             if candidate_id not in seen:
@@ -77,24 +88,24 @@ def build_authoritative_payload(
                 candidates.append({
                     "candidate_id": candidate_id,
                     "date": _event_date(event),
-                    "time": str(payload.get("decision_at", ""))[11:16],
-                    "session": payload.get("session"),
-                    "vehicle": None,
-                    "ordered_sequence": payload.get("sequence"),
-                    "cell": payload.get("cell"),
-                    "direction": payload.get("direction"),
+                    "time": str(view.get("at", ""))[11:16],
+                    "session": subject.get("session"),
+                    "vehicle": subject.get("vehicle"),
+                    "ordered_sequence": metrics.get("sequence"),
+                    "cell": subject.get("location"),
+                    "direction": subject.get("direction"),
                     "eligibility": (
-                        "eligible" if payload.get("outcome") in {"accepted", "filled"}
-                        else "rejected" if payload.get("outcome") in {"rejected", "policy rejection", "sizing rejection"}
+                        "eligible" if policy.get("outcome") in {"accepted", "filled"}
+                        else "rejected" if policy.get("outcome") in {"rejected", "policy rejection", "sizing rejection"}
                         else "unavailable"
                     ),
-                    "rejection_reason": payload.get("reason"),
-                    "score": payload.get("score"),
-                    "score_factors": payload.get("score_factors", {}),
-                    "sizing_diagnostics": payload.get("sizing_pipeline"),
+                    "rejection_reason": policy.get("reason_code"),
+                    "score": metrics.get("score"),
+                    "score_factors": diagnostics.get("score_factors", {}),
+                    "sizing_diagnostics": diagnostics.get("sizing_pipeline"),
                 })
         if candidate_id and event_type == "CANDIDATEDECISION":
-            decisions.append({"candidate_id": str(candidate_id), **payload})
+            decisions.append({"candidate_id": str(candidate_id), "decision_view": view})
         if event_type in {"FILLED", "EXECUTIONFILLED", "EXITED", "EXECUTIONEXITED"}:
             trades.append(payload)
         if "settlement" in event_type or "settlement_status" in payload:

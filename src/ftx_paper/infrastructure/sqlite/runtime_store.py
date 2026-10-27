@@ -873,7 +873,9 @@ class SqliteRuntimeStore:
             "by_instrument": {str(kind): int(count) for kind, count in instrument_rows},
         }
 
-    def read_decision_summary(self, session_date: str, *, strategy_id: str | None = None) -> DecisionSummaryReport:
+    def read_decision_summary(
+        self, session_date: str, *, strategy_id: str | None = None, canonical_only: bool = False,
+    ) -> DecisionSummaryReport:
         """Aggregate a complete session day without decoding event payloads."""
         event_types = tuple(sorted(DECISION_EVENT_TYPES))
         event_placeholders = ", ".join("?" for _ in event_types)
@@ -882,6 +884,7 @@ class SqliteRuntimeStore:
         strategy_clause = ""
         if strategy_id is not None:
             strategy_clause = "AND json_extract(payload, '$.strategy_id') = ? "
+        canonical_clause = "AND json_type(payload, '$.decision_view') = 'object' " if canonical_only else ""
         sql = (
             "SELECT event_type, substr(json_extract(payload, '$.decision_at'), 12, 5), "
             "json_extract(payload, '$.outcome'), COUNT(*), "
@@ -892,6 +895,7 @@ class SqliteRuntimeStore:
             "FROM runtime_events decision "
             f"WHERE event_type IN ({event_placeholders}) "
             "AND substr(json_extract(payload, '$.decision_at'), 1, 10) = ? "
+            + canonical_clause
             + strategy_clause +
             "AND (json_extract(payload, '$.decision_source') IS NULL "
             "OR lower(json_extract(payload, '$.decision_source')) <> 'replay') "
@@ -936,7 +940,7 @@ class SqliteRuntimeStore:
 
     def read_decision_events(
         self, session_date: str | None = None, limit: int = 50, *, strategy_id: str | None = None,
-        before_id: int | None = None, session_name: str | None = None,
+        before_id: int | None = None, session_name: str | None = None, canonical_only: bool = False,
     ) -> list[dict[str, Any]]:
         """Read decision events on their own, independent of the general event stream.
 
@@ -952,7 +956,8 @@ class SqliteRuntimeStore:
             "SELECT id, event_type, payload, created_at FROM runtime_events "
             f"WHERE event_type IN ({placeholders}) "
             "AND json_extract(payload, '$.decision_at') <> ''"
-            " AND (json_extract(payload, '$.decision_source') IS NULL "
+            + (" AND json_type(payload, '$.decision_view') = 'object'" if canonical_only else "")
+            + " AND (json_extract(payload, '$.decision_source') IS NULL "
             "OR lower(json_extract(payload, '$.decision_source')) <> 'replay')"
         )
         params: list[Any] = list(event_types)

@@ -147,3 +147,28 @@ def test_diagnostic_coordinator_rejects_accidental_order_payload() -> None:
     )[0]
     assert event.payload["outcome"] == "rejected"
     assert event.payload["reason"] == "diagnostic_policy_order_forbidden"
+    assert event.payload["decision_view"]["schema_version"] == 1
+    assert event.payload["decision_view"]["policy"]["outcome"] == "rejected"
+    assert event.payload["decision_view"]["decision_id"] == "candidate"
+
+
+def test_decision_view_accepts_strategy_specific_structured_fields() -> None:
+    from ftx_paper.contracts import build_decision_view
+
+    view = build_decision_view(
+        {
+            "decision_at": "2026-01-01T10:00:00+00:00",
+            "decision_id": "d1",
+            "strategy_id": "orderflow-research",
+            "decision_stage": "interaction_response",
+            "subject": {"location": "vwap_zone", "direction": "long"},
+            "policy": {"outcome": "accepted", "reason_code": "confirmed"},
+            "evidence": {"state": {"response_state": "CONFIRMED"}},
+        },
+        event_type="CANDIDATEDECISION",
+    )
+
+    assert view["subject"] == {"location": "vwap_zone", "direction": "long"}
+    assert view["policy"]["reason_code"] == "confirmed"
+    assert view["evidence"]["state"]["response_state"] == "CONFIRMED"
+    assert "legacy_adapted" not in view

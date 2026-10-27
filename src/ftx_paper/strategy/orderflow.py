@@ -200,6 +200,9 @@ class OrderflowPolicy:
             "feature_version": self.config.vwap_calculation_version,
             "decision_stage": "interaction_response",
             "cell": "vwap_zone",
+            "subject": {"vehicle": "futures", "location": "vwap_zone"},
+            "policy": {},
+            "evidence": {"metrics": {}, "state": {}, "provenance": {}},
         }
         if orderflow is None or orderflow.session_id != bundle.trading_date:
             return (PolicyDecision({**base, "outcome": "rejected", "reason": "orderflow_context_unavailable"}),)

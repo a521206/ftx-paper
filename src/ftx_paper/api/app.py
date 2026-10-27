@@ -7,6 +7,7 @@ from flask import Flask, jsonify, redirect, request
 from typing import Any
 
 from ftx_paper.config import IST
+from ftx_paper.contracts import validate_decision_view
 from ftx_paper.infrastructure.sqlite.runtime_store import ProcessAlreadyRunningError
 from ftx_paper.runtime.session import RuntimeSession
 from ftx_paper.runtime.store import RuntimeStore
@@ -589,11 +590,12 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             return jsonify(error_payload("invalid_strategy", "strategy_id is not configured")), 400
 
         strategy_id = selected_strategy if isinstance(selected_strategy, str) else None
-        summary = store.read_decision_summary(selected_date, strategy_id=strategy_id)
+        summary = store.read_decision_summary(selected_date, strategy_id=strategy_id, canonical_only=True)
         decision_events = store.read_decision_events(
             session_date=selected_date, strategy_id=strategy_id,
             limit=limit + 1, before_id=before_id,
             session_name=selected_session or None,
+            canonical_only=True,
         )
         has_more = len(decision_events) > limit
         decision_events = decision_events[:limit]
@@ -642,7 +644,25 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
                 payload["risk_event"] = risk
             if execution is None and str(payload.get("decision_source", "")).lower() == "replay":
                 payload["execution_status"] = "replayed"
-            return {**event, "category": "decision", "payload": payload}
+            # Prefer the persisted strategy-neutral contract. The fallback is
+            # only for decisions written before the contract was introduced.
+            raw_view = payload.get("decision_view")
+            if not isinstance(raw_view, dict):
+                raise ValueError("canonical decision event is missing decision_view")
+            view = validate_decision_view(raw_view)
+            # Lifecycle evidence is newer than the policy decision and changes
+            # the aggregate status without rewriting policy.outcome.
+            outcome = payload.get("risk_status") or payload.get("execution_status") or view.get("outcome") or "recorded"
+            view["outcome"] = outcome
+            view["display_outcome"] = outcome
+            lifecycle = {}
+            if execution is not None:
+                lifecycle.update({"status": payload.get("execution_status"), "event_type": payload.get("execution_event_type")})
+            if risk is not None:
+                lifecycle.update({"status": payload.get("risk_status"), "event_type": risk.get("event_type")})
+            if lifecycle:
+                view["execution"] = lifecycle
+            return {**event, "category": "decision", "decision_view": view, "payload": payload}
 
         enriched_events = []
         for event in decision_events:

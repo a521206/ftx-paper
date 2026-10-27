@@ -9,6 +9,7 @@ from .orders import (
     is_legal_order_transition,
 )
 from .decision_artifacts import DecisionTrace, FuturesExecutionPlan, SyntheticSettlement, TradePlan
+from .decision_view import DECISION_VIEW_SCHEMA_VERSION, build_decision_view, validate_decision_view
 from .events import RuntimeEvent
 from .futures_rollover import (
     FuturesContract, ROLLOVER_RULE, RolloverSelection, SELECTION_POLICY_VERSION,
@@ -21,6 +22,7 @@ __all__ = [
     "OrderAck", "OrderIntent", "OrderLifecycle", "OrderLifecycleState", "OrderRole", "OrderSide", "OrderType",
     "is_legal_order_transition",
     "TradePlan", "FuturesExecutionPlan", "SyntheticSettlement", "DecisionTrace",
+    "DECISION_VIEW_SCHEMA_VERSION", "build_decision_view", "validate_decision_view",
     "RuntimeEvent",
     "FuturesContract", "ROLLOVER_RULE", "RolloverSelection", "SELECTION_POLICY_VERSION",
     "futures_contract_from_row", "parse_expiry", "select_front_futures_contract",

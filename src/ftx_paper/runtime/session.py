@@ -12,7 +12,8 @@ from ftx_paper.config import IST
 from ftx_paper.domain.capital import CapitalRuntimeContext, ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
 from ftx_paper.domain.portfolio import PaperPosition, PortfolioState
 from ftx_paper.contracts import (
-    MarketBar, MarketRole, OptionRole, OrderRole, OrderSide, Role, RuntimeEvent, parse_role,
+    MarketBar, MarketRole, OptionRole, OrderRole, OrderSide, Role, RuntimeEvent, build_decision_view, parse_role,
+    validate_decision_view,
     role_to_key,
 )
 from ftx_paper.market import AggregatorConfig, CompletedBarAggregator, FeatureService, InstrumentKey, LiveMarketNormalizer
@@ -488,6 +489,12 @@ class RuntimeSession:
         metadata = (engine or self.engine).strategy_metadata
         if metadata:
             payload.update(strategy_version=metadata.version, config_hash=metadata.config_hash)
+        if is_decision_event(event_type):
+            payload["decision_view"] = validate_decision_view(build_decision_view(
+                payload,
+                event_type=event_type,
+                strategy_id=payload.get("strategy_id") if isinstance(payload.get("strategy_id"), str) else None,
+            ))
         self.store.append_event(event_type, payload,
                                 f"{event_type}:{source}:{bundle_id}:{payload.get('decision_id', '')}",
                                 timestamp=timestamp)
@@ -1047,7 +1054,7 @@ class RuntimeSession:
                         direction="long" if action.intent.side.value == "SELL" else "short",
                         quantity=action.intent.quantity,
                     )
-                self.store.append_event("EXITDECISION", {
+                exit_payload = {
                     "decision_id": action.intent.client_order_id,
                     "vehicle": action.intent.vehicle,
                     "cell": action.cell,
@@ -1069,7 +1076,12 @@ class RuntimeSession:
                     "decision_source": "live",
                     "execution_allowed": True,
                     "outcome": "exit_triggered",
-                }, f"exit_decision:{action.intent.client_order_id}", timestamp=bar.timestamp.isoformat())
+                }
+                exit_payload["decision_view"] = validate_decision_view(build_decision_view(
+                    exit_payload, event_type="EXITDECISION", strategy_id=action.intent.strategy_id,
+                ))
+                self.store.append_event("EXITDECISION", exit_payload,
+                                        f"exit_decision:{action.intent.client_order_id}", timestamp=bar.timestamp.isoformat())
             self._refresh_pending_status()
             if bundle is not None:
                 self.store.patch_status({"last_completed_bundle_minute": bundle.minute,
@@ -1111,7 +1123,7 @@ class RuntimeSession:
                         direction="long" if action.intent.side.value == "SELL" else "short",
                         quantity=action.intent.quantity,
                     )
-                self.store.append_event("EXITDECISION", {
+                exit_payload = {
                     "decision_id": action.intent.client_order_id,
                     "vehicle": action.intent.vehicle,
                     "cell": action.cell,
@@ -1133,7 +1145,12 @@ class RuntimeSession:
                     "decision_source": "live",
                     "execution_allowed": True,
                     "outcome": "exit_triggered",
-                }, f"exit_decision:{action.intent.client_order_id}", timestamp=bar.timestamp.isoformat())
+                }
+                exit_payload["decision_view"] = validate_decision_view(build_decision_view(
+                    exit_payload, event_type="EXITDECISION", strategy_id=action.intent.strategy_id,
+                ))
+                self.store.append_event("EXITDECISION", exit_payload,
+                                        f"exit_decision:{action.intent.client_order_id}", timestamp=bar.timestamp.isoformat())
 
     def _record_incomplete(self, bundle) -> None:
         payload = {

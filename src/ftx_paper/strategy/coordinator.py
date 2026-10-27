@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from ftx_paper.domain.decision_context import DecisionContext
 from ftx_paper.execution.events import ExecutionNotification
+from ftx_paper.contracts import build_decision_view, validate_decision_view
 from .policy_contract import ExecutionMode, StrategyPolicy
 
 if TYPE_CHECKING:
@@ -30,12 +31,23 @@ class SharedDecisionCoordinator:
 
         decisions = self.policy.evaluate(bundle, context)
         result: list[DecisionEvent] = []
+
+        def canonical(payload: dict[str, object], event_type: str) -> dict[str, object]:
+            return validate_decision_view(build_decision_view(payload, event_type=event_type))
+
         for decision in decisions:
+            payload = dict(decision.payload)
+            payload.setdefault("bundle_id", bundle.bundle_id)
+            payload.setdefault("decision_at", context.as_of.isoformat())
+            if not payload.get("decision_id") and not payload.get("candidate_id"):
+                reason = str(payload.get("reason", decision.event_type))
+                payload["decision_id"] = sha256(
+                    f"{bundle.bundle_id}:{decision.event_type}:{reason}".encode()
+                ).hexdigest()[:24]
             if isinstance(decision, (LiveDecision, CandidateDecision)):
                 order = getattr(decision, "order", None)
-                payload_order = getattr(decision, "payload", {}).get("order")
+                payload_order = payload.get("order")
                 if self.policy.execution_mode is ExecutionMode.DIAGNOSTIC and (order is not None or payload_order is not None):
-                    payload = dict(decision.payload)
                     payload.update({
                         "outcome": "rejected",
                         "reason": "diagnostic_policy_order_forbidden",
@@ -45,18 +57,15 @@ class SharedDecisionCoordinator:
                         payload["decision_id"] = sha256(
                             f"{bundle.bundle_id}:diagnostic_policy_order_forbidden".encode()
                         ).hexdigest()[:24]
+                    payload["decision_view"] = canonical(payload, "CANDIDATEDECISION")
                     result.append(CandidateDecision(payload, event_type="CANDIDATEDECISION"))
                     continue
-                result.append(decision)
+                payload["decision_view"] = canonical(payload, decision.event_type)
+                if isinstance(decision, CandidateDecision):
+                    result.append(CandidateDecision(payload, order=order, event_type=decision.event_type))
+                else:
+                    result.append(LiveDecision(decision.event_type, payload, order=order))
                 continue
-            payload = dict(decision.payload)
-            payload.setdefault("bundle_id", bundle.bundle_id)
-            payload.setdefault("decision_at", context.as_of.isoformat())
-            if not payload.get("decision_id") and not payload.get("candidate_id"):
-                reason = str(payload.get("reason", decision.event_type))
-                payload["decision_id"] = sha256(
-                    f"{bundle.bundle_id}:{decision.event_type}:{reason}".encode()
-                ).hexdigest()[:24]
             order = decision.order
             if self.policy.execution_mode is ExecutionMode.DIAGNOSTIC and (
                 order is not None or payload.get("order") is not None
@@ -65,6 +74,7 @@ class SharedDecisionCoordinator:
                 payload["reason"] = "diagnostic_policy_order_forbidden"
                 payload.pop("order", None)
                 order = None
+            payload["decision_view"] = canonical(payload, decision.event_type)
             result.append(CandidateDecision(payload, order=order, event_type=decision.event_type))
         return tuple(result)
 

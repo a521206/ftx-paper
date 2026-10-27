@@ -278,9 +278,13 @@ class IndependentLiveDecisionEngine:
         pcr = snapshot_values.get("pcr")
         pcr = float(pcr) if pcr is not None else None
         base = {"decision_at": decision_at.isoformat(), "bundle_id": bundle.bundle_id,
-                "strategy_version": self.version, "config_hash": self.config_hash,
-                "vehicle": "futures",
-                "required_input_availability": {r: r not in bundle.missing_roles for r in bundle.required_roles}}
+                 "strategy_version": self.version, "config_hash": self.config_hash,
+                 "vehicle": "futures",
+                 "required_input_availability": {r: r not in bundle.missing_roles for r in bundle.required_roles},
+                 "subject": {"vehicle": "futures"},
+                 "policy": {},
+                 "evidence": {"metrics": {}, "state": {}, "provenance": {}},
+                 }
         if not bundle.complete:
             decision_id = sha256(f"{bundle.bundle_id}:incomplete_bundle".encode()).hexdigest()[:24]
             return (CandidateDecision({

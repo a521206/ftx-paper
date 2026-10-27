@@ -11,6 +11,8 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from ftx_paper.contracts import build_decision_view, validate_decision_view
+
 
 PARITY_ARTIFACT_SCHEMA_VERSION = 1
 _REQUIRED_DECISION_FIELDS = (
@@ -67,32 +69,48 @@ def _timestamp(record: Mapping[str, Any]) -> str | None:
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _canonical_view(event: Mapping[str, Any]) -> dict[str, Any]:
+    payload = dict(event.get("payload", event))
+    raw = payload.get("decision_view") or event.get("decision_view")
+    if isinstance(raw, Mapping):
+        return validate_decision_view(raw)
+    view = build_decision_view(payload, event_type=str(event.get("event_type", "decision")))
+    view["legacy_adapted"] = True
+    return view
+
+
 def _record(event: Mapping[str, Any], ordinal: int) -> dict[str, Any]:
     payload = dict(event.get("payload", event))
     event_type = str(event.get("event_type", payload.get("event_type", ""))).upper()
-    timestamp = _timestamp(payload)
-    feature_values = dict(payload.get("feature_values") or payload.get("causal_features") or {})
-    score_factors = dict(payload.get("score_factors") or {})
-    pcr = payload.get("pcr")
-    if pcr is None:
-        pcr = payload.get("pcr_at_event", feature_values.get("pcr_at_event", feature_values.get("pcr")))
-    vix = payload.get("vix")
-    if vix is None:
-        vix = payload.get("vix_at_event", feature_values.get("vix_at_event", feature_values.get("vix")))
-    confirmation_count = payload.get("confirmation_count")
+    view = _canonical_view(event)
+    subject = dict(view["subject"])
+    policy = dict(view["policy"])
+    evidence = dict(view["evidence"])
+    metrics = dict(evidence.get("metrics") or {})
+    feature_values = dict(evidence.get("features") or {})
+    diagnostics = dict(evidence.get("diagnostics") or {})
+    score_factors = dict(diagnostics.get("score_factors") or {})
+    pcr = metrics.get("pcr", metrics.get("pcr_at_event"))
+    vix = metrics.get("vix", metrics.get("vix_at_event"))
+    timestamp = _timestamp({
+        "observed_at": evidence.get("provenance", {}).get("observed_at"),
+        "trigger": evidence.get("state", {}).get("trigger"),
+        "decision_at": view.get("at"),
+    })
+    confirmation_count = metrics.get("confirmation_count")
     if confirmation_count is None:
         confirmation_count = sum(
             score_factors.get(name) is True
             for name in ("volume_climax_prior", "prior_midpoint_reclaim", "volume_drying")
         )
-    missing_inputs = payload.get("missing_inputs")
+    missing_inputs = metrics.get("missing_inputs")
     if missing_inputs is None:
         missing_inputs = [
             name for name in (*score_factors, "pcr_at_event", "vix_at_event")
             if (name in score_factors and score_factors[name] is None)
             or (name in feature_values and feature_values[name] is None)
         ]
-    values = {key: payload.get(key) for key in (
+    values = {key: metrics.get(key) for key in (
         "entry_price", "stop", "score", "requested_quantity", "effective_quantity",
     )}
     values.update({
@@ -104,7 +122,7 @@ def _record(event: Mapping[str, Any], ordinal: int) -> dict[str, Any]:
         "missing_inputs": list(missing_inputs),
     })
     orderflow_provenance = {
-        key: payload.get(key)
+        key: evidence.get("provenance", {}).get(key) or evidence.get("state", {}).get(key)
         for key in (
             "feature_version", "availability_cutoff", "timeframe", "instrument",
             "observed_at", "available_at", "interval_start", "interval_end",
@@ -115,29 +133,30 @@ def _record(event: Mapping[str, Any], ordinal: int) -> dict[str, Any]:
             "decision_stage", "cell", "direction",
             "reference_level", "lower_band", "upper_band",
         )
-        if payload.get(key) is not None
+        if evidence.get("provenance", {}).get(key) is not None or evidence.get("state", {}).get(key) is not None
     }
     record = {
         "comparison_identity": _identity({
-            "event_type": event_type, "date": str(payload.get("session_date") or payload.get("date") or (timestamp or ""))[:10],
-            "timestamp": timestamp, "session": payload.get("session"), "vehicle": payload.get("vehicle", "futures"),
-            "cell": payload.get("cell"), "direction": payload.get("direction"),
-            "stage": payload.get("decision_stage"), "outcome": payload.get("outcome") or event_type.lower(),
-            "reason_code": payload.get("reason") or payload.get("rejection_reason"),
+            "event_type": event_type, "date": str(evidence.get("provenance", {}).get("session_date") or (timestamp or ""))[:10],
+            "timestamp": timestamp, "session": subject.get("session"), "vehicle": subject.get("vehicle", "futures"),
+            "cell": subject.get("location"), "direction": subject.get("direction"),
+            "stage": view.get("stage"), "outcome": policy.get("outcome") or event_type.lower(),
+            "reason_code": policy.get("reason_code"),
         }),
-        "producer_local_id": payload.get("decision_id") or payload.get("candidate_id"),
+        "producer_local_id": view.get("decision_id"),
         "stream_sequence": ordinal,
-        "date": str(payload.get("session_date") or payload.get("date") or (timestamp or "")[:10])[:10],
+        "date": str(evidence.get("provenance", {}).get("session_date") or (timestamp or "")[:10])[:10],
         "timestamp": timestamp,
         "event_type": event_type,
-        "detector_ordinal": payload.get("detector_emission_ordinal"),
-        "session": payload.get("session"),
-        "vehicle": payload.get("vehicle", "futures"),
-        "cell": payload.get("cell"),
-        "direction": payload.get("direction"),
-        "stage": payload.get("decision_stage"), "outcome": payload.get("outcome") or event_type.lower(),
-        "reason_code": payload.get("reason") or payload.get("rejection_reason"), "values": values,
+        "detector_ordinal": metrics.get("detector_emission_ordinal"),
+        "session": subject.get("session"),
+        "vehicle": subject.get("vehicle", "futures"),
+        "cell": subject.get("location"),
+        "direction": subject.get("direction"),
+        "stage": view.get("stage"), "outcome": policy.get("outcome") or event_type.lower(),
+        "reason_code": policy.get("reason_code"), "values": values,
         "orderflow_provenance": orderflow_provenance,
+        "legacy_adapted": bool(view.get("legacy_adapted")),
         "field_availability": {key: "available" if value not in (None, "") else "missing" for key, value in values.items()},
     }
     return _jsonable(record)

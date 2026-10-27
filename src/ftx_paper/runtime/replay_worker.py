@@ -6,10 +6,11 @@ import hashlib
 import json
 from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread, current_thread
+from collections.abc import Mapping
 from typing import Any, cast
 from uuid import uuid4
 
-from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderRole, OrderSide, Role, SyntheticFutureQuote, synthetic_future_quote
+from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderRole, OrderSide, Role, SyntheticFutureQuote, build_decision_view, synthetic_future_quote, validate_decision_view
 from ftx_paper.domain.capital import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE, CapitalRuntimeContext
 from ftx_paper.market import (
     AggregatorConfig, Cell, CompletedBarAggregator, FeatureService, InstrumentKey, LocationDetector,
@@ -500,6 +501,11 @@ class ReplayWorker:
                     if exit_quote is not None:
                         exit_event.update({"synthetic_future_price": exit_quote.price, "ce_strike": exit_quote.strike,
                                            "ce_exit_price": exit_quote.ce.close, "pe_exit_price": exit_quote.pe.close})
+                    exit_event["decision_view"] = validate_decision_view(build_decision_view(
+                        exit_event,
+                        event_type="EXITDECISION",
+                        strategy_id=action.intent.strategy_id,
+                    ))
                     all_events.append(exit_event)
                     all_events.append({"event_type": "ORDER_INTENT", "decision_id": action.intent.client_order_id,
                                        "client_order_id": action.intent.client_order_id,
@@ -912,27 +918,37 @@ class ReplayWorker:
     def _normalize_decision(event: dict[str, Any]) -> dict[str, Any]:
         payload = dict(event)
         event_type = str(payload.get("event_type", ""))
+        raw_view = payload.get("decision_view")
+        view = validate_decision_view(raw_view) if isinstance(raw_view, Mapping) else build_decision_view(
+            payload, event_type=event_type,
+        )
+        subject = dict(view["subject"])
+        policy = dict(view["policy"])
+        evidence = dict(view["evidence"])
+        metrics = dict(evidence.get("metrics") or {})
         return {
-            "candidate_identity": payload.get("candidate_id") or payload.get("decision_id"),
-            "decision_id": payload.get("decision_id"),
-            "decision_stage": payload.get("decision_stage") or event_type.lower().removesuffix("decision"),
-            "outcome": payload.get("outcome") or event_type.lower(),
-            "rejection_reason": payload.get("reason"),
+            "candidate_identity": view.get("decision_id"),
+            "decision_id": view.get("decision_id"),
+            "decision_stage": view.get("stage") or event_type.lower().removesuffix("decision"),
+            "outcome": policy.get("outcome") or event_type.lower(),
+            "rejection_reason": policy.get("reason_code"),
             "risk": {
-                key: payload.get(key) for key in ("stop_basis", "risk_per_trade", "risk_amount", "quantity", "score_multiplier")
-                if payload.get(key) is not None
+                key: metrics.get(key) for key in ("stop_basis", "risk_per_trade", "risk_amount", "quantity", "score_multiplier")
+                if metrics.get(key) is not None
             },
             "sizing": {
-                key: payload.get(key) for key in ("quantity", "max_lots", "lot_size", "entry_price")
-                if payload.get(key) is not None
+                key: metrics.get(key) for key in ("quantity", "max_lots", "lot_size", "entry_price")
+                if metrics.get(key) is not None
             },
             "execution": {
-                key: payload.get(key) for key in ("vehicle", "client_order_id", "execution_status", "execution_event_type")
+                key: payload.get(key) for key in ("client_order_id", "execution_status", "execution_event_type")
                 if payload.get(key) is not None
             },
-            "date": payload.get("session_date"),
-            "timestamp": payload.get("decision_at"),
-            "bar_index": payload.get("sequence"),
+            "subject": subject,
+            "evidence": evidence,
+            "date": evidence.get("provenance", {}).get("session_date"),
+            "timestamp": view.get("at"),
+            "bar_index": metrics.get("sequence"),
         }
 
     @staticmethod
