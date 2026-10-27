@@ -1053,11 +1053,16 @@
     .context-section { margin-bottom: 14px; }
     .context-section .section-head { margin-bottom: 10px; }
     .context-evidence { color: var(--md-on-surface-variant); font-size: 12px; line-height: 1.5; }
+    .context-note { margin: 0 0 14px; padding: 12px 14px; border-left: 3px solid var(--md-primary); background: var(--md-primary-container); color: var(--md-on-primary-container); border-radius: 8px; line-height: 1.5; }
+    .context-state { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .context-state > div { padding: 12px; border: 1px solid var(--md-outline-variant); border-radius: 8px; background: var(--md-surface); }
+    .context-state strong { display: block; margin-top: 5px; overflow-wrap: anywhere; }
+    .context-location-meta { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 9px; }
     .context-section.orderflow-sequence { max-height: 620px; overflow-y: auto; }
     .orderflow-sequence-row:nth-of-type(even) { background: var(--md-surface); }
     .orderflow-sequence-row summary > span { min-width: 0; overflow-wrap: anywhere; }
-    @media (max-width: 800px) { .orderflow-grid, .orderflow-locations, .orderflow-action-grid, .orderflow-columns { grid-template-columns: 1fr 1fr; } .context-hero { grid-template-columns: repeat(2, minmax(0, 1fr)); } .context-hero .context-read { grid-column: 1 / -1; } .orderflow-sequence-row summary { grid-template-columns: 1fr 1fr; } }
-    @media (max-width: 480px) { .orderflow-grid, .orderflow-locations, .orderflow-action-grid, .orderflow-columns { grid-template-columns: 1fr; } }
+    @media (max-width: 800px) { .orderflow-grid, .orderflow-locations, .orderflow-action-grid, .orderflow-columns, .context-state { grid-template-columns: 1fr 1fr; } .context-hero { grid-template-columns: repeat(2, minmax(0, 1fr)); } .context-hero .context-read { grid-column: 1 / -1; } .orderflow-sequence-row summary { grid-template-columns: 1fr 1fr; } }
+    @media (max-width: 480px) { .orderflow-grid, .orderflow-locations, .orderflow-action-grid, .orderflow-columns, .context-state { grid-template-columns: 1fr; } }
     @media (max-width: 480px) { .context-hero { grid-template-columns: 1fr; } .context-hero .context-read { grid-column: auto; } }
   </style>
 </head>
@@ -1353,22 +1358,28 @@
         return '<div class="card empty"><h2>Orderflow context unavailable</h2><p>The UI did not receive a canonical orderflow decision payload for this session. Check the API connection and reload the page.</p></div>';
       }
       const outcome = String(action.outcome || '').toLowerCase();
-      const isNoTrade = action.name === 'No trade' || outcome === 'rejected';
-      const read = action.reason || action.outcome || 'No current orderflow decision was reported.';
+      const responseStates = locations.map((item) => String(item.response_status || '').toUpperCase()).filter(Boolean);
+      const interactionStates = locations.map((item) => String(item.interaction_status || '').toUpperCase()).filter(Boolean);
+      const responseState = responseStates.includes('CONFIRMED') ? 'CONFIRMED' : responseStates[0] || 'UNAVAILABLE';
+      const interactionState = interactionStates[0] || 'UNAVAILABLE';
+      const isNoTrade = action.name === 'No trade' || outcome === 'rejected' || outcome === 'unavailable';
+      const read = responseState === 'CONFIRMED'
+        ? 'A response has been confirmed; this remains a diagnostic candidate until execution policy is enabled.'
+        : action.reason || 'Waiting for causal response evidence.';
       const field = (value) => value == null || value === '' ? 'Unavailable' : esc(value);
-      const locationCards = locations.length ? locations.map((item) => `<article class="orderflow-location"><h3>${field(item.name)}</h3><span>Reference / distance</span><strong>${field(item.reference)} · ${field(item.distance)}</strong><p>${badge(field(item.interaction_status), 'subtle')} ${badge(field(item.response_status), item.response_status === 'CONFIRMED' ? 'good' : 'warn')}</p><p>Flow implication: <strong>${field(item.implication)}</strong></p></article>`).join('') : '<div class="empty">No orderflow locations observed.</div>';
-      const sequenceRows = sequence.length ? sequence.slice().reverse().map((item) => `<details class="orderflow-sequence-row"><summary><span>${field(date(item.time))}</span><span>${field(item.location)}</span><span>${field(item.transition)}</span><span>${badge(field(item.direction), item.direction === 'LONG' ? 'good' : item.direction === 'SHORT' ? 'bad' : 'subtle')}</span><span>${field(item.implication)}</span></summary><div class="payload">${esc(JSON.stringify(item.evidence || {}, null, 2))}</div></details>`).join('') : '<div class="empty">No orderflow transitions observed.</div>';
+      const locationCards = locations.length ? locations.map((item) => `<article class="orderflow-location"><h3>${field(item.name)}</h3><span>Reference level / distance</span><strong>${field(item.reference)} · ${field(item.distance)}</strong><div class="context-location-meta">${badge(field(item.interaction_status), 'subtle')} ${badge(field(item.response_status), item.response_status === 'CONFIRMED' ? 'good' : 'warn')}</div><p>Directional hypothesis: <strong>${field(item.implication)}</strong></p></article>`).join('') : '<div class="empty">No reference interaction observed.</div>';
+      const sequenceRows = sequence.length ? sequence.slice().reverse().map((item) => `<details class="orderflow-sequence-row"><summary><span>${field(date(item.time))}</span><span>${field(item.location)}</span><span>${field(item.transition)}</span><span>${badge(field(item.direction), item.direction === 'LONG' ? 'good' : item.direction === 'SHORT' ? 'bad' : 'subtle')}</span><span>${field(item.implication)}</span></summary><div class="payload"><strong>Causal evidence</strong>${esc(JSON.stringify(item.evidence || {}, null, 2))}</div></details>`).join('') : '<div class="empty">No completed-bar transitions observed.</div>';
       return `<div class="context-hero">
-        <div class="context-read"><div class="label">Orderflow read</div><h2>${field(action.name)}</h2><p>${field(read)}</p><span class="badge ${isNoTrade ? 'warn' : 'good'}">${isNoTrade ? 'Stand aside' : 'Actionable context'}</span></div>
-        <div><div class="label">Bias</div><span class="context-value">${field(model.bias)}</span></div>
-        <div><div class="label">Market state</div><span class="context-value">${field(model.market_state)}</span></div>
-        <div><div class="label">Setup / location</div><span class="context-value">${field(setup.name || setup.location)}</span></div>
-        <div><div class="label">Decision at</div><span class="context-value">${esc(date(model.as_of))}</span></div>
-        <div><div class="label">Updated at</div><span class="context-value">${esc(date(model.updated_at))}</span></div>
+        <div class="context-read"><div class="label">Diagnostic orderflow state</div><h2>${field(action.name)}</h2><p>${field(read)}</p><span class="badge ${isNoTrade ? 'warn' : 'good'}">${isNoTrade ? 'No executable order' : 'Diagnostic only'}</span></div>
+        <div><div class="label">Interaction</div><span class="context-value">${field(interactionState)}</span></div>
+        <div><div class="label">Response</div><span class="context-value">${field(responseState)}</span></div>
+        <div><div class="label">Evidence bars</div><span class="context-value">${sequence.length} completed 5m</span></div>
       </div>
-      <section class="card context-section"><div class="section-head"><div><h2>Location response</h2><div class="context-evidence">Only orderflow interaction and response states are shown. No strategy-neutral event data is mixed in.</div></div><span class="badge"><strong>${locations.length}</strong> locations</span></div><div class="orderflow-locations">${locationCards}</div></section>
-       <section class="card orderflow-sequence context-section"><div class="section-head"><div><h2>Flow sequence</h2><div class="context-evidence">One transition per completed 5m bar from the canonical orderflow decision stream.</div></div><span class="badge"><strong>${sequence.length}</strong> 5m bars</span></div>${sequenceRows}</section>
-      <details class="card"><summary>Canonical provenance</summary><div class="payload">${esc(JSON.stringify(model.provenance, null, 2))}</div></details>`;
+      <p class="context-note"><strong>How to read this:</strong> reference levels create interaction episodes; completed candles determine the response. A confirmed response is evidence for a candidate, not an execution instruction. Levels such as VWAP are shown only as reference context.</p>
+      <section class="card context-section"><div class="section-head"><div><h2>Current lifecycle</h2><div class="context-evidence">The latest orderflow state, kept separate from portfolio and execution state.</div></div><span class="badge">${field(setup.stage || 'trigger')}</span></div><div class="context-state"><div><div class="label">Setup</div><strong>${field(setup.name || setup.location)}</strong></div><div><div class="label">Directional hypothesis</div><strong>${field(model.bias)}</strong></div><div><div class="label">Market state</div><strong>${field(model.market_state)}</strong></div><div><div class="label">Decision at</div><strong>${esc(date(model.as_of))}</strong></div><div><div class="label">Last updated</div><strong>${esc(date(model.updated_at))}</strong></div><div><div class="label">Reference interactions</div><strong>${locations.length}</strong></div></div></section>
+      <section class="card context-section"><div class="section-head"><div><h2>Reference interactions</h2><div class="context-evidence">Frozen levels and their response status. These are context inputs, not independent trade signals.</div></div><span class="badge"><strong>${locations.length}</strong> references</span></div><div class="orderflow-locations">${locationCards}</div></section>
+      <section class="card orderflow-sequence context-section"><div class="section-head"><div><h2>Causal response sequence</h2><div class="context-evidence">One lifecycle transition per completed 5m bar. Expand a row to inspect its evidence lineage.</div></div><span class="badge"><strong>${sequence.length}</strong> bars</span></div>${sequenceRows}</section>
+       <details class="card"><summary>Canonical provenance</summary><div class="payload">${esc(JSON.stringify(model.provenance, null, 2))}</div></details>`;
     }
 
     function orderflowPage(model) {
