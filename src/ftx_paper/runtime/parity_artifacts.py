@@ -1,6 +1,7 @@
 """Minimal producer-neutral parity artifact for Paper replays."""
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 import hashlib
@@ -106,6 +107,25 @@ def _record(record: Mapping[str, Any], *, kind: str, sequence: int) -> dict[str,
     }
 
 
+def decision_diagnostics(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Summarize Paper decisions without changing the parity layer."""
+    kinds = Counter(str(record.get("kind", "")) for record in records)
+    stages: Counter[str] = Counter()
+    outcomes: Counter[str] = Counter()
+    reasons: Counter[str] = Counter()
+    for record in records:
+        values = record.get("values", record.get("comparable_values", record))
+        values = values if isinstance(values, Mapping) else {}
+        stages[str(values.get("decision_stage", "unknown"))] += 1
+        outcomes[str(values.get("outcome", record.get("kind", "unknown")))] += 1
+        reasons[str(values.get("reason") or values.get("reason_code") or "")] += 1
+    return {
+        "count": len(records),
+        "kind_counts": dict(sorted(kinds.items())),
+        "stage_counts": dict(sorted(stages.items())),
+        "outcome_counts": dict(sorted(outcomes.items())),
+        "reason_counts": dict(sorted(reasons.items())),
+    }
 def _coverage(
     decisions: Sequence[Mapping[str, Any]], bars_seen: int, unavailable: Sequence[str],
     *, execution_observed: bool, ledger_observed: bool, input_identity: Any,

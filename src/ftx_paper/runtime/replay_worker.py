@@ -20,6 +20,7 @@ from ftx_paper.domain import AccountAggregate, PortfolioState
 from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.runtime.engine import PaperEngine
 from ftx_paper.runtime.events import is_decision_event
+from ftx_paper.strategy.orderflow_contract import stable_orderflow_id
 from ftx_paper.strategy.orderflow_producer import CausalOrderflowProducer
 from ftx_paper.runtime.futures_source import FuturesSessionSourceResolver
 from ftx_paper.runtime.parity_artifacts import build_parity_artifact
@@ -64,6 +65,41 @@ def _execution_cost(trade: dict[str, Any]) -> float:
     return synthetic_futures_cost(
         ce, pe, lots, is_short=str(trade.get("side", "")).upper() == "SELL",
     )
+
+
+def _available_orderflow_trigger_events(
+    bundle: Any,
+    as_of: datetime,
+    emitted_ids: set[str],
+) -> list[dict[str, Any]]:
+    """Project completed 1m evidence at the replay decision boundary."""
+    context = getattr(bundle, "orderflow_context", None)
+    if context is None:
+        return []
+    events: list[dict[str, Any]] = []
+    for observation in context.observations_for("1m"):
+        if observation.available_at > as_of or observation.observation_id in emitted_ids:
+            continue
+        emitted_ids.add(observation.observation_id)
+        events.append({
+            "event_type": "POLICY_DECISION",
+            "strategy_id": "ftx-paper-orderflow",
+            "strategy_name": "ftx-paper-orderflow",
+            "decision_id": stable_orderflow_id("trigger", observation.observation_id),
+            "decision_at": observation.available_at.isoformat(),
+            "available_at": observation.available_at.isoformat(),
+            "observed_at": observation.observed_at.isoformat(),
+            "outcome": "recorded",
+            "reason": "trigger_observation",
+            "decision_stage": "trigger",
+            "timeframe": "1m",
+            "source_observation_id": observation.source_observation_id,
+            "source_observation_ids": [observation.observation_id],
+            "feature_values": dict(observation.features),
+            "replay_provenance": dict(observation.context.replay_provenance) if observation.context else {},
+            "session_date": observation.context.session_id if observation.context else None,
+        })
+    return events
 
 
 class ReplayWorker:
@@ -283,6 +319,7 @@ class ReplayWorker:
         all_events: list[dict[str, Any]] = []
         trace: list[dict[str, Any]] = []
         parity_records: dict[str, list[dict[str, Any]]] = {"decisions": [], "execution": []}
+        emitted_orderflow_trigger_ids: set[str] = set()
         unavailable_fields: set[str] = set()
         diagnostic_trades: list[dict[str, Any]] = []
         bars_seen = 0
@@ -572,8 +609,14 @@ class ReplayWorker:
                         raise
                     result = engine.on_bundle(bundle)
                 bars_seen += 1
+                trigger_events = _available_orderflow_trigger_events(
+                    bundle, futures_bar.timestamp, emitted_orderflow_trigger_ids,
+                )
+                all_events.extend(trigger_events)
                 result_events = [{**event, "source": "replay", "session_date": date} for event in result.events]
                 all_events.extend(result_events)
+                for event in trigger_events:
+                    parity_records["decisions"].append(dict(event))
                 for order in result.orders:
                     all_events.append({"event_type": "ORDER_INTENT",
                                        "decision_id": order.client_order_id.rsplit(":", 1)[0],

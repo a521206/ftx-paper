@@ -2,6 +2,7 @@ from ftx_paper.runtime.parity_artifacts import (
     PARITY_LAYERS,
     build_parity_artifact,
     compare_parity_manifests,
+    decision_diagnostics,
     parity_layer_records,
     validate_parity_artifact,
 )
@@ -55,3 +56,18 @@ def test_orderflow_scope_uses_canonical_session_and_vehicle_fields() -> None:
     assert scope["sessions"] == ["orderflow"]
     assert scope["vehicles"] == ["futures"]
     assert scope["partitions"] == {"source": ["orderflow"]}
+
+
+def test_decision_diagnostics_exposes_paper_stage_and_reason_counts() -> None:
+    records = [
+        {"kind": "recorded", "values": {"decision_stage": "trigger", "outcome": "recorded", "reason": "trigger_observation"}},
+        {"kind": "rejected", "values": {"decision_stage": "trigger", "outcome": "rejected", "reason": "no_orderflow_interaction"}},
+        {"kind": "accepted", "values": {"decision_stage": "admission", "outcome": "accepted", "reason": "orderflow_admission"}},
+    ]
+
+    diagnostics = decision_diagnostics(records)
+
+    assert diagnostics["count"] == 3
+    assert diagnostics["kind_counts"] == {"accepted": 1, "recorded": 1, "rejected": 1}
+    assert diagnostics["stage_counts"] == {"admission": 1, "trigger": 2}
+    assert diagnostics["reason_counts"]["trigger_observation"] == 1
