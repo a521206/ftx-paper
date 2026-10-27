@@ -1343,11 +1343,13 @@
       const setup = model.setup;
       const locations = model.locations;
       const sequence = model.sequence;
-      if (!model.as_of || !model.updated_at || !model.bias || !model.market_state || !action?.name || !setup?.name || !Array.isArray(locations) || !Array.isArray(sequence)) {
+      const hasValue = (value) => value != null && value !== '';
+      const actionComplete = action && hasValue(action.name) && hasValue(action.direction) && hasValue(action.entry_trigger) && hasValue(action.reason) && (hasValue(action.stop_basis) || hasValue(action.stop_price)) && (hasValue(action.exit_condition) || hasValue(action.target));
+      if (!model.as_of || !model.updated_at || !model.bias || !model.market_state || !actionComplete || !setup?.name || !Array.isArray(locations) || !Array.isArray(sequence)) {
         return '<div class="card empty">Orderflow context is unavailable for this session.</div>';
       }
       const read = action.reason ?? action.outcome;
-      const field = (value) => value == null ? '' : esc(value);
+      const field = (value) => value == null || value === '' ? 'Unavailable' : esc(value);
       const locationCards = locations.length ? locations.map((item) => `<article class="orderflow-location"><h3>${field(item.name)}</h3><span>Reference / distance</span><strong>${field(item.reference)} · ${field(item.distance)}</strong><p>${badge(field(item.interaction_status), 'subtle')} ${badge(field(item.response_status), item.response_status === 'CONFIRMED' ? 'good' : 'warn')}</p><p>Flow implication: <strong>${field(item.implication)}</strong></p></article>`).join('') : '<div class="empty">No orderflow locations observed.</div>';
       const sequenceRows = sequence.length ? sequence.slice().reverse().map((item) => `<details class="orderflow-sequence-row"><summary><span>${field(date(item.time))}</span><span>${field(item.location)}</span><span>${field(item.transition)}</span><span>${badge(field(item.direction), item.direction === 'LONG' ? 'good' : item.direction === 'SHORT' ? 'bad' : 'subtle')}</span><span>${field(item.implication)}</span></summary><div class="payload">${esc(JSON.stringify(item.evidence || {}, null, 2))}</div></details>`).join('') : '<div class="empty">No orderflow transitions observed.</div>';
       return `<div class="context-hero">
@@ -1369,11 +1371,13 @@
       const locations = model.locations;
       const sequence = model.sequence;
       const trades = model.trades;
-      if (!model.as_of || !model.updated_at || !model.bias || !model.market_state || !action?.name || !setup?.name || !Array.isArray(position) || !Array.isArray(locations) || !Array.isArray(sequence) || !Array.isArray(trades)) {
+      const hasValue = (value) => value != null && value !== '';
+      const actionComplete = action && hasValue(action.name) && hasValue(action.direction) && hasValue(action.entry_trigger) && hasValue(action.reason) && (hasValue(action.stop_basis) || hasValue(action.stop_price)) && (hasValue(action.exit_condition) || hasValue(action.target));
+      if (!model.as_of || !model.updated_at || !model.bias || !model.market_state || !actionComplete || !setup?.name || !Array.isArray(position) || !Array.isArray(locations) || !Array.isArray(sequence) || !Array.isArray(trades)) {
         return '<div class="card empty">Orderflow workspace is unavailable for this session.</div>';
       }
       const replayDate = activityDateKey(model.as_of);
-      const value = (item) => item == null || item === '' ? '' : item;
+      const value = (item) => item == null || item === '' ? 'Unavailable' : item;
       const locationCards = locations.length ? locations.map((item) => `<article class="orderflow-location"><h3>${esc(item.name || item.location)}</h3><span>Reference / distance</span><strong>${esc(value(item.reference))} · ${esc(value(item.distance))}</strong><p>${badge(value(item.interaction_status), 'subtle')} ${badge(value(item.response_status), item.response_status === 'CONFIRMED' ? 'good' : 'warn')}</p><p>Implication: <strong>${esc(value(item.implication))}</strong></p></article>`).join('') : '<div class="empty">No active locations recorded</div>';
       const sequenceRows = sequence.length ? sequence.slice().reverse().map((item) => `<details class="orderflow-sequence-row"><summary><span>${esc(date(item.time))}</span><span>${esc(value(item.location))}</span><span>${esc(value(item.transition))}</span><span>${badge(value(item.direction), item.direction === 'LONG' ? 'good' : item.direction === 'SHORT' ? 'bad' : 'subtle')}</span><span>${esc(value(item.implication))}</span></summary><div class="payload">${esc(JSON.stringify(item.evidence || {}, null, 2))}</div></details>`).join('') : '<div class="empty">No orderflow sequence recorded</div>';
       const tradeRows = trades.length ? trades.slice(0, 8).map((trade) => `<tr><td>${esc(date(trade.created_at || trade.payload?.timestamp))}</td><td>${esc(trade.payload?.side || trade.payload?.direction || '—')}</td><td>${esc(money(trade.payload?.entry_price ?? trade.payload?.price))}</td><td>${esc(money(trade.payload?.realized_pnl ?? trade.payload?.pnl))}</td></tr>`).join('') : '<tr><td colspan="4" class="empty">No orderflow-triggered trades recorded</td></tr>';
@@ -1381,7 +1385,7 @@
         <section class="orderflow-action"><div class="section-head"><div><div class="label">Decision action</div><h2>${esc(value(action.name))}</h2></div><a href="/replay?date=${encodeURIComponent(replayDate)}">Open replay</a></div><div class="orderflow-action-grid">${[['Direction', action.direction], ['Entry trigger', action.entry_trigger], ['Entry / zone', action.entry_price ?? `${action.trigger_zone?.lower ?? '—'} – ${action.trigger_zone?.upper ?? '—'}`], ['Stop', `${value(action.stop_basis)} · ${value(action.stop_price)}`], ['Target / exit', action.target ?? action.exit_condition], ['Risk / reward', action.risk_reward]].map(([label, item]) => `<div><span>${label}</span><strong>${esc(value(item))}</strong></div>`).join('')}</div><p><strong>Reason:</strong> ${esc(value(action.reason))}</p></section>
         <section><div class="section-head"><div><h2>Active location board</h2><div class="label">Actionable interaction and response state</div></div></div><div class="orderflow-locations">${locationCards}</div></section>
         <section class="card orderflow-sequence"><div class="section-head"><div><h2>Orderflow sequence</h2><div class="label">Recent causal transitions</div></div><span class="badge">${sequence.length} events</span></div>${sequenceRows}</section>
-        <div class="orderflow-columns"><section class="card"><h2>Current position</h2>${position.length ? table(position) : '<div class="empty">Flat</div>'}</section><section class="card"><h2>Recent trades</h2><table><thead><tr><th>Time</th><th>Direction</th><th>Price</th><th>P&amp;L</th></tr></thead><tbody>${tradeRows}</tbody></table></section></div>
+        <div class="orderflow-columns"><section class="card"><h2>Current shared portfolio exposure</h2><div class="label">Position data is shared across configured strategies.</div>${position.length ? table(position) : '<div class="empty">Flat</div>'}</section><section class="card"><h2>Recent trades</h2><table><thead><tr><th>Time</th><th>Direction</th><th>Price</th><th>P&amp;L</th></tr></thead><tbody>${tradeRows}</tbody></table></section></div>
         <details class="card"><summary>Evidence and provenance</summary><div class="payload">${esc(JSON.stringify(model.provenance || {}, null, 2))}</div></details>`;
     }
 

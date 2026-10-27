@@ -39,3 +39,24 @@ def test_orderflow_projection_calculates_risk_reward_for_trade_action():
     assert result["bias"] == "SHORT"
     assert result["action"]["name"] == "Trade now"
     assert result["action"]["risk_reward"] == 2.0
+
+
+def test_orderflow_projection_does_not_misclassify_lifecycle_as_market_state():
+    result = build_orderflow_projection([{"decision_view": _view()}], [], [], [])
+
+    assert result["market_state"] is None
+
+
+def test_orderflow_projection_uses_explicit_market_state_and_labels_positions():
+    view = _view(
+        market_state="TRENDING",
+        evidence={
+            "metrics": {},
+            "state": {"market_state": "RANGE"},
+            "provenance": {},
+        },
+    )
+    result = build_orderflow_projection([{"decision_view": view}], [], [{"symbol": "NIFTY"}], [])
+
+    assert result["market_state"] == "TRENDING"
+    assert result["position_scope"] == "shared_portfolio"

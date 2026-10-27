@@ -101,12 +101,15 @@ def build_orderflow_projection(
         "as_of": _first(view.get("at"), latest.get("created_at")),
         "updated_at": as_of,
         "bias": direction,
-        "market_state": _first(state.get("response_state"), state.get("interaction_state"), view.get("stage"), "Not reported"),
+        # Response/lifecycle states are not market states. Only use an explicit
+        # market-state field; the UI treats None as unavailable.
+        "market_state": _first(view.get("market_state"), state.get("market_state")),
         "setup": {"name": _first(subject.get("setup"), view.get("context")), "location": view.get("context"), "stage": view.get("stage")},
         "action": {"name": action_name, "direction": direction, "outcome": outcome, "entry_trigger": _first(provenance.get("trigger"), policy.get("message")), "entry_price": entry, "trigger_zone": {"lower": provenance.get("lower_band"), "upper": provenance.get("upper_band")}, "stop_basis": _first(metrics.get("stop_basis"), policy.get("reason_code")), "stop_price": stop, "target": target, "exit_condition": _first(policy.get("exit_mode"), metrics.get("exit_mode")), "risk_reward": risk_reward, "reason": reason},
         "locations": list(location_keys.values()),
         "sequence": sequence[-100:],
         "position": {"open": list(positions)},
+        "position_scope": "shared_portfolio",
         "trades": list(trades),
         "provenance": {"decision_id": view.get("decision_id"), "decision_at": view.get("at"), "source": provenance},
     }
