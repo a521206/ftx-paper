@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 from dataclasses import replace
+from typing import cast
 
 from ftx_paper.domain.decision_context import (
     CapitalSnapshot,
@@ -19,12 +20,14 @@ from ftx_paper.domain.decision_context import (
 from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.contracts import MarketRole
 from ftx_paper.market.bundles import DecisionBundle
+from ftx_paper.market.location import Location, LocationDetector
 
 from .coordinator import SharedDecisionCoordinator
 from .orderflow_contract import OrderflowObservation, stable_orderflow_id
 from .orderflow_trigger import observe_trigger
 from .orderflow_opportunity import (
-    ExecutionGroupRegistry, SetupOpportunity, advance_timeouts_before_formation,
+    ExecutionGroupRegistry, OpportunityStatus, SetupOpportunity,
+    advance_timeouts_before_formation,
 )
 from .orderflow_admission import evaluate_admission
 from .orderflow_capture import CaptureMode
@@ -199,6 +202,9 @@ class OrderflowPolicy:
         self._interactions: dict[str, InteractionState] = {}
         self._session_id: str | None = None
         self._processed_observation_ids: set[str] = set()
+        self._processed_location_observation_ids: set[str] = set()
+        self._location_interactions: dict[str, dict[str, object]] = {}
+        self._location_detector = LocationDetector()
         self._admission_suspended = False
         self._gap_end: datetime | None = None
         self._opportunities: dict[str, SetupOpportunity] = {}
@@ -246,6 +252,8 @@ class OrderflowPolicy:
             }) for item in self._interactions.values() if item.state in {"CREATED", "ACTIVE"}]
             self._interactions.clear()
             self._processed_observation_ids.clear()
+            self._processed_location_observation_ids.clear()
+            self._location_interactions.clear()
             self._admission_suspended = False
             self._gap_end = None
             self._opportunities.clear()
@@ -259,6 +267,33 @@ class OrderflowPolicy:
         results: list[PolicyDecision] = list(session_transitions)
         futures = bundle.bars.get(MarketRole.FUTURES)
         expected_instrument = futures.instrument.symbol if futures is not None else None
+        location_features = (
+            bundle.feature_snapshot.location_features
+            if bundle.feature_snapshot is not None else None
+        )
+        if self._session_id == orderflow.session_id and not self._processed_observation_ids:
+            self._location_detector.reset(
+                prior_day_high=(
+                    float(location_features.prior_day_high)
+                    if location_features is not None
+                    and isinstance(location_features.prior_day_high, (int, float))
+                    and not isinstance(location_features.prior_day_high, bool)
+                    else None
+                ),
+                prior_day_low=(
+                    float(location_features.prior_day_low)
+                    if location_features is not None
+                    and isinstance(location_features.prior_day_low, (int, float))
+                    and not isinstance(location_features.prior_day_low, bool)
+                    else None
+                ),
+            )
+        if futures is not None:
+            location_snapshot = self._location_detector.observe(
+                futures, features=location_features,
+            )
+        else:
+            location_snapshot = None
         for observation in observations:
             if observation.observation_id in self._processed_observation_ids:
                 continue
@@ -288,8 +323,108 @@ class OrderflowPolicy:
             if not orderflow.validate_complete_parent(observation):
                 continue
             self._processed_observation_ids.add(observation.observation_id)
-            vwap = _number(observation, "vwap")
             close = _number(observation, "close")
+            high = _number(observation, "high")
+            low = _number(observation, "low")
+            if observation.timeframe == "5m" and location_features is not None:
+                width = max(float(location_features.atr) * 0.06, 1e-9)
+                levels = {
+                    Location.OR_HIGH: location_features.opening_range_high,
+                    Location.OR_LOW: location_features.opening_range_low,
+                    Location.SESSION_HIGH: location_features.session_high,
+                    Location.SESSION_LOW: location_features.session_low,
+                    Location.PRIOR_DAY_HIGH: location_features.prior_day_high,
+                    Location.PRIOR_DAY_LOW: location_features.prior_day_low,
+                }
+                detected = {
+                    location for location, level in levels.items()
+                    if isinstance(level, (int, float))
+                    and not isinstance(level, bool)
+                    and high is not None
+                    and low is not None
+                    and low <= float(level) + width
+                    and high >= float(level) - width
+                }
+                if location_snapshot is not None:
+                    detected.update(
+                        location for location in location_snapshot.locations
+                        if location in levels
+                    )
+                for alias, interaction in tuple(self._location_interactions.items()):
+                    lower = cast(float, interaction["lower"])
+                    upper = cast(float, interaction["upper"])
+                    if low is not None and high is not None and low <= upper and high >= lower:
+                        continue
+                    self._location_interactions.pop(alias, None)
+                    results.append(PolicyDecision({
+                        **base,
+                        "decision_stage": "lifecycle",
+                        "outcome": "rejected",
+                        "reason": "interaction_ended",
+                        "decision_id": _decision_id(
+                            "lifecycle", interaction["interaction_id"],
+                            observation.observation_id, "ended",
+                        ),
+                        "location": alias,
+                        "interaction_id": interaction["interaction_id"],
+                        "response_state": "ENDED",
+                        "source_observation_ids": [observation.observation_id],
+                    }))
+                for location in sorted(detected, key=lambda item: item.value):
+                    alias = location.value
+                    interaction = self._location_interactions.get(alias)
+                    level = levels[location]
+                    if not isinstance(level, (int, float)) or isinstance(level, bool):
+                        continue
+                    frozen_level = float(level)
+                    if interaction is not None and interaction["level"] != frozen_level:
+                        results.append(PolicyDecision({
+                            **base,
+                            "decision_stage": "lifecycle",
+                            "outcome": "rejected",
+                            "reason": "reference_replaced",
+                            "decision_id": _decision_id(
+                                "lifecycle", interaction["interaction_id"],
+                                observation.observation_id, "reference_replaced",
+                            ),
+                            "location": alias,
+                            "interaction_id": interaction["interaction_id"],
+                            "response_state": "ENDED",
+                            "source_observation_ids": [observation.observation_id],
+                        }))
+                        interaction = None
+                        self._location_interactions.pop(alias, None)
+                    if interaction is None:
+                        interaction = {
+                            "interaction_id": stable_orderflow_id(
+                                "interaction", observation.observation_id, alias,
+                            ),
+                            "level": frozen_level,
+                            "lower": frozen_level - width,
+                            "upper": frozen_level + width,
+                        }
+                        self._location_interactions[alias] = interaction
+                    location_key = f"{observation.observation_id}:{alias}"
+                    if location_key in self._processed_location_observation_ids:
+                        continue
+                    self._processed_location_observation_ids.add(location_key)
+                    results.append(PolicyDecision({
+                        **base,
+                        "decision_stage": "opportunity",
+                        "outcome": "recorded",
+                        "reason": "location_interaction_observed",
+                        "decision_id": _decision_id(
+                            "opportunity", interaction["interaction_id"],
+                            observation.observation_id,
+                        ),
+                        "location": alias,
+                        "interaction_id": interaction["interaction_id"],
+                        "source_observation_ids": [observation.observation_id],
+                        "observed_at": observation.observed_at.isoformat(),
+                        "available_at": observation.available_at.isoformat(),
+                        "feature_values": dict(observation.features),
+                    }))
+            vwap = _number(observation, "vwap")
             if vwap is None or close is None:
                 results.append(PolicyDecision({
                     **base,
@@ -335,6 +470,7 @@ class OrderflowPolicy:
                 }))
                 continue
             generation = observation.context.generation if observation.context else None
+            previous_opportunities = dict(self._opportunities)
             self._opportunities = {
                 key: value for key, value in (
                     (key, advance_timeouts_before_formation((item,), timeframe=observation.timeframe,
@@ -343,6 +479,29 @@ class OrderflowPolicy:
                     for key, item in self._opportunities.items()
                 )
             }
+            for opportunity_id, opportunity in self._opportunities.items():
+                previous_opportunity = previous_opportunities.get(opportunity_id)
+                if previous_opportunity is None or len(opportunity.transitions) <= len(previous_opportunity.transitions):
+                    continue
+                for transition in opportunity.transitions[len(previous_opportunity.transitions):]:
+                    if transition.status is not OpportunityStatus.EXPIRED:
+                        continue
+                    results.append(PolicyDecision({
+                        **base,
+                        "decision_stage": "lifecycle",
+                        "outcome": "rejected",
+                        "reason": "setup_expired",
+                        "decision_id": _decision_id(
+                            "lifecycle", opportunity.lifecycle_id,
+                            transition.at.isoformat(), "setup_expired",
+                        ),
+                        "opportunity_id": opportunity.lifecycle_id,
+                        "setup_id": opportunity.setup.setup_id,
+                        "interaction_id": opportunity.response_episode_id.removeprefix("response-"),
+                        "observed_at": transition.at.isoformat(),
+                        "available_at": transition.at.isoformat(),
+                        "source_observation_ids": list(transition.evidence_ids),
+                    }))
             previous = next(
                 (
                     item for item in self._interactions.values()
@@ -569,6 +728,18 @@ class OrderflowPolicy:
                              "direction": previous.response_direction},
             }
             results.append(PolicyDecision(payload))
+            results.append(PolicyDecision({
+                **base, **provenance, "decision_stage": "opportunity",
+                "outcome": "recorded", "reason": "response_confirmed",
+                "decision_id": _decision_id(
+                    "opportunity", opportunity.lifecycle_id,
+                    observation.observation_id, "resolved",
+                ),
+                "opportunity_id": opportunity.lifecycle_id,
+                "interaction_id": interaction_id,
+                "response_state": previous.response_state,
+                "source_observation_ids": [observation.observation_id],
+            }))
         if not results and all(observation.observation_id in self._processed_observation_ids for observation in observations):
             return ()
         return tuple(results)
@@ -584,6 +755,7 @@ class OrderflowPolicy:
             "interactions": [asdict(self._interactions[key]) for key in sorted(self._interactions)],
             "session_id": self._session_id,
             "processed_observation_ids": sorted(self._processed_observation_ids),
+            "processed_location_observation_ids": sorted(self._processed_location_observation_ids),
         }
 
     @classmethod
@@ -616,6 +788,12 @@ class OrderflowPolicy:
         if not isinstance(raw_processed, (list, tuple)) or any(not isinstance(item, str) for item in raw_processed):
             raise ValueError("invalid processed orderflow observation IDs")
         policy._processed_observation_ids = set(raw_processed)
+        raw_location_processed = snapshot.get("processed_location_observation_ids", ())
+        if not isinstance(raw_location_processed, (list, tuple)) or any(
+            not isinstance(item, str) for item in raw_location_processed
+        ):
+            raise ValueError("invalid processed location observation IDs")
+        policy._processed_location_observation_ids = set(raw_location_processed)
         raw_interactions = snapshot.get("interactions", ())
         if not isinstance(raw_interactions, (list, tuple)):
             raise ValueError("orderflow snapshot interactions must be a sequence")
