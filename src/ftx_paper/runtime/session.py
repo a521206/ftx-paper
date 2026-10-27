@@ -15,7 +15,7 @@ from ftx_paper.contracts import (
     MarketBar, MarketRole, OptionRole, OrderRole, OrderSide, Role, RuntimeEvent, parse_role,
     role_to_key,
 )
-from ftx_paper.market import AggregatorConfig, CompletedBarAggregator, InstrumentKey, LiveMarketNormalizer
+from ftx_paper.market import AggregatorConfig, CompletedBarAggregator, FeatureService, InstrumentKey, LiveMarketNormalizer
 from ftx_paper.domain import AccountAggregate
 from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.strategy.protocol import Strategy
@@ -116,6 +116,10 @@ class RuntimeSession:
         self._market_wait = threading.Event()
         self._aggregator: CompletedBarAggregator | None = None
         self._orderflow_producer = CausalOrderflowProducer()
+        self._feature_service = FeatureService(
+            self.store.feature_repository()
+            if callable(getattr(self.store, "feature_repository", None)) else None,
+        )
         self._last_execution_fill: LastExecutionFill | None = None
         self._feed_lease_id: str | None = None
 
@@ -322,11 +326,13 @@ class RuntimeSession:
             backfill_kwargs: dict[str, Any] = {"contract_store": self.store}
             if provider == "xts":
                 backfill_kwargs["stop_event"] = self._stop_event
-            backfill = load_startup_backfill(client, cast(Any, resolved), **backfill_kwargs)
+            backfill = tuple(load_startup_backfill(client, cast(Any, resolved), **backfill_kwargs))
             if self._stop_event.is_set():
                 self._release_feed_lease()
                 return
             self.store.append_market_bars(backfill, source="historical_backfill")
+            for historical_bar in sorted(backfill, key=lambda item: item.timestamp):
+                self._feature_service.ingest(historical_bar)
             access_token = self._wait_for_session_readiness(is_nse_market_open)
             if access_token is None:
                 self._release_feed_lease()
@@ -997,11 +1003,20 @@ class RuntimeSession:
             }, f"bar_closed:{bar_key}", timestamp=bar.timestamp.isoformat())
             if self._aggregator is None:
                 return
+            self._feature_service.ingest(bar)
             self._orderflow_producer.ingest(bar)
             expired = self._aggregator.expire(now=time.monotonic())
             for incomplete in expired:
                 self._record_incomplete(incomplete)
             bundle = self._aggregator.ingest(bar)
+            if bundle is not None:
+                strategy = getattr(self.engine, "strategy", None)
+                bundle = self._feature_service.enrich(
+                    bundle,
+                    prior_day_high=getattr(strategy, "prior_day_high", None),
+                    prior_day_low=getattr(strategy, "prior_day_low", None),
+                    expiry_dates=tuple(str(item) for item in getattr(strategy, "expiry_dates", ())),
+                )
             # Settle positions carried into this bar before evaluating a new
             # bundle, matching the deterministic replay ordering.
             try:

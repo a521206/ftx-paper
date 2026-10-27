@@ -9,11 +9,12 @@ from threading import Event, Lock, Thread
 from typing import Any, cast
 from uuid import uuid4
 
-from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderRole, OrderSide, Role, SyntheticFutureQuote, role_to_key, synthetic_future_quote
+from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderRole, OrderSide, Role, SyntheticFutureQuote, synthetic_future_quote
 from ftx_paper.domain.capital import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE, CapitalRuntimeContext
-from ftx_paper.market import AggregatorConfig, Cell, CompletedBarAggregator, InstrumentKey, LocationDetector
+from ftx_paper.market import (
+    AggregatorConfig, Cell, CompletedBarAggregator, FeatureService, InstrumentKey, LocationDetector,
+)
 from ftx_paper.market.requirements import FeatureRequirement
-from ftx_paper.market.features import option_pcr_at_event
 from ftx_paper.domain import AccountAggregate, PortfolioState
 from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.runtime.engine import PaperEngine
@@ -353,8 +354,10 @@ class ReplayWorker:
             )
             trace_detector = LocationDetector()
             trace_detector.reset(prior_day_high=prior_day_high, prior_day_low=prior_day_low)
-            trace_vix_first: float | None = None
-            trace_vix_open: float | None = None
+            feature_service = FeatureService(
+                self.store.feature_repository()
+                if callable(getattr(self.store, "feature_repository", None)) else None,
+            )
             open_trades: list[dict[str, Any]] = []
             # Synthetic is a reporting-only view of the accepted futures
             # decision.  Keep its diagnostic lifecycle separate so it cannot
@@ -366,39 +369,40 @@ class ReplayWorker:
                     break
                 if orderflow_producer is not None:
                     orderflow_producer.ingest(bar)
+                feature_service.ingest(bar)
                 bundle = aggregator.ingest(bar)
                 if bundle is None:
                     continue
                 futures_bar = bundle.bars[MarketRole.FUTURES]
-                trace_snapshot = trace_detector.observe(futures_bar)
+                bundle = feature_service.enrich(
+                    bundle,
+                    prior_day_high=prior_day_high,
+                    prior_day_low=prior_day_low,
+                    expiry_dates=tuple(str(item) for item in effective_expiry_dates),
+                )
+                trace_snapshot = trace_detector.observe(
+                    futures_bar,
+                    features=(bundle.feature_snapshot.location_features
+                              if bundle.feature_snapshot is not None else None),
+                )
                 trace_features: dict[str, Any] = {}
                 trace_locations: list[str] = []
                 trace_transitions: list[dict[str, str]] = []
                 trace_unavailable: list[str] = []
-                current_vix = bundle.bars.get(MarketRole.VIX) or (
-                    bundle.supporting_inputs or {}
-                ).get("bars", {}).get(MarketRole.VIX)
-                if current_vix is not None:
-                    current_vix_close = float(current_vix.close)
-                    if trace_vix_first is None:
-                        trace_vix_first = current_vix_close
-                    vix_timestamp = current_vix.timestamp.astimezone(IST)
-                    vix_minute = vix_timestamp.hour * 60 + vix_timestamp.minute
-                    if trace_vix_open is None and vix_minute >= SESSION_OPEN_MINUTES:
-                        trace_vix_open = current_vix_close
                 if trace_snapshot is not None:
+                    snapshot_values = bundle.feature_snapshot.values if bundle.feature_snapshot is not None else {}
                     trace_features = {
-                        "vwap": trace_snapshot.features.vwap,
-                        "session_high": trace_snapshot.features.session_high,
-                        "session_low": trace_snapshot.features.session_low,
-                        "opening_range_high": trace_snapshot.features.opening_range_high,
-                        "opening_range_low": trace_snapshot.features.opening_range_low,
-                        "atr": trace_snapshot.features.atr,
-                        "prior_day_high": trace_snapshot.features.prior_day_high,
-                        "prior_day_low": trace_snapshot.features.prior_day_low,
-                        "vix": current_vix.close if current_vix is not None else None,
-                        "vix_open": trace_vix_open if trace_vix_open is not None else trace_vix_first,
-                        "pcr": self._bundle_pcr(bundle, effective_expiry_dates),
+                        "vwap": snapshot_values.get("vwap"),
+                        "session_high": snapshot_values.get("session_high"),
+                        "session_low": snapshot_values.get("session_low"),
+                        "opening_range_high": snapshot_values.get("opening_range_high"),
+                        "opening_range_low": snapshot_values.get("opening_range_low"),
+                        "atr": snapshot_values.get("atr"),
+                        "prior_day_high": snapshot_values.get("prior_day_high"),
+                        "prior_day_low": snapshot_values.get("prior_day_low"),
+                        "vix": snapshot_values.get("vix"),
+                        "vix_open": snapshot_values.get("vix_open"),
+                        "pcr": snapshot_values.get("pcr"),
                     }
                     trace_locations = [item.value for item in trace_snapshot.locations]
                     trace_transitions = [
@@ -990,21 +994,6 @@ class ReplayWorker:
 
     def _dates(self) -> list[str]:
         return self.store.read_market_dates()
-
-    @staticmethod
-    def _bundle_pcr(bundle: Any, expiry_dates: Any) -> float | None:
-        supporting = bundle.supporting_inputs or {}
-        bars = supporting.get("bars", {})
-        sources = supporting.get("sources", {})
-        if not isinstance(bars, dict):
-            return None
-        if isinstance(sources, dict):
-            bars = {
-                key: bar for key, bar in bars.items()
-                if sources.get(role_to_key(key) if isinstance(key, (MarketRole, OptionRole)) else str(key), "same_minute") == "same_minute"
-            }
-        futures = bundle.bars.get(MarketRole.FUTURES)
-        return option_pcr_at_event(bars, futures, expiry_dates=expiry_dates) if futures is not None else None
 
     def _prior_day_levels(
         self, session_date: str, available_dates: list[str] | None = None,

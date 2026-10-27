@@ -4,6 +4,7 @@ from .repositories import (
     AuthTokenRepository,
     EventRepository,
     ExpiryRepository,
+    FeatureRepository,
     MarketBarRepository,
     ProcessLeaseRepository,
     ReplayRepository,
@@ -20,7 +21,7 @@ from .capabilities import (
 )
 
 __all__ = [
-    "AuthTokenRepository", "EventRepository", "ExpiryRepository",
+    "AuthTokenRepository", "EventRepository", "ExpiryRepository", "FeatureRepository",
     "MarketBarRepository", "ProcessLeaseRepository", "ReplayRepository",
     "RuntimeContractRepository", "RuntimeStatusRepository", "UnitOfWork", "UnitOfWorkFactory",
     "AccountDataPort", "ExecutionPort", "MarketDataPort", "OrderStatusPort", "PnlQueryPort",

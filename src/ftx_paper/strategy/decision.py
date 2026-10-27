@@ -8,7 +8,7 @@ from ftx_paper.market.bundles import DecisionBundle
 from ftx_paper.config import IST, NIFTY_LOT_SIZE
 from ftx_paper.contracts import MarketBar, MarketRole, OptionRole, OrderIntent, OrderRole, Role, synthetic_future_quote, role_to_key
 from ftx_paper.execution.cost import FUTURES_RTD_COST_PER_LOT
-from ftx_paper.market.features import option_pcr_at_event, vix_open_and_event
+from ftx_paper.market.features import vix_open_and_event
 from ftx_paper.market.location import (
     Cell, Location, LocationDetector, TransitionKind, TransitionPattern,
     transition_patterns_allow,
@@ -28,29 +28,6 @@ from .config import (
     CellPolicyConfig,
     Session,
 )
-
-
-def _option_pcr(bundle: DecisionBundle, expiry_dates: frozenset[str] = frozenset()) -> float | None:
-    """Read exact-minute volume PCR, with the canonical 10:00 cutoff."""
-    supporting = bundle.supporting_inputs
-    if supporting is None:
-        return None
-    bars = supporting.get("bars", {})
-    if not isinstance(bars, Mapping):
-        return None
-    futures = bundle.bars.get(MarketRole.FUTURES)
-    if futures is None:
-        return None
-    sources = supporting.get("sources", {})
-    if isinstance(sources, Mapping):
-        bars = {
-            key: bar for key, bar in bars.items()
-            if sources.get(
-                role_to_key(key) if isinstance(key, (MarketRole, OptionRole)) else str(key),
-                "same_minute",
-            ) == "same_minute"
-        }
-    return option_pcr_at_event(bars, futures, expiry_dates=expiry_dates)
 
 
 def _supporting_bar(bundle: DecisionBundle, role: Role) -> MarketBar | None:
@@ -297,7 +274,9 @@ class IndependentLiveDecisionEngine:
                 self.risk_gate.reset_segment()
             self._decision_segment = decision_segment
             self._decision_session = decision_session
-        pcr = _option_pcr(bundle, self.expiry_dates)
+        snapshot_values = bundle.feature_snapshot.values if bundle.feature_snapshot is not None else {}
+        pcr = snapshot_values.get("pcr")
+        pcr = float(pcr) if pcr is not None else None
         base = {"decision_at": decision_at.isoformat(), "bundle_id": bundle.bundle_id,
                 "strategy_version": self.version, "config_hash": self.config_hash,
                 "vehicle": "futures",
@@ -323,9 +302,13 @@ class IndependentLiveDecisionEngine:
         if current_vix is not None:
             self._previous_vix = current_vix
             self._vix_history.append(current_vix)
-            opening, _ = vix_open_and_event(tuple(self._vix_history), current_vix)
-            if opening is not None:
-                self._vix_open = opening
+            snapshot_vix_open = snapshot_values.get("vix_open")
+            if snapshot_vix_open is not None:
+                self._vix_open = float(snapshot_vix_open)
+            else:
+                opening, _ = vix_open_and_event(tuple(self._vix_history), current_vix)
+                if opening is not None:
+                    self._vix_open = opening
         # Canonical decisions require an event-time VIX value, but its absence
         # must not prevent candidate evaluation.  A prior VIX observation is
         # retained only for opening-value calculation; it is never carried
@@ -344,8 +327,12 @@ class IndependentLiveDecisionEngine:
             }),)
         futures = bundle.bars[MarketRole.FUTURES]
         self._futures.append(futures)
+        location_features = bundle.feature_snapshot.location_features if bundle.feature_snapshot is not None else None
         if len(self._futures) < 3:
-            self._location_detector.observe(futures)
+            if location_features is None:
+                self._location_detector.observe(futures)
+            else:
+                self._location_detector.observe(futures, features=location_features)
             if vix_bar is None:
                 decision_id = sha256(f"{bundle.bundle_id}:missing_vix".encode()).hexdigest()[:24]
                 return (CandidateDecision({
@@ -356,7 +343,11 @@ class IndependentLiveDecisionEngine:
                 }),)
             return (LiveDecision("WARMUP", {**base, "reason": "insufficient_history", "feature_values": {}}),)
         prior = tuple(self._futures[:-1])
-        location_snapshot = self._location_detector.observe(futures)
+        location_snapshot = (
+            self._location_detector.observe(futures)
+            if location_features is None
+            else self._location_detector.observe(futures, features=location_features)
+        )
         if location_snapshot is None:
             if vix_bar is None:
                 decision_id = sha256(f"{bundle.bundle_id}:missing_vix".encode()).hexdigest()[:24]

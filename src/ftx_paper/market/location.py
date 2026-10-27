@@ -9,7 +9,7 @@ both replay and live paper decisions.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from ftx_paper.config import IST
@@ -235,13 +235,21 @@ class LocationDetector:
         self._prior_stable.clear()
         self._prior_pending.clear()
 
-    def observe(self, current: MarketBar) -> LocationSnapshot | None:
+    def observe(self, current: MarketBar, features: LocationFeatures | None = None) -> LocationSnapshot | None:
         prefix = tuple(self._bars)
         if len(prefix) < 2:
             self._bars.append(current)
             return None
-        features = _features(prefix, opening_range_bars=self.opening_range_bars, atr_window=self.atr_window,
-                             prior_day_high=self._prior_day_high, prior_day_low=self._prior_day_low)
+        features = features or _features(
+            prefix, opening_range_bars=self.opening_range_bars, atr_window=self.atr_window,
+            prior_day_high=self._prior_day_high, prior_day_low=self._prior_day_low,
+        )
+        if features is not None:
+            features = replace(
+                features,
+                prior_day_high=self._prior_day_high,
+                prior_day_low=self._prior_day_low,
+            )
         transitions: list[LocationTransition] = []
         if len(prefix) >= 2 and features.vwap is not None:
             current_vwap_side = _side(current.close, features.vwap, 0.25)

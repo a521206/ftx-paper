@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import time
 from typing import Iterable, Mapping, TypedDict
 
@@ -11,6 +11,7 @@ from ftx_paper.market.requirements import FeatureRequirement, feature_union
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from ftx_paper.market.feature_cache import FeatureSnapshot
     from ftx_paper.strategy.orderflow_contract import OrderflowContext
     from ftx_paper.strategy.policy_contract import StrategyPolicy
 
@@ -36,10 +37,14 @@ class DecisionBundle:
     missing_roles: tuple[Role | str, ...] = ()
     supporting_inputs: SupportingInputs | None = None
     orderflow_context: OrderflowContext | None = None
+    feature_snapshot: "FeatureSnapshot | None" = None
 
     @property
     def complete(self) -> bool:
         return not self.missing_roles
+
+    def with_feature_snapshot(self, snapshot: "FeatureSnapshot") -> "DecisionBundle":
+        return replace(self, feature_snapshot=snapshot)
 
 
 @dataclass(frozen=True, slots=True)
