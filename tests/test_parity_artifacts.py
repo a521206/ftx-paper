@@ -1,7 +1,9 @@
 import json
 from pathlib import Path
 
-from ftx_paper.runtime.parity_artifacts import build_parity_artifact, strategy_payload_hash
+from ftx_paper.runtime.parity_artifacts import (
+    build_parity_artifact, build_parity_manifest, parity_stage_records, strategy_payload_hash,
+)
 
 
 def test_parity_artifact_is_deterministic_and_separates_p9_p10():
@@ -23,7 +25,9 @@ def test_parity_artifact_is_deterministic_and_separates_p9_p10():
         ],
         "ledger": {"2026-01-05": {"net_pnl_rs": 1.0}},
     }
-    artifact = build_parity_artifact(result, request={"session_date": "2026-01-05"})
+    artifact = build_parity_artifact(
+        result, request={"session_date": "2026-01-05"}, stage_records={"p9": result["events"], "p10": result["events"]},
+    )
     assert artifact["schema_version"] == 1
     assert artifact["p9"]["decision_records"][0]["stream_sequence"] == 0
     assert artifact["p9"]["decision_records"][0]["comparison_identity"]
@@ -34,13 +38,17 @@ def test_parity_artifact_is_deterministic_and_separates_p9_p10():
     assert any(record["event_type"] == "EXECUTEDDECISION" for record in artifact["p10"]["execution"])
     assert artifact["scope"]["generated_at"] == "2026-01-05T06:00:00Z"
     assert artifact["scope"]["replay_input"]["provenance"] == {"source": "fixture"}
-    assert artifact == build_parity_artifact(result, request={"session_date": "2026-01-05"})
+    assert artifact == build_parity_artifact(
+        result, request={"session_date": "2026-01-05"}, stage_records={"p9": result["events"], "p10": result["events"]},
+    )
     assert strategy_payload_hash(result["strategy"])[1] == artifact["strategy"]["payload_hash"]
 
 
 def test_missing_required_diagnostics_mark_coverage_incomplete():
     result = {"strategy": {}, "vehicles": ["futures"], "bars_seen": 1, "events": [{"event_type": "CANDIDATEDECISION", "decision_id": "d1", "session_date": "2026-01-05"}], "ledger": {}}
-    artifact = build_parity_artifact(result, request={"session_date": "2026-01-05"})
+    artifact = build_parity_artifact(
+        result, request={"session_date": "2026-01-05"}, stage_records={"p9": result["events"], "p10": result["events"]},
+    )
     assert artifact["coverage"]["complete"] is False
     assert artifact["coverage"]["issues"]
 
@@ -65,7 +73,9 @@ def test_p9_preserves_missing_pcr_diagnostics() -> None:
         }],
     }
 
-    record = build_parity_artifact(result, request={"session_date": "2026-01-05"})["p9"]["decision_records"][0]
+    record = build_parity_artifact(
+        result, request={"session_date": "2026-01-05"}, stage_records={"p9": result["events"]},
+    )["p9"]["decision_records"][0]
 
     assert record["vehicle"] == "futures"
     assert record["values"]["pcr"] is None
@@ -98,7 +108,9 @@ def test_p9_preserves_orderflow_provenance() -> None:
         }],
     }
 
-    record = build_parity_artifact(result, request={"session_date": "2026-01-05"})["p9"]["decision_records"][0]
+    record = build_parity_artifact(
+        result, request={"session_date": "2026-01-05"}, stage_records={"p9": result["events"]},
+    )["p9"]["decision_records"][0]
 
     assert record["orderflow_provenance"] == {
         "feature_version": "v1",
@@ -130,7 +142,9 @@ def test_p9_uses_source_observation_time_and_preserves_availability() -> None:
         }],
     }
 
-    record = build_parity_artifact(result, request={"session_date": "2026-01-05"})["p9"]["decision_records"][0]
+    record = build_parity_artifact(
+        result, request={"session_date": "2026-01-05"}, stage_records={"p9": result["events"]},
+    )["p9"]["decision_records"][0]
 
     assert record["timestamp"] == "2026-01-05T04:30:00Z"
     assert record["orderflow_provenance"]["observed_at"] == "2026-01-05T10:00:00+05:30"
@@ -142,3 +156,46 @@ def test_shared_fixture_contract_and_strategy_fingerprint():
     assert fixture["artifact_type"] == "ftx_producer_parity"
     assert fixture["p9"]["decision_records"] == []
     assert strategy_payload_hash(fixture["strategy"]["payload"])[1] == fixture["strategy"]["payload_hash"]
+
+
+def test_parity_manifest_is_stage_hashed_and_marks_unavailable_stages():
+    artifact = build_parity_artifact(
+        {"strategy": {}, "vehicles": ["futures"], "bars_seen": 1,
+         "events": [], "ledger": {}}, request={"session_date": "2026-01-05"},
+        stage_records={stage: [] for stage in (f"p{index}" for index in range(1, 11))},
+    )
+    manifest = build_parity_manifest(artifact)
+    assert manifest["manifest_version"] == 1
+    assert manifest["hash_algorithm"] == "sha256"
+    assert set(manifest["stages"]) == {f"p{index}" for index in range(1, 11)}
+    assert manifest["stages"]["p1"]["status"] == "AVAILABLE"
+    assert manifest["stages"]["p2"]["status"] == "UNAVAILABLE"
+    assert manifest["stages"]["p9"]["record_count"] == 0
+    assert manifest["stages"]["p10"]["sha256"]
+    assert parity_stage_records(artifact, "p10") == []
+
+
+def test_parity_artifact_does_not_derive_stages_from_legacy_events():
+    artifact = build_parity_artifact(
+        {"strategy": {}, "vehicles": ["futures"], "bars_seen": 1,
+         "events": [{"event_type": "CANDIDATEDECISION", "decision_id": "legacy"}]},
+        request={"session_date": "2026-01-05"},
+    )
+    assert artifact["p9"]["decision_records"] == []
+    assert artifact["stages"]["p9"] == []
+
+
+def test_orderflow_stage_records_are_normalized_with_causal_fields():
+    artifact = build_parity_artifact(
+        {"strategy": {}, "vehicles": ["futures"], "bars_seen": 1},
+        request={"session_date": "2026-01-05"},
+        stage_records={
+            "p2": [{"observation_id": "obs-1", "observed_at": "2026-01-05T09:15:00+05:30",
+                    "child_observation_ids": ["child-1"]}],
+        },
+    )
+    record = artifact["stages"]["p2"][0]
+    assert record["comparison_identity"]
+    assert record["timestamp"] == "2026-01-05T09:15:00+05:30"
+    assert record["causal_parent_ids"] == ["child-1"]
+    assert record["normalized_stage"] == "p2"

@@ -17,6 +17,7 @@ from ftx_paper.runtime.events import (
     EXECUTION_EVENT_TYPES, RISK_EVENT_TYPES, DecisionTimestampError,
 )
 from ftx_paper.runtime.events import serialize_datetime
+from ftx_paper.runtime.parity_artifacts import parity_stage_records
 from .schemas import error_payload, openapi_document
 
 INVALID_STRATEGY = object()
@@ -227,12 +228,23 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
         run = store.read_replay_run(run_id)
         if run is None:
             return jsonify(error_payload("not_found", "replay not found")), 404
+        # Polling is intentionally small. Large replay results are available
+        # through the parity endpoints; `include=result` is a debug escape hatch.
+        include = {item.strip() for item in request.args.get("include", "").split(",") if item.strip()}
+        if include and "result" not in include:
+            return jsonify(error_payload("invalid_request", "include=result is required for debug replay output")), 400
+        include_result = "result" in include
+        if not include_result:
+            return jsonify(json_safe({
+                "run_id": run.get("run_id"),
+                "status": run.get("status"),
+                "error": run.get("error"),
+            }))
         result = run.get("result")
         if isinstance(result, dict):
-            include = {item.strip() for item in request.args.get("include", "").split(",") if item.strip()}
-            invalid = include - {"events", "trace"}
+            invalid = include - {"result", "events", "trace"}
             if invalid:
-                return jsonify(error_payload("invalid_request", "include supports events and trace only")), 400
+                return jsonify(error_payload("invalid_request", "include supports result, events, and trace only")), 400
             result = dict(result)
             if "events" not in include:
                 result.pop("events", None)
@@ -244,6 +256,8 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
 
     @app.get("/api/v1/replay/<run_id>/trace")
     def replay_trace(run_id: str):
+        if request.args.get("legacy") != "true":
+            return jsonify(error_payload("legacy_endpoint", "use parity stage endpoints")), 410
         run = store.read_replay_run(run_id)
         if run is None:
             return jsonify(error_payload("not_found", "replay not found")), 404
@@ -255,8 +269,60 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
                                   "schema_version": result.get("trace_schema_version", 1),
                                   "trace": result.get("trace", [])}))
 
+    @app.get("/api/v1/replay/<run_id>/parity/manifest")
+    def replay_parity_manifest(run_id: str):
+        run = store.read_replay_run(run_id)
+        if run is None:
+            return jsonify(error_payload("not_found", "replay not found")), 404
+        if run.get("status") not in {"completed", "failed", "cancelled"}:
+            return incomplete_replay_response(run)
+        result = run.get("result")
+        if not isinstance(result, dict) or not isinstance(result.get("parity_artifact"), dict):
+            return jsonify(error_payload("unavailable", "parity artifact is unavailable")), 404
+        manifest = result["parity_artifact"].get("manifest")
+        if not isinstance(manifest, dict):
+            return jsonify(error_payload("unavailable", "persisted parity manifest is unavailable")), 404
+        manifest["run_id"] = run_id
+        return jsonify(json_safe(manifest))
+
+    @app.get("/api/v1/replay/<run_id>/parity/<stage>")
+    def replay_parity_stage(run_id: str, stage: str):
+        run = store.read_replay_run(run_id)
+        if run is None:
+            return jsonify(error_payload("not_found", "replay not found")), 404
+        if run.get("status") not in {"completed", "failed", "cancelled"}:
+            return incomplete_replay_response(run)
+        result = run.get("result")
+        artifact = result.get("parity_artifact") if isinstance(result, dict) else None
+        if not isinstance(artifact, dict):
+            return jsonify(error_payload("unavailable", "parity artifact is unavailable")), 404
+        try:
+            records = parity_stage_records(artifact, stage.lower())
+        except ValueError:
+            return jsonify(error_payload("invalid_request", "stage must be p1 through p10")), 400
+        try:
+            offset = max(0, int(request.args.get("offset", 0)))
+            limit = min(10_000, max(1, int(request.args.get("limit", 1_000))))
+        except ValueError:
+            return jsonify(error_payload("invalid_request", "offset and limit must be integers")), 400
+        persisted_manifest = artifact.get("manifest")
+        if not isinstance(persisted_manifest, dict):
+            return jsonify(error_payload("unavailable", "persisted parity manifest is unavailable")), 404
+        manifest = persisted_manifest["stages"].get(stage.lower())
+        if not isinstance(manifest, dict):
+            return jsonify(error_payload("unavailable", "parity stage is unavailable")), 404
+        return jsonify(json_safe({
+            "run_id": run_id, "stage": stage.lower(), **manifest,
+            "offset": offset, "limit": limit, "total_count": len(records),
+            "records": records[offset:offset + limit],
+            "has_more": offset + limit < len(records),
+            "next_offset": offset + limit if offset + limit < len(records) else None,
+        }))
+
     @app.get("/api/v1/replay/<run_id>/events")
     def replay_events(run_id: str):
+        if request.args.get("legacy") != "true":
+            return jsonify(error_payload("legacy_endpoint", "use parity stage endpoints")), 410
         run = store.read_replay_run(run_id)
         if run is None:
             return jsonify(error_payload("not_found", "replay not found")), 404

@@ -167,23 +167,26 @@ def _coverage(records: Sequence[Mapping[str, Any]], *, bars_seen: int, unavailab
 
 def build_parity_artifact(
     result: Mapping[str, Any], *, request: Mapping[str, Any] | None = None,
+    stage_records: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     """Build the Paper-owned schema-v1 envelope from a replay result."""
     request = request or {}
-    events = list(result.get("events", ()))
-    # P9 is the candidate/acceptance decision stream. Execution lifecycle
-    # events such as EXECUTEDDECISION belong exclusively to P10.
+    stage_records = stage_records or {}
+    # P9 and P10 are supplied by the replay-stage producers. This builder does
+    # not derive parity stages from the legacy replay event or trace streams.
     decisions = [_record(event, ordinal) for ordinal, event in enumerate(
-        event for event in events
+        event for event in stage_records.get("p9", ())
         if str(event.get("event_type", "")).upper().endswith("DECISION")
         and str(event.get("event_type", "")).upper() not in {"EXITDECISION", "EXECUTEDDECISION"}
     )]
     execution_types = {"ORDER_INTENT", "ORDER_AUTHORIZED", "ORDER_ACK", "FILL", "EXECUTEDDECISION", "ORDER_UNFILLED", "ORDER_SUPPRESSED", "RISK_REJECTED"}
     execution = [_jsonable({"ordinal": ordinal, **dict(event)}) for ordinal, event in enumerate(
-        event for event in events if str(event.get("event_type", "")).upper() in execution_types
+        event for event in stage_records.get("p10", ())
+        if str(event.get("event_type", "")).upper() in execution_types
     )]
     exits = [_jsonable({"ordinal": ordinal, **dict(event)}) for ordinal, event in enumerate(
-        event for event in events if str(event.get("event_type", "")).upper() in {"EXITDECISION", "EXIT", "CLOSE"}
+        event for event in stage_records.get("p10", ())
+        if str(event.get("event_type", "")).upper() in {"EXITDECISION", "EXIT", "CLOSE"}
     )]
     strategy, strategy_hash = strategy_payload_hash(result.get("strategy"))
     run_id = str(request.get("run_id") or result.get("run_id") or "paper-replay")
@@ -204,7 +207,112 @@ def build_parity_artifact(
         "p9": {"decision_records": decisions, "coverage": coverage},
         "p10": {"execution": execution, "exits": exits, "synthetic_settlements": _jsonable(result.get("synthetic_settlements", [])), "ledger": _jsonable(result.get("ledger", {}))},
     }
+    p10_records: list[Mapping[str, Any]] = [*execution, *exits]
+    p10_records.extend(
+        {"record_type": "synthetic_settlement", **dict(item)}
+        for item in result.get("synthetic_settlements", ())
+    )
+    ledger = result.get("ledger", {})
+    if isinstance(ledger, Mapping):
+        p10_records.extend(
+            {"record_type": "ledger", "date": str(date), "value": value}
+            for date, value in sorted(ledger.items(), key=lambda item: str(item[0]))
+        )
+    raw_stages: dict[str, Sequence[Mapping[str, Any]]] = {
+        stage: list(stage_records.get(stage, ())) for stage in _PARITY_STAGES
+    }
+    raw_stages["p9"] = decisions
+    raw_stages["p10"] = p10_records
+    envelope["stages"] = {
+        stage: _normalize_stage_records(stage, records)
+        for stage, records in raw_stages.items()
+    }
+    envelope["p9"]["decision_records"] = envelope["stages"]["p9"]
+    envelope["p10"]["execution"] = [record for record in envelope["stages"]["p10"]
+                                      if record.get("event_type") in execution_types]
+    envelope["p10"]["exits"] = [record for record in envelope["stages"]["p10"]
+                                  if record.get("event_type") in {"EXITDECISION", "EXIT", "CLOSE"}]
+    # Persist the exact stage hashes alongside the records. API reads do not
+    # regenerate parity from legacy events or traces.
+    envelope["manifest"] = build_parity_manifest(envelope)
     return _jsonable(envelope)
 
 
-__all__ = ["PARITY_ARTIFACT_SCHEMA_VERSION", "build_parity_artifact", "strategy_payload_hash"]
+_PARITY_STAGES = tuple(f"p{index}" for index in range(1, 11))
+
+
+def parity_stage_records(artifact: Mapping[str, Any], stage: str) -> list[dict[str, Any]]:
+    """Return deterministic, record-oriented data for one parity stage."""
+    if stage not in _PARITY_STAGES:
+        raise ValueError(f"unsupported parity stage: {stage}")
+    stored_stages = artifact.get("stages")
+    if not isinstance(stored_stages, Mapping) or stage not in stored_stages:
+        raise ValueError(f"persisted parity stage is unavailable: {stage}")
+    return list(stored_stages[stage])
+
+
+def _normalize_stage_records(
+    stage: str, records: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    normalized = []
+    for ordinal, record in enumerate(records):
+        value = dict(record)
+        identity_fields = (
+            "observation_id", "interaction_id", "candidate_id", "decision_id",
+            "client_order_id", "comparison_identity", "date", "timestamp", "record_type",
+        )
+        identity = {key: value.get(key) for key in identity_fields if value.get(key) is not None}
+        if not identity:
+            identity = {"stage": stage, "record": value}
+        value.setdefault("comparison_identity", hashlib.sha256(
+            _canonical_json(identity).encode("utf-8")
+        ).hexdigest())
+        value.setdefault(
+            "timestamp",
+            value.get("observed_at") or value.get("decision_at") or value.get("fill_timestamp"),
+        )
+        value.setdefault(
+            "causal_parent_ids",
+            value.get("source_observation_ids")
+            or value.get("child_observation_ids")
+            or value.get("source_observation_id")
+            or [],
+        )
+        value.setdefault("normalized_stage", stage)
+        value.setdefault("payload", dict(record))
+        normalized.append(_jsonable(value))
+    return normalized
+
+
+def build_parity_manifest(artifact: Mapping[str, Any]) -> dict[str, Any]:
+    """Build stage counts and hashes without duplicating the full artifact."""
+    stages: dict[str, dict[str, Any]] = {}
+    for stage in _PARITY_STAGES:
+        records = parity_stage_records(artifact, stage)
+        available = stage in {"p1", "p9", "p10"} or bool(records)
+        if stage == "p9" and not artifact.get("coverage", {}).get("complete", False):
+            status = "INCOMPLETE"
+        else:
+            status = "AVAILABLE" if available else "UNAVAILABLE"
+        stages[stage] = {
+            "status": status,
+            "record_count": len(records),
+            "sha256": hashlib.sha256(_canonical_json(records).encode("utf-8")).hexdigest(),
+        }
+    scope = artifact.get("scope", {})
+    replay_input = scope.get("replay_input", {}) if isinstance(scope, Mapping) else {}
+    return {
+        "manifest_version": 1,
+        "hash_algorithm": "sha256",
+        "run_id": artifact.get("run_id"),
+        "scope": scope,
+        "strategy": artifact.get("strategy", {}),
+        "source_fingerprint": replay_input,
+        "stages": stages,
+    }
+
+
+__all__ = [
+    "PARITY_ARTIFACT_SCHEMA_VERSION", "build_parity_artifact", "build_parity_manifest",
+    "parity_stage_records", "strategy_payload_hash",
+]
