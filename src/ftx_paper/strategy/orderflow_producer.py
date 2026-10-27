@@ -76,6 +76,7 @@ class CausalOrderflowProducer:
         self._raw_last_timestamps: dict[str, datetime] = {}
         self._selected_identity: str | None = None
         self._prior_bars: tuple[MarketBar, ...] = ()
+        self._prior_complete = False
         self._session_timezone = session_timezone
         self._session_start = datetime.strptime(session_start, "%H:%M").time()
         self._session_end = datetime.strptime(session_end, "%H:%M").time()
@@ -84,11 +85,26 @@ class CausalOrderflowProducer:
         local = bar.timestamp.astimezone(self._session_timezone)
         date = local.date().isoformat()
         local_time = local.time().replace(second=0, microsecond=0)
+        if bar.instrument.instrument_type.upper() not in {"FUT", "FUTURE", "FUTURES"}:
+            return
+        if not source_row_is_complete(bar):
+            return
+        if local_time < self._session_start or local_time >= self._session_end:
+            return
         if self._active_date is not None and date < self._active_date:
             raise ValueError("orderflow source bars cannot move to an earlier session")
         if self._active_date is not None and date > self._active_date:
             self._prior_bars = tuple(
                 bar for bars in self._bars.values() for bar in bars
+            )
+            expected = int((
+                datetime.combine(datetime.min, self._session_end)
+                - datetime.combine(datetime.min, self._session_start)
+            ).total_seconds() // 60)
+            prior_times = sorted(item.timestamp for item in self._prior_bars)
+            self._prior_complete = len(prior_times) == expected and all(
+                right - left == timedelta(minutes=1)
+                for left, right in zip(prior_times, prior_times[1:])
             )
             self._bars.clear()
             self._last_timestamps.clear()
@@ -96,8 +112,6 @@ class CausalOrderflowProducer:
             self._selected_identity = None
         timestamp = bar.timestamp.astimezone(timezone.utc)
         identity = _source_identity(bar)
-        if bar.instrument.instrument_type.upper() not in {"FUT", "FUTURE", "FUTURES"}:
-            return
         if self._selected_identity is None:
             self._selected_identity = identity
         elif identity != self._selected_identity:
@@ -108,10 +122,6 @@ class CausalOrderflowProducer:
         if raw_last_timestamp is not None and timestamp < raw_last_timestamp:
             raise ValueError("orderflow source bars must be strictly chronological")
         self._raw_last_timestamps[identity] = timestamp
-        if not source_row_is_complete(bar):
-            return
-        if local_time < self._session_start or local_time > self._session_end:
-            return
         self._active_date = date
         key = (date, identity)
         bars = self._bars[key]
@@ -133,7 +143,7 @@ class CausalOrderflowProducer:
             bar for (date, _), bars in self._bars.items()
             if date == trading_date
             for bar in bars
-            if self._session_start <= bar.timestamp.astimezone(self._session_timezone).time().replace(second=0, microsecond=0) <= self._session_end
+            if self._session_start <= bar.timestamp.astimezone(self._session_timezone).time().replace(second=0, microsecond=0) < self._session_end
             and bar.timestamp + timedelta(minutes=1) <= decision_cutoff
         ]
         if not candidates:
@@ -308,12 +318,14 @@ class CausalOrderflowProducer:
                 "session_high": session_high,
                 "session_low": session_low,
             }
-            if len(session_open) >= 5:
+            if len(session_open) >= 5 and tuple(
+                item.observed_at for item in session_open[:5]
+            ) == tuple(session_start + timedelta(minutes=index) for index in range(5)):
                 levels.update({
                     "or_high": max(_numeric_feature(item.features, "high") for item in session_open[:5]),
                     "or_low": min(_numeric_feature(item.features, "low") for item in session_open[:5]),
                 })
-            if self._prior_bars:
+            if self._prior_bars and self._prior_complete:
                 levels.update({
                     "pd_high": max(float(item.high) for item in self._prior_bars),
                     "pd_low": min(float(item.low) for item in self._prior_bars),

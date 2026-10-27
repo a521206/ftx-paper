@@ -512,10 +512,7 @@ class OrderflowPolicy:
                                 and current_context.opening_gap.status != "UNAVAILABLE"
                                 and not self._admission_suspended
                             ),
-                            active_position_allowed=(
-                                context.exposure.open_positions == 0
-                                or interaction.location_alias not in {"SESSION_HIGH", "SESSION_LOW"}
-                            ),
+                            active_position_allowed=context.exposure.open_positions == 0,
                             exposure_allowed=context.exposure.net_directional_lots == 0,
                             allocation_allowed=context.margin.available > 0,
                             sizing_allowed=context.margin.available >= 0,
