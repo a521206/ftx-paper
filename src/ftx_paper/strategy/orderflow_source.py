@@ -185,10 +185,14 @@ def prepare_replay_input(
         for row in eligible_rows
         if selected_underlying is None or _underlying(row) == selected_underlying
     }
-    # Validate each candidate stream before session-window filtering, but do
-    # not let unrelated contracts or dates poison deterministic selection.
+    # Validate only the selected session window; out-of-session rows are not
+    # part of the source stream used for aggregation or identity validation.
     for identity in candidates:
-        candidate_rows = [row for row in normalized if _identity(row) == identity]
+        candidate_rows = [
+            row for row in normalized
+            if _identity(row) == identity
+            and start <= normalize_exchange_timestamp(row.timestamp).astimezone(IST).time().replace(tzinfo=None) < end
+        ]
         timestamps = [normalize_exchange_timestamp(row.timestamp) for row in candidate_rows]
         if any(left >= right for left, right in zip(timestamps, timestamps[1:])):
             raise ValueError("orderflow source rows must be strictly chronological")

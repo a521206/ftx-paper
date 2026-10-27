@@ -138,7 +138,7 @@ def observe_market(replay: OrderflowReplayInput) -> MarketObservation:
             window_start + timedelta(minutes=index)
             for index in range(int((window_end - window_start).total_seconds() // 60))
         )
-        if children and children != expected_children:
+        if children != expected_children:
             issues.append(ObservationIssue(
                 "5m", window_start, window_end, "incomplete_session_aligned_parent", children,
             ))

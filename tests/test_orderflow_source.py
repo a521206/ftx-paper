@@ -112,3 +112,14 @@ def test_prepare_records_discarded_session_dates_without_mixing_state() -> None:
     replay = prepare_replay_input([_bar("NIFTY26JAN", 0), other], "2026-01-01")
 
     assert replay.metadata.discarded_session_dates == ("2026-01-02",)
+
+
+def test_out_of_session_rows_cannot_change_selected_source_validation_or_fingerprint() -> None:
+    valid = _bar("NIFTY26JAN", 0)
+    out_of_session = replace(valid, timestamp=datetime(2026, 1, 1, 3, 44, tzinfo=timezone.utc))
+
+    baseline = prepare_replay_input([valid], "2026-01-01")
+    with_extra = prepare_replay_input([valid, out_of_session, out_of_session], "2026-01-01")
+
+    assert with_extra.rows == baseline.rows
+    assert with_extra.metadata.source_fingerprint == baseline.metadata.source_fingerprint

@@ -111,3 +111,16 @@ def test_out_of_session_rows_do_not_create_gaps_or_published_evidence() -> None:
     assert len(observation.context.observations_for("1m")) == 1
     assert observation.context.observations_for("1m")[0].observed_at == _rows(1)[0].timestamp
     assert observation.gaps == ()
+
+
+def test_empty_aligned_windows_are_retained_as_incomplete_parent_issues() -> None:
+    observation = observe_market(
+        prepare_replay_input(_rows(1), "2026-01-01", session_partition="09:15-09:25")
+    )
+
+    assert any(
+        issue.timeframe == "5m"
+        and issue.interval_start == datetime(2026, 1, 1, 3, 50, tzinfo=timezone.utc)
+        and issue.reason == "incomplete_session_aligned_parent"
+        for issue in observation.issues
+    )
