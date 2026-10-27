@@ -87,9 +87,9 @@ def __getattr__(name: str):
     if name in {"Direction", "LocationTemplate", "OpeningInteractionKind", "ResponseType", "TradeTemplate", "TriggerType"}:
         from .templates import Direction, LocationTemplate, OpeningInteractionKind, ResponseType, TradeTemplate, TriggerType
         return {"Direction": Direction, "LocationTemplate": LocationTemplate, "OpeningInteractionKind": OpeningInteractionKind, "ResponseType": ResponseType, "TradeTemplate": TradeTemplate, "TriggerType": TriggerType}[name]
-    if name in {"ResponseCandle", "ResponseSpec", "build_response_spec"}:
-        from .response import ResponseCandle, ResponseSpec, build_response_spec
-        return {"ResponseCandle": ResponseCandle, "ResponseSpec": ResponseSpec, "build_response_spec": build_response_spec}[name]
+    if name in {"ResponseCandle", "ResponseSpec", "build_response_spec", "evaluate_policy_responses"}:
+        from .response import ResponseCandle, ResponseSpec, build_response_spec, evaluate_policy_responses
+        return {"ResponseCandle": ResponseCandle, "ResponseSpec": ResponseSpec, "build_response_spec": build_response_spec, "evaluate_policy_responses": evaluate_policy_responses}[name]
     if name in {"OpportunityContext", "OpportunityOutcome", "OpportunityOutcomeStatus", "opportunity_identity"}:
         from .opportunity import OpportunityContext, OpportunityOutcome, OpportunityOutcomeStatus, opportunity_identity
         return {"OpportunityContext": OpportunityContext, "OpportunityOutcome": OpportunityOutcome, "OpportunityOutcomeStatus": OpportunityOutcomeStatus, "opportunity_identity": opportunity_identity}[name]

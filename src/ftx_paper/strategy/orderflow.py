@@ -29,7 +29,7 @@ from .orderflow_admission import evaluate_admission
 from .orderflow_capture import CaptureMode
 from .orderflow_interaction import InteractionCloseReason, InteractionDetector, InteractionStatus
 from .orderflow_location import LocationBand, LocationObservation, LocationRecord, LocationRegistry
-from .response import evaluate_policy_response
+from .response import evaluate_policy_responses
 from .policy_contract import ExecutionMode, FeatureRequirement, PolicyDecision
 from .protocol import StrategyMetadata
 from .snapshot_envelope import unwrap_snapshot, wrap_snapshot
@@ -365,25 +365,29 @@ class OrderflowPolicy:
                 ), key=lambda item: (item.observed_at, item.available_at, item.observation_id)))
                 if not response_observations:
                     continue
-                evaluation = evaluate_policy_response(
-                    interaction,
-                    response_observations,
+                evaluations = evaluate_policy_responses(
+                    interaction, response_observations,
                     max_candles=self.config.response_window_candles,
                     cutoff=min(context.as_of, orderflow.cutoff),
                 )
-                if evaluation is None or evaluation.status is None:
-                    continue
-                next_status = evaluation.status.value
-                if next_status == "PENDING":
-                    next_status = "PENDING_RESPONSE"
-                if next_status == interaction.response_status:
-                    continue
-                updated = self._location_detectors[observation.timeframe].update_response(
-                    interaction.interaction_id, next_status,
-                )
-                if updated is None:
-                    continue
-                results.append(PolicyDecision({
+                for template, evaluation in evaluations:
+                    if evaluation.status is None:
+                        continue
+                    hypothesis_id = template.template_id
+                    next_status = evaluation.status.value
+                    if next_status == "PENDING":
+                        next_status = "PENDING_RESPONSE"
+                    current_status = dict(interaction.hypothesis_states).get(
+                        hypothesis_id, "PENDING_RESPONSE",
+                    )
+                    if next_status == current_status:
+                        continue
+                    updated = self._location_detectors[observation.timeframe].update_response(
+                        interaction.interaction_id, next_status, hypothesis_id,
+                    )
+                    if updated is None:
+                        continue
+                    results.append(PolicyDecision({
                     **base,
                     "decision_stage": "response",
                     "outcome": "recorded" if next_status == "CONFIRMED" else "rejected",
@@ -397,10 +401,12 @@ class OrderflowPolicy:
                     "interaction_id": interaction.interaction_id,
                     "reference_generation": interaction.reference_generation,
                     "response_state": next_status,
+                    "template_id": template.template_id,
                     "response_evidence_ids": list(evaluation.evidence_ids),
                     "source_observation_ids": list(evaluation.evidence_ids),
-                }))
-                if next_status == "CONFIRMED":
+                    }))
+                    if next_status != "CONFIRMED":
+                        continue
                     formed_at = evaluation.confirmation_available_at or observation.available_at
                     direction = evaluation.direction
                     if direction is None:
@@ -462,6 +468,7 @@ class OrderflowPolicy:
                             "interaction_id": interaction.interaction_id,
                             "location": interaction.location_alias,
                             "direction": direction,
+                            "template_id": template.template_id,
                             "admission_status": admission.status.value,
                             "admission_reason": admission.reason,
                             "admission_predicates": [asdict(item) for item in admission.predicates],

@@ -255,6 +255,48 @@ def evaluate_policy_response(
     return result
 
 
+def evaluate_policy_responses(
+    interaction: object, observations: Sequence[object], *, max_candles: int, cutoff: object,
+) -> tuple[tuple[TradeTemplate, ResponseEvaluation[object]], ...]:
+    """Evaluate acceptance and rejection hypotheses independently."""
+    alias = str(getattr(interaction, "location_alias", "")).upper()
+    if not isinstance(cutoff, datetime):
+        return ()
+    templates = tuple(
+        template for (family, location), template in TRADE_TEMPLATES.items()
+        if location == alias and family in {"5m_recovery_breakout", "5m_acceptance_breakout"}
+    )
+    templates = tuple(sorted(templates, key=lambda item: item.response_type.value != "acceptance"))
+    results: list[tuple[TradeTemplate, ResponseEvaluation[object]]] = []
+    for template in templates:
+        created_at = getattr(interaction, "created_at", None)
+        candidates = tuple(
+            item for item in observations
+            if getattr(item, "timeframe", None) == getattr(interaction, "timeframe", None)
+            and isinstance(getattr(item, "observed_at", None), datetime)
+            and isinstance(created_at, datetime)
+            and getattr(item, "observed_at") > created_at
+            and isinstance(getattr(item, "available_at", None), datetime)
+            and getattr(item, "available_at") <= cutoff
+        )[:max_candles]
+        lower, upper = getattr(interaction, "band_lower", None), getattr(interaction, "band_upper", None)
+        if not isinstance(lower, (int, float)) or not isinstance(upper, (int, float)):
+            continue
+        spec = build_response_spec(template, band_lower=float(lower), band_upper=float(upper))
+        evaluation = evaluate_response_window(
+            candidates,
+            to_candle=lambda item: ResponseCandle(
+                float(getattr(item, "features")["open"]), float(getattr(item, "features")["high"]),
+                float(getattr(item, "features")["low"]), float(getattr(item, "features")["close"]),
+            ),
+            spec_for=lambda _item: spec,
+            armed=False,
+            pre_contact_side=getattr(interaction, "pre_contact_side", None),
+        )
+        results.append((template, evaluation))
+    return tuple(results)
+
+
 __all__ = [
     "ResponseCandle", "ResponseEvaluation", "ResponseOutcomeStatus", "ResponseSpec",
     "advance_response_candle", "build_response_spec", "evaluate_policy_response", "evaluate_response_hypotheses", "evaluate_response_window",

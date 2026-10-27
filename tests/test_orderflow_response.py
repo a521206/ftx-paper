@@ -7,6 +7,7 @@ from ftx_paper.strategy import (
     OrderflowObservation, OrderflowObservationContext,
     ResponseOutcomeStatus, evaluate_response_window,
 )
+from ftx_paper.strategy.response import evaluate_policy_responses
 from ftx_paper.strategy.orderflow_contract import FeatureValue
 
 
@@ -31,7 +32,7 @@ def _observation(
 
 
 def _interaction():
-    location = LocationRecord("loc-1", "opening_range", 100, LocationBand(99, 101), 1,
+    location = LocationRecord("loc-1", "OR_LOW", 100, LocationBand(99, 101), 1,
                               datetime(2026, 1, 1, 9, 15, tzinfo=UTC), "agg-1")
     detector = InteractionDetector("5m")
     return detector.observe(location, _observation(0, 100))
@@ -84,3 +85,14 @@ def test_response_rejects_non_chronological_evidence() -> None:
     assert interaction is not None
     with pytest.raises(ValueError, match="strictly chronological"):
         evaluate_response_window(interaction, (_observation(2, 99), _observation(1, 99)))
+
+
+def test_policy_response_evaluates_acceptance_and_rejection_independently() -> None:
+    interaction = _interaction()
+    assert interaction is not None
+    evaluations = evaluate_policy_responses(
+        interaction, (_observation(1, 101, features={"open": 100, "high": 102, "low": 99, "close": 101}),),
+        max_candles=3, cutoff=datetime(2026, 1, 1, 9, 25, tzinfo=UTC),
+    )
+    assert {template.response_type.value for template, _ in evaluations} == {"acceptance", "rejection"}
+    assert all(evaluation.evidence_ids == ("ev-1",) for _, evaluation in evaluations)

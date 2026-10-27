@@ -53,6 +53,7 @@ class LocationInteraction:
     response_status: str = "PENDING_RESPONSE"
     band_lower: float | None = None
     band_upper: float | None = None
+    hypothesis_states: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.interaction_id.strip() or not self.location_id.strip():
@@ -200,6 +201,7 @@ class InteractionDetector:
                 "response_status": item.response_status,
                 "band_lower": item.band_lower,
                 "band_upper": item.band_upper,
+                "hypothesis_states": [list(value) for value in item.hypothesis_states],
             }
 
         return {
@@ -247,6 +249,7 @@ class InteractionDetector:
                 str(raw.get("response_status", "PENDING_RESPONSE")),
                 float(raw["band_lower"]) if raw.get("band_lower") is not None else None,
                 float(raw["band_upper"]) if raw.get("band_upper") is not None else None,
+                tuple((str(value[0]), str(value[1])) for value in raw.get("hypothesis_states", ())),
             )
 
         active = snapshot.get("active", ())
@@ -282,15 +285,21 @@ class InteractionDetector:
     def active_interactions(self) -> tuple[LocationInteraction, ...]:
         return tuple(self._active.values())
 
-    def update_response(self, interaction_id: str, response_status: str) -> LocationInteraction | None:
+    def update_response(self, interaction_id: str, response_status: str, hypothesis_id: str | None = None) -> LocationInteraction | None:
+        def update(item: LocationInteraction) -> LocationInteraction:
+            if hypothesis_id is None:
+                return replace(item, response_status=response_status)
+            states = dict(item.hypothesis_states)
+            states[hypothesis_id] = response_status
+            return replace(item, hypothesis_states=tuple(sorted(states.items())))
         for key, interaction in self._active.items():
             if interaction.interaction_id == interaction_id:
-                updated = replace(interaction, response_status=response_status)
+                updated = update(interaction)
                 self._active[key] = updated
                 return updated
         for index, interaction in enumerate(self._closed):
             if interaction.interaction_id == interaction_id:
-                updated = replace(interaction, response_status=response_status)
+                updated = update(interaction)
                 self._closed[index] = updated
                 return updated
         return None
