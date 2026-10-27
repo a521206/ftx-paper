@@ -68,6 +68,44 @@ def test_replay_and_runtime_share_paper_engine_bundle_path(monkeypatch, tmp_path
     assert any(event["event_type"] == "BUNDLE_PATH_CHECK" for event in result["events"])
 
 
+def test_replay_worker_stop_cancels_active_job(monkeypatch):
+    class Store:
+        def __init__(self):
+            self.runs = {}
+
+        def clear_replay_runs_for_date(self, session_date):
+            return 0
+
+        def create_replay_run(self, run_id, request):
+            self.runs[run_id] = {"status": "queued", "request": request}
+
+        def read_replay_run(self, run_id):
+            run = self.runs.get(run_id)
+            return dict(run) if run is not None else None
+
+        def update_replay_run(self, run_id, *, status, result=None, error=None):
+            self.runs[run_id].update(status=status, result=result, error=error)
+
+    store = Store()
+    started = Event()
+    worker = ReplayWorker(store)
+
+    def execute(request, cancel):
+        started.set()
+        cancel.wait(5)
+        return {}
+
+    monkeypatch.setattr(worker, "_execute", execute)
+    run_id = worker.submit({"session_date": "2026-01-01"})
+    assert started.wait(1)
+
+    worker.stop()
+
+    assert worker._thread is not None
+    assert not worker._thread.is_alive()
+    assert store.runs[run_id]["status"] == "cancelled"
+
+
 def test_replay_seeds_prior_day_futures_levels(tmp_path):
     store = RuntimeStore(tmp_path / "replay-context")
     store.append_market_bars((

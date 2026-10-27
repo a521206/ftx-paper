@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from queue import Empty, Full, Queue
-from threading import Event, Lock, Thread
+from threading import Event, Lock, Thread, current_thread
 from typing import Any, cast
 from uuid import uuid4
 
@@ -88,9 +88,16 @@ class ReplayWorker:
                 self._thread = Thread(target=self._run, name="ftx-paper-replay", daemon=True)
                 self._thread.start()
 
-    def stop(self) -> None:
-        """Stop the worker when the owning application is shutting down."""
+    def stop(self, *, wait: bool = True) -> None:
+        """Cancel queued work and stop the worker during application shutdown."""
         self._stopped.set()
+        with self._lock:
+            run_ids = tuple(self._cancel)
+        for run_id in run_ids:
+            self.cancel(run_id)
+        thread = self._thread
+        if wait and thread is not None and thread is not current_thread():
+            thread.join()
 
     def submit(self, request: dict[str, Any]) -> str:
         run_id = uuid4().hex
