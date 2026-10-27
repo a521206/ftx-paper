@@ -66,6 +66,54 @@ class LocationRecord:
         return alias == self.alias or alias in self.aliases
 
 
+@dataclass(frozen=True, slots=True)
+class LocationObservation:
+    """Causal measurement of one frozen location on a completed parent."""
+
+    location_id: str
+    location_alias: str
+    reference_generation: int
+    reference: float
+    band_lower: float
+    band_upper: float
+    open: float
+    high: float
+    low: float
+    close: float
+    band_contact: bool
+    source_aggregate_id: str
+    observed_at: datetime
+    available_at: datetime
+    observation_id: str
+
+    def __post_init__(self) -> None:
+        if not self.location_id or not self.location_alias or not self.observation_id:
+            raise ValueError("location observation identity is required")
+        if self.band_lower > self.band_upper:
+            raise ValueError("location observation band bounds are inverted")
+        if self.available_at < self.observed_at:
+            raise ValueError("location observation availability is not causal")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "location_id": self.location_id,
+            "location_alias": self.location_alias,
+            "reference_generation": self.reference_generation,
+            "reference": self.reference,
+            "band_lower": self.band_lower,
+            "band_upper": self.band_upper,
+            "open": self.open,
+            "high": self.high,
+            "low": self.low,
+            "close": self.close,
+            "band_contact": self.band_contact,
+            "source_aggregate_id": self.source_aggregate_id,
+            "observed_at": self.observed_at.isoformat(),
+            "available_at": self.available_at.isoformat(),
+            "observation_id": self.observation_id,
+        }
+
+
 class LocationRegistry:
     """Append-only registry; replacement never mutates an earlier record."""
 
@@ -141,4 +189,4 @@ class LocationRegistry:
         return tuple(carried)
 
 
-__all__ = ["LocationBand", "LocationRecord", "LocationRegistry"]
+__all__ = ["LocationBand", "LocationObservation", "LocationRecord", "LocationRegistry"]

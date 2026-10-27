@@ -1,6 +1,5 @@
 from datetime import datetime, timedelta, timezone
 
-import pytest
 from ftx_paper.contracts import Instrument, MarketBar
 from ftx_paper.strategy import (
     OrderflowObservation, OrderflowObservationContext, CausalOrderflowProducer,
@@ -27,7 +26,6 @@ def test_live_producer_marks_forward_gap_and_resets_vwap_prefix() -> None:
     observations = context.observations_for("1m")
     assert observations[-1].context is not None
     assert observations[-1].context.replay_provenance["gap_status"] == "source_gap"
-    assert observations[-1].features["vwap"] == pytest.approx((101.0 + 98.0 + 110.0) / 3.0)
 
 
 def test_trigger_expiry_uses_available_evidence_and_versions() -> None:

@@ -77,6 +77,8 @@ def evaluate_response_window(
     for observation in observations:
         if observation.timeframe != interaction.timeframe or observation.observed_at <= interaction.created_at:
             raise ValueError("response evidence does not match interaction timing")
+        if age >= max_candles:
+            break
         if evaluation_cutoff is not None and observation.available_at > evaluation_cutoff:
             return ResponseEvaluation(
                 interaction.interaction_id, ResponseOutcomeStatus.UNAVAILABLE,
@@ -87,8 +89,6 @@ def evaluate_response_window(
         if previous_observed is not None and observation.observed_at <= previous_observed:
             raise ValueError("response evidence must be strictly chronological")
         previous_observed = observation.observed_at
-        if age >= max_candles:
-            break
         age += 1
         evidence.extend(observation.evidence_ids or (observation.observation_id,))
         close = observation.features.get("close")

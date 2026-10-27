@@ -44,3 +44,28 @@ def test_interaction_detector_closes_all_for_gap() -> None:
     ended = detector.close_all(InteractionCloseReason.DATA_GAP, _observation(1, 100).observed_at)
 
     assert ended[0].close_reason is InteractionCloseReason.DATA_GAP
+
+
+def test_interaction_detector_snapshot_restores_generation_state() -> None:
+    location = LocationRecord("loc-1", "opening_range", 100, LocationBand(99, 101), 1,
+                              datetime(2026, 1, 1, 9, 15, tzinfo=UTC), "agg-1")
+    detector = InteractionDetector("1m")
+    created = detector.observe(location, _observation(0, 100))
+    assert created is not None
+    restored = InteractionDetector.from_snapshot(detector.snapshot())
+    advanced = restored.observe(location, _observation(1, 100))
+    assert advanced is not None
+    assert advanced.interaction_id == created.interaction_id
+    assert len(advanced.contact_candles) == 2
+
+
+def test_interaction_detector_deduplicates_by_location_observation() -> None:
+    first = LocationRecord("loc-1", "opening_range", 100, LocationBand(99, 101), 1,
+                           datetime(2026, 1, 1, 9, 15, tzinfo=UTC), "agg-1")
+    second = LocationRecord("loc-2", "session_high", 100, LocationBand(99, 101), 1,
+                            datetime(2026, 1, 1, 9, 15, tzinfo=UTC), "agg-1")
+    detector = InteractionDetector("1m")
+    observation = _observation(0, 100)
+    assert detector.observe(first, observation, observation_id="location-1") is not None
+    assert detector.observe(second, observation, observation_id="location-2") is not None
+    assert len(detector.active_interactions) == 2

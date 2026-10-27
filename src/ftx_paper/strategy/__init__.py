@@ -32,7 +32,7 @@ if TYPE_CHECKING:
         advance_opening_gap, classify_opening_gap, derive_session_levels,
         permission_for_context, admission_recovery_available,
     )
-    from .orderflow_location import LocationBand, LocationRecord, LocationRegistry
+    from .orderflow_location import LocationBand, LocationObservation, LocationRecord, LocationRegistry
     from .orderflow_interaction import (
         InteractionCandle, InteractionCloseReason, InteractionDetector,
         InteractionStatus, LocationInteraction,
@@ -81,6 +81,10 @@ def __getattr__(name: str):
         from .policy_contract import ExecutionMode, FeatureRequirement, PolicyDecision, StrategyPolicy
         return {"ExecutionMode": ExecutionMode, "FeatureRequirement": FeatureRequirement,
                 "PolicyDecision": PolicyDecision, "StrategyPolicy": StrategyPolicy}[name]
+    if name in {"LocationBand", "LocationObservation", "LocationRecord", "LocationRegistry"}:
+        from .orderflow_location import LocationBand, LocationObservation, LocationRecord, LocationRegistry
+        return {"LocationBand": LocationBand, "LocationObservation": LocationObservation,
+                "LocationRecord": LocationRecord, "LocationRegistry": LocationRegistry}[name]
     if name == "SharedDecisionCoordinator":
         from .coordinator import SharedDecisionCoordinator
         return SharedDecisionCoordinator
@@ -137,9 +141,10 @@ def __getattr__(name: str):
             "permission_for_context": permission_for_context,
             "admission_recovery_available": admission_recovery_available,
         }[name]
-    if name in {"LocationBand", "LocationRecord", "LocationRegistry"}:
-        from .orderflow_location import LocationBand, LocationRecord, LocationRegistry
-        return {"LocationBand": LocationBand, "LocationRecord": LocationRecord, "LocationRegistry": LocationRegistry}[name]
+    if name in {"LocationBand", "LocationObservation", "LocationRecord", "LocationRegistry"}:
+        from .orderflow_location import LocationBand, LocationObservation, LocationRecord, LocationRegistry
+        return {"LocationBand": LocationBand, "LocationObservation": LocationObservation,
+                "LocationRecord": LocationRecord, "LocationRegistry": LocationRegistry}[name]
     if name in {"InteractionCandle", "InteractionCloseReason", "InteractionDetector", "InteractionStatus", "LocationInteraction"}:
         from .orderflow_interaction import (
             InteractionCandle, InteractionCloseReason, InteractionDetector,
@@ -239,7 +244,7 @@ __all__ = [
     "ContextHistory", "ContextVersion", "OpeningGapState", "SessionLevels", "ValueReference",
     "advance_opening_gap", "classify_opening_gap", "derive_session_levels",
     "permission_for_context", "admission_recovery_available",
-    "LocationBand", "LocationRecord", "LocationRegistry",
+    "LocationBand", "LocationObservation", "LocationRecord", "LocationRegistry",
     "InteractionCandle", "InteractionCloseReason", "InteractionDetector",
     "InteractionStatus", "LocationInteraction",
     "ResponseEvaluation", "ResponseHypothesis", "ResponseOutcomeStatus",

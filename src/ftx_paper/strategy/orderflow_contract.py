@@ -10,6 +10,8 @@ from enum import StrEnum
 import hashlib
 import json
 
+from .orderflow_location import LocationObservation
+
 
 class UnavailableReason(StrEnum):
     MISSING_SOURCE = "missing_source"
@@ -92,6 +94,7 @@ class OrderflowObservation:
     response_status: str | None = None
     evidence_ids: tuple[str, ...] = ()
     context: OrderflowObservationContext | None = None
+    location_observations: tuple[LocationObservation, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.observation_id.strip() or not self.feature_version.strip():
@@ -107,6 +110,11 @@ class OrderflowObservation:
                 raise ValueError("orderflow interval must be increasing")
         if len(self.evidence_ids) != len(set(self.evidence_ids)):
             raise ValueError("orderflow evidence IDs must be unique")
+        location_ids = [item.observation_id for item in self.location_observations]
+        if any(not item for item in location_ids):
+            raise ValueError("location observations require stable IDs")
+        if len(location_ids) != len(set(location_ids)):
+            raise ValueError("location observation IDs must be unique")
         object.__setattr__(self, "features", _mapping(self.features))
 
     def available_by(self, cutoff: datetime) -> bool:

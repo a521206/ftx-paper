@@ -1,4 +1,4 @@
-"""Native causal VWAP observation producer for completed market bars."""
+"""Native causal observation producer for completed market bars."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from .orderflow_contract import (
     OrderflowContext, OrderflowObservation, OrderflowObservationContext,
     stable_orderflow_id,
 )
+from .orderflow_location import LocationBand, LocationObservation, LocationRecord
 
 
 def _numeric_feature(features: Mapping[str, object], name: str) -> float:
@@ -113,19 +114,12 @@ class CausalOrderflowProducer:
             bar.instrument.instrument_type, bar.instrument.expiry or "",
         )) == stream_identity]
         prefix: list[OrderflowObservation] = []
-        cumulative_value = 0.0
-        cumulative_volume = 0.0
         for bar_index, bar in enumerate(bars):
             bar_has_gap = bool(
                 bar_index
                 and bar.timestamp - bars[bar_index - 1].timestamp > timedelta(minutes=1)
             )
-            if bar_has_gap:
-                cumulative_value = 0.0
-                cumulative_volume = 0.0
             volume = float(bar.volume or 0.0)
-            cumulative_value += ((bar.high + bar.low + bar.close) / 3.0) * volume
-            cumulative_volume += volume
             available_at = bar.timestamp + timedelta(minutes=1)
             prefix.append(OrderflowObservation(
                 observation_id=stable_orderflow_id("observation", trading_date, stream_identity, "1m", bar.timestamp.isoformat()),
@@ -142,7 +136,6 @@ class CausalOrderflowProducer:
                     "high": bar.high,
                     "low": bar.low,
                     "close": bar.close,
-                    "vwap": cumulative_value / cumulative_volume if cumulative_volume else None,
                     "volume": volume,
                     "previous_close": bars[bar_index - 1].close if bar_index and not bar_has_gap else None,
                 },
@@ -163,6 +156,8 @@ class CausalOrderflowProducer:
                 ),
             ))
         five_minute: list[OrderflowObservation] = []
+        location_records: dict[str, LocationRecord] = {}
+        location_generations: dict[str, int] = {}
         session_start = datetime.combine(
             datetime.fromisoformat(trading_date).date(), self._session_start,
         ).replace(
@@ -217,9 +212,72 @@ class CausalOrderflowProducer:
                 "low": min(_numeric_feature(item, "low") for item in child_features),
                 "close": _numeric_feature(child_features[-1], "close"),
                 "previous_close": child_features[0].get("previous_close"),
-                "vwap": child_features[-1].get("vwap"),
                 "volume": total_volume,
             }
+            session_children = [
+                item for item in prefix if item.observed_at <= children[-1].observed_at
+            ]
+            ranges = [
+                _numeric_feature(item.features, "high") - _numeric_feature(item.features, "low")
+                for item in session_children
+            ]
+            atr = max(sum(ranges[-20:]) / len(ranges[-20:]), 1e-9)
+            session_high = max(_numeric_feature(item.features, "high") for item in session_children)
+            session_low = min(_numeric_feature(item.features, "low") for item in session_children)
+            session_open = [
+                item for item in session_children
+                if item.observed_at < session_start + timedelta(minutes=15)
+            ]
+            levels: dict[str, float] = {
+                "session_high": session_high,
+                "session_low": session_low,
+            }
+            if len(session_open) == 15:
+                levels.update({
+                    "or_high": max(_numeric_feature(item.features, "high") for item in session_open),
+                    "or_low": min(_numeric_feature(item.features, "low") for item in session_open),
+                })
+            location_observations: list[LocationObservation] = []
+            for alias, level in levels.items():
+                previous = location_records.get(alias)
+                band = LocationBand(level - atr * 0.06, level + atr * 0.06)
+                if (
+                    previous is None
+                    or previous.price != level
+                    or previous.band != band
+                ):
+                    generation = location_generations.get(alias, 0) + 1
+                    location_generations[alias] = generation
+                    location_id = stable_orderflow_id(
+                        "location", trading_date, stream_identity, alias, generation,
+                    )
+                    location_records[alias] = LocationRecord(
+                        location_id, alias, level, band, generation, end, parent_id,
+                        timeframe="5m", source_identity=stream_identity,
+                        replaced_location_id=previous.location_id if previous else None,
+                    )
+                record = location_records[alias]
+                parent_high = _numeric_feature(parent_features, "high")
+                parent_low = _numeric_feature(parent_features, "low")
+                location_observations.append(LocationObservation(
+                    location_id=record.location_id,
+                    location_alias=record.alias,
+                    reference_generation=record.generation,
+                    reference=record.price,
+                    band_lower=record.band.lower,
+                    band_upper=record.band.upper,
+                    open=_numeric_feature(parent_features, "open"),
+                    high=parent_high,
+                    low=parent_low,
+                    close=_numeric_feature(parent_features, "close"),
+                    band_contact=record.band.lower <= parent_high and parent_low <= record.band.upper,
+                    source_aggregate_id=parent_id,
+                    observed_at=start,
+                    available_at=end,
+                    observation_id=stable_orderflow_id(
+                        "location_observation", parent_id, record.location_id,
+                    ),
+                ))
             five_minute.append(OrderflowObservation(
                 observation_id=parent_id,
                 source_observation_id=parent_id,
@@ -244,6 +302,7 @@ class CausalOrderflowProducer:
                     child_intervals=child_intervals,
                     causal_sequence=1,
                 ),
+                location_observations=tuple(location_observations),
             ))
         observations = (*prefix, *five_minute)
         cutoff = decision_cutoff

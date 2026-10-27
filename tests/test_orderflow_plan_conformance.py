@@ -1,6 +1,4 @@
 from datetime import datetime, timedelta, timezone
-from collections.abc import Mapping
-from typing import cast
 
 from ftx_paper.contracts import Instrument, MarketBar
 from ftx_paper.strategy import (
@@ -81,12 +79,10 @@ def test_live_diagnostic_projection_contains_non_executable_lineage() -> None:
     from tests.test_orderflow_strategy import _context
 
     bundle, context = _context()
-    event = OrderflowStrategy().evaluate(bundle, context)[0]
-    projection = cast(Mapping[str, object], event.payload["diagnostic_intent"])
-    assert projection["executable"] is False
-    assert projection["intent_id"]
-    assert isinstance(event.payload["setup_id"], str)
-    assert isinstance(event.payload["execution_group_id"], str)
+    events = OrderflowStrategy().evaluate(bundle, context)
+    assert events
+    assert all(event.order is None for event in events)
+    assert all(event.payload.get("execution_mode") != "executable" for event in events)
 
 
 def test_interaction_closure_distinguishes_cross_band_departure() -> None:

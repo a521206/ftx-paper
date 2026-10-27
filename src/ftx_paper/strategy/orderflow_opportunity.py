@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 import hashlib
 
 
@@ -84,6 +84,59 @@ class ExecutionGroupRegistry:
     @property
     def history(self) -> tuple[ExecutionGroupClaim, ...]:
         return tuple(self._history)
+
+    def snapshot(self) -> dict[str, object]:
+        def encode(item: ExecutionGroupClaim) -> dict[str, object]:
+            return {
+                "execution_group_id": item.execution_group_id,
+                "lifecycle_id": item.lifecycle_id,
+                "accepted": item.accepted,
+                "reason": item.reason,
+                "evidence_ids": list(item.evidence_ids),
+            }
+        return {
+            "claims": [encode(item) for item in self._claims.values()],
+            "history": [encode(item) for item in self._history],
+        }
+
+    @classmethod
+    def from_snapshot(cls, snapshot: Mapping[str, object]) -> "ExecutionGroupRegistry":
+        registry = cls()
+        claims = snapshot.get("claims", ())
+        history = snapshot.get("history", ())
+        if not isinstance(claims, (list, tuple)) or not isinstance(history, (list, tuple)):
+            raise ValueError("invalid execution group snapshot")
+
+        def decode(raw: object) -> ExecutionGroupClaim:
+            if not isinstance(raw, Mapping):
+                raise ValueError("execution group claim must be an object")
+            evidence = raw.get("evidence_ids", ())
+            if not isinstance(evidence, (list, tuple)):
+                raise ValueError("execution group evidence must be a sequence")
+            accepted = raw.get("accepted")
+            if not isinstance(accepted, bool):
+                raise ValueError("execution group accepted flag must be boolean")
+            return ExecutionGroupClaim(
+                str(raw["execution_group_id"]), str(raw["lifecycle_id"]),
+                accepted, str(raw["reason"]), tuple(str(item) for item in evidence),
+            )
+
+        seen_history: set[tuple[str, str, bool, str, tuple[str, ...]]] = set()
+        for item in history:
+            claim = decode(item)
+            identity = (claim.execution_group_id, claim.lifecycle_id, claim.accepted, claim.reason, claim.evidence_ids)
+            if identity in seen_history:
+                raise ValueError("duplicate execution group history claim")
+            seen_history.add(identity)
+            registry._history.append(claim)
+        seen_groups: set[str] = set()
+        for item in claims:
+            claim = decode(item)
+            if claim.execution_group_id in seen_groups:
+                raise ValueError("duplicate execution group claim")
+            seen_groups.add(claim.execution_group_id)
+            registry._claims[claim.execution_group_id] = claim
+        return registry
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +266,88 @@ class SetupOpportunity:
         return replace(
             self, status=status,
             transitions=(*self.transitions, OpportunityTransition(status, at, reason, evidence_ids)),
+        )
+
+    def snapshot(self) -> dict[str, object]:
+        return {
+            "lifecycle_id": self.lifecycle_id,
+            "response_episode_id": self.response_episode_id,
+            "execution_group_id": self.execution_group_id,
+            "setup": {
+                "setup_id": self.setup.setup_id,
+                "direction": self.setup.direction,
+                "entry_lower": self.setup.entry_lower,
+                "entry_upper": self.setup.entry_upper,
+                "failure_boundary": self.setup.failure_boundary,
+                "formed_at": self.setup.formed_at.isoformat(),
+                "expires_at": self.setup.expires_at.isoformat(),
+                "evidence_ids": list(self.setup.evidence_ids),
+                "context_version": self.setup.context_version,
+                "confirmation_ids": list(self.setup.confirmation_ids),
+                "regime_version": self.setup.regime_version,
+            },
+            "status": self.status.value,
+            "regime_version": self.regime_version,
+            "evidence_timeframe": self.evidence_timeframe,
+            "timeout_count": self.timeout_count,
+            "timeout_evidence_ids": list(self.timeout_evidence_ids),
+            "transitions": [
+                {
+                    "status": item.status.value,
+                    "at": item.at.isoformat(),
+                    "reason": item.reason,
+                    "evidence_ids": list(item.evidence_ids),
+                }
+                for item in self.transitions
+            ],
+        }
+
+    @classmethod
+    def from_snapshot(cls, raw: Mapping[str, object]) -> "SetupOpportunity":
+        setup_raw = raw.get("setup")
+        transitions_raw = raw.get("transitions", ())
+        if not isinstance(setup_raw, Mapping) or not isinstance(transitions_raw, (list, tuple)):
+            raise ValueError("invalid opportunity snapshot")
+
+        def strings(value: object, name: str) -> tuple[str, ...]:
+            if not isinstance(value, (list, tuple)):
+                raise ValueError(f"invalid opportunity {name}")
+            return tuple(str(item) for item in value)
+
+        setup = StructuralSetup(
+            str(setup_raw["setup_id"]), str(setup_raw["direction"]),
+            float(setup_raw["entry_lower"]), float(setup_raw["entry_upper"]),
+            float(setup_raw["failure_boundary"]),
+            datetime.fromisoformat(str(setup_raw["formed_at"])),
+            datetime.fromisoformat(str(setup_raw["expires_at"])),
+            strings(setup_raw.get("evidence_ids", ()), "evidence_ids"),
+            int(setup_raw["context_version"]) if setup_raw.get("context_version") is not None else None,
+            strings(setup_raw.get("confirmation_ids", ()), "confirmation_ids"),
+            int(setup_raw["regime_version"]) if setup_raw.get("regime_version") is not None else None,
+        )
+        transitions_list: list[OpportunityTransition] = []
+        for item in transitions_raw:
+            if not isinstance(item, Mapping):
+                raise ValueError("opportunity transition must be an object")
+            transitions_list.append(OpportunityTransition(
+                OpportunityStatus(str(item["status"])),
+                datetime.fromisoformat(str(item["at"])), str(item["reason"]),
+                strings(item.get("evidence_ids", ()), "transition evidence_ids"),
+            ))
+        transitions = tuple(transitions_list)
+        regime_version = raw.get("regime_version")
+        timeout_count = raw.get("timeout_count", 0)
+        if regime_version is not None and not isinstance(regime_version, int):
+            raise ValueError("invalid opportunity regime version")
+        if not isinstance(timeout_count, int):
+            raise ValueError("invalid opportunity timeout count")
+        return cls(
+            str(raw["lifecycle_id"]), str(raw["response_episode_id"]),
+            str(raw["execution_group_id"]), setup,
+            OpportunityStatus(str(raw["status"])),
+            regime_version,
+            str(raw["evidence_timeframe"]), timeout_count,
+            strings(raw.get("timeout_evidence_ids", ()), "timeout_evidence_ids"), transitions,
         )
 
 

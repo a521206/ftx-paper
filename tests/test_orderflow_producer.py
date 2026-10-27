@@ -22,13 +22,15 @@ def test_causal_producer_builds_complete_five_minute_context() -> None:
     assert parent.features["low"] == 98.0
     assert parent.features["close"] == 104.0
     assert parent.features["volume"] == 50.0
-    assert parent.features["vwap"] is not None
     assert parent.observed_at == start
     assert parent.available_at == start + timedelta(minutes=5)
     assert parent.context is not None
     assert parent.context.replay_provenance["input_availability"] == "complete"
     assert parent.context.replay_provenance["gap_status"] == "none"
     assert parent.context.replay_provenance["source_fingerprint"]
+    assert parent.location_observations
+    assert all(item.available_at == parent.available_at for item in parent.location_observations)
+    assert all(item.source_aggregate_id == parent.observation_id for item in parent.location_observations)
 
 
 def test_causal_producer_keeps_later_parent_windows_complete() -> None:
