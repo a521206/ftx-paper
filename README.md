@@ -25,6 +25,34 @@ from the repository root, then start the processes in separate terminals:
 The API runs on `http://127.0.0.1:8501`; the dashboard runs on
 `http://127.0.0.1:8502`. Keep the API loopback-only.
 
+## Runtime Database And Replay Data
+
+The runtime SQLite database is not stored in this repository. On Windows, the
+default database is:
+
+```text
+C:\Users\<user>\AppData\Local\ftx-paper\runtime\runtime.sqlite3
+```
+
+The actual path is controlled by `FTX_PAPER_RUNTIME_DIR`. Use the configured
+database for replay inputs and market history; do not create or use a
+repo-local `data/runtime/runtime.sqlite3` copy:
+
+```powershell
+$env:FTX_PAPER_RUNTIME_DIR = "$env:LOCALAPPDATA\ftx-paper\runtime"
+```
+
+For example, replay September 29 through the API after starting it:
+
+```powershell
+Invoke-RestMethod -Method Post http://127.0.0.1:8501/api/v1/replay `
+  -ContentType 'application/json' `
+  -Body '{"session_date":"2026-09-29","strategy_id":"ftx-paper-orderflow","vehicles":["futures"]}'
+```
+
+Runtime databases contain broker/runtime state and historical market bars. Do
+not commit them, copy them into the repository, or share broker credentials.
+
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)

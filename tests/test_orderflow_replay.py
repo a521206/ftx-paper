@@ -5,6 +5,9 @@ from ftx_paper.strategy import (
     CANONICAL_PHASE_ORDER, ReplayMachine, ReplayPhase,
     observe_market, prepare_replay_input,
 )
+from ftx_paper.strategy.factory import ConfiguredStrategyFactory
+from ftx_paper.strategy.orderflow import OrderflowConfig, OrderflowStrategy
+from ftx_paper.strategy.policy_contract import ExecutionMode
 from tests.test_orderflow_observation import _rows
 
 
@@ -57,3 +60,12 @@ def test_replay_machine_resumes_admission_after_complete_recovery_parent() -> No
     assert suspended.admission_suspended
     assert not recovered.admission_suspended
 
+
+def test_explicit_orderflow_dispatch_is_executable_and_not_vwap() -> None:
+    strategy = ConfiguredStrategyFactory().create(
+        strategy="ftx-paper-orderflow",
+        config=OrderflowConfig(execution_mode=ExecutionMode.EXECUTABLE),
+    )
+    assert isinstance(strategy, OrderflowStrategy)
+    assert strategy.metadata.name == "ftx-paper-orderflow"
+    assert strategy.policy.execution_mode is ExecutionMode.EXECUTABLE

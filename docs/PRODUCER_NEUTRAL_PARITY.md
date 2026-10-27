@@ -37,8 +37,7 @@ layers
 and input identity. `coverage` includes `complete` and `issues`. A missing or
 unobserved scope is `INCOMPLETE`, not an empty match.
 
-Each layer contains `status`, `count`, `sha256`, and ordered `records`. A record
-contains:
+Each layer contains `count`, `sha256`, and ordered `records`. A record contains:
 
 ```text
 kind, occurred_at, sequence, identity, values, unavailable
@@ -88,8 +87,11 @@ by both producers. Each producer has one authoritative portfolio state.
 
 ## Comparison and API
 
-- Compare the manifest and Layer 1 before other layers.
-- Compare each layer's status, count, and hash before fetching records.
+- A producer artifact is evidence only; creating or validating one does not
+  produce a parity verdict.
+- Compare two producer artifacts, and compare the manifest and Layer 1 before
+  other layers.
+- Compare each layer's count and hash before fetching records.
 - On a mismatch, inspect only that layer and stop at the first mismatch.
 - Verdict precedence is `MISMATCHED`, `INCOMPLETE`, `UNAVAILABLE`, then
   `MATCHED`.
@@ -97,6 +99,10 @@ by both producers. Each producer has one authoritative portfolio state.
   empty.
 - No numeric tolerance is used in this first version.
 - Producer-local IDs and storage metadata are diagnostics, not identities.
+
+`MATCHED` is reserved for the result of an explicit cross-producer comparison.
+It must never be assigned to a producer's own artifact merely because its
+records are internally valid or its coverage is complete.
 
 Paper APIs expose persisted data only:
 

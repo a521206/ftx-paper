@@ -29,6 +29,8 @@ from ftx_paper.execution import PaperExecutionCoordinator
 from ftx_paper.execution.settlement import ExitValidationError, validate_exit_order
 from ftx_paper.strategy.exits import ExitAction
 from ftx_paper.strategy import ConfiguredStrategyFactory, StrategyFactory
+from ftx_paper.strategy.orderflow import OrderflowConfig
+from ftx_paper.strategy.policy_contract import ExecutionMode
 from ftx_paper.strategy.config import (
     AFTERNOON_ENTRY_MINUTES,
     MORNING_ENTRY_MINUTES,
@@ -371,6 +373,13 @@ class ReplayWorker:
             strategy_id = request.get("strategy_id")
             if strategy_id is not None:
                 strategy_kwargs["strategy"] = strategy_id
+            if strategy_id == "ftx-paper-orderflow":
+                # Replay is an executable paper simulation.  The live/default
+                # orderflow projection remains diagnostic-only.
+                strategy_kwargs["config"] = OrderflowConfig(
+                    enabled_vehicles=tuple(vehicles),
+                    execution_mode=ExecutionMode.EXECUTABLE,
+                )
             strategy = self.strategy_factory.create(
                 **strategy_kwargs,
                 enabled_vehicles=vehicles,

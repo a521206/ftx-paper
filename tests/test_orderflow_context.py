@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from ftx_paper.strategy import (
-    ContextHistory, ContextVersion, OpeningGapState, SessionLevels,
+    ContextHistory, ContextVersion, OpeningGapState, SessionLevels, ValueReference,
     advance_opening_gap, classify_opening_gap,
 )
 
@@ -22,9 +22,13 @@ def test_context_history_resolves_latest_available_version() -> None:
     start = datetime(2026, 1, 1, 9, 15, tzinfo=UTC)
     history = ContextHistory((_version(1, start), _version(2, start + timedelta(minutes=5))))
 
-    assert history.as_of(start + timedelta(minutes=1)).version == 1
+    first = history.as_of(start + timedelta(minutes=1))
+    assert first is not None
+    assert first.version == 1
     assert history.as_of(start - timedelta(seconds=1)) is None
-    assert history.as_of(start + timedelta(minutes=6)).version == 2
+    second = history.as_of(start + timedelta(minutes=6))
+    assert second is not None
+    assert second.version == 2
 
 
 def test_context_history_rejects_future_or_duplicate_versions() -> None:
@@ -51,3 +55,16 @@ def test_opening_gap_recovery_is_explicit_and_causal() -> None:
     )
     assert recovered.status == "RETURN_TO_VALUE"
     assert recovered.evidence_ids == ("obs-1",)
+
+
+def test_value_reference_requires_complete_causal_publication() -> None:
+    with pytest.raises(ValueError, match="both bounds"):
+        ValueReference("pd", 101.0, None, datetime(2026, 1, 1, 9, 15, tzinfo=UTC), ("profile",), True)
+    with pytest.raises(ValueError, match="source IDs"):
+        ValueReference("pd", 101.0, 99.0, datetime(2026, 1, 1, 9, 15, tzinfo=UTC), (), True)
+
+    reference = ValueReference(
+        "pd", 101.0, 99.0, datetime(2026, 1, 1, 9, 15, tzinfo=UTC), ("profile",), True,
+    )
+    assert reference.complete
+    assert reference.source_ids == ("profile",)

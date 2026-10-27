@@ -92,3 +92,35 @@ def test_trigger_requires_a_causal_price() -> None:
     assert not result.eligible
     assert result.trigger_price is None
     assert result.ineligible_reason == "missing_trigger_price"
+
+
+def test_trigger_accepts_causal_displacement_only_after_crossing() -> None:
+    observed = datetime(2026, 1, 1, 3, 45, tzinfo=UTC)
+    observation = OrderflowObservation(
+        "obs", "bar", "v1", "1m", "NIFTYFUT", observed, observed + timedelta(minutes=1),
+        {"close": 102.0, "previous_close": 99.0, "armed": True},
+        observed, observed + timedelta(minutes=1),
+        context=OrderflowObservationContext("2026-01-01", "complete", "available", {}, 1),
+    )
+
+    result = observe_trigger(observation, boundary=100.0, execution_mode="enabled")
+
+    assert result.crossed
+    assert result.eligible
+    assert result.ineligible_reason is None
+
+
+def test_diagnostic_trigger_preserves_crossing_without_authorizing_execution() -> None:
+    observed = datetime(2026, 1, 1, 3, 45, tzinfo=UTC)
+    observation = OrderflowObservation(
+        "obs", "bar", "v1", "1m", "NIFTYFUT", observed, observed + timedelta(minutes=1),
+        {"close": 102.0, "previous_close": 99.0, "armed": True},
+        observed, observed + timedelta(minutes=1),
+        context=OrderflowObservationContext("2026-01-01", "complete", "available", {}, 1),
+    )
+
+    result = observe_trigger(observation, boundary=100.0, execution_mode="diagnostic")
+
+    assert result.crossed
+    assert not result.eligible
+    assert result.ineligible_reason == "diagnostic_only"

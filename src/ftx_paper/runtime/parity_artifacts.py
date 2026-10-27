@@ -154,8 +154,13 @@ def build_parity_artifact(
     layer_records = layer_records or {}
     source_decisions = list(layer_records.get("decisions", ()))
     source_decisions = [event for event in source_decisions
-                        if is_decision_event(str(event.get("event_type", "")), event)]
-    decisions = [_record(event, kind=str(event.get("outcome", "recorded")), sequence=index)
+                        if is_decision_event(str(event.get("event_type", "")), event)
+                        and (str(event.get("outcome", "")).lower() in {"", "accepted", "rejected"}
+                             or str(event.get("decision_stage", "")).lower() == "opportunity"
+                             or str(event.get("event_type", "")).upper() == "EXITDECISION")]
+    decisions = [_record(event, kind=("candidate" if str(event.get("decision_stage", "")).lower() == "opportunity"
+                                      else "exit" if str(event.get("event_type", "")).upper() == "EXITDECISION"
+                                      else str(event.get("outcome", "rejected"))), sequence=index)
                  for index, event in enumerate(source_decisions)]
     execution_types = {"ORDER_INTENT", "ORDER_AUTHORIZED", "ORDER_ACK", "FILL", "ORDER_UNFILLED", "ORDER_SUPPRESSED", "RISK_REJECTED"}
     source_execution = [event for event in layer_records.get("execution", ())
@@ -243,8 +248,10 @@ def build_parity_manifest(artifact: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError(f"invalid {layer} record")
         coverage = artifact.get("coverage", {})
         observed = coverage.get("observed_layers", {}).get(layer, False)
-        status = "INCOMPLETE" if not coverage.get("complete", False) else ("MATCHED" if observed else "UNAVAILABLE")
-        layers[layer] = {"status": status, "count": len(records),
+        # A producer can establish coverage, but only a cross-producer
+        # comparison can establish MATCHED.
+        status = "INCOMPLETE" if not coverage.get("complete", False) else "UNAVAILABLE"
+        layers[layer] = {"status": status, "observed": bool(observed), "count": len(records),
                          "sha256": hashlib.sha256(_canonical_json(records).encode("utf-8")).hexdigest()}
     scope = artifact.get("scope", {})
     return {"version": PARITY_MANIFEST_VERSION, "hash_algorithm": "sha256",
@@ -256,6 +263,8 @@ def validate_parity_artifact(artifact: Mapping[str, Any]) -> dict[str, Any]:
     required = ("artifact_type", "schema_version", "contract", "producer", "run_id", "scope", "coverage", "producer_configuration", "layers", "manifest")
     if any(key not in artifact for key in required) or artifact.get("artifact_type") != "producer_parity" or artifact.get("schema_version") != 2:
         raise ValueError("invalid parity artifact envelope")
+    if not isinstance(artifact["producer"], Mapping):
+        raise ValueError("invalid parity producer")
     contract = artifact["contract"]
     if not isinstance(contract, Mapping) or contract.get("id") != PARITY_CONTRACT_ID or contract.get("layers") != list(PARITY_LAYERS):
         raise ValueError("invalid parity contract")
@@ -294,21 +303,52 @@ def compare_parity_manifests(left: Mapping[str, Any], right: Mapping[str, Any], 
             status = "INCOMPLETE" if "INCOMPLETE" in statuses else (
                 "UNAVAILABLE" if "UNAVAILABLE" in statuses else "MISMATCHED")
             return {"status": status, "layer": layer}
+        if left_layer.get("observed") != right_layer.get("observed"):
+            return {"status": "UNAVAILABLE", "layer": layer}
+        if not left_layer.get("observed", False):
+            return {"status": "UNAVAILABLE", "layer": layer}
         if (left_layer.get("count"), left_layer.get("sha256")) != (right_layer.get("count"), right_layer.get("sha256")):
             return {"status": "MISMATCHED", "layer": layer, "context_limit": max_context}
     return {"status": "MATCHED"}
 
 
-def compare_parity_artifacts(left: Mapping[str, Any], right: Mapping[str, Any], *, max_context: int = 3,
-                             left_records: Sequence[Mapping[str, Any]] | None = None,
-                             right_records: Sequence[Mapping[str, Any]] | None = None) -> dict[str, Any]:
-    result = compare_parity_manifests(left.get("manifest", left), right.get("manifest", right), max_context=max_context)
-    if result.get("status") != "MISMATCHED" or left_records is None or right_records is None:
+def compare_parity_artifacts(left: Mapping[str, Any], right: Mapping[str, Any], *, max_context: int = 3) -> dict[str, Any]:
+    try:
+        left = read_parity_artifact(left)
+        right = read_parity_artifact(right)
+    except ValueError as exc:
+        return {"status": "UNAVAILABLE", "reason": str(exc)}
+    left_producer = left.get("producer", {}).get("name")
+    right_producer = right.get("producer", {}).get("name")
+    if not left_producer or not right_producer or left_producer == right_producer:
+        return {"status": "UNAVAILABLE", "reason": "comparison requires distinct producers"}
+    result = compare_parity_manifests(left["manifest"], right["manifest"], max_context=max_context)
+    counts = {
+        layer: {"left": len(parity_layer_records(left, layer)),
+                "right": len(parity_layer_records(right, layer))}
+        for layer in PARITY_LAYERS
+    }
+    result = {**result, "scope": {"left": left.get("scope"), "right": right.get("scope")},
+              "counts": counts}
+    if result.get("layer") == "run_scope" and left.get("scope") != right.get("scope"):
+        result["context"] = [{"field": key, "left": left.get("scope", {}).get(key),
+                               "right": right.get("scope", {}).get(key)}
+                              for key in sorted(set(left.get("scope", {})) | set(right.get("scope", {})))
+                              if left.get("scope", {}).get(key) != right.get("scope", {}).get(key)][:max_context]
+    if result.get("status") != "MISMATCHED":
         return result
-    mismatches = [{"index": index, "left": left_record, "right": right_record}
-                  for index, (left_record, right_record) in enumerate(zip(left_records, right_records))
-                  if left_record != right_record][:max_context]
-    return {**result, "context": mismatches}
+    layer = result.get("layer")
+    if layer not in PARITY_LAYERS:
+        return result
+    left_layer = parity_layer_records(left, layer)
+    right_layer = parity_layer_records(right, layer)
+    context = [{"index": index, "left": a, "right": b}
+               for index, (a, b) in enumerate(zip(left_layer, right_layer)) if a != b][:max_context]
+    if len(left_layer) != len(right_layer) and len(context) < max_context:
+        context.append({"index": min(len(left_layer), len(right_layer)),
+                        "left": left_layer[len(right_layer)] if len(left_layer) > len(right_layer) else None,
+                        "right": right_layer[len(left_layer)] if len(right_layer) > len(left_layer) else None})
+    return {**result, "left_count": len(left_layer), "right_count": len(right_layer), "context": context}
 
 
 __all__ = ["PARITY_ARTIFACT_SCHEMA_VERSION", "PARITY_CONTRACT_ID", "PARITY_LAYERS",

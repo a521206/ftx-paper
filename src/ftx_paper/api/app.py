@@ -18,7 +18,9 @@ from ftx_paper.runtime.events import (
     EXECUTION_EVENT_TYPES, RISK_EVENT_TYPES, DecisionTimestampError,
 )
 from ftx_paper.runtime.events import serialize_datetime
-from ftx_paper.runtime.parity_artifacts import PARITY_LAYERS, parity_layer_records, read_parity_artifact
+from ftx_paper.runtime.parity_artifacts import (
+    PARITY_LAYERS, compare_parity_artifacts, parity_layer_records, read_parity_artifact,
+)
 from .schemas import error_payload, openapi_document
 from .orderflow import build_orderflow_projection
 
@@ -272,6 +274,20 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
         if not isinstance(manifest, dict):
             return jsonify(error_payload("unavailable", "persisted parity manifest is unavailable")), 404
         return jsonify(json_safe({**manifest, "run_id": run_id, "contract": artifact.get("contract")}))
+
+    @app.post("/api/v1/replay/compare")
+    def compare_replay_parity():
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify(error_payload("invalid_request", "JSON object body required")), 400
+        left = payload.get("paper_artifact")
+        right = payload.get("canonical_artifact")
+        if not isinstance(left, dict) or not isinstance(right, dict):
+            return jsonify(error_payload(
+                "invalid_request", "paper_artifact and canonical_artifact are required",
+            )), 400
+        result = compare_parity_artifacts(left, right)
+        return jsonify(json_safe(result))
 
     @app.get("/api/v1/replay/<run_id>/parity/<layer>")
     def replay_parity_layer(run_id: str, layer: str):

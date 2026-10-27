@@ -4,6 +4,7 @@ from ftx_paper.runtime.parity_artifacts import (
     PARITY_LAYERS,
     build_parity_artifact,
     build_parity_manifest,
+    compare_parity_artifacts,
     compare_parity_manifests,
     read_parity_artifact,
 )
@@ -68,7 +69,7 @@ def test_observed_empty_scope_is_complete() -> None:
         request={"session_date": "2026-01-05"},
     )
     assert artifact["coverage"]["complete"] is True
-    assert artifact["manifest"]["layers"]["decision"]["status"] == "MATCHED"
+    assert artifact["manifest"]["layers"]["decision"]["status"] == "UNAVAILABLE"
 
 
 def test_scope_uses_canonical_orderflow_run_identity() -> None:
@@ -142,3 +143,58 @@ def test_status_comparison_preserves_unavailable_verdict() -> None:
     assert compare_parity_manifests(left["manifest"], right["manifest"]) == {
         "status": "UNAVAILABLE", "layer": "execution_settlement",
     }
+
+
+def test_unobserved_layers_are_not_compared() -> None:
+    left = _artifact()
+    right = _artifact()
+    left["coverage"]["observed_layers"]["execution_settlement"] = False
+    right["coverage"]["observed_layers"]["execution_settlement"] = False
+    right["layers"]["execution_settlement"].append({
+        "kind": "fill", "occurred_at": "2026-01-05T14:31:00Z", "sequence": 0,
+        "identity": "x", "values": {}, "unavailable": [],
+    })
+    left["manifest"] = build_parity_manifest(left)
+    right["manifest"] = build_parity_manifest(right)
+    assert compare_parity_manifests(left["manifest"], right["manifest"]) == {
+        "status": "UNAVAILABLE", "layer": "execution_settlement",
+    }
+
+
+def test_malformed_producer_is_rejected() -> None:
+    artifact = _artifact()
+    artifact["producer"] = "ftx-paper"
+    with pytest.raises(ValueError, match="producer"):
+        read_parity_artifact(artifact)
+
+
+def test_single_artifact_never_receives_cross_producer_match() -> None:
+    artifact = _artifact()
+    assert compare_parity_artifacts(artifact, artifact)["status"] == "UNAVAILABLE"
+
+
+def test_cross_producer_scope_match_decision_mismatch() -> None:
+    left = _artifact()
+    right = _artifact()
+    right["producer"] = {"name": "NiftyZoning", "version": "fixture"}
+    right["layers"]["decision"][0]["values"]["changed"] = True
+    right["manifest"] = build_parity_manifest(right)
+    result = compare_parity_artifacts(left, right)
+    assert result["status"] == "MISMATCHED"
+    assert result["layer"] == "decision"
+    assert result["context"]
+
+
+def test_cross_producer_decision_match_execution_mismatch() -> None:
+    left = _artifact()
+    right = _artifact()
+    right["producer"] = {"name": "NiftyZoning", "version": "fixture"}
+    right["layers"]["execution_settlement"].append({
+        "kind": "fill", "occurred_at": "2026-01-05T14:31:00Z", "sequence": 0,
+        "identity": "x", "values": {}, "unavailable": [],
+    })
+    right["manifest"] = build_parity_manifest(right)
+    result = compare_parity_artifacts(left, right)
+    assert result["status"] == "MISMATCHED"
+    assert result["layer"] == "execution_settlement"
+    assert result["right_count"] == 1
