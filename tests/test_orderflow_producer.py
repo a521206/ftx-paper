@@ -78,3 +78,21 @@ def test_causal_producer_uses_configured_session_alignment() -> None:
     context = producer.context("2026-01-01", "10:04")
     assert context is not None
     assert context.observations_for("5m")[0].interval_start == start
+
+
+def test_incomplete_source_row_is_not_published_as_one_or_five_minute_evidence() -> None:
+    producer = CausalOrderflowProducer()
+    instrument = Instrument("NIFTYFUT", "NSE", "FUTURES")
+    start = datetime(2026, 1, 1, 3, 45, tzinfo=timezone.utc)
+    for index in range(5):
+        timestamp = start + timedelta(minutes=index)
+        producer.ingest(MarketBar(
+            instrument, timestamp, 99.0, 102.0, 98.0, 100.0 + index,
+            None if index == 2 else 10.0,
+        ))
+
+    context = producer.context("2026-01-01", "09:19")
+
+    assert context is not None
+    assert len(context.observations_for("1m")) == 4
+    assert context.observations_for("5m") == ()

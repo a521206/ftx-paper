@@ -55,3 +55,59 @@ def test_five_minute_window_does_not_shift_to_delayed_first_row() -> None:
 
     assert observation.context.observations_for("5m") == ()
     assert observation.gaps[0].start == datetime(2026, 1, 1, 3, 45, tzinfo=timezone.utc)
+
+
+def test_leading_boundary_gap_is_propagated_to_first_minute_features() -> None:
+    rows = _rows(6)[1:]
+    observation = observe_market(
+        prepare_replay_input(rows, "2026-01-01", session_partition="09:15-09:21")
+    )
+
+    first = observation.context.observations_for("1m")[0]
+    assert first.context is not None
+    assert first.context.replay_provenance["gap_status"] == "boundary_gap"
+    assert first.features["vwap"].reason == "boundary_gap"
+    assert observation.context.observations_for("1m")[1].context is not None
+    assert observation.context.observations_for("1m")[1].context.replay_provenance["gap_status"] == "source_gap"
+    assert observation.context.observations_for("1m")[1].features["vwap"].reason == "source_gap"
+    assert observation.context.observations_for("5m") == ()
+
+
+def test_parent_lineage_exactly_covers_children_and_selected_source() -> None:
+    replay = prepare_replay_input(_rows(5), "2026-01-01", session_partition="09:15-09:20")
+    observation = observe_market(replay)
+    parent = observation.context.observations_for("5m")[0]
+    children = observation.context.observations_for("1m")
+
+    assert parent.context is not None
+    assert parent.source_observation_id == parent.observation_id
+    assert parent.context.child_observation_ids == tuple(item.observation_id for item in children)
+    assert parent.context.child_intervals == tuple(
+        (item.interval_start, item.interval_end) for item in children
+    )
+    assert parent.context.replay_provenance["source_fingerprint"] == replay.metadata.source_fingerprint
+    assert parent.interval_start == children[0].interval_start
+    assert parent.interval_end == children[-1].interval_end
+
+
+def test_out_of_session_rows_do_not_create_gaps_or_published_evidence() -> None:
+    rows = [
+        MarketBar(
+            _rows(1)[0].instrument,
+            datetime(2026, 1, 1, 3, 44, tzinfo=timezone.utc),
+            99, 102, 98, 100, 10,
+        ),
+        _rows(1)[0],
+        MarketBar(
+            _rows(1)[0].instrument,
+            datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc),
+            99, 102, 98, 100, 10,
+        ),
+    ]
+    observation = observe_market(
+        prepare_replay_input(rows, "2026-01-01", session_partition="09:15-09:16")
+    )
+
+    assert len(observation.context.observations_for("1m")) == 1
+    assert observation.context.observations_for("1m")[0].observed_at == _rows(1)[0].timestamp
+    assert observation.gaps == ()

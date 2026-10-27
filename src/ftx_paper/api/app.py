@@ -244,32 +244,15 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             }))
         result = run.get("result")
         if isinstance(result, dict):
-            invalid = include - {"result", "events", "trace"}
+            invalid = include - {"result", "events"}
             if invalid:
-                return jsonify(error_payload("invalid_request", "include supports result, events, and trace only")), 400
+                return jsonify(error_payload("invalid_request", "include supports result and events only")), 400
             result = dict(result)
             if "events" not in include:
                 result.pop("events", None)
-            if "trace" not in include:
-                result.pop("trace", None)
             run["result"] = result
         run["replay_metadata"] = replay_metadata(run)
         return jsonify(json_safe(run))
-
-    @app.get("/api/v1/replay/<run_id>/trace")
-    def replay_trace(run_id: str):
-        if request.args.get("legacy") != "true":
-            return jsonify(error_payload("legacy_endpoint", "use parity stage endpoints")), 410
-        run = store.read_replay_run(run_id)
-        if run is None:
-            return jsonify(error_payload("not_found", "replay not found")), 404
-        if run.get("status") not in {"completed", "failed", "cancelled"}:
-            return incomplete_replay_response(run)
-        result_raw = run.get("result")
-        result: dict[str, Any] = result_raw if isinstance(result_raw, dict) else {}
-        return jsonify(json_safe({"run_id": run_id, "metadata": result.get("metadata", {}),
-                                  "schema_version": result.get("trace_schema_version", 1),
-                                  "trace": result.get("trace", [])}))
 
     @app.get("/api/v1/replay/<run_id>/parity/manifest")
     def replay_parity_manifest(run_id: str):
@@ -330,34 +313,6 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             "records": records[offset:offset + limit],
             "has_more": offset + limit < len(records),
             "next_offset": offset + limit if offset + limit < len(records) else None,
-        }))
-
-    @app.get("/api/v1/replay/<run_id>/events")
-    def replay_events(run_id: str):
-        if request.args.get("legacy") != "true":
-            return jsonify(error_payload("legacy_endpoint", "use parity stage endpoints")), 410
-        run = store.read_replay_run(run_id)
-        if run is None:
-            return jsonify(error_payload("not_found", "replay not found")), 404
-        if run.get("status") not in {"completed", "failed", "cancelled"}:
-            return incomplete_replay_response(run)
-        result_raw = run.get("result")
-        result: dict[str, Any] = result_raw if isinstance(result_raw, dict) else {}
-        events = list(result.get("events", []))
-        try:
-            offset = max(0, int(request.args.get("offset", 0)))
-            limit = min(10_000, max(1, int(request.args.get("limit", 1_000))))
-        except ValueError:
-            return jsonify(error_payload("invalid_request", "offset and limit must be integers")), 400
-        return jsonify(json_safe({
-            "run_id": run_id,
-            "metadata": result.get("metadata", {}),
-            "offset": offset,
-            "limit": limit,
-            "total": len(events),
-            "events": events[offset:offset + limit],
-            "has_more": offset + limit < len(events),
-            "next_offset": offset + limit if offset + limit < len(events) else None,
         }))
 
     @app.post("/api/v1/replay/<run_id>/cancel")

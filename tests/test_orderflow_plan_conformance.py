@@ -64,6 +64,57 @@ def test_capture_modes_keep_replay_decisions_and_availability_equal() -> None:
     assert {result.available_observation_ids for result in results} == {results[0].available_observation_ids}
 
 
+def test_capture_modes_keep_phase_two_outputs_identical() -> None:
+    observation = observe_market(prepare_replay_input(
+        [_bar(index) for index in range(5)], "2026-01-01",
+        session_partition="09:15-09:20",
+    ))
+    timestamp = datetime(2026, 1, 1, 3, 50, tzinfo=UTC)
+    results = []
+    records = []
+    for mode in CaptureMode:
+        machine = ReplayMachine(observation, capture_mode=mode)
+        results.append(machine.process_bar(
+            timestamp, before_state={}, after_state={}, decisions=("d",),
+            aggregates=({"aggregate": "a"},),
+            unavailable=({"unavailable": "u"},),
+        ))
+        records.append(machine.recorder.records[0])
+
+    assert {result.available_observation_ids for result in results} == {results[0].available_observation_ids}
+    assert {record.decisions for record in records} == {records[0].decisions}
+    assert all(record.aggregates == records[0].aggregates for record in records)
+    assert all(record.unavailable == records[0].unavailable for record in records)
+    assert observation.gaps == observe_market(prepare_replay_input(
+        [_bar(index) for index in range(5)], "2026-01-01",
+        session_partition="09:15-09:20",
+    )).gaps
+    assert tuple(observation.context.observations) == tuple(
+        observe_market(prepare_replay_input(
+            [_bar(index) for index in range(5)], "2026-01-01",
+            session_partition="09:15-09:20",
+        )).context.observations
+    )
+
+
+def test_incomplete_parent_is_diagnosed_without_publishing_children_or_parent() -> None:
+    rows = [_bar(index) for index in range(5)]
+    rows[2] = MarketBar(rows[2].instrument, rows[2].timestamp, 99.0, 101.0, 98.0, 100.0, None)
+    observation = observe_market(prepare_replay_input(
+        rows, "2026-01-01", session_partition="09:15-09:20",
+    ))
+
+    assert len(observation.context.observations_for("1m")) == 4
+    assert observation.context.observations_for("5m") == ()
+    assert observation.issues[0].reason == "incomplete_session_aligned_parent"
+    assert observation.issues[0].observed_child_times == (
+        datetime(2026, 1, 1, 3, 45, tzinfo=UTC),
+        datetime(2026, 1, 1, 3, 46, tzinfo=UTC),
+        datetime(2026, 1, 1, 3, 48, tzinfo=UTC),
+        datetime(2026, 1, 1, 3, 49, tzinfo=UTC),
+    )
+
+
 def test_location_boundary_carry_is_once_and_detached() -> None:
     registry = LocationRegistry()
     start = datetime(2026, 1, 1, 9, 15, tzinfo=UTC)

@@ -935,12 +935,6 @@ The roadmap is not complete through Phase 10. The following gaps are verified
 against the current Paper source and must be resolved before the corresponding
 phase can be marked complete:
 
-- The replay worker still constructs the legacy `market.location.LocationDetector`
-  and emits one legacy `trace` record per futures bar. This trace is exposed by
-  the compatibility endpoint and is separate from the causal orderflow policy.
-  It must be removed from the native orderflow replay path or explicitly
-  isolated as deprecated compatibility data so two location lifecycles cannot be
-  mistaken for one authoritative state machine.
 - The causal policy emits trigger observations and lifecycle/status transitions,
   not the full recorded hypothesis stream. Pending, unavailable, and repeated
   causal outcomes are under-published.
@@ -952,12 +946,16 @@ phase can be marked complete:
   and expiry transitions are not implemented in the live path.
 - Location generations and carry policy are available in model helpers but are
   not integrated with session rollover and interaction termination.
-- Replay output contains both the new producer-neutral parity artifact and older
-  `trace`/`candidate_trace`/`decision_trace` projections. The latter are
-  compatibility views and must not be used as lifecycle inputs or parity-layer
-  counts.
 - Phase 9 remains correctly deferred: diagnostic mode must continue to create no
   executable intents, reservations, fills, exits, or portfolio mutations.
+
+### Resolved Gaps
+
+- Replay no longer constructs the legacy `market.location.LocationDetector` or
+  emits per-bar `trace` records. The legacy trace and events endpoints are
+  removed from the API and OpenAPI contract.
+- Replay artifacts no longer expose `candidate_trace`; decision projections are
+  derived only from the canonical causal decision stream.
 
 The current implementation therefore provides a substantial Phase 0-5
 foundation and partial Phase 6-8 behavior, but it must not be described as a

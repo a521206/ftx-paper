@@ -10,7 +10,7 @@ from ftx_paper.contracts import MarketBar, normalize_exchange_timestamp
 from ftx_paper.config import IST
 
 from .orderflow_contract import OrderflowContext, OrderflowObservation
-from .orderflow_producer import CausalOrderflowProducer
+from .orderflow_producer import CausalOrderflowProducer, source_row_is_complete
 from .orderflow_source import OrderflowReplayInput
 
 
@@ -110,6 +110,7 @@ def observe_market(replay: OrderflowReplayInput) -> MarketObservation:
     session_rows = tuple(
         row for row in replay.rows
         if expected_start <= normalize_exchange_timestamp(row.timestamp) < expected_end
+        and source_row_is_complete(row)
     )
     start_text, end_text = replay.metadata.session_partition.split("-", maxsplit=1)
     producer = CausalOrderflowProducer(

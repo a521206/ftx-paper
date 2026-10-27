@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone, tzinfo
 import hashlib
 import json
+import math
 
 from ftx_paper.contracts import MarketBar
 from ftx_paper.config import IST
@@ -23,6 +24,17 @@ def _numeric_feature(features: Mapping[str, object], name: str) -> float:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         raise ValueError(f"orderflow child feature {name!r} must be numeric")
     return float(value)
+
+
+def source_row_is_complete(bar: MarketBar) -> bool:
+    """Return whether a source row can produce published bar evidence."""
+    values = (bar.open, bar.high, bar.low, bar.close, bar.volume)
+    return all(
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        for value in values
+    )
 
 
 def _feature_fingerprint(features: Mapping[str, object]) -> str:
@@ -82,6 +94,8 @@ class CausalOrderflowProducer:
         if raw_last_timestamp is not None and timestamp < raw_last_timestamp:
             raise ValueError("orderflow source bars must be strictly chronological")
         self._raw_last_timestamps[identity] = timestamp
+        if not source_row_is_complete(bar):
+            return
         if local_time < self._session_start or local_time >= self._session_end:
             return
         self._active_date = date
@@ -120,6 +134,11 @@ class CausalOrderflowProducer:
         cumulative_dollar_volume = 0.0
         vwap_unavailable = False
         recovery_indices: set[int] = set()
+        session_start = datetime.combine(
+            datetime.fromisoformat(trading_date).date(), self._session_start,
+        ).replace(
+            tzinfo=self._session_timezone
+        ).astimezone(timezone.utc)
         for gap_index in range(1, len(bars)):
             if bars[gap_index].timestamp - bars[gap_index - 1].timestamp <= timedelta(minutes=1):
                 continue
@@ -133,10 +152,12 @@ class CausalOrderflowProducer:
                     recovery_indices.add(end_index + 1)
                     break
         for bar_index, bar in enumerate(bars):
-            bar_has_gap = bool(
+            boundary_gap = bar_index == 0 and bar.timestamp > session_start
+            source_gap = bool(
                 bar_index
                 and bar.timestamp - bars[bar_index - 1].timestamp > timedelta(minutes=1)
             )
+            bar_has_gap = boundary_gap or source_gap
             volume = float(bar.volume or 0.0)
             available_at = bar.timestamp + timedelta(minutes=1)
             if bar_index in recovery_indices:
@@ -145,13 +166,18 @@ class CausalOrderflowProducer:
                 cumulative_dollar_volume = 0.0
             if bar_has_gap:
                 vwap_unavailable = True
+            gap_status = (
+                "boundary_gap" if boundary_gap
+                else "source_gap" if source_gap or vwap_unavailable
+                else "none"
+            )
             if not vwap_unavailable:
                 cumulative_volume += max(0.0, volume)
                 cumulative_dollar_volume += ((bar.high + bar.low + bar.close) / 3.0) * max(0.0, volume)
             vwap: float | UnavailableValue = (
                 cumulative_dollar_volume / cumulative_volume
                 if not vwap_unavailable and cumulative_volume > 0
-                else UnavailableValue("source_gap", available_at)
+                else UnavailableValue(gap_status if bar_has_gap else "source_gap", available_at)
             )
             prefix.append(OrderflowObservation(
                 observation_id=stable_orderflow_id("observation", trading_date, stream_identity, "1m", bar.timestamp.isoformat()),
@@ -178,7 +204,8 @@ class CausalOrderflowProducer:
                         "producer": "ftx-paper",
                         "producer_version": self._PRODUCER_VERSION,
                         "input_availability": "gap" if bar_has_gap else "complete",
-                        "gap_status": "source_gap" if bar_has_gap else "none",
+                        "gap_status": gap_status,
+                        "gap_origin": "boundary_gap" if boundary_gap else "source_gap" if source_gap else "none",
                         "source_fingerprint": _feature_fingerprint({
                             "timestamp": bar.timestamp.isoformat(), "open": bar.open,
                             "high": bar.high, "low": bar.low, "close": bar.close,
@@ -191,11 +218,6 @@ class CausalOrderflowProducer:
         five_minute: list[OrderflowObservation] = []
         location_records: dict[str, LocationRecord] = {}
         location_generations: dict[str, int] = {}
-        session_start = datetime.combine(
-            datetime.fromisoformat(trading_date).date(), self._session_start,
-        ).replace(
-            tzinfo=self._session_timezone
-        ).astimezone(timezone.utc)
         windows: dict[int, list[OrderflowObservation]] = defaultdict(list)
         for item in prefix:
             if item.interval_start is None:
@@ -226,7 +248,7 @@ class CausalOrderflowProducer:
                 continue
             parent_has_gap = any(
                 item.context is not None
-                and item.context.replay_provenance.get("gap_status") != "none"
+                and item.context.replay_provenance.get("gap_origin", "none") != "none"
                 for item in children
             )
             parent_id = stable_orderflow_id("aggregate", trading_date, stream_identity, "5m", start.isoformat())
@@ -349,4 +371,4 @@ class CausalOrderflowProducer:
         )
 
 
-__all__ = ["CausalOrderflowProducer"]
+__all__ = ["CausalOrderflowProducer", "source_row_is_complete"]

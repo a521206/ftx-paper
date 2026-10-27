@@ -62,12 +62,10 @@ def build_authoritative_payload(
         )
 
     ordered = sorted(scoped, key=event_order)
-    candidates: list[dict[str, Any]] = []
     decisions: list[dict[str, Any]] = []
     trades: list[dict[str, Any]] = []
     settlements: list[dict[str, Any]] = []
     ledgers: dict[str, Any] = {}
-    seen: set[str] = set()
     for event in ordered:
         payload = dict(event.get("payload", event))
         event_type = str(event.get("event_type", "")).upper()
@@ -75,36 +73,9 @@ def build_authoritative_payload(
         view = validate_decision_view(raw_view) if isinstance(raw_view, Mapping) else build_decision_view(
             payload, event_type=event_type or "POLICY_DECISION",
         )
-        subject = dict(view["subject"])
-        policy = dict(view["policy"])
-        evidence = dict(view["evidence"])
-        metrics = dict(evidence.get("metrics") or {})
-        diagnostics = dict(evidence.get("diagnostics") or {})
         decision_id = view.get("decision_id")
         if decision_id:
             decision_id = str(decision_id)
-            if decision_id not in seen:
-                seen.add(decision_id)
-                candidates.append({
-                    "decision_id": decision_id,
-                    "date": _event_date(event),
-                    "time": str(view.get("at", ""))[11:16],
-                    "session": subject.get("session"),
-                    "vehicle": subject.get("vehicle"),
-                    "ordered_sequence": metrics.get("sequence"),
-                    "cell": subject.get("location"),
-                    "direction": subject.get("direction"),
-                    "eligibility": (
-                        "eligible" if policy.get("outcome") in {"accepted", "filled"}
-                        else "rejected" if policy.get("outcome") in {"rejected", "policy rejection", "sizing rejection"}
-                        else "unavailable"
-                    ),
-                    "rejection_reason": policy.get("reason_code"),
-                    "score": metrics.get("score"),
-                    "score_factors": diagnostics.get("score_factors", {}),
-                    "sizing_diagnostics": diagnostics.get("sizing_pipeline"),
-                })
-        if decision_id:
             decisions.append({"decision_id": decision_id, "decision_view": view})
         if event_type in {"FILLED", "EXECUTIONFILLED", "EXITED", "EXECUTIONEXITED"}:
             trades.append(payload)
@@ -122,8 +93,7 @@ def build_authoritative_payload(
             json.dumps(config, sort_keys=True, default=str).encode("utf-8")
         ).hexdigest(),
     }
-    return {"manifest": manifest, "candidate_trace": candidates,
-            "decision_trace": decisions, "trades": trades,
+    return {"manifest": manifest, "decision_trace": decisions, "trades": trades,
             "ledger": ledgers, "synthetic_settlements": settlements}
 
 

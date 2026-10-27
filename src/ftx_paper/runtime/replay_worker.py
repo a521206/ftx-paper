@@ -13,7 +13,7 @@ from uuid import uuid4
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderRole, OrderSide, Role, SyntheticFutureQuote, build_decision_view, synthetic_future_quote, validate_decision_view
 from ftx_paper.domain.capital import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE, CapitalRuntimeContext
 from ftx_paper.market import (
-    AggregatorConfig, Cell, CompletedBarAggregator, FeatureService, InstrumentKey, LocationDetector,
+    AggregatorConfig, Cell, CompletedBarAggregator, FeatureService, InstrumentKey,
 )
 from ftx_paper.market.requirements import FeatureRequirement
 from ftx_paper.domain import AccountAggregate, PortfolioState
@@ -317,7 +317,6 @@ class ReplayWorker:
             raise ValueError("emit_rejected_decisions must be a boolean")
         dates = [session_date]
         all_events: list[dict[str, Any]] = []
-        trace: list[dict[str, Any]] = []
         parity_records: dict[str, list[dict[str, Any]]] = {"decisions": [], "execution": []}
         emitted_orderflow_trigger_ids: set[str] = set()
         unavailable_fields: set[str] = set()
@@ -390,19 +389,16 @@ class ReplayWorker:
             )
             # Each date gets a fresh position/risk session while cumulative
             # capital is carried by the authoritative PortfolioState.
+            native_orderflow = strategy.metadata.name == "ftx-paper-orderflow"
             orderflow_producer = (
                 CausalOrderflowProducer()
-                if strategy.metadata.name == "ftx-paper-orderflow" else None
+                if native_orderflow else None
             )
             aggregator = self._aggregator(
                 bars,
                 orderflow_producer,
                 tuple(getattr(getattr(strategy, "policy", None), "required_features", ())),
             )
-            native_orderflow = strategy.metadata.name == "ftx-paper-orderflow"
-            trace_detector = None if native_orderflow else LocationDetector()
-            if trace_detector is not None:
-                trace_detector.reset(prior_day_high=prior_day_high, prior_day_low=prior_day_low)
             feature_service = FeatureService(
                 self.store.feature_repository()
                 if callable(getattr(self.store, "feature_repository", None)) else None,
@@ -434,51 +430,6 @@ class ReplayWorker:
                     prior_day_low=prior_day_low,
                     expiry_dates=tuple(str(item) for item in effective_expiry_dates),
                 )
-                trace_snapshot = (
-                    trace_detector.observe(
-                        futures_bar,
-                        features=(bundle.feature_snapshot.location_features
-                                  if bundle.feature_snapshot is not None else None),
-                    ) if trace_detector is not None else None
-                )
-                trace_features: dict[str, Any] = {}
-                trace_locations: list[str] = []
-                trace_transitions: list[dict[str, str]] = []
-                trace_unavailable: list[str] = []
-                if trace_snapshot is not None:
-                    snapshot_values = bundle.feature_snapshot.values if bundle.feature_snapshot is not None else {}
-                    trace_features = {
-                        "vwap": snapshot_values.get("vwap"),
-                        "session_high": snapshot_values.get("session_high"),
-                        "session_low": snapshot_values.get("session_low"),
-                        "opening_range_high": snapshot_values.get("opening_range_high"),
-                        "opening_range_low": snapshot_values.get("opening_range_low"),
-                        "atr": snapshot_values.get("atr"),
-                        "prior_day_high": snapshot_values.get("prior_day_high"),
-                        "prior_day_low": snapshot_values.get("prior_day_low"),
-                        "vix": snapshot_values.get("vix"),
-                        "vix_open": snapshot_values.get("vix_open"),
-                        "pcr": snapshot_values.get("pcr"),
-                    }
-                    trace_locations = [item.value for item in trace_snapshot.locations]
-                    trace_transitions = [
-                        {"reference": item.reference.value, "kind": item.kind.value,
-                         "from": item.from_side.value, "to": item.to_side.value}
-                        for item in trace_snapshot.transitions
-                    ]
-                    trace_unavailable = [key for key, value in trace_features.items() if value is None]
-                    unavailable_fields.update(trace_unavailable)
-                trace_bar_index = bars_seen + 1
-                if trace_detector is not None:
-                    trace.append({
-                        "date": date,
-                        "bar_index": trace_bar_index,
-                        "timestamp": futures_bar.timestamp.isoformat(),
-                        "features": trace_features,
-                        "locations": trace_locations,
-                        "transitions": trace_transitions,
-                        "unavailable_fields": trace_unavailable,
-                    })
                 # Synthetic contract selection is anchored to the spot/index
                 # level, matching the Paper entry contract rule. Futures is
                 # still the decision and exit-state instrument.
@@ -894,11 +845,6 @@ class ReplayWorker:
             "decisions": [event for event in all_events if is_decision_event(str(event.get("event_type", "")), event)],
             "decision_trace_schema_version": 1,
             "decision_trace": normalized_decisions,
-            **({
-                "trace_schema_version": 1,
-                "trace_bar_index_base": 1,
-                "trace": trace,
-            } if last_strategy_metadata.name != "ftx-paper-orderflow" else {}),
             "unavailable_fields": sorted(unavailable_fields),
             "first_divergent_stage": None,
             # Diagnostic-only trades live inside the replay run result. They

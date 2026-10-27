@@ -84,7 +84,8 @@ def test_paper_authoritative_payload_is_scoped_and_deterministic():
         events, date_from="2026-01-01", date_to="2026-01-02",
         sessions=("morning",), vehicles=("futures",), configuration={"v": 1},
     )
-    assert [item["candidate_id"] for item in payload["candidate_trace"]] == ["c2"]
+    assert "candidate_trace" not in payload
+    assert payload["decision_trace"] == []
     assert payload["manifest"]["artifact_schema_version"] == 2
     assert payload == build_authoritative_payload(
         events, date_from="2026-01-01", date_to="2026-01-02",
