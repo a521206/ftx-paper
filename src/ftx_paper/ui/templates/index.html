@@ -1351,7 +1351,10 @@
     function orderflowContextPage(model) {
       const action = model.action || {};
       const setup = model.setup || {};
-      const locations = Array.isArray(model.locations) ? model.locations : [];
+      const locations = (Array.isArray(model.locations) ? model.locations : []).filter((item) => {
+        const location = String(item.location || item.name || '').toLowerCase().replaceAll(' ', '_');
+        return location !== 'vwap_zone';
+      });
       const sequence = Array.isArray(model.sequence) ? model.sequence : [];
       const hasValue = (value) => value != null && value !== '';
       if (!model.as_of || !model.updated_at || !hasValue(action.name)) {
