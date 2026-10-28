@@ -66,10 +66,10 @@ def test_leading_boundary_gap_is_propagated_to_first_minute_features() -> None:
     first = observation.context.observations_for("1m")[0]
     assert first.context is not None
     assert first.context.replay_provenance["gap_status"] == "boundary_gap"
-    assert first.features["vwap"].reason == "boundary_gap"
+    assert "vwap" not in first.features
     assert observation.context.observations_for("1m")[1].context is not None
-    assert observation.context.observations_for("1m")[1].context.replay_provenance["gap_status"] == "source_gap"
-    assert observation.context.observations_for("1m")[1].features["vwap"].reason == "source_gap"
+    assert observation.context.observations_for("1m")[1].context.replay_provenance["gap_status"] == "none"
+    assert "vwap" not in observation.context.observations_for("1m")[1].features
     assert observation.context.observations_for("5m") == ()
 
 

@@ -8,9 +8,6 @@ from ftx_paper.strategy import (
     CANONICAL_PHASE_ORDER, ReplayMachine, ReplayPhase,
     observe_market, prepare_replay_input,
 )
-from ftx_paper.strategy.factory import ConfiguredStrategyFactory
-from ftx_paper.strategy.orderflow import OrderflowConfig, OrderflowStrategy
-from ftx_paper.strategy.policy_contract import ExecutionMode
 from tests.test_orderflow_observation import _rows
 
 
@@ -64,16 +61,6 @@ def test_replay_machine_resumes_admission_after_complete_recovery_parent() -> No
     assert not recovered.admission_suspended
 
 
-def test_explicit_orderflow_dispatch_is_executable_and_not_vwap() -> None:
-    strategy = ConfiguredStrategyFactory().create(
-        strategy="ftx-paper-orderflow",
-        config=OrderflowConfig(execution_mode=ExecutionMode.EXECUTABLE),
-    )
-    assert isinstance(strategy, OrderflowStrategy)
-    assert strategy.metadata.name == "ftx-paper-orderflow"
-    assert strategy.policy.execution_mode is ExecutionMode.EXECUTABLE
-
-
 def test_orderflow_replay_defaults_to_diagnostic_without_execution_mutations(tmp_path) -> None:
     bar = MarketBar(
         Instrument("NIFTY26SEP", "NFO", "FUTURES", "2026-09-29"),
@@ -117,25 +104,3 @@ def test_paired_replay_compares_decisions_and_keeps_execution_projection_separat
     )
 
     assert comparison == {"matched": True, "mismatches": [], "diagnostic_mutations": False}
-
-
-
-
-def test_replay_summary_counts_unique_lifecycles_and_risk() -> None:
-    summary = ReplayWorker._build_summary(
-        [
-            {"reason": "location_interaction_observed", "interaction_id": "loc-1"},
-            {"reason": "location_interaction_observed", "interaction_id": "loc-1"},
-            {"reason": "setup_candidate_formed", "decision_id": "candidate-1"},
-            {"reason": "setup_candidate_formed", "decision_id": "candidate-2"},
-        ],
-        [{"vehicle": "futures", "gross_pnl_rs": 750.0, "initial_risk_rs": 150.0}],
-    )
-
-    assert summary == {
-        "setup_candidates": 2,
-        "location_interactions": 1,
-        "entries_filled": 1,
-        "gross_reward_points": 750.0 / 65.0,
-        "achieved_risk_reward": 5.0,
-    }

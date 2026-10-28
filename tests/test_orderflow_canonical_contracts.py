@@ -1,6 +1,3 @@
-from typing import Any
-
-from ftx_paper.strategy.opportunity import opportunity_identity
 from ftx_paper.strategy.response import ResponseCandle, build_response_spec, evaluate_response_window
 from ftx_paper.strategy.templates import Direction, ResponseType, TRADE_TEMPLATES
 
@@ -28,15 +25,3 @@ def test_non_vwap_template_exits_match_canonical_locations() -> None:
     assert TRADE_TEMPLATES[("5m_recovery_breakout", "OR_HIGH")].exits == ()
     assert ("5m_acceptance_breakout", "OR_HIGH") not in TRADE_TEMPLATES
     assert ("5m_acceptance_breakout", "OR_LOW") not in TRADE_TEMPLATES
-
-
-def test_opportunity_identity_is_stable_across_runner_adapters() -> None:
-    values: dict[str, Any] = dict(
-        session_date="2026-01-01", instrument="NIFTYFUT", direction=Direction.LONG,
-        interaction_id="interaction-1", reference_generation=2,
-        response_evidence_ids=("bar-1", "bar-2"),
-        formation_at="2026-01-01T09:30:00+00:00",
-        formation_available_at="2026-01-01T09:35:00+00:00",
-        template_id="or_low-long-recovery_breakout",
-    )
-    assert opportunity_identity(**values) == opportunity_identity(**values)

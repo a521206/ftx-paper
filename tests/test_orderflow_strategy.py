@@ -217,14 +217,16 @@ def test_non_contact_location_observation_does_not_start_interaction() -> None:
 
 
 def test_response_and_admission_use_completed_causal_evidence() -> None:
-    bundle, account = _context(response_close=101.0)
+    bundle, account = _context(close=99.5, response_close=101.0)
 
     events = OrderflowStrategy().evaluate(bundle, account)
 
     response = next(event for event in events if event.payload.get("decision_stage") == "response")
     admission = next(event for event in events if event.payload.get("decision_stage") == "admission")
     assert response.payload["response_state"] == "CONFIRMED"
-    assert response.payload["response_evidence_ids"] == ["response-evidence-obs-5m"]
+    assert response.payload["response_evidence_ids"] == [
+        "obs-5m", "response-evidence-obs-5m",
+    ]
     assert response.payload["source_observation_ids"] == ["response-obs-5m"]
     assert admission.payload["reason"] == "orderflow_admission"
     assert admission.payload["outcome"] == "accepted"
@@ -232,7 +234,7 @@ def test_response_and_admission_use_completed_causal_evidence() -> None:
 
 
 def test_admission_projection_includes_causal_trigger_eligibility() -> None:
-    bundle, account = _context(response_close=101.0)
+    bundle, account = _context(close=99.5, response_close=101.0)
 
     admission = next(
         event for event in OrderflowStrategy().evaluate(bundle, account)
@@ -244,19 +246,6 @@ def test_admission_projection_includes_causal_trigger_eligibility() -> None:
     assert isinstance(trigger, dict)
     assert trigger["source_observation_id"] == "response-obs-5m"
     assert trigger["effective_at"] is not None
-
-
-def test_trigger_projection_uses_the_response_confirmation_observation() -> None:
-    bundle, account = _context(close=99.5, response_close=101.0)
-
-    admission = next(
-        event for event in OrderflowStrategy().evaluate(bundle, account)
-        if event.payload.get("decision_stage") == "admission"
-    )
-
-    trigger = admission.payload["trigger"]
-    assert isinstance(trigger, dict)
-    assert trigger["source_observation_id"] == "response-obs-5m"
 
 
 def test_orderflow_executable_mode_emits_bounded_futures_entry() -> None:

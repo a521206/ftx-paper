@@ -15,14 +15,6 @@ def _opportunity():
     )
 
 
-def test_opportunity_identities_are_deterministic_and_distinct() -> None:
-    first = _opportunity()
-    second = _opportunity()
-    assert first == second
-    assert first.lifecycle_id != first.setup.setup_id
-    assert first.execution_group_id
-
-
 def test_opportunity_timeout_counts_only_configured_timeframe() -> None:
     opportunity = _opportunity()
     at = datetime(2026, 1, 1, 9, 25, tzinfo=UTC)

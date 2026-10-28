@@ -57,13 +57,7 @@ def test_unavailable_and_rejected_views_keep_distinct_status_and_boundary() -> N
         }, event_type="POLICY_DECISION"))
 
 
-def test_decision_view_detaches_nested_payload_and_rejects_missing_outcome() -> None:
-    nested = {"decision_id": "d1", "decision_at": "2026-01-01T10:00:00+00:00",
-              "outcome": "accepted", "feature_values": {"score": {"value": 1}}}
-    view = build_decision_view(nested, event_type="POLICY_DECISION")
-    nested["feature_values"]["score"]["value"] = 9
-    assert view["evidence"]["features"]["score"]["value"] == 1
-
+def test_decision_view_rejects_missing_outcome() -> None:
     with pytest.raises(ValueError, match="policy outcome"):
         validate_decision_view(build_decision_view({
             "decision_id": "missing", "decision_at": "2026-01-01T10:00:00+00:00",

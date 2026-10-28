@@ -33,6 +33,10 @@ def test_causal_producer_builds_complete_five_minute_context() -> None:
     assert parent.location_observations
     assert all(item.available_at == parent.available_at for item in parent.location_observations)
     assert all(item.source_aggregate_id == parent.observation_id for item in parent.location_observations)
+    by_alias = {item.location_alias: item for item in parent.location_observations}
+    assert "VWAP" not in by_alias
+    assert by_alias["SESSION_HIGH"].location_type == "session_reference"
+    assert all("vwap" not in parent.features for parent in context.observations)
 
 
 def test_causal_producer_uses_canonical_source_fingerprint_for_children() -> None:

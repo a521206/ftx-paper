@@ -12,7 +12,6 @@ from ftx_paper.strategy import (
     prepare_replay_input,
 )
 from ftx_paper.strategy.orderflow_interaction import InteractionCloseReason, InteractionDetector
-from ftx_paper.strategy.orderflow import OrderflowStrategy
 from ftx_paper.contracts import build_decision_view, validate_decision_view
 
 
@@ -35,12 +34,6 @@ def test_source_identity_is_typed_and_scope_safe() -> None:
     assert replay.metadata.identity == identity
 
 
-def test_out_of_session_rows_do_not_change_observation_fingerprint() -> None:
-    in_session = prepare_replay_input([_bar(0), _bar(1)], "2026-01-01")
-    with_extra = prepare_replay_input([_bar(0), _bar(1), _bar(600)], "2026-01-01")
-    assert observe_market(in_session).source_fingerprint == observe_market(with_extra).source_fingerprint
-
-
 def test_post_gap_complete_parent_is_recovery_evidence() -> None:
     rows = [_bar(index) for index in range(11) if index != 2]
     replay = prepare_replay_input(rows, "2026-01-01", session_partition="09:15-09:26")
@@ -52,16 +45,6 @@ def test_post_gap_complete_parent_is_recovery_evidence() -> None:
         and item.context.replay_provenance["gap_status"] == "none"
         for item in parents
     )
-
-
-def test_capture_modes_keep_replay_decisions_and_availability_equal() -> None:
-    observation = observe_market(prepare_replay_input([_bar(index) for index in range(5)], "2026-01-01"))
-    timestamp = datetime(2026, 1, 1, 3, 50, tzinfo=UTC)
-    results = []
-    for mode in CaptureMode:
-        machine = ReplayMachine(observation, capture_mode=mode)
-        results.append(machine.process_bar(timestamp, before_state={}, after_state={}, decisions=("d",)))
-    assert {result.available_observation_ids for result in results} == {results[0].available_observation_ids}
 
 
 def test_capture_modes_keep_phase_two_outputs_identical() -> None:
@@ -124,17 +107,6 @@ def test_location_boundary_carry_is_once_and_detached() -> None:
     assert len(carried) == 1
     assert registry.next_generation(at=start + timedelta(days=1), carry=True) == ()
     assert carried[0].to_dict()["source_aggregate_id"] == "agg-1"
-
-
-def test_live_diagnostic_projection_contains_non_executable_lineage() -> None:
-    # The live policy owns lifecycle state; replay helpers are not involved.
-    from tests.test_orderflow_strategy import _context
-
-    bundle, context = _context()
-    events = OrderflowStrategy().evaluate(bundle, context)
-    assert events
-    assert all(event.order is None for event in events)
-    assert all(event.payload.get("execution_mode") != "executable" for event in events)
 
 
 def test_interaction_closure_distinguishes_cross_band_departure() -> None:

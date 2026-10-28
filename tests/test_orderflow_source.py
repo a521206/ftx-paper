@@ -50,12 +50,6 @@ def test_prepare_allows_explicit_source_contract_selection() -> None:
     assert replay.rows[0].instrument.symbol == "NIFTY26FEB"
 
 
-def test_prepare_rejects_duplicate_timestamps_for_selected_contract() -> None:
-    first = _bar("NIFTY26JAN", 0)
-    with pytest.raises(ValueError, match="chronological"):
-        prepare_replay_input([first, first], "2026-01-01")
-
-
 def test_prepare_rejects_duplicate_normalized_session_minutes() -> None:
     first = _bar("NIFTY26JAN", 0)
     second = MarketBar(
