@@ -82,6 +82,20 @@ def test_causal_producer_rejects_mixed_source_instruments() -> None:
         ))
 
 
+def test_causal_producer_ignores_duplicate_source_bar() -> None:
+    producer = CausalOrderflowProducer()
+    instrument = Instrument("NIFTYFUT", "NSE", "FUTURES")
+    timestamp = datetime(2026, 1, 1, 3, 45, tzinfo=timezone.utc)
+    bar = MarketBar(instrument, timestamp, 99.0, 102.0, 98.0, 100.0, 10.0)
+
+    producer.ingest(bar)
+    producer.ingest(bar)
+
+    context = producer.context("2026-01-01", "09:15")
+    assert context is not None
+    assert len(context.observations_for("1m")) == 1
+
+
 def test_causal_producer_uses_configured_session_alignment() -> None:
     producer = CausalOrderflowProducer(session_start="10:00", session_end="10:30")
     instrument = Instrument("NIFTYFUT", "NSE", "FUTURES")

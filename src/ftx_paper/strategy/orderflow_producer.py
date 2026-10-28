@@ -129,7 +129,7 @@ class CausalOrderflowProducer:
             raise ValueError("orderflow source identity changed within a session")
         raw_last_timestamp = self._raw_last_timestamps.get(identity)
         if raw_last_timestamp == timestamp:
-            raise ValueError("duplicate orderflow source bar")
+            return
         if raw_last_timestamp is not None and timestamp < raw_last_timestamp:
             raise ValueError("orderflow source bars must be strictly chronological")
         self._raw_last_timestamps[identity] = timestamp
@@ -138,7 +138,7 @@ class CausalOrderflowProducer:
         bars = self._bars[key]
         last_timestamp = self._last_timestamps.get(identity)
         if last_timestamp == timestamp:
-            raise ValueError("duplicate orderflow source bar")
+            return
         if last_timestamp is not None and timestamp < last_timestamp:
             raise ValueError("orderflow source bars must be strictly chronological")
         bars.append(bar)
