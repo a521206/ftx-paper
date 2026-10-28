@@ -81,8 +81,11 @@ def test_orderflow_replay_defaults_to_diagnostic_without_execution_mutations(tmp
         datetime(2026, 9, 29, 3, 45, tzinfo=UTC),
         22600, 22610, 22590, 22600,
     )
-    worker = ReplayWorker(RuntimeStore(tmp_path))
+    store = RuntimeStore(tmp_path)
+    worker = ReplayWorker(store)
     worker._bars = lambda session_date, **_kwargs: (bar,)
+    before_status = store.read_status()
+    before_events = store.read_events(1000)
 
     result = worker._execute({
         "session_date": "2026-09-29",
@@ -93,5 +96,30 @@ def test_orderflow_replay_defaults_to_diagnostic_without_execution_mutations(tmp
     assert result["metadata"]["execution_mode"] == "diagnostic"
     assert result["trades"] == []
     assert result["ledger"] == {}
+    assert result["execution_scope"] == "shadow"
+    assert result["ledger_scope"] == "replay"
+    assert result["shadow_ledger"] == {}
     assert not any(str(event.get("event_type", "")).upper() in {"FILL", "RESERVATION", "SETTLEMENT"}
                    for event in result["events"])
+    assert store.read_status() == before_status
+    assert store.read_events(1000) == before_events
+
+
+def test_replay_summary_counts_unique_lifecycles_and_risk() -> None:
+    summary = ReplayWorker._build_replay_summary(
+        [
+            {"reason": "location_interaction_observed", "lifecycle_id": "loc-1"},
+            {"reason": "location_interaction_observed", "lifecycle_id": "loc-1"},
+            {"reason": "setup_candidate_formed", "decision_id": "candidate-1"},
+            {"reason": "setup_candidate_formed", "decision_id": "candidate-2"},
+        ],
+        [{"vehicle": "futures", "gross_pnl_rs": 750.0, "initial_risk_rs": 150.0}],
+    )
+
+    assert summary == {
+        "setup_candidates": 2,
+        "location_interactions": 1,
+        "entries_filled": 1,
+        "gross_reward_points": 750.0 / 65.0,
+        "achieved_risk_reward": 5.0,
+    }

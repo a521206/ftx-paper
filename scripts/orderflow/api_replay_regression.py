@@ -16,6 +16,8 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from tabulate import tabulate
+
 
 CANONICAL = {
     "setup_candidates": 17,
@@ -24,9 +26,6 @@ CANONICAL = {
     "gross_reward_points": 155.2143,
     "achieved_risk_reward": 6.1443,
 }
-LOT_SIZE = 75.0
-
-
 def _request(url: str, *, method: str = "GET", payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
     body = json.dumps(payload).encode() if payload is not None else None
     request = Request(url, data=body, method=method, headers={"Content-Type": "application/json"})
@@ -40,32 +39,21 @@ def _request(url: str, *, method: str = "GET", payload: Mapping[str, Any] | None
     return value
 
 
-def _optional_summary(result: Mapping[str, Any], name: str) -> Any:
-    for container_name in ("summary", "replay_summary", "canonical_summary"):
-        container = result.get(container_name)
-        if isinstance(container, Mapping) and name in container:
-            return container[name]
-    metadata = result.get("metadata")
-    if isinstance(metadata, Mapping):
-        summary = metadata.get("summary")
-        if isinstance(summary, Mapping):
-            return summary.get(name)
-    return None
-
-
 def _actual_metrics(result: Mapping[str, Any]) -> dict[str, Any]:
-    trades = result.get("trades")
-    if not isinstance(trades, list):
-        raise RuntimeError("replay result does not contain a trades list")
-    futures = [trade for trade in trades if isinstance(trade, Mapping) and trade.get("vehicle") == "futures"]
-    gross_rs = sum(float(trade.get("gross_pnl_rs") or 0.0) for trade in futures)
-    return {
-        "setup_candidates": _optional_summary(result, "setup_candidates"),
-        "entries_filled": len(futures),
-        "location_interactions": _optional_summary(result, "location_interactions"),
-        "gross_reward_points": gross_rs / LOT_SIZE,
-        "achieved_risk_reward": _optional_summary(result, "achieved_risk_reward"),
-    }
+    summary = result.get("summary")
+    if not isinstance(summary, Mapping):
+        raise RuntimeError("replay result does not contain the versioned summary contract")
+    if result.get("summary_schema_version") != 1:
+        raise RuntimeError("replay result has an unsupported summary schema version")
+    return {name: summary.get(name) for name in CANONICAL}
+
+
+def _display_value(value: Any) -> str:
+    if value is None:
+        return "unavailable"
+    if isinstance(value, float):
+        return f"{value:.4f}"
+    return str(value)
 
 
 def run(base_url: str, *, timeout: float, interval: float) -> int:
@@ -102,20 +90,40 @@ def run(base_url: str, *, timeout: float, interval: float) -> int:
 
     actual = _actual_metrics(result)
     failures: list[str] = []
+    rows: list[list[str]] = []
     for name, expected in CANONICAL.items():
         observed = actual[name]
         if observed is None:
-            failures.append(f"{name}: unavailable (API did not publish this metric)")
+            failure = "unavailable (API did not publish this metric)"
+            failures.append(f"{name}: {failure}")
+            rows.append([name, _display_value(expected), "unavailable", "-", "FAIL"])
         elif abs(float(observed) - expected) > 1e-4:
             failures.append(f"{name}: expected {expected}, got {observed}")
+            rows.append([
+                name,
+                _display_value(expected),
+                _display_value(observed),
+                _display_value(float(observed) - expected),
+                "FAIL",
+            ])
+        else:
+            rows.append([
+                name,
+                _display_value(expected),
+                _display_value(observed),
+                _display_value(float(observed) - expected),
+                "PASS",
+            ])
 
-    print(json.dumps({"run_id": run_id, "expected": CANONICAL, "actual": actual}, indent=2, sort_keys=True))
+    outcome = "FAILED" if failures else "PASSED"
+    print(f"Orderflow replay regression: {outcome}")
+    print(f"Run ID: {run_id}")
+    print(tabulate(rows, headers=["Metric", "Expected", "Actual", "Delta", "Result"], tablefmt="grid"))
     if failures:
-        print("Regression FAILED:", file=sys.stderr)
+        print("Regression details:", file=sys.stderr)
         for failure in failures:
             print(f"- {failure}", file=sys.stderr)
         return 1
-    print("Regression PASSED")
     return 0
 
 

@@ -137,7 +137,7 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             return jsonify(error_payload("invalid_request", "use vehicles array; vehicle is no longer supported")), 400
         range_aliases = (("date_from", "date_to"), ("from", "to"), ("from_date", "to_date"))
         range_pair = next((pair for pair in range_aliases if any(key in payload for key in pair)), None)
-        supported = {"session_date", "strategy_id", "vehicles", "emit_rejected_decisions", "execution_mode"}
+        supported = {"session_date", "strategy_id", "vehicles", "emit_rejected_decisions", "execution_mode", "include_shadow_layers"}
         if range_pair:
             supported.update(range_pair)
         if set(payload) - supported:
@@ -150,6 +150,8 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             )), 400
         if "execution_mode" in payload and payload["execution_mode"] not in {"diagnostic", "executable"}:
             return jsonify(error_payload("invalid_request", "execution_mode must be diagnostic or executable")), 400
+        if "include_shadow_layers" in payload and not isinstance(payload["include_shadow_layers"], bool):
+            return jsonify(error_payload("invalid_request", "include_shadow_layers must be a boolean")), 400
         if "strategy_id" in payload and (
             not isinstance(payload["strategy_id"], str) or not payload["strategy_id"].strip()
         ):
