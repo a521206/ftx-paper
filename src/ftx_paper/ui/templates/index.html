@@ -1044,26 +1044,43 @@
     .orderflow-sequence-row summary { display: grid; grid-template-columns: 150px 1fr 1fr 90px 1.4fr; gap: 10px; align-items: center; padding: 11px 8px; }
     .orderflow-sequence-row:last-child { border-bottom: 0; }
     .orderflow-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-    .context-hero { display: grid; grid-template-columns: minmax(220px, 1.4fr) repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
+    .context-header { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 14px; }
+    .context-header h1 { margin: 0 0 4px; font-size: 28px; line-height: 1.1; }
+    .context-header p { margin: 0; color: var(--md-on-surface-variant); }
+    .context-diagnostic { white-space: nowrap; }
+    .context-controls { margin-top: 7px; text-align: right; color: var(--md-on-surface-variant); font-size: 12px; }
+    .context-hero { display: grid; grid-template-columns: minmax(0, 1.7fr) repeat(3, minmax(120px, .7fr)); gap: 10px; margin-bottom: 14px; }
     .context-hero > div { background: var(--md-surface-container-low); border: 1px solid var(--md-outline-variant); border-radius: 12px; padding: 16px; }
     .context-hero .context-read { background: var(--md-primary-container); border-color: var(--md-primary); }
     .context-read h2 { margin: 5px 0 8px; font-size: 24px; }
-    .context-read p { margin: 0; color: var(--md-on-primary-container); line-height: 1.5; }
+    .context-read p { margin: 0 0 12px; color: var(--md-on-primary-container); line-height: 1.5; }
+    .context-action { border-left: 3px solid var(--md-warning) !important; }
     .context-value { display: block; margin-top: 7px; font-size: 16px; line-height: 1.4; font-weight: 700; overflow-wrap: anywhere; }
     .context-section { margin-bottom: 14px; }
     .context-section .section-head { margin-bottom: 10px; }
     .context-evidence { color: var(--md-on-surface-variant); font-size: 12px; line-height: 1.5; }
     .context-note { margin: 0 0 14px; padding: 12px 14px; border-left: 3px solid var(--md-primary); background: var(--md-primary-container); color: var(--md-on-primary-container); border-radius: 8px; line-height: 1.5; }
     .context-state { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .context-strip { display: grid; grid-template-columns: repeat(6, minmax(100px, 1fr)); gap: 8px; margin-bottom: 14px; overflow-x: auto; }
+    .context-strip > div { min-width: 100px; padding: 12px; border: 1px solid var(--md-outline-variant); border-radius: 9px; background: var(--md-surface); }
+    .context-strip strong { display: block; margin-top: 5px; overflow-wrap: anywhere; }
+    .context-main { display: grid; grid-template-columns: minmax(0, 1fr) 270px; gap: 14px; align-items: start; }
+    .context-rail { position: sticky; top: 12px; }
+    .context-rail .context-state { grid-template-columns: 1fr; }
     .context-state > div { padding: 12px; border: 1px solid var(--md-outline-variant); border-radius: 8px; background: var(--md-surface); }
     .context-state strong { display: block; margin-top: 5px; overflow-wrap: anywhere; }
     .context-location-meta { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 9px; }
     .context-section.orderflow-sequence { max-height: 620px; overflow-y: auto; }
+    .context-timeline { position: relative; padding-left: 22px; }
+    .context-timeline::before { content: ''; position: absolute; left: 7px; top: 8px; bottom: 8px; width: 2px; background: var(--md-outline-variant); }
+    .orderflow-sequence-row { position: relative; }
+    .orderflow-sequence-row::before { content: ''; position: absolute; left: -19px; top: 17px; width: 9px; height: 9px; border-radius: 50%; background: var(--md-primary); border: 2px solid var(--md-surface-container-low); }
+    .orderflow-sequence-row summary { display: grid; grid-template-columns: 72px 1fr 1fr auto; gap: 10px; align-items: center; padding: 13px 4px; }
     .orderflow-sequence-row:nth-of-type(even) { background: var(--md-surface); }
     .orderflow-sequence-row summary > span { min-width: 0; overflow-wrap: anywhere; }
-    @media (max-width: 800px) { .orderflow-grid, .orderflow-locations, .orderflow-action-grid, .orderflow-columns, .context-state { grid-template-columns: 1fr 1fr; } .context-hero { grid-template-columns: repeat(2, minmax(0, 1fr)); } .context-hero .context-read { grid-column: 1 / -1; } .orderflow-sequence-row summary { grid-template-columns: 1fr 1fr; } }
+    @media (max-width: 800px) { .orderflow-grid, .orderflow-locations, .orderflow-action-grid, .orderflow-columns, .context-state { grid-template-columns: 1fr 1fr; } .context-hero { grid-template-columns: repeat(2, minmax(0, 1fr)); } .context-hero .context-read { grid-column: 1 / -1; } .context-main { grid-template-columns: 1fr; } .context-rail { position: static; } .orderflow-sequence-row summary { grid-template-columns: 72px 1fr auto; } .orderflow-sequence-row summary span:nth-child(3) { grid-column: 2; } }
     @media (max-width: 480px) { .orderflow-grid, .orderflow-locations, .orderflow-action-grid, .orderflow-columns, .context-state { grid-template-columns: 1fr; } }
-    @media (max-width: 480px) { .context-hero { grid-template-columns: 1fr; } .context-hero .context-read { grid-column: auto; } }
+    @media (max-width: 480px) { .context-header { display: block; } .context-diagnostic { display: inline-block; margin-top: 8px; } .context-hero { grid-template-columns: 1fr; } .context-hero .context-read { grid-column: auto; } .context-strip { display: flex; } .context-strip > div { flex: 0 0 135px; } .context-state { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -1370,22 +1387,13 @@
         ? 'A response has been confirmed; this remains a diagnostic candidate until execution policy is enabled.'
         : action.reason || 'Waiting for causal response evidence.';
       const field = (value) => value == null || value === '' ? 'Unavailable' : esc(value);
-      const locationCards = locations.length ? locations.map((item) => `<article class="orderflow-location"><h3>${field(item.name)}</h3><span>Reference level / distance</span><strong>${field(item.reference)} · ${field(item.distance)}</strong><div class="context-location-meta">${badge(field(item.interaction_status), 'subtle')} ${badge(field(item.response_status), item.response_status === 'CONFIRMED' ? 'good' : 'warn')}</div><p>Directional hypothesis: <strong>${field(item.implication)}</strong></p></article>`).join('') : '<div class="empty">No reference interaction observed.</div>';
-      const referenceSection = locations.length > 1
-        ? `<section class="card context-section"><div class="section-head"><div><h2>Reference interactions</h2><div class="context-evidence">Frozen levels and their response status. These are context inputs, not independent trade signals.</div></div><span class="badge"><strong>${locations.length}</strong> references</span></div><div class="orderflow-locations">${locationCards}</div></section>`
-        : '';
-      const sequenceRows = sequence.length ? sequence.slice().reverse().map((item) => `<details class="orderflow-sequence-row"><summary><span>${field(date(item.time))}</span><span>${field(item.location)}</span><span>${field(item.transition)}</span><span>${badge(field(item.direction), item.direction === 'LONG' ? 'good' : item.direction === 'SHORT' ? 'bad' : 'subtle')}</span><span>${field(item.implication)}</span></summary><div class="payload"><strong>Causal evidence</strong>${esc(JSON.stringify(item.evidence || {}, null, 2))}</div></details>`).join('') : '<div class="empty">No completed-bar transitions observed.</div>';
-      return `<div class="context-hero">
-        <div class="context-read"><div class="label">Diagnostic orderflow state</div><h2>${field(action.name)}</h2><p>${field(read)}</p><span class="badge ${isNoTrade ? 'warn' : 'good'}">${isNoTrade ? 'No executable order' : 'Diagnostic only'}</span></div>
-        <div><div class="label">Interaction</div><span class="context-value">${field(interactionState)}</span></div>
-        <div><div class="label">Response</div><span class="context-value">${field(responseState)}</span></div>
-        <div><div class="label">Evidence bars</div><span class="context-value">${sequence.length} completed 5m</span></div>
-      </div>
-      <p class="context-note"><strong>How to read this:</strong> reference levels create interaction episodes; completed candles determine the response. A confirmed response is evidence for a candidate, not an execution instruction. Levels such as VWAP are shown only as reference context.</p>
-      <section class="card context-section"><div class="section-head"><div><h2>Current lifecycle</h2><div class="context-evidence">The latest orderflow state, kept separate from portfolio and execution state.</div></div><span class="badge">${field(setup.stage || 'trigger')}</span></div><div class="context-state"><div><div class="label">Setup</div><strong>${field(setup.name || setup.location)}</strong></div><div><div class="label">Directional hypothesis</div><strong>${field(model.bias)}</strong></div><div><div class="label">Market state</div><strong>${field(model.market_state)}</strong></div><div><div class="label">Decision at</div><strong>${esc(date(model.as_of))}</strong></div><div><div class="label">Last updated</div><strong>${esc(date(model.updated_at))}</strong></div><div><div class="label">Reference interactions</div><strong>${locations.length}</strong></div></div></section>
-      ${referenceSection}
-      <section class="card orderflow-sequence context-section"><div class="section-head"><div><h2>Causal response sequence</h2><div class="context-evidence">One lifecycle transition per completed 5m bar. Expand a row to inspect its evidence lineage.</div></div><span class="badge"><strong>${sequence.length}</strong> bars</span></div>${sequenceRows}</section>
-       <details class="card"><summary>Canonical provenance</summary><div class="payload">${esc(JSON.stringify(model.provenance, null, 2))}</div></details>`;
+      const latestLocation = locations[0] || {};
+      const levelRows = locations.length ? locations.map((item) => `<tr><td><strong>${field(item.name)}</strong></td><td>${field(item.reference)}</td><td>${field(item.implication)}</td><td>${badge(field(item.response_status), item.response_status === 'CONFIRMED' ? 'good' : 'warn')}</td></tr>`).join('') : '<tr><td colspan="4" class="empty">No reference interaction observed.</td></tr>';
+      const sequenceRows = sequence.length ? sequence.slice().reverse().map((item) => `<details class="orderflow-sequence-row"><summary><span class="mono">${field(date(item.time))}</span><span><strong>${field(item.location)}</strong><small>${field(item.transition)}</small></span><span>${field(item.implication)}</span>${badge(field(item.direction), item.direction === 'LONG' ? 'subtle' : item.direction === 'SHORT' ? 'bad' : 'warn')}</summary><div class="payload"><strong>Evidence lineage</strong>${esc(JSON.stringify(item.evidence || {}, null, 2))}</div></details>`).join('') : '<div class="empty">No completed-bar transitions observed.</div>';
+      return `<div class="context-header"><div><h1>Market briefing</h1><p>${field(model.session_date || model.date || model.as_of && String(model.as_of).slice(0, 10))} · ${field(model.session || 'Session unavailable')} · Last completed bar ${field(date(model.as_of))} · Updated ${field(date(model.updated_at))}</p></div><div><span class="badge context-diagnostic">Research / Diagnostic</span><div class="context-controls">Timeframe: 15m</div></div></div>
+      <div class="context-hero"><div class="context-read"><div class="label">Market read</div><h2>${field(action.name)}</h2><p>${field(read)}</p><span class="badge warn">No executable order</span></div><div><div class="label">Bias</div><span class="context-value">${field(model.bias)}</span></div><div><div class="label">Market state</div><span class="context-value">${field(model.market_state)}</span></div><div class="context-action"><div class="label">Action</div><span class="context-value">${isNoTrade ? 'Wait for confirmation' : field(action.name)}</span></div></div>
+      <div class="context-strip"><div><div class="label">Current price</div><strong>${field(model.current_price || latestLocation.current_price)}</strong></div><div><div class="label">Active location</div><strong>${field(latestLocation.name)}</strong></div><div><div class="label">Reference level</div><strong>${field(latestLocation.reference)}</strong></div><div><div class="label">Distance</div><strong>${field(latestLocation.distance)}</strong></div><div><div class="label">Interaction</div><strong>${field(interactionState)}</strong></div><div><div class="label">Response</div><strong>${field(responseState)}</strong></div></div>
+      <div class="context-main"><div><section class="card orderflow-sequence context-section"><div class="section-head"><div><h2>Causal timeline</h2><div class="context-evidence">Completed-bar transitions supporting the current read.</div></div><span class="badge"><strong>${sequence.length}</strong> bars</span></div><div class="context-timeline">${sequenceRows}</div></section><section class="card context-section"><div class="section-head"><div><h2>Reference levels</h2><div class="context-evidence">Levels provide context; response status is the evidence.</div></div></div><table class="context-levels"><thead><tr><th>Level</th><th>Reference</th><th>Hypothesis</th><th>Response</th></tr></thead><tbody>${levelRows}</tbody></table></section></div><aside class="card context-rail"><div class="section-head"><div><h2>Decision state</h2><div class="context-evidence">Latest diagnostic lifecycle.</div></div><span class="badge">${field(setup.stage || 'trigger')}</span></div><div class="context-state"><div><div class="label">Setup</div><strong>${field(setup.name || setup.location)}</strong></div><div><div class="label">Bias</div><strong>${field(model.bias)}</strong></div><div><div class="label">Market state</div><strong>${field(model.market_state)}</strong></div><div><div class="label">Decision time</div><strong>${esc(date(model.as_of))}</strong></div><div><div class="label">Latest update</div><strong>${esc(date(model.updated_at))}</strong></div><div><div class="label">Active interactions</div><strong>${locations.length}</strong></div></div><p class="context-note"><strong>What would change this read?</strong><br>${field(action.reason || 'A completed-bar confirmation or invalidation update.')}</p></aside></div><details class="card"><summary>Show evidence and provenance</summary><div class="payload">${esc(JSON.stringify(model.provenance, null, 2))}</div></details>`;
     }
 
     function orderflowPage(model) {
