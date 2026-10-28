@@ -57,6 +57,18 @@ def test_opening_gap_recovery_is_explicit_and_causal() -> None:
     assert recovered.evidence_ids == ("obs-1",)
 
 
+def test_opening_gap_expires_after_five_completed_bars() -> None:
+    state = OpeningGapState("GAP_ACCEPTED", -2.0, 100.0, completed_bars=1, reference_id="PD_LOW")
+    for index in range(2, 6):
+        state = advance_opening_gap(
+            state, close=98.0, available_at=datetime(2026, 1, 1, 9, index, tzinfo=UTC),
+            evidence_id=f"obs-{index}",
+        )
+    assert state.status == "EXPIRED"
+    assert state.completed_bars == 5
+    assert state.reference_id == "PD_LOW"
+
+
 def test_value_reference_requires_complete_causal_publication() -> None:
     with pytest.raises(ValueError, match="both bounds"):
         ValueReference("pd", 101.0, None, datetime(2026, 1, 1, 9, 15, tzinfo=UTC), ("profile",), True)

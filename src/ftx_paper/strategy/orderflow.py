@@ -228,16 +228,23 @@ class OrderflowPolicy:
                         else prior_high if prior_high is not None and opening > prior_high
                         else previous_close
                     )
+                    reference_id = (
+                        "PD_LOW" if prior_low is not None and opening < prior_low
+                        else "PD_HIGH" if prior_high is not None and opening > prior_high
+                        else None
+                    )
                     classified_gap = classify_opening_gap(
                         opening_price=opening,
                         prior_close=reference,
                         observed_at=first_1m.observed_at,
+                        reference_id=reference_id,
                     )
                     self._opening_gap_state = OpeningGapState(
                         "GAP_CANDIDATE" if classified_gap.status in {"UP", "DOWN"}
                         else classified_gap.status,
                         classified_gap.gap_points, classified_gap.reference_price,
                         classified_gap.observed_at, (first_1m.observation_id,),
+                        reference_id=classified_gap.reference_id,
                     )
                     self._opening_gap_observation_id = first_1m.observation_id
                     results.append(PolicyDecision({
@@ -269,24 +276,16 @@ class OrderflowPolicy:
                 and self._opening_gap_initialized
                 and observation.observation_id != self._opening_gap_observation_id
             ):
-                advanced_gap = self._opening_gap_state
-                if self._opening_gap_state.status == "GAP_CANDIDATE":
-                    advanced_gap = OpeningGapState(
-                        "GAP_ACCEPTED", self._opening_gap_state.gap_points,
-                        self._opening_gap_state.reference_price, observation.available_at,
-                        (*self._opening_gap_state.evidence_ids, observation.observation_id),
-                    )
-                else:
-                    advanced_gap = advance_opening_gap(
-                        self._opening_gap_state,
-                        close=_number(observation, "close"),
-                        available_at=observation.available_at,
-                        evidence_id=observation.observation_id,
-                        complete=(observation.context is not None and observation.context.completeness == "complete"),
-                    )
-                if advanced_gap != self._opening_gap_state:
-                    previous_gap = self._opening_gap_state
-                    self._opening_gap_state = advanced_gap
+                advanced_gap = advance_opening_gap(
+                    self._opening_gap_state,
+                    close=_number(observation, "close"),
+                    available_at=observation.available_at,
+                    evidence_id=observation.observation_id,
+                    complete=(observation.context is not None and observation.context.completeness == "complete"),
+                )
+                previous_gap = self._opening_gap_state
+                self._opening_gap_state = advanced_gap
+                if advanced_gap.status != previous_gap.status:
                     results.append(PolicyDecision({
                         **base,
                         "decision_at": observation.observed_at.isoformat(),
@@ -297,6 +296,8 @@ class OrderflowPolicy:
                         "decision_id": _decision_id("opening_gap_transition", observation.observation_id),
                         "from_state": previous_gap.status,
                         "state": advanced_gap.status,
+                        "reference": advanced_gap.reference_id,
+                        "reference_level": advanced_gap.reference_price,
                         "source_observation_ids": [observation.observation_id],
                     }))
                     results.append(PolicyDecision({
@@ -307,7 +308,9 @@ class OrderflowPolicy:
                         "decision_stage": "interaction",
                         "reason": "opening_gap_permission",
                         "decision_id": _decision_id("opening_gap_permission", observation.observation_id),
-                        "direction": advanced_gap.status,
+                        "direction": "down" if (advanced_gap.gap_points or 0) < 0 else "up",
+                        "state": advanced_gap.status,
+                        "reference": advanced_gap.reference_id,
                         "source_observation_ids": [observation.observation_id],
                     }))
             if observation.context is None or observation.context.session_id != orderflow.session_id:

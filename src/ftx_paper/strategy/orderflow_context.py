@@ -61,6 +61,8 @@ class OpeningGapState:
     reference_price: float | None = None
     observed_at: datetime | None = None
     evidence_ids: tuple[str, ...] = ()
+    completed_bars: int = 0
+    reference_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.status not in {"UNAVAILABLE", "NONE", "UP", "DOWN", "RECOVERED", "GAP_CANDIDATE", "GAP_ACCEPTED", "GAP_RECLAIMED", "RETURN_TO_VALUE", "EXPIRED"}:
@@ -169,6 +171,8 @@ class ContextHistory:
                 float(gap_raw["reference_price"]) if gap_raw.get("reference_price") is not None else None,
                 datetime.fromisoformat(str(gap_raw["observed_at"])) if gap_raw.get("observed_at") is not None else None,
                 tuple(str(evidence_id) for evidence_id in gap_raw.get("evidence_ids", ())),
+                int(gap_raw.get("completed_bars", 0)),
+                str(gap_raw["reference_id"]) if gap_raw.get("reference_id") is not None else None,
             )
             decoded.append(ContextVersion(
                 str(item["context_id"]), int(item["version"]), datetime.fromisoformat(str(item["available_at"])),
@@ -181,9 +185,10 @@ class ContextHistory:
 def classify_opening_gap(
     *, opening_price: float | None, prior_close: float | None,
     observed_at: datetime | None = None, tolerance: float = 0.0,
+    reference_id: str | None = None,
 ) -> OpeningGapState:
     if opening_price is None or prior_close is None:
-        return OpeningGapState("UNAVAILABLE", observed_at=observed_at)
+        return OpeningGapState("UNAVAILABLE", observed_at=observed_at, reference_id=reference_id)
     gap = opening_price - prior_close
     if abs(gap) <= tolerance:
         status = "NONE"
@@ -191,7 +196,7 @@ def classify_opening_gap(
         status = "UP"
     else:
         status = "DOWN"
-    return OpeningGapState(status, gap, prior_close, observed_at)
+    return OpeningGapState(status, gap, prior_close, observed_at, reference_id=reference_id)
 
 
 def derive_session_levels(
@@ -267,12 +272,21 @@ def advance_opening_gap(
         return state
     if state.reference_price is None:
         return state
-    recovered = close <= state.reference_price if state.gap_points is not None and state.gap_points > 0 else close >= state.reference_price
-    if evidence_id in state.evidence_ids or not recovered:
+    if evidence_id in state.evidence_ids:
         return state
+    completed_bars = state.completed_bars + 1
+    recovered = close <= state.reference_price if state.gap_points is not None and state.gap_points > 0 else close >= state.reference_price
+    next_status = state.status
+    if recovered:
+        next_status = "RETURN_TO_VALUE"
+    elif state.status == "GAP_CANDIDATE":
+        next_status = "GAP_ACCEPTED"
+    elif completed_bars >= 5:
+        next_status = "EXPIRED"
     return OpeningGapState(
-        "RETURN_TO_VALUE", state.gap_points, state.reference_price,
-        available_at, (*state.evidence_ids, evidence_id),
+        next_status, state.gap_points, state.reference_price,
+        available_at, (*state.evidence_ids, evidence_id), completed_bars,
+        state.reference_id,
     )
 
 
