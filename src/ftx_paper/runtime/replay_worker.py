@@ -225,6 +225,17 @@ class ReplayWorker:
             "current": futures_source.provenance() if futures_source is not None else None,
             "prior": self._prior_source_provenance(session_date),
         }
+        completed_source_rows = len({
+            str(row.get("minute")) for row in replay_rows
+            if str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
+        })
+        current_source = source_provenance["current"]
+        selected_source_rows = int(
+            current_source["source_bar_count"]
+            if current_source is not None and "source_bar_count" in current_source
+            else completed_source_rows
+        )
+        expected_source_rows = SESSION_DATA_END_MINUTES - SESSION_OPEN_MINUTES
         payload = {
             "available_date": session_date,
             "date": session_date,
@@ -232,6 +243,10 @@ class ReplayWorker:
             "bar_count": len(strategy_rows),
             "raw_bar_count": len(loaded_rows),
             "supporting_bar_count": len(bars) - len(strategy_rows),
+            "selected_source_rows": selected_source_rows,
+            "filtered_source_rows": max(0, selected_source_rows - completed_source_rows),
+            "completed_source_rows": completed_source_rows,
+            "gap_rows": max(0, expected_source_rows - completed_source_rows),
             "futures_source": futures_source.provenance() if futures_source is not None else None,
             "provenance": source_provenance,
             "per_instrument_counts": dict(sorted(by_instrument.items())),
@@ -862,12 +877,10 @@ class ReplayWorker:
             "input_fingerprint": input_manifest["input_fingerprint"],
             "input_provenance": input_manifest["provenance"],
             "input_availability": input_manifest["availability"],
-            "selected_source_rows": int(
-                ((input_manifest.get("provenance") or {}).get("current") or {}).get(
-                    "source_bar_count", input_manifest.get("raw_bar_count", 0),
-                )
-            ),
-            "filtered_source_rows": int(input_manifest.get("bar_count", 0)),
+            "selected_source_rows": int(input_manifest["selected_source_rows"]),
+            "filtered_source_rows": int(input_manifest["filtered_source_rows"]),
+            "completed_source_rows": int(input_manifest["completed_source_rows"]),
+            "gap_rows": int(input_manifest["gap_rows"]),
             "processed_decision_bars": int(bars_seen),
             "incomplete_causal_bars": max(0, int(bars_seen) - int(causal_bars_seen)),
             "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),

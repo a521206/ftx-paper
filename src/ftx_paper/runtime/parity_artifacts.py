@@ -261,8 +261,10 @@ def build_parity_artifact(
         "partitions": {"source": ["orderflow"]} if str(request.get("strategy_id", "")).startswith("ftx-paper-orderflow") else {},
         "replay_input": replay_input,
         "counts": {
-            "selected_source_rows": int(metadata.get("selected_source_rows", metadata.get("input_bar_count", 0))),
-            "filtered_source_rows": int(metadata.get("filtered_source_rows", metadata.get("input_bar_count", 0))),
+            "selected_source_rows": int(metadata.get("selected_source_rows", 0)),
+            "filtered_source_rows": int(metadata.get("filtered_source_rows", 0)),
+            "completed_source_rows": int(metadata.get("completed_source_rows", 0)),
+            "gap_rows": int(metadata.get("gap_rows", 0)),
             "completed_causal_bars": int(result.get("causal_bars_seen", 0)),
             "incomplete_causal_bars": int(metadata.get("incomplete_causal_bars", 0)),
             "processed_decision_bars": int(metadata.get("processed_decision_bars", result.get("bars_seen", 0))),
@@ -320,11 +322,12 @@ def build_parity_manifest(artifact: Mapping[str, Any]) -> dict[str, Any]:
         if any(not isinstance(record, Mapping) for record in records):
             raise ValueError(f"invalid {layer} record")
         coverage = artifact.get("coverage", {})
-        observed = coverage.get("observed_layers", {}).get(layer, False)
-        # A producer can establish coverage, but only a cross-producer
-        # comparison can establish MATCHED.
-        status = "INCOMPLETE" if not coverage.get("complete", False) else "UNAVAILABLE"
-        layers[layer] = {"status": status, "observed": bool(observed), "count": len(records),
+        observed_layers = coverage.get("observed_layers", {})
+        observed = bool(observed_layers.get(layer, False)) if isinstance(observed_layers, Mapping) else False
+        status = "INCOMPLETE" if not coverage.get("complete", False) else (
+            "AVAILABLE" if observed else "UNAVAILABLE"
+        )
+        layers[layer] = {"status": status, "observed": observed, "count": len(records),
                          "sha256": hashlib.sha256(_canonical_json(canonical_records(records)).encode("utf-8")).hexdigest()}
     scope = artifact.get("scope", {})
     return {"version": PARITY_MANIFEST_VERSION, "hash_algorithm": "sha256",
@@ -336,7 +339,7 @@ def validate_parity_artifact(artifact: Mapping[str, Any]) -> dict[str, Any]:
     required = ("artifact_type", "schema_version", "contract", "producer", "run_id", "scope", "coverage", "producer_configuration", "layers", "manifest")
     if any(key not in artifact for key in required) or artifact.get("artifact_type") != "producer_parity" or artifact.get("schema_version") != 2:
         raise ValueError("invalid parity artifact envelope")
-    if not isinstance(artifact["producer"], Mapping):
+    if not isinstance(artifact["producer"], Mapping) or not artifact["producer"].get("name"):
         raise ValueError("invalid parity producer")
     contract = artifact["contract"]
     if not isinstance(contract, Mapping) or contract.get("id") != PARITY_CONTRACT_ID or contract.get("layers") != list(PARITY_LAYERS):

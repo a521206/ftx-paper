@@ -13,7 +13,9 @@ from ftx_paper.runtime.parity_artifacts import (
 def _artifact(*, timezone="America/New_York"):
     return build_parity_artifact(
         {"strategy": {"algorithm": "flow"}, "bars_seen": 1,
-         "metadata": {"timezone": timezone, "input_fingerprint": "fixture"}},
+         "metadata": {"timezone": timezone, "input_fingerprint": "fixture",
+                      "selected_source_rows": 1, "filtered_source_rows": 0,
+                      "completed_source_rows": 1, "gap_rows": 0}},
         request={"session_date": "2026-01-05", "timezone": timezone},
          layer_records={"decisions": [{"event_type": "POLICY_DECISION", "decision_id": "accepted",
                                         "outcome": "accepted", "decision_at": "2026-01-05T14:30:00Z"}]},
@@ -44,6 +46,13 @@ def test_invalid_layer_records_are_rejected() -> None:
         build_parity_manifest(artifact)
 
 
+def test_malformed_observed_layers_are_treated_as_unobserved() -> None:
+    artifact = _artifact()
+    artifact["coverage"]["observed_layers"] = []
+    manifest = build_parity_manifest(artifact)
+    assert manifest["layers"]["decision"]["status"] == "UNAVAILABLE"
+
+
 def test_records_use_canonical_kinds_and_neutral_identity() -> None:
     artifact = build_parity_artifact(
         {"strategy": {}, "bars_seen": 1, "metadata": {"input_fingerprint": "fixture"}},
@@ -69,7 +78,7 @@ def test_observed_empty_scope_is_complete() -> None:
         request={"session_date": "2026-01-05"},
     )
     assert artifact["coverage"]["complete"] is True
-    assert artifact["manifest"]["layers"]["decision"]["status"] == "UNAVAILABLE"
+    assert artifact["manifest"]["layers"]["decision"]["status"] == "AVAILABLE"
 
 
 def test_scope_uses_canonical_orderflow_run_identity() -> None:

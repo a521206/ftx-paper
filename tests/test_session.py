@@ -293,6 +293,10 @@ def test_replay_resolves_current_then_prior_source_once(tmp_path):
     assert {bar.instrument.symbol for bar in bars} == {"NIFTY01OCTFUT"}
     assert levels == (23124.1, 22792.9)
     assert manifest["provenance"]["current"]["selected_symbol"] == "NIFTY"
+    assert manifest["selected_source_rows"] == 1
+    assert manifest["filtered_source_rows"] == 0
+    assert manifest["completed_source_rows"] == 1
+    assert manifest["gap_rows"] == 374
     assert manifest["provenance"]["current"]["source_contract_symbol"] == "NIFTY01OCTFUT"
     assert manifest["provenance"]["prior"]["selected_symbol"] == "NIFTY"
     assert manifest["provenance"]["prior"]["source_contract_symbol"] == "NIFTY26SEPFUT"

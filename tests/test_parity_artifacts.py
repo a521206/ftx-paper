@@ -14,7 +14,9 @@ def _artifact() -> dict:
         "bars_seen": 1,
         "events": [],
         "ledger": {"2026-01-05": {"net_pnl_rs": 1.0}},
-        "metadata": {"timezone": "UTC", "input_fingerprint": "fixture"},
+        "metadata": {"timezone": "UTC", "input_fingerprint": "fixture",
+                     "selected_source_rows": 1, "filtered_source_rows": 0,
+                     "completed_source_rows": 1, "gap_rows": 0},
     }
     return build_parity_artifact(
         result,
