@@ -227,6 +227,10 @@ class OrderIntent:
     request_id: str | None = field(default=None, kw_only=True)
     strategy_id: str | None = field(default=None, kw_only=True)
     account_id: str | None = field(default=None, kw_only=True)
+    execution_group_id: str | None = field(default=None, kw_only=True)
+    lifecycle_id: str | None = field(default=None, kw_only=True)
+    setup_availability: str | None = field(default=None, kw_only=True)
+    structural_rank: int = field(default=0, kw_only=True)
 
     def __post_init__(self) -> None:
         vehicle = str(self.vehicle).lower()
@@ -241,3 +245,5 @@ class OrderIntent:
             if (call.expiry, call.strike) != (put.expiry, put.strike):
                 raise ValueError("synthetic CE/PE legs must share expiry and strike")
         object.__setattr__(self, "vehicle", vehicle)
+        if self.structural_rank < 0:
+            raise ValueError("structural rank must be non-negative")

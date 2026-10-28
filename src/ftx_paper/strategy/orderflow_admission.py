@@ -79,7 +79,6 @@ def evaluate_admission(
     direction_matches: bool | None = None,
     confirmations_available: bool | None = None,
     current_at: datetime | None = None,
-    require_complete_gates: bool = False,
     evidence_ids: tuple[str, ...] = (),
     context_version: str | None = None,
     permission_version: str | None = None,
@@ -108,12 +107,7 @@ def evaluate_admission(
         ("exposure_gate", exposure_allowed), ("allocation_gate", allocation_allowed),
         ("sizing_gate", sizing_allowed), ("risk_gate", risk_allowed),
     )
-    if require_complete_gates:
-        checks.extend(optional_checks)
-    else:
-        optional_checks = tuple(item for item in optional_checks if item[1] is not None)
-    if not require_complete_gates:
-        checks.extend(optional_checks)
+    checks.extend(optional_checks)
     if setup_valid is not None:
         checks.append(("setup_validity", setup_valid))
     if direction_matches is not None:
@@ -123,7 +117,7 @@ def evaluate_admission(
     if current_at is not None:
         checks.append(("setup_expiry", current_at < opportunity.setup.expires_at))
     predicates: list[PredicateResult] = []
-    for predicate_id, value in checks:
+    for index, (predicate_id, value) in enumerate(checks):
         if value is None:
             result = PredicateResult(
                 predicate_id, PredicateStatus.UNAVAILABLE, reason="evidence_unavailable",
@@ -144,6 +138,15 @@ def evaluate_admission(
             )
         predicates.append(result)
         if result.status is not PredicateStatus.PASSED:
+            predicates.extend(
+                PredicateResult(
+                    later_id, PredicateStatus.UNAVAILABLE, value=None,
+                    reason=f"blocked_by:{predicate_id}", evidence_ids=evidence_ids,
+                    context_version=context_version, permission_version=permission_version,
+                    reference_window=reference_window,
+                )
+                for later_id, _ in checks[index + 1:]
+            )
             return AdmissionDecision(opportunity.lifecycle_id, result.status, result.reason or result.status.value, tuple(predicates))
     intent = DiagnosticDecisionIntent(
         intent_id=f"diagnostic:{opportunity.lifecycle_id}",

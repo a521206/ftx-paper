@@ -5,8 +5,6 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone, tzinfo
-import hashlib
-import json
 import math
 
 from ftx_paper.contracts import MarketBar
@@ -17,6 +15,7 @@ from .orderflow_contract import (
     UnavailableValue, stable_orderflow_id,
 )
 from .orderflow_location import LocationBand, LocationObservation, LocationRecord
+from .orderflow_source import source_fingerprint
 
 
 def _numeric_feature(features: Mapping[str, object], name: str) -> float:
@@ -35,22 +34,6 @@ def source_row_is_complete(bar: MarketBar) -> bool:
         and math.isfinite(float(value))
         for value in values
     )
-
-
-def _feature_fingerprint(features: Mapping[str, object]) -> str:
-    payload = json.dumps(dict(features), sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-def _source_row_fingerprint(bars: list[MarketBar]) -> str:
-    """Hash the canonical source rows, never derived child fingerprints."""
-    payload = [{
-        "identity": _source_identity(bar),
-        "timestamp": bar.timestamp.isoformat(),
-        "open": bar.open, "high": bar.high, "low": bar.low, "close": bar.close,
-        "volume": bar.volume, "open_interest": bar.open_interest,
-    } for bar in bars]
-    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def _source_identity(bar: MarketBar) -> str:
@@ -247,11 +230,7 @@ class CausalOrderflowProducer:
                         "input_availability": "gap" if bar_has_gap else "complete",
                         "gap_status": gap_status,
                         "gap_origin": "boundary_gap" if boundary_gap else "source_gap" if source_gap else "none",
-                        "source_fingerprint": _feature_fingerprint({
-                            "timestamp": bar.timestamp.isoformat(), "open": bar.open,
-                            "high": bar.high, "low": bar.low, "close": bar.close,
-                            "volume": bar.volume, "open_interest": bar.open_interest,
-                        }),
+                        "source_fingerprint": source_fingerprint((bar,)),
                     }, generation=1,
                     causal_sequence=1,
                 ),
@@ -299,7 +278,7 @@ class CausalOrderflowProducer:
                 bar for bar in bars
                 if bar.timestamp in child_timestamps and _source_identity(bar) == stream_identity
             ]
-            source_fingerprint = _source_row_fingerprint(source_rows)
+            parent_source_fingerprint = source_fingerprint(source_rows)
             child_features = [item.features for item in children]
             total_volume = sum(_numeric_feature(item, "volume") for item in child_features)
             parent_features = {
@@ -407,7 +386,7 @@ class CausalOrderflowProducer:
                         "producer_version": self._PRODUCER_VERSION,
                         "input_availability": "gap" if parent_has_gap else "complete",
                         "gap_status": "source_gap" if parent_has_gap else "none",
-                        "source_fingerprint": source_fingerprint,
+                        "source_fingerprint": parent_source_fingerprint,
                     }, generation=1,
                     child_observation_ids=child_ids,
                     child_intervals=child_intervals,

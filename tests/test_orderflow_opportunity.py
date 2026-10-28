@@ -55,6 +55,19 @@ def test_template_identity_scopes_opportunity_and_conflict_group() -> None:
     assert first.execution_group_id == second.execution_group_id == "or-low"
 
 
+def test_templated_opportunity_source_current_matches_its_interaction() -> None:
+    formed = datetime(2026, 1, 1, 9, 20, tzinfo=UTC)
+    opportunity = SetupOpportunity.create(
+        interaction_id="interaction-1", direction="long",
+        formed_at=formed, expires_at=formed + timedelta(minutes=5),
+        entry_lower=99.0, entry_upper=101.0, failure_boundary=98.0,
+        evidence_ids=("evidence-1",), evidence_timeframe="5m",
+        regime_version=3, template_id="acceptance", policy_version="v1",
+    )
+
+    assert opportunity.source_is_current(interaction_id="interaction-1", context_version=3)
+
+
 def test_terminal_transition_is_idempotent_but_conflicts_are_rejected() -> None:
     opportunity = _opportunity()
     at = datetime(2026, 1, 1, 9, 25, tzinfo=UTC)

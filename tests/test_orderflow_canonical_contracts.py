@@ -26,6 +26,8 @@ def test_non_vwap_template_exits_match_canonical_locations() -> None:
     assert TRADE_TEMPLATES[("5m_recovery_breakout", "SESSION_HIGH")].exits[0].location.value == "OR_LOW"
     assert TRADE_TEMPLATES[("5m_acceptance_breakout", "SESSION_LOW")].exits[0].location.value == "OR_HIGH"
     assert TRADE_TEMPLATES[("5m_recovery_breakout", "OR_HIGH")].exits == ()
+    assert ("5m_acceptance_breakout", "OR_HIGH") not in TRADE_TEMPLATES
+    assert ("5m_acceptance_breakout", "OR_LOW") not in TRADE_TEMPLATES
 
 
 def test_opportunity_identity_is_stable_across_runner_adapters() -> None:

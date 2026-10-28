@@ -149,7 +149,7 @@ def _context(
         as_of=cutoff,
         account_revision=0,
         capital=CapitalSnapshot(1000.0, 1000.0, 0.0, 0.0),
-        margin=MarginSnapshot(0.0, 1000.0, 0.0),
+        margin=MarginSnapshot(0.0, 1000.0, 1000.0),
         exposure=ExposureSnapshot(0.0, 0),
     )
     return bundle, account
@@ -224,7 +224,8 @@ def test_response_and_admission_use_completed_causal_evidence() -> None:
     response = next(event for event in events if event.payload.get("decision_stage") == "response")
     admission = next(event for event in events if event.payload.get("decision_stage") == "admission")
     assert response.payload["response_state"] == "CONFIRMED"
-    assert response.payload["response_evidence_ids"] == ["obs-5m"]
+    assert response.payload["response_evidence_ids"] == ["response-evidence-obs-5m"]
+    assert response.payload["source_observation_ids"] == ["response-obs-5m"]
     assert admission.payload["reason"] == "orderflow_admission"
     assert admission.payload["outcome"] == "accepted"
     assert admission.order is None
@@ -241,7 +242,7 @@ def test_admission_projection_includes_causal_trigger_eligibility() -> None:
     assert admission.payload["trigger_eligible"] is True
     trigger = admission.payload["trigger"]
     assert isinstance(trigger, dict)
-    assert trigger["source_observation_id"] == "obs-5m"
+    assert trigger["source_observation_id"] == "response-obs-5m"
     assert trigger["effective_at"] is not None
 
 
@@ -283,8 +284,11 @@ def test_executable_orderflow_registers_and_settles_protective_exit() -> None:
     entry_time = OBSERVED
     strategy.register_entry(entry, fill_price=100.0, entry_fill_time=entry_time)
 
-    actions = strategy.on_closed_bar(MarketBar(
+    assert strategy.on_closed_bar(MarketBar(
         instrument, entry_time + timedelta(minutes=1), 100.0, 101.0, 98.5, 99.0,
+    )) == ()
+    actions = strategy.on_closed_bar(MarketBar(
+        instrument, entry_time + timedelta(minutes=2), 100.0, 101.0, 98.5, 99.0,
     ))
 
     assert len(actions) == 1
@@ -292,6 +296,28 @@ def test_executable_orderflow_registers_and_settles_protective_exit() -> None:
     strategy.settle_exit(actions[0].intent.client_order_id, filled=True)
     assert strategy.on_closed_bar(MarketBar(
         instrument, entry_time + timedelta(minutes=2), 100.0, 101.0, 99.5, 100.0,
+    )) == ()
+
+
+def test_delayed_exit_is_dispatched_once_until_settlement() -> None:
+    strategy = OrderflowStrategy(OrderflowConfig(execution_mode=ExecutionMode.EXECUTABLE))
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    entry = OrderIntent(
+        "entry-delayed", instrument, OrderSide.BUY, 1, stop_price=99.0,
+        role=OrderRole.ENTRY, cell="OR_HIGH", exit_mode="signal",
+    )
+    entry_time = OBSERVED
+    strategy.register_entry(entry, fill_price=100.0, entry_fill_time=entry_time)
+
+    assert strategy.on_closed_bar(MarketBar(
+        instrument, entry_time + timedelta(minutes=1), 100.0, 101.0, 98.5, 99.0,
+    )) == ()
+    first_dispatch = strategy.on_closed_bar(MarketBar(
+        instrument, entry_time + timedelta(minutes=2), 100.0, 101.0, 98.5, 99.0,
+    ))
+    assert len(first_dispatch) == 1
+    assert strategy.on_closed_bar(MarketBar(
+        instrument, entry_time + timedelta(minutes=3), 100.0, 101.0, 98.5, 99.0,
     )) == ()
 
 

@@ -52,10 +52,6 @@ if TYPE_CHECKING:
     from .orderflow_capture import CaptureMode, REPLAY_RECORD_SCHEMA_VERSION, ReplayRecord, ReplayRecorder, validate_replay_scope
     from .orderflow_replay import CANONICAL_PHASE_ORDER, OrderflowRuntimeState, ReplayBarResult, ReplayMachine, ReplayPhase
     from .orderflow_reporting import CAUSAL_CHECKPOINT_PHASES, build_multi_session_report, build_session_summary, causal_actions, first_divergent_phase
-    from .orderflow_execution import (
-        ExecutionAuthorization, ExecutionProposal, ExecutionState, ExecutionStatus,
-        OrderflowExecutionCoordinator,
-    )
     from .research_policy import ResearchPolicyAdapter
     from .snapshot_envelope import unwrap_snapshot, wrap_snapshot
     from .policy_contract import ExecutionMode, PolicyDecision, StrategyPolicy
@@ -219,18 +215,6 @@ def __getattr__(name: str):
     if name in {"CAUSAL_CHECKPOINT_PHASES", "build_multi_session_report", "build_session_summary", "causal_actions", "first_divergent_phase"}:
         from .orderflow_reporting import CAUSAL_CHECKPOINT_PHASES, build_multi_session_report, build_session_summary, causal_actions, first_divergent_phase
         return {"CAUSAL_CHECKPOINT_PHASES": CAUSAL_CHECKPOINT_PHASES, "build_multi_session_report": build_multi_session_report, "build_session_summary": build_session_summary, "causal_actions": causal_actions, "first_divergent_phase": first_divergent_phase}[name]
-    if name in {"ExecutionAuthorization", "ExecutionProposal", "ExecutionState", "ExecutionStatus", "OrderflowExecutionCoordinator"}:
-        from .orderflow_execution import (
-            ExecutionAuthorization, ExecutionProposal, ExecutionState, ExecutionStatus,
-            OrderflowExecutionCoordinator,
-        )
-        return {
-            "ExecutionAuthorization": ExecutionAuthorization,
-            "ExecutionProposal": ExecutionProposal,
-            "ExecutionState": ExecutionState,
-            "ExecutionStatus": ExecutionStatus,
-            "OrderflowExecutionCoordinator": OrderflowExecutionCoordinator,
-        }[name]
     if name == "ResearchPolicyAdapter":
         from .research_policy import ResearchPolicyAdapter
         return ResearchPolicyAdapter
@@ -270,11 +254,9 @@ __all__ = [
     "CaptureMode", "REPLAY_RECORD_SCHEMA_VERSION", "ReplayRecord", "ReplayRecorder", "validate_replay_scope",
     "CANONICAL_PHASE_ORDER", "OrderflowRuntimeState", "ReplayBarResult", "ReplayMachine", "ReplayPhase",
     "CAUSAL_CHECKPOINT_PHASES", "build_multi_session_report", "build_session_summary", "causal_actions", "first_divergent_phase",
-    "ExecutionAuthorization", "ExecutionProposal", "ExecutionState", "ExecutionStatus",
     "Direction", "LocationTemplate", "OpeningInteractionKind", "ResponseType", "TradeTemplate", "TriggerType",
     "ResponseCandle", "ResponseSpec", "build_response_spec",
     "OpportunityContext", "OpportunityOutcome", "OpportunityOutcomeStatus", "opportunity_identity",
-    "OrderflowExecutionCoordinator",
     "ResearchPolicyAdapter",
     "unwrap_snapshot", "wrap_snapshot",
     "STRATEGY_NAME", "STRATEGY_VERSION",

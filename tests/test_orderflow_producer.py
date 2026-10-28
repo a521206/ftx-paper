@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from ftx_paper.contracts import Instrument, MarketBar
-from ftx_paper.strategy import CausalOrderflowProducer
+from ftx_paper.strategy import CausalOrderflowProducer, source_fingerprint
 
 
 def test_causal_producer_builds_complete_five_minute_context() -> None:
@@ -33,6 +33,20 @@ def test_causal_producer_builds_complete_five_minute_context() -> None:
     assert parent.location_observations
     assert all(item.available_at == parent.available_at for item in parent.location_observations)
     assert all(item.source_aggregate_id == parent.observation_id for item in parent.location_observations)
+
+
+def test_causal_producer_uses_canonical_source_fingerprint_for_children() -> None:
+    producer = CausalOrderflowProducer()
+    instrument = Instrument("NIFTYFUT", "NSE", "FUTURES")
+    start = datetime(2026, 1, 1, 3, 45, tzinfo=timezone.utc)
+    bar = MarketBar(instrument, start, 99.0, 102.0, 98.0, 100.0, 10.0)
+    producer.ingest(bar)
+
+    context = producer.context("2026-01-01", "09:15")
+    assert context is not None
+    child = context.observations_for("1m")[0]
+    assert child.context is not None
+    assert child.context.replay_provenance["source_fingerprint"] == source_fingerprint((bar,))
 
 
 def test_causal_producer_accepts_detached_prior_close_for_opening_gap() -> None:

@@ -220,6 +220,98 @@ class ReplayWorker:
             raise ValueError("mode must be 'shadow' or 'replay'")
         return self._execute({**request, "mode": mode, "run_id": request.get("run_id") or uuid4().hex}, Event())
 
+    def execute_paired(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Run diagnostic and executable projections through the same replay path."""
+        diagnostic = self.execute_detached({**request, "mode": "shadow"})
+        executable = self.execute_detached({**request, "mode": "replay"})
+        comparison = self.compare_paired_replay(diagnostic, executable)
+        return {
+            "diagnostic": diagnostic,
+            "executable": executable,
+            "comparison": comparison,
+        }
+
+    @staticmethod
+    def compare_paired_replay(
+        diagnostic: Mapping[str, Any], executable: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Compare the complete Paper projection without comparing object identity."""
+        def decisions(result: Mapping[str, Any]) -> dict[str, tuple[Any, ...]]:
+            values: dict[str, tuple[Any, ...]] = {}
+            for event in result.get("events", ()):
+                if not isinstance(event, Mapping) or not event.get("decision_id"):
+                    continue
+                decision_id = str(event["decision_id"])
+                values[decision_id] = tuple(
+                    event.get(field)
+                    for field in (
+                        "decision_stage", "outcome", "reason", "response_state",
+                        "response_evidence_ids", "source_observation_ids",
+                        "observed_at", "available_at", "decision_at",
+                    )
+                )
+            return values
+
+        diagnostic_decisions = decisions(diagnostic)
+        executable_decisions = decisions(executable)
+        mismatches = [
+            {
+                "decision_id": decision_id,
+                "diagnostic": diagnostic_decisions.get(decision_id),
+                "executable": executable_decisions.get(decision_id),
+            }
+            for decision_id in sorted(set(diagnostic_decisions) | set(executable_decisions))
+            if diagnostic_decisions.get(decision_id) != executable_decisions.get(decision_id)
+        ]
+        def lifecycle(result: Mapping[str, Any]) -> tuple[tuple[Any, ...], ...]:
+            values: list[tuple[Any, ...]] = []
+            for event in result.get("events", ()):
+                if not isinstance(event, Mapping):
+                    continue
+                event_type = str(event.get("event_type", "")).upper()
+                if event_type not in _EXECUTION_EVENT_TYPES and event_type not in {"EXIT", "CLOSE"}:
+                    continue
+                values.append(tuple(event.get(field) for field in (
+                    "event_type", "decision_id", "client_order_id", "entry_decision_id",
+                    "outcome", "reason", "status", "quantity", "price", "fill_timestamp",
+                    "timestamp", "available_at", "expected_available_at", "reservation_amount",
+                    "gross_pnl", "net_pnl", "costs",
+                )))
+            return tuple(values)
+
+        def projection(result: Mapping[str, Any], name: str) -> tuple[Any, ...]:
+            values = result.get(name, ())
+            if not isinstance(values, (list, tuple)):
+                return (values,)
+            return tuple(_strip_legacy_fields(item) for item in values)
+
+        diagnostic_mutations = bool(
+            diagnostic.get("authoritative_trades") or diagnostic.get("authoritative_ledger")
+        )
+        lifecycle_mismatches = []
+        diagnostic_lifecycle, executable_lifecycle = lifecycle(diagnostic), lifecycle(executable)
+        if diagnostic_lifecycle != executable_lifecycle:
+            lifecycle_mismatches.append({
+                "diagnostic": diagnostic_lifecycle,
+                "executable": executable_lifecycle,
+            })
+        projection_mismatches = []
+        compare_projections = "execution_scope" in diagnostic and "execution_scope" in executable
+        for name in ("shadow_trades", "shadow_ledger", "authoritative_trades", "authoritative_ledger"):
+            left, right = projection(diagnostic, name), projection(executable, name)
+            if (compare_projections or name.startswith("authoritative_")) and left != right:
+                projection_mismatches.append({"projection": name, "diagnostic": left, "executable": right})
+        result = {
+            "matched": not mismatches and not diagnostic_mutations,
+            "mismatches": mismatches,
+            "diagnostic_mutations": diagnostic_mutations,
+        }
+        if lifecycle_mismatches or projection_mismatches:
+            result["lifecycle_mismatches"] = lifecycle_mismatches
+            result["projection_mismatches"] = projection_mismatches
+            result["matched"] = False
+        return result
+
     def input_manifest(
         self,
         session_date: str,
@@ -487,7 +579,10 @@ class ReplayWorker:
             if strategy_id == "ftx-paper-orderflow":
                 strategy_kwargs["config"] = OrderflowConfig(
                     enabled_vehicles=tuple(vehicles),
-                    execution_mode=ExecutionMode.EXECUTABLE,
+                    execution_mode=(
+                        ExecutionMode.EXECUTABLE
+                        if mode == "replay" else ExecutionMode.DIAGNOSTIC
+                    ),
                 )
             strategy = self.strategy_factory.create(
                 **strategy_kwargs,
@@ -728,6 +823,8 @@ class ReplayWorker:
                 for event in trigger_events:
                     parity_records["decision"].append(dict(event))
                 for order in result.orders:
+                    if mode == "shadow":
+                        continue
                     all_events.append({"event_type": "ORDER_INTENT",
                                        "decision_id": order.client_order_id.rsplit(":", 1)[0],
                                        "client_order_id": order.client_order_id,

@@ -60,6 +60,7 @@ class AccountAggregate:
                     available_capital=self.portfolio.available_capital,
                     realized_pnl=self.portfolio.realized_pnl,
                     daily_loss=daily_loss,
+                    daily_loss_limit=profile.max_daily_loss * self.portfolio.daily_baseline,
                 ),
                 margin=MarginSnapshot(
                     used=self.portfolio.open_margin,

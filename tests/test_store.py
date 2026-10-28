@@ -135,6 +135,24 @@ def test_runtime_store_preserves_warmup_event_payload(tmp_path):
     }
 
 
+def test_runtime_store_summary_preserves_unavailable_outcome(tmp_path):
+    store = RuntimeStore(tmp_path)
+    store.append_event("POLICY_DECISION", {
+        "decision_at": "2026-09-10T10:20:00+05:30",
+        "decision_id": "unavailable-1", "strategy_id": "alpha",
+        "outcome": "unavailable",
+        "decision_view": {
+            "schema_version": 1, "at": "2026-09-10T10:20:00+05:30",
+            "decision_id": "unavailable-1", "subject": {},
+            "policy": {"outcome": "unavailable", "reason_code": "future_evidence"},
+            "evidence": {"provenance": {"available_at": "2026-09-10T10:25:00+05:30"}},
+        },
+    })
+
+    summary = store.read_decision_summary("2026-09-10", strategy_id="alpha")
+    assert summary["totals"]["unavailable"] == 1
+
+
 def test_runtime_store_filters_decision_summary_and_cursor_by_strategy(tmp_path):
     store = RuntimeStore(tmp_path)
     for strategy_id, minute in (("alpha", "10:20"), ("beta", "10:19"), ("alpha", "10:18")):

@@ -12,6 +12,7 @@ class CapitalSnapshot:
     available_capital: float
     realized_pnl: float
     daily_loss: float
+    daily_loss_limit: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

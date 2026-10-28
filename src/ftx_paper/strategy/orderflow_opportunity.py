@@ -164,7 +164,7 @@ class SetupOpportunity:
         self, *, interaction_id: str, context_version: int | None,
     ) -> bool:
         return (
-            self.response_episode_id == f"response-{interaction_id}"
+            self.source_interaction_id == interaction_id
             and self.setup.context_version == context_version
             and self.status is OpportunityStatus.ACTIVE
         )

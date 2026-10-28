@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from typing import Generic, TypeVar
 
 from .templates import Direction, ResponseType, TradeTemplate
@@ -191,35 +191,7 @@ def evaluate_response_hypotheses(
     return tuple(ResponseEvaluation(status, state_armed, tuple(evidence), confirmation, direction) for state_armed, evidence, status, confirmation, direction in (states[item] for item in hypotheses))
 
 
-def evaluate_policy_response(
-    interaction: object,
-    observations: Sequence[object],
-    *,
-    max_candles: int,
-    cutoff: object,
-) -> ResponseEvaluation[object] | None:
-    """Compatibility shim; orderflow adaptation lives in ``orderflow_response``."""
-    from .orderflow_response import evaluate_policy_response as adapter
-    return adapter(interaction, observations, max_candles=max_candles, cutoff=cutoff)
-
-
-def evaluate_policy_responses(
-    interaction: object,
-    observations: Sequence[object],
-    *,
-    max_candles: int,
-    cutoff: object,
-    initial_armed: Mapping[str, bool] | None = None,
-) -> tuple[tuple[TradeTemplate, ResponseEvaluation[object]], ...]:
-    """Compatibility shim; orderflow adaptation lives in ``orderflow_response``."""
-    from .orderflow_response import evaluate_policy_responses as adapter
-    return adapter(
-        interaction, observations, max_candles=max_candles, cutoff=cutoff,
-        initial_armed=initial_armed,
-    )
-
-
 __all__ = [
     "ResponseCandle", "ResponseEvaluation", "ResponseOutcomeStatus", "ResponseSpec",
-    "advance_response_candle", "build_response_spec", "evaluate_policy_response", "evaluate_response_hypotheses", "evaluate_response_window",
+    "advance_response_candle", "build_response_spec", "evaluate_response_hypotheses", "evaluate_response_window",
 ]

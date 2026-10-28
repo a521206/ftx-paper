@@ -37,6 +37,8 @@ class PositionState:
     synthetic_legs: tuple[Instrument, Instrument] | None = None
     entry_bar: int | None = None
     entry_order_id: str | None = None
+    initial_risk_points: float | None = None
+    partial_exit_enabled: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,9 +89,11 @@ class ExitStateMachine:
         self._volumes: deque[float] = deque(maxlen=10)
         self._max_favorable_price: float | None = None
         self._trail_active = False
+        self._trailing_stop: float | None = None
         self._bars_held = 0
         self._mae_bp = 0.0
         self._mfe_bp = 0.0
+        self._partial_exit_taken = False
 
     def reset(self) -> None:
         """Clear position-specific history before evaluating a new position."""
@@ -97,9 +101,11 @@ class ExitStateMachine:
         self._volumes.clear()
         self._max_favorable_price = None
         self._trail_active = False
+        self._trailing_stop = None
         self._bars_held = 0
         self._mae_bp = 0.0
         self._mfe_bp = 0.0
+        self._partial_exit_taken = False
 
     def snapshot(self) -> dict[str, object]:
         return {
@@ -113,9 +119,11 @@ class ExitStateMachine:
             "volumes": list(self._volumes),
             "max_favorable_price": self._max_favorable_price,
             "trail_active": self._trail_active,
+            "trailing_stop": self._trailing_stop,
             "bars_held": self._bars_held,
             "mae_bp": self._mae_bp,
             "mfe_bp": self._mfe_bp,
+            "partial_exit_taken": self._partial_exit_taken,
         }
 
     @classmethod
@@ -160,6 +168,11 @@ class ExitStateMachine:
         if not isinstance(trail_active, bool):
             raise ValueError("exit-state snapshot trail_active must be boolean")
         machine._trail_active = trail_active
+        machine._trailing_stop = _optional_number(snapshot.get("trailing_stop"), "trailing_stop")
+        partial_exit_taken = snapshot.get("partial_exit_taken", False)
+        if not isinstance(partial_exit_taken, bool):
+            raise ValueError("exit-state snapshot partial_exit_taken must be boolean")
+        machine._partial_exit_taken = partial_exit_taken
         for name in ("bars_held", "mae_bp", "mfe_bp"):
             value = snapshot.get(name, 0)
             if name == "bars_held":
@@ -203,6 +216,21 @@ class ExitStateMachine:
             stop_fill = self._fill_at_or_beyond_level(position, open_price, position.stop_price)
             return self._action(position, stop_fill, "hard_stop", client_order_id)
         favorable = high if position.side is OrderSide.BUY else low
+        risk_points = position.initial_risk_points
+        if (
+            position.partial_exit_enabled
+            and not self._partial_exit_taken
+            and position.quantity > 1
+            and isinstance(risk_points, (int, float))
+            and risk_points > 0
+            and ((favorable - reference_entry) if position.side is OrderSide.BUY else (reference_entry - favorable))
+            >= 3.0 * risk_points
+        ):
+            self._partial_exit_taken = True
+            return self._action(
+                position, favorable, "partial_3r", client_order_id,
+                quantity=max(1, position.quantity // 2),
+            )
         if position.exit_mode == "target" and position.target_price is not None:
             target_hit = (high >= position.target_price if position.side is OrderSide.BUY
                           else low <= position.target_price)
@@ -223,16 +251,33 @@ class ExitStateMachine:
                             (reference_entry - self._max_favorable_price) / reference_entry * 10000)
             if favorable_bp >= self.trail_activation_bp:
                 self._trail_active = True
+            if self._trail_active:
+                trail = self._trail_price(
+                    position, reference_entry, self._max_favorable_price,
+                    self.trail_distance_bp / 10000,
+                )
+                self._trailing_stop = (
+                    max(self._trailing_stop or position.stop_price, trail)
+                    if position.side is OrderSide.BUY
+                    else min(self._trailing_stop or position.stop_price, trail)
+                )
             if previous_active:
-                trail = self._trail_price(position, reference_entry, self._max_favorable_price,
-                                          self.trail_distance_bp / 10000)
+                trail = self._trailing_stop
+                assert trail is not None
                 if ((position.side is OrderSide.BUY and low <= trail)
                         or (position.side is OrderSide.SELL and high >= trail)):
                     fill = self._fill_at_or_beyond_level(position, open_price, trail)
                     return self._action(position, fill, "trail_stop", client_order_id)
         elif self.trail_distance is not None:
-            trail = self._trail_price(position, reference_entry, self._max_favorable_price,
-                                      self.trail_distance, absolute=True)
+            trail = self._trail_price(
+                position, reference_entry, self._max_favorable_price,
+                self.trail_distance, absolute=True,
+            )
+            self._trailing_stop = (
+                max(self._trailing_stop or position.stop_price, trail)
+                if position.side is OrderSide.BUY
+                else min(self._trailing_stop or position.stop_price, trail)
+            )
             if (((position.side is OrderSide.BUY and low <= trail)
                  or (position.side is OrderSide.SELL and high >= trail))
                     and ((position.side is OrderSide.BUY and favorable > reference_entry)
@@ -260,12 +305,18 @@ class ExitStateMachine:
             return self._action(position, close, "eod", client_order_id)
         return None
 
+    @property
+    def trailing_stop(self) -> float | None:
+        """Current monotonic protective stop, if the template enables trailing."""
+        return self._trailing_stop
+
     def evaluate_tick(self, position: PositionState, *, timestamp: datetime, price: float,
                       client_order_id: str) -> ExitAction | None:
         """Evaluate one live quote immediately; hard stops have no activation delay."""
         state = (
             deque(self._closes), self._max_favorable_price, self._trail_active,
-            self._bars_held, self._mae_bp, self._mfe_bp,
+            self._trailing_stop, self._bars_held, self._mae_bp, self._mfe_bp,
+            self._partial_exit_taken,
         )
         try:
             return self.evaluate(position, timestamp=timestamp, high=price, low=price,
@@ -273,7 +324,8 @@ class ExitStateMachine:
                                  include_signal=False, count_bar=False)
         finally:
             (self._closes, self._max_favorable_price, self._trail_active,
-             self._bars_held, self._mae_bp, self._mfe_bp) = state
+             self._trailing_stop, self._bars_held, self._mae_bp, self._mfe_bp,
+             self._partial_exit_taken) = state
 
     @staticmethod
     def _gap_fills(position: PositionState, open_price: float, level: float) -> bool:
@@ -285,20 +337,22 @@ class ExitStateMachine:
 
     @staticmethod
     def _trail_price(position: PositionState, reference_entry: float, favorable: float,
-                     distance: float, *, absolute: bool = False) -> float:
+                     distance: float, *, absolute: bool = False,
+                     distance_basis: float | None = None) -> float:
         if absolute:
             return favorable - distance if position.side is OrderSide.BUY else favorable + distance
         # Basis-point trails use a fixed distance measured from the entry
         # price, matching the canonical trail contract. Scaling the distance
         # from the favorable price creates a price-dependent drift.
-        fixed_distance = reference_entry * distance
+        fixed_distance = (distance_basis if distance_basis is not None else reference_entry) * distance
         return (max(favorable - fixed_distance, reference_entry)
                 if position.side is OrderSide.BUY else min(favorable + fixed_distance, reference_entry))
 
-    def _action(self, position: PositionState, price: float, reason: str, client_order_id: str) -> ExitAction:
+    def _action(self, position: PositionState, price: float, reason: str, client_order_id: str,
+                *, quantity: int | None = None) -> ExitAction:
         side = OrderSide.SELL if position.side is OrderSide.BUY else OrderSide.BUY
         intent = OrderIntent(
-            client_order_id, position.instrument, side, position.quantity,
+            client_order_id, position.instrument, side, position.quantity if quantity is None else quantity,
             reason=reason, role=OrderRole.EXIT, vehicle=position.vehicle,
             exit_mode=position.exit_mode,
             synthetic_legs=position.synthetic_legs,

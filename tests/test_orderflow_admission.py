@@ -14,12 +14,15 @@ def _opportunity() -> SetupOpportunity:
 
 def test_diagnostic_admission_records_ordered_predicates_without_intent() -> None:
     decision = evaluate_admission(_opportunity(), context_available=True, regime_allowed=True,
-                                  opening_gap_allowed=True, active_position_allowed=True)
+                                  opening_gap_allowed=True, active_position_allowed=True,
+                                  exposure_allowed=True, allocation_allowed=True,
+                                  sizing_allowed=True, risk_allowed=True)
 
     assert decision.status is PredicateStatus.PASSED
     assert decision.intent_id is None
     assert [item.predicate_id for item in decision.predicates] == [
         "context_relation", "regime_permission", "opening_gap_permission", "active_position_gate",
+        "exposure_gate", "allocation_gate", "sizing_gate", "risk_gate",
     ]
 
 
@@ -29,4 +32,5 @@ def test_admission_preserves_unavailable_gate_reason() -> None:
 
     assert decision.status is PredicateStatus.UNAVAILABLE
     assert decision.reason == "evidence_unavailable"
-    assert len(decision.predicates) == 2
+    assert len(decision.predicates) == 8
+    assert all(item.status is PredicateStatus.UNAVAILABLE for item in decision.predicates[2:])

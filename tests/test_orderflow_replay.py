@@ -105,6 +105,20 @@ def test_orderflow_replay_defaults_to_diagnostic_without_execution_mutations(tmp
     assert store.read_events(1000) == before_events
 
 
+def test_paired_replay_compares_decisions_and_keeps_execution_projection_separate() -> None:
+    decisions = [{
+        "decision_id": "decision-1", "decision_stage": "admission",
+        "outcome": "unavailable", "reason": "future_evidence",
+        "source_observation_ids": ["obs-1"], "available_at": "2026-09-29T03:50:00+00:00",
+    }]
+    comparison = ReplayWorker.compare_paired_replay(
+        {"events": decisions, "shadow_trades": [], "shadow_ledger": []},
+        {"events": decisions, "shadow_trades": [{"status": "filled"}], "shadow_ledger": [{"net_pnl": 0}]},
+    )
+
+    assert comparison == {"matched": True, "mismatches": [], "diagnostic_mutations": False}
+
+
 
 
 def test_replay_summary_counts_unique_lifecycles_and_risk() -> None:

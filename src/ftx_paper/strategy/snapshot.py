@@ -220,6 +220,9 @@ def _position_from_snapshot(raw: Mapping[str, object]) -> PositionState:
     entry_price = _finite_number("entry_price", raw["entry_price"])
     stop_price = _finite_number("stop_price", raw["stop_price"])
     quantity = _positive_int("quantity", raw["quantity"])
+    partial_exit_enabled = raw.get("partial_exit_enabled", False)
+    if not isinstance(partial_exit_enabled, bool):
+        raise ValueError("strategy snapshot partial_exit_enabled is invalid")
     return PositionState(
         _instrument_from_snapshot(instrument_raw), entry_price, stop_price,
         quantity, OrderSide(raw["side"]), cell=cell,
@@ -228,7 +231,9 @@ def _position_from_snapshot(raw: Mapping[str, object]) -> PositionState:
          target_price=_optional_number(raw.get("target_price")),
         vehicle=vehicle, synthetic_legs=legs,
          entry_bar=_optional_int(raw.get("entry_bar")),
-        entry_order_id=entry_order_id,
+         entry_order_id=entry_order_id,
+         initial_risk_points=_optional_number(raw.get("initial_risk_points")),
+         partial_exit_enabled=partial_exit_enabled,
     )
 
 

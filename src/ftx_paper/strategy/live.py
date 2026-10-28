@@ -141,6 +141,8 @@ class ConfiguredLiveStrategy:
             "exit_reference_price": position.exit_reference_price, "target_price": position.target_price,
             "vehicle": position.vehicle, "entry_bar": position.entry_bar,
             "entry_order_id": position.entry_order_id,
+            "initial_risk_points": position.initial_risk_points,
+            "partial_exit_enabled": position.partial_exit_enabled,
             "synthetic_legs": [ConfiguredLiveStrategy._instrument_snapshot(item) for item in position.synthetic_legs]
             if position.synthetic_legs else None,
         }

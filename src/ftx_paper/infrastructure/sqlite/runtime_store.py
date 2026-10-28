@@ -34,6 +34,7 @@ class DecisionSummary(TypedDict):
     candidates: int
     accepted: int
     rejected: int
+    unavailable: int
     executed: int
 
 
@@ -920,11 +921,11 @@ class SqliteRuntimeStore:
             rows = connection.execute(sql, params).fetchall()
 
         sessions: dict[str, DecisionSummary] = {
-            name: {"detections": 0, "candidates": 0, "accepted": 0, "rejected": 0, "executed": 0}
+            name: {"detections": 0, "candidates": 0, "accepted": 0, "rejected": 0, "unavailable": 0, "executed": 0}
             for name in ("Pre", "Morning", "Mid", "Afternoon", "Post")
         }
         totals: DecisionSummary = {
-            "detections": 0, "candidates": 0, "accepted": 0, "rejected": 0, "executed": 0,
+            "detections": 0, "candidates": 0, "accepted": 0, "rejected": 0, "unavailable": 0, "executed": 0,
         }
         for event_type, minute, outcome, count, executed in rows:
             if not minute:
@@ -942,6 +943,7 @@ class SqliteRuntimeStore:
             stats["candidates"] += amount
             stats["accepted"] += amount if outcome == "accepted" else 0
             stats["rejected"] += amount if outcome == "rejected" else 0
+            stats["unavailable"] += amount if outcome == "unavailable" else 0
             stats["executed"] += int(executed or 0)
         for stats in sessions.values():
             for key in totals:

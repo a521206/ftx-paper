@@ -11,6 +11,50 @@ class PaperExecutionCoordinator:
         self.portfolio = portfolio
         self.capital_context = capital_context or CapitalRuntimeContext(ResearchCapitalProfile())
         self._entry_fill_ids: dict[str, set[str]] = {}
+        self._denied: dict[str, str] = {}
+
+    @property
+    def denied_proposals(self) -> dict[str, str]:
+        return dict(self._denied)
+
+    def arbitrate(
+        self, orders: tuple[OrderIntent, ...] | list[OrderIntent], *,
+        execution_group: str | None = None, max_open_positions: int | None = None,
+    ) -> tuple[OrderIntent, ...]:
+        """Select one deterministic entry owner before any account mutation."""
+        candidates = tuple(orders)
+        ranked = sorted(
+            candidates,
+            key=lambda order: (
+                str(getattr(order, "setup_availability", "")),
+                int(getattr(order, "structural_rank", 0)),
+                str(getattr(order, "lifecycle_id", order.client_order_id)),
+                order.client_order_id,
+            ),
+        )
+        accepted: list[OrderIntent] = []
+        claimed = {
+            str(getattr(item, "execution_group_id"))
+            for item in self.portfolio.positions.values()
+            if getattr(item, "execution_group_id", None) is not None
+        }
+        for order in ranked:
+            group = execution_group or getattr(order, "execution_group_id", None)
+            if order.role is not OrderRole.ENTRY:
+                accepted.append(order)
+            elif order.client_order_id in self.portfolio.positions:
+                self._denied[order.client_order_id] = "duplicate_entry"
+            elif group is not None and str(group) in claimed:
+                self._denied[order.client_order_id] = "execution_group_already_claimed"
+            elif max_open_positions is not None and len(self.portfolio.positions) + sum(
+                item.role is OrderRole.ENTRY for item in accepted
+            ) >= max_open_positions:
+                self._denied[order.client_order_id] = "portfolio_position_limit"
+            else:
+                accepted.append(order)
+                if group is not None:
+                    claimed.add(str(group))
+        return tuple(accepted)
 
     def submit(self, order: OrderIntent) -> None:
         self._require_futures(order)
@@ -38,15 +82,24 @@ class PaperExecutionCoordinator:
             if fill_id is not None:
                 self._entry_fill_ids[order.client_order_id].add(fill_id)
             return result
-        return self.portfolio.settle_exit(order, price=price, cost=cost)
+        return self.portfolio.settle_exit(order, price=price, cost=cost, fill_id=fill_id)
 
     def partial_exit(
         self, order: OrderIntent, *, price: float, quantity: int, cost: float = 0.0,
+        fill_id: str | None = None,
     ) -> SettlementResult | None:
         self._require_futures(order)
         if order.role is not OrderRole.EXIT:
             raise ValueError("only exit orders may partially settle")
-        return self.portfolio.settle_partial_exit(order, price=price, quantity=quantity, cost=cost)
+        return self.portfolio.settle_partial_exit(
+            order, price=price, quantity=quantity, cost=cost, fill_id=fill_id,
+        )
+
+    def queue_exit(
+        self, order: OrderIntent, *, available_at: str, reason: str,
+    ) -> dict[str, object]:
+        self._require_futures(order)
+        return self.portfolio.queue_pending_exit(order, available_at=available_at, reason=reason)
 
     def cancel(self, order: OrderIntent) -> bool:
         return self.portfolio.cancel_entry(order.client_order_id)

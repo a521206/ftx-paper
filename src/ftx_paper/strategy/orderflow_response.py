@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, time, timezone
 from enum import StrEnum
 
 from .orderflow_contract import OrderflowObservation
@@ -17,11 +17,57 @@ from .response import (
     build_response_spec,
     evaluate_response_window as evaluate_geometry_response_window,
 )
-from .templates import Direction, TRADE_TEMPLATES, TradeTemplate
+from .templates import Direction, ResponseType, TRADE_TEMPLATES, TradeTemplate
+from ftx_paper.config import IST
 
 
 def _number(value: object) -> float | None:
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _prior_day_role(interaction: object) -> str | None:
+    alias = str(getattr(interaction, "location_alias", ""))
+    if alias == "PD_LOW":
+        return getattr(interaction, "pd_role", None) or "SUPPORT"
+    if alias == "PD_HIGH":
+        return getattr(interaction, "pd_role", None) or "RESISTANCE"
+    return None
+
+
+def _effective_template(template: TradeTemplate, interaction: object) -> TradeTemplate:
+    role = _prior_day_role(interaction)
+    if role is None:
+        return template
+    direction = Direction.LONG if (
+        template.response_type is ResponseType.REJECTION
+    ) == (role == "SUPPORT") else Direction.SHORT
+    return replace(template, direction=direction)
+
+
+def _after_prior_day_transition(
+    candidates: Sequence[object], interaction: object,
+) -> tuple[object, ...]:
+    transition_at = getattr(interaction, "pd_role_transition_available_at", None)
+    if _prior_day_role(interaction) is None or transition_at is None:
+        return tuple(candidates)
+    return tuple(
+        item for item in candidates
+        if getattr(item, "available_at", None) >= transition_at
+    )
+
+
+def _template_expiry(created_at: datetime, expiry_at: str) -> datetime:
+    expiry = time.fromisoformat(expiry_at)
+    # Session timestamps are normally IST-aware.  UTC fixtures represent the
+    # already-normalized session clock and must not be shifted a second time.
+    if created_at.utcoffset() in {timezone.utc.utcoffset(created_at), IST.utcoffset(created_at)}:
+        return created_at.replace(
+            hour=expiry.hour, minute=expiry.minute, second=expiry.second, microsecond=0,
+        )
+    local_created = created_at.astimezone(IST)
+    return local_created.replace(
+        hour=expiry.hour, minute=expiry.minute, second=expiry.second, microsecond=0,
+    ).astimezone(created_at.tzinfo)
 
 
 class ResponseOutcomeStatus(StrEnum):
@@ -128,10 +174,19 @@ def evaluate_response_window(
             invalidation_upper if invalidation_upper is not None else
             interaction.reference_level + 1
         )
-        if direction == "long" and close_value < lower:
+        low_raw = observation.features.get("low")
+        high_raw = observation.features.get("high")
+        low_value = _number(low_raw)
+        high_value = _number(high_raw)
+        touched = low_value if low_value is not None else close_value
+        touched_band = (
+            high_value is None or low_value is None
+            or touched <= upper and high_value >= lower
+        )
+        if direction == "long" and close_value < lower and touched_band:
             status = ResponseOutcomeStatus.INVALIDATED
             break
-        if direction == "short" and close_value > upper:
+        if direction == "short" and close_value > upper and touched_band:
             status = ResponseOutcomeStatus.INVALIDATED
             break
         if direction == "long" and close_value >= interaction.reference_level and close_value > open_value:
@@ -198,15 +253,21 @@ def evaluate_policy_response(
     template = TRADE_TEMPLATES.get(("5m_recovery_breakout", alias))
     if template is None or not isinstance(cutoff, datetime):
         return None
-    candidates = tuple(
+    template = _effective_template(template, interaction)
+    created_at = getattr(interaction, "created_at", None)
+    terminal_at = getattr(interaction, "closed_at", None)
+    expiry = _template_expiry(created_at, template.expiry_at) if isinstance(created_at, datetime) else None
+    candidates = _after_prior_day_transition(tuple(
         item for item in observations
         if getattr(item, "timeframe", None) == template.response_timeframe
         and isinstance(getattr(item, "observed_at", None), datetime)
         and isinstance(getattr(interaction, "created_at", None), datetime)
-        and getattr(item, "observed_at") >= getattr(interaction, "created_at")
+        and getattr(item, "observed_at") > getattr(interaction, "created_at")
         and isinstance(getattr(item, "available_at", None), datetime)
         and getattr(item, "available_at") <= cutoff
-    )[:max_candles]
+        and (expiry is None or getattr(item, "available_at") <= expiry)
+        and (not isinstance(terminal_at, datetime) or getattr(item, "observed_at") <= terminal_at)
+    ), interaction)[:max_candles]
     if not candidates:
         return GeometryResponseEvaluation(None, False, (), None, template.direction)
     lower, upper = getattr(interaction, "band_lower", None), getattr(interaction, "band_upper", None)
@@ -251,24 +312,29 @@ def evaluate_policy_responses(
     templates = tuple(sorted(
         (template for (family, location), template in TRADE_TEMPLATES.items()
          if location == alias and family in {"5m_recovery_breakout", "5m_acceptance_breakout"}),
-        key=lambda item: item.response_type.value != "acceptance",
+         key=lambda item: item.response_type.value != "acceptance",
     ))
     results: list[tuple[TradeTemplate, GeometryResponseEvaluation[object]]] = []
     for template in templates:
+        template_for_evaluation = _effective_template(template, interaction)
         created_at = getattr(interaction, "created_at", None)
-        candidates = tuple(
+        terminal_at = getattr(interaction, "closed_at", None)
+        expiry = _template_expiry(created_at, template_for_evaluation.expiry_at) if isinstance(created_at, datetime) else None
+        candidates = _after_prior_day_transition(tuple(
             item for item in observations
-            if getattr(item, "timeframe", None) == template.response_timeframe
+            if getattr(item, "timeframe", None) == template_for_evaluation.response_timeframe
             and isinstance(getattr(item, "observed_at", None), datetime)
             and isinstance(created_at, datetime)
-            and getattr(item, "observed_at") >= created_at
+            and getattr(item, "observed_at") > created_at
             and isinstance(getattr(item, "available_at", None), datetime)
             and getattr(item, "available_at") <= cutoff
-        )[:max_candles]
+            and (expiry is None or getattr(item, "available_at") <= expiry)
+            and (not isinstance(terminal_at, datetime) or getattr(item, "observed_at") <= terminal_at)
+        ), interaction)[:max_candles]
         lower, upper = getattr(interaction, "band_lower", None), getattr(interaction, "band_upper", None)
         if not isinstance(lower, (int, float)) or not isinstance(upper, (int, float)):
             continue
-        spec = build_response_spec(template, band_lower=float(lower), band_upper=float(upper))
+        spec = build_response_spec(template_for_evaluation, band_lower=float(lower), band_upper=float(upper))
         evaluation = evaluate_geometry_response_window(
             candidates,
             to_candle=lambda item: ResponseCandle(*(

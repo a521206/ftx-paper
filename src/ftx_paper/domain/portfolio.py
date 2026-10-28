@@ -59,6 +59,7 @@ class PaperPosition:
     entry_price: float
     vehicle: str = "futures"
     cell: str | None = None
+    execution_group_id: str | None = None
     entry_timestamp: str | None = None
     synthetic_legs: tuple[str, str] | None = None
     synthetic_entry_prices: tuple[float, float] | None = None
@@ -108,6 +109,9 @@ class PortfolioState:
     positions: dict[str, PaperPosition] = field(default_factory=dict, init=False)
     pending_orders: dict[str, str] = field(default_factory=dict, init=False)
     settled_orders: set[str] = field(default_factory=set, init=False)
+    pending_exits: dict[str, dict[str, object]] = field(default_factory=dict, init=False)
+    _exit_fill_ids: dict[str, set[str]] = field(default_factory=dict, init=False, repr=False)
+    _settlement_results: dict[str, SettlementResult] = field(default_factory=dict, init=False, repr=False)
     gate_snapshot: dict[str, object] = field(default_factory=dict, init=False)
     quote_provenance: dict[str, object] = field(default_factory=dict, init=False)
     state_revision: int = field(default=0, init=False)
@@ -142,6 +146,29 @@ class PortfolioState:
     def submit(self, order: OrderIntent) -> None:
         if order.client_order_id not in self.settled_orders:
             self.pending_orders.setdefault(order.client_order_id, "submitted")
+
+    def queue_pending_exit(
+        self, order: OrderIntent, *, available_at: str, reason: str,
+    ) -> dict[str, object]:
+        """Persist an exit observed now but executable on the next available bar."""
+        if order.role is not OrderRole.EXIT or order.entry_order_id is None:
+            raise ValueError("pending exit requires a linked exit order")
+        existing = self.pending_exits.get(order.client_order_id)
+        value = {
+            "exit_order_id": order.client_order_id,
+            "entry_order_id": order.entry_order_id,
+            "available_at": str(available_at),
+            "reason": str(reason),
+            "status": "pending",
+        }
+        if existing is not None:
+            if existing != value:
+                raise ValueError("pending exit identity already exists with different fields")
+            return dict(existing)
+        self.pending_exits[order.client_order_id] = dict(value)
+        self.pending_orders[order.client_order_id] = "exit_pending"
+        self.state_revision += 1
+        return dict(value)
 
     def available_scoped_risk(self, scope: str, allowance: float) -> float:
         """Return a session/cell/direction risk bucket after open reservations."""
@@ -236,7 +263,8 @@ class PortfolioState:
             return updated
         self.reserve_entry(order, margin_per_lot=margin_per_lot)
         position = PaperPosition(order.client_order_id, order.instrument.symbol, order.side, quantity,
-                                 float(price), str(order.vehicle), order.cell, timestamp,
+                                 float(price), str(order.vehicle), order.cell, order.execution_group_id,
+                                 timestamp,
                                   (order.synthetic_legs[0].symbol, order.synthetic_legs[1].symbol)
                                   if order.synthetic_legs and len(order.synthetic_legs) == 2 else None,
                                  synthetic_entry_prices)
@@ -271,9 +299,12 @@ class PortfolioState:
         self.daily_baseline = self.equity
         self.state_revision += 1
 
-    def settle_exit(self, order: OrderIntent, *, price: float, cost: float = 0.0) -> SettlementResult | None:
+    def settle_exit(self, order: OrderIntent, *, price: float, cost: float = 0.0,
+                    fill_id: str | None = None) -> SettlementResult | None:
+        if fill_id is not None and fill_id in self._exit_fill_ids.setdefault(order.client_order_id, set()):
+            return self._settlement_results.get(order.client_order_id)
         if order.client_order_id in self.settled_orders:
-            return None
+            return self._settlement_results.get(order.client_order_id)
         entry_id = order.entry_order_id
         if entry_id is None or entry_id not in self.positions:
             raise ValueError("exit_without_matching_entry")
@@ -295,16 +326,27 @@ class PortfolioState:
                 max(0.0, balance + net),
             )
         self.pending_orders[order.client_order_id] = "settled"
+        self.pending_exits.pop(order.client_order_id, None)
         self.settled_orders.add(order.client_order_id)
         self.state_revision += 1
-        return {"entry_order_id": entry_id, "gross_pnl": gross, "costs": float(cost), "net_pnl": net}
+        result: SettlementResult = {
+            "entry_order_id": entry_id, "gross_pnl": gross, "costs": float(cost), "net_pnl": net,
+        }
+        self._settlement_results[order.client_order_id] = result
+        if fill_id is not None:
+            self._exit_fill_ids[order.client_order_id].add(fill_id)
+        return result
 
     def settle_partial_exit(
         self, order: OrderIntent, *, price: float, quantity: int, cost: float = 0.0,
+        fill_id: str | None = None,
     ) -> SettlementResult | None:
         """Realize part of a position while retaining its remaining reservation."""
         if quantity <= 0:
             raise ValueError("partial exit quantity must be positive")
+        effective_fill_id = fill_id or f"implicit:{quantity}:{float(price)}:{float(cost)}"
+        if effective_fill_id in self._exit_fill_ids.setdefault(order.client_order_id, set()):
+            return self._settlement_results.get(order.client_order_id)
         entry_id = order.entry_order_id
         if entry_id is None or entry_id not in self.positions:
             raise ValueError("exit_without_matching_entry")
@@ -320,8 +362,14 @@ class PortfolioState:
         self.equity += net
         self.peak_equity = max(self.peak_equity, self.equity)
         self.pending_orders[order.client_order_id] = "partially_settled"
+        self.pending_exits.pop(order.client_order_id, None)
         self.state_revision += 1
-        return {"entry_order_id": entry_id, "gross_pnl": gross, "costs": float(cost), "net_pnl": net}
+        result: SettlementResult = {
+            "entry_order_id": entry_id, "gross_pnl": gross, "costs": float(cost), "net_pnl": net,
+        }
+        self._settlement_results[order.client_order_id] = result
+        self._exit_fill_ids[order.client_order_id].add(effective_fill_id)
+        return result
 
     def reset(self) -> None:
         self.equity = self.peak_equity = self.daily_baseline = float(self.initial_capital)
@@ -331,6 +379,9 @@ class PortfolioState:
         self.scoped_risk_reservations.clear()
         self.positions.clear()
         self.pending_orders.clear()
+        self.pending_exits.clear()
+        self._exit_fill_ids.clear()
+        self._settlement_results.clear()
         self.settled_orders.clear()
         self.gate_snapshot.clear()
         self.quote_provenance.clear()
@@ -345,7 +396,8 @@ class PortfolioState:
                     k: asdict(v) for k, v in self.scoped_risk_reservations.items()
                 },
                 "positions": {k: {**asdict(v), "side": v.side.value} for k, v in self.positions.items()},
-                "pending_orders": dict(self.pending_orders), "settled_orders": sorted(self.settled_orders),
+                 "pending_orders": dict(self.pending_orders), "pending_exits": deepcopy(self.pending_exits),
+                 "settled_orders": sorted(self.settled_orders),
                 "gates": deepcopy(self.gate_snapshot), "quote_provenance": deepcopy(self.quote_provenance),
                 "state_revision": self.state_revision}
 
@@ -436,6 +488,20 @@ class PortfolioState:
         ):
             raise ValueError("portfolio snapshot pending_orders are invalid")
         portfolio.pending_orders = dict(raw)
+        raw_pending_exits = snapshot.get("pending_exits", {})
+        if not isinstance(raw_pending_exits, Mapping):
+            raise ValueError("portfolio snapshot pending_exits must be an object")
+        for exit_id, value in raw_pending_exits.items():
+            if not isinstance(exit_id, str) or not isinstance(value, Mapping):
+                raise ValueError("portfolio snapshot pending exit is invalid")
+            required = ("exit_order_id", "entry_order_id", "available_at", "reason", "status")
+            if any(not isinstance(value.get(key), str) or not value.get(key) for key in required):
+                raise ValueError("portfolio snapshot pending exit fields are invalid")
+            if value["exit_order_id"] != exit_id or value["status"] != "pending":
+                raise ValueError("portfolio snapshot pending exit identity is invalid")
+            if value["entry_order_id"] not in portfolio.positions:
+                raise ValueError("portfolio snapshot pending exit has no open position")
+            portfolio.pending_exits[exit_id] = {str(key): item for key, item in value.items()}
         settled = snapshot.get("settled_orders", [])
         if (isinstance(settled, (str, bytes, bytearray)) or not isinstance(settled, (list, tuple, set))
                 or any(not isinstance(value, str) for value in settled)):
@@ -462,6 +528,11 @@ class PortfolioState:
             raise ValueError("portfolio snapshot contains an invalid reservation lifecycle")
         if not all(order_id in portfolio.reservations for order_id in portfolio.positions):
             raise ValueError("portfolio snapshot contains a position without a reservation")
+        if not all(
+            portfolio.pending_orders.get(exit_id) == "exit_pending"
+            for exit_id in portfolio.pending_exits
+        ):
+            raise ValueError("portfolio snapshot pending exit lifecycle is invalid")
         expected_margin = sum(item.amount for item in portfolio.reservations.values())
         if abs(expected_margin - portfolio.open_margin) > 1e-6:
             raise ValueError("portfolio snapshot margin is inconsistent")

@@ -99,3 +99,19 @@ def test_hypothesis_state_snapshot_preserves_causal_lineage() -> None:
     detector.update_response(interaction.interaction_id, state.status, state.hypothesis_id, state=state)
     restored = InteractionDetector.from_snapshot(detector.snapshot())
     assert restored.active_interactions[0].hypothesis_states == (state,)
+
+
+def test_prior_day_role_transition_is_persisted_with_causal_candle() -> None:
+    location = LocationRecord("loc-pd", "PD_HIGH", 100, LocationBand(99, 101), 1,
+                              datetime(2026, 1, 1, 9, 15, tzinfo=UTC), "agg-1")
+    detector = InteractionDetector("1m")
+    interaction = detector.observe(location, _observation(0, 100))
+    assert interaction is not None
+    updated = detector.update_prior_day_role(
+        interaction.interaction_id, "SUPPORT", "obs-2", _observation(1, 100).available_at,
+    )
+    assert updated is not None
+    restored = InteractionDetector.from_snapshot(detector.snapshot())
+    persisted = restored.active_interactions[0]
+    assert persisted.pd_role == "SUPPORT"
+    assert persisted.pd_role_transition_candle_id == "obs-2"

@@ -3,6 +3,8 @@ from __future__ import annotations
 import threading
 import time
 import logging
+import hashlib
+import json
 from copy import deepcopy
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timezone
@@ -528,7 +530,14 @@ class RuntimeSession:
         decision_id = str(payload.get("decision_id") or "")
         self._event_sequence += 1
         payload["sequence"] = self._event_sequence
-        idempotency_key = ":".join((strategy_id, session_date, source, event_type, bundle_id, decision_id))
+        event_identity = decision_id or str(payload.get("event_id") or "")
+        if not event_identity:
+            stable_payload = dict(payload)
+            stable_payload.pop("sequence", None)
+            event_identity = hashlib.sha256(
+                json.dumps(stable_payload, sort_keys=True, separators=(",", ":"), default=str).encode()
+            ).hexdigest()[:24]
+        idempotency_key = ":".join((strategy_id, session_date, source, event_type, bundle_id, event_identity))
         self.store.append_event(
             event_type, deepcopy(payload), idempotency_key,
             timestamp=serialize_datetime(event_decision_at) if decision_event else timestamp,

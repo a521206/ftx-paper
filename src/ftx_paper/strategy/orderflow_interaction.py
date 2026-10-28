@@ -81,6 +81,9 @@ class LocationInteraction:
     band_lower: float | None = None
     band_upper: float | None = None
     hypothesis_states: tuple[HypothesisState, ...] = ()
+    pd_role: str | None = None
+    pd_role_transition_candle_id: str | None = None
+    pd_role_transition_available_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if not self.interaction_id.strip() or not self.location_id.strip():
@@ -240,6 +243,9 @@ class InteractionDetector:
                 "response_status": item.response_status,
                 "band_lower": item.band_lower,
                 "band_upper": item.band_upper,
+                "pd_role": item.pd_role,
+                "pd_role_transition_candle_id": item.pd_role_transition_candle_id,
+                "pd_role_transition_available_at": item.pd_role_transition_available_at.isoformat() if item.pd_role_transition_available_at else None,
                 "hypothesis_states": [
                     {
                         "hypothesis_id": value.hypothesis_id,
@@ -326,6 +332,9 @@ class InteractionDetector:
                 float(raw["band_lower"]) if raw.get("band_lower") is not None else None,
                 float(raw["band_upper"]) if raw.get("band_upper") is not None else None,
                 tuple(decode_hypothesis(value) for value in raw_hypotheses),
+                str(raw["pd_role"]) if raw.get("pd_role") is not None else None,
+                str(raw["pd_role_transition_candle_id"]) if raw.get("pd_role_transition_candle_id") is not None else None,
+                datetime.fromisoformat(str(raw["pd_role_transition_available_at"])) if raw.get("pd_role_transition_available_at") is not None else None,
             )
 
         active = snapshot.get("active", ())
@@ -377,6 +386,24 @@ class InteractionDetector:
             if interaction.interaction_id == interaction_id:
                 updated = update(interaction)
                 self._closed[index] = updated
+                return updated
+        return None
+
+    def update_prior_day_role(
+        self, interaction_id: str, role: str, candle_id: str, available_at: datetime,
+    ) -> LocationInteraction | None:
+        if role not in {"SUPPORT", "RESISTANCE"}:
+            raise ValueError("invalid prior-day role")
+        for key, interaction in self._active.items():
+            if interaction.interaction_id == interaction_id:
+                updated = replace(
+                    interaction, pd_role=role,
+                    pd_role_transition_candle_id=candle_id,
+                    pd_role_transition_available_at=available_at,
+                    response_status="PENDING_RESPONSE",
+                    hypothesis_states=(),
+                )
+                self._active[key] = updated
                 return updated
         return None
 
