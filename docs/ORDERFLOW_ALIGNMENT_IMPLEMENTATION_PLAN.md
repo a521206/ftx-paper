@@ -112,6 +112,19 @@ tests/test_orderflow_reporting.py
 tests/test_orderflow_replay.py
 ```
 
+The canonical Sep 29 API replay comparison is intentionally outside the unit
+test suite. With the Paper API already running, execute:
+
+```powershell
+.venv\Scripts\python.exe scripts/orderflow/api_replay_regression.py
+```
+
+The script submits `2026-09-29` over HTTP, waits for completion, compares the
+futures replay against the canonical totals (17 setup candidates, 4 filled
+trades, 74 location interactions, 155.2143 gross points, and 6.1443 achieved
+R:R), prints the observed values, and exits nonzero on mismatch or unavailable
+API metrics. It is an opt-in integration regression, not a pytest test.
+
 Within each test module, prefer names that identify the comparable behavior,
 such as `test_response_acceptance_uses_completed_candle` or
 `test_opportunity_timeout_precedes_formation`.
