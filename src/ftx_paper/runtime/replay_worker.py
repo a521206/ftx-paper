@@ -689,7 +689,8 @@ class ReplayWorker:
                                                  "quantity": order.quantity, "vehicle": order.vehicle,
                                                  "source": "replay", "session_date": date}
                             all_events.append(reservation_event)
-                            parity_records["ledger"].append({**reservation_event, "kind": "reservation"})
+                            if not diagnostic_mode:
+                                parity_records["ledger"].append({**reservation_event, "kind": "reservation"})
                             all_events.append({"event_type": "ORDER_AUTHORIZED",
                                                "decision_id": order.client_order_id,
                                                "account_revision": account.revision,
@@ -715,8 +716,9 @@ class ReplayWorker:
                             all_events.append({"event_type": "ORDER_UNFILLED", "decision_id": order.client_order_id,
                                                "vehicle": order.vehicle, "timestamp": futures_bar.timestamp.isoformat(),
                                                "source": "replay", "session_date": date, "reason": "missing_synthetic_future_quote"})
-                            parity_records["ledger"].append({"event_type": "CANCELLATION", "decision_id": order.client_order_id,
-                                                              "timestamp": futures_bar.timestamp.isoformat(), "reason": "missing_synthetic_future_quote"})
+                            if not diagnostic_mode:
+                                parity_records["ledger"].append({"event_type": "CANCELLATION", "decision_id": order.client_order_id,
+                                                                  "timestamp": futures_bar.timestamp.isoformat(), "reason": "missing_synthetic_future_quote"})
                             continue
                         fill_price = entry_quote.price if entry_quote is not None else futures_bar.close
                         for event in reversed(all_events):
@@ -733,9 +735,10 @@ class ReplayWorker:
                                            "price": fill_price, "quantity": order.quantity,
                                            "vehicle": order.vehicle, "source": "replay",
                                              "session_date": date})
-                        parity_records["ledger"].append({"event_type": "FILL", "decision_id": order.client_order_id,
-                                                          "timestamp": futures_bar.timestamp.isoformat(),
-                                                          "quantity": order.quantity, "price": fill_price})
+                        if not diagnostic_mode:
+                            parity_records["ledger"].append({"event_type": "FILL", "decision_id": order.client_order_id,
+                                                              "timestamp": futures_bar.timestamp.isoformat(),
+                                                              "quantity": order.quantity, "price": fill_price})
                         engine.register_entry(order, fill_price=fill_price,
                                               entry_fill_time=futures_bar.timestamp,
                                               reference_price=futures_bar.close)
@@ -1062,13 +1065,17 @@ class ReplayWorker:
 
         futures = [trade for trade in trades if trade.get("vehicle") == "futures"]
         gross_pnl_rs = sum(float(trade.get("gross_pnl_rs") or 0.0) for trade in futures)
-        initial_risk_rs = sum(float(trade.get("initial_risk_rs") or 0.0) for trade in futures)
+        risk_reward_values: list[float] = []
+        for trade in futures:
+            initial_risk_rs = float(trade.get("initial_risk_rs") or 0.0)
+            if initial_risk_rs:
+                risk_reward_values.append(float(trade.get("gross_pnl_rs") or 0.0) / initial_risk_rs)
         return {
             "setup_candidates": count_reason("setup_candidate_formed"),
             "location_interactions": count_reason("location_interaction_observed"),
             "entries_filled": len(futures),
             "gross_reward_points": gross_pnl_rs / NIFTY_LOT_SIZE,
-            "achieved_risk_reward": gross_pnl_rs / initial_risk_rs if initial_risk_rs else None,
+            "achieved_risk_reward": round(sum(risk_reward_values), 5) if risk_reward_values else None,
         }
 
     @staticmethod
