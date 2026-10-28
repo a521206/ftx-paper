@@ -201,7 +201,8 @@ def test_policy_snapshot_migrates_legacy_single_detector_state() -> None:
     strategy.evaluate(bundle, account)
     current = dict(strategy.policy.snapshot())
     current["schema_version"] = 2
-    current["location_detector"] = current["location_detectors"]["5m"]
+    detectors = cast(dict[str, object], current["location_detectors"])
+    current["location_detector"] = detectors["5m"]
     del current["location_detectors"]
 
     restored = OrderflowPolicy.from_snapshot(current)
@@ -253,9 +254,14 @@ def test_response_and_admission_use_completed_causal_evidence() -> None:
 def test_admission_projection_includes_causal_trigger_eligibility() -> None:
     bundle, account = _context(close=99.5, response_close=101.0)
 
+    events = OrderflowStrategy().evaluate(bundle, account)
     admission = next(
-        event for event in OrderflowStrategy().evaluate(bundle, account)
+        event for event in events
         if event.payload.get("decision_stage") == "admission"
+    )
+    trigger_projection = next(
+        event for event in events
+        if event.payload.get("decision_stage") == "trigger"
     )
 
     assert admission.payload["trigger_eligible"] is True
@@ -263,6 +269,8 @@ def test_admission_projection_includes_causal_trigger_eligibility() -> None:
     assert isinstance(trigger, dict)
     assert trigger["source_observation_id"] == "response-obs-5m"
     assert trigger["effective_at"] is not None
+    assert trigger_projection.payload["outcome"] == "accepted"
+    assert trigger_projection.payload["trigger"] == trigger
 
 
 def test_orderflow_executable_mode_emits_bounded_futures_entry() -> None:

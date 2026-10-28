@@ -1112,6 +1112,25 @@ class OrderflowPolicy:
                             ),
                             armed=True,
                         )
+                        results.append(PolicyDecision({
+                            **base,
+                            "decision_stage": "trigger",
+                            "outcome": "accepted" if trigger.eligible else "rejected",
+                            "reason": trigger.reason,
+                            "decision_id": _decision_id(
+                                "trigger", opportunity.lifecycle_id,
+                                trigger_observation.observation_id,
+                            ),
+                            "opportunity_id": opportunity.lifecycle_id,
+                            "setup_id": opportunity.setup.setup_id,
+                            "interaction_id": interaction.interaction_id,
+                            "location": interaction.location_alias,
+                            "direction": direction,
+                            "trigger": asdict(trigger),
+                            "source_observation_ids": list(evidence_ids),
+                            "observed_at": trigger.observed_at,
+                            "available_at": trigger.available_at,
+                        }))
                         accepted = (
                             admission.status.value == "PASSED"
                             and (self.execution_mode is not ExecutionMode.EXECUTABLE or trigger.eligible)
