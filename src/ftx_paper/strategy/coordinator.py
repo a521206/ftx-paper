@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime
 from hashlib import sha256
 from typing import TYPE_CHECKING
 
@@ -33,6 +34,17 @@ class SharedDecisionCoordinator:
         result: list[DecisionEvent] = []
 
         def canonical(payload: dict[str, object], event_type: str) -> dict[str, object]:
+            evidence = payload.get("evidence")
+            provenance = evidence.get("provenance") if isinstance(evidence, Mapping) else None
+            available = payload.get("available_at")
+            if available is None and isinstance(provenance, Mapping):
+                available = provenance.get("available_at")
+            decision_at = payload.get("decision_at")
+            if isinstance(available, str) and isinstance(decision_at, str):
+                available_time = datetime.fromisoformat(available.replace("Z", "+00:00"))
+                decision_time = datetime.fromisoformat(decision_at.replace("Z", "+00:00"))
+                if available_time > decision_time:
+                    payload["decision_at"] = available_time.isoformat()
             return validate_decision_view(build_decision_view(payload, event_type=event_type))
 
         for decision in decisions:

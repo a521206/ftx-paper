@@ -24,7 +24,11 @@ from ftx_paper.runtime.events import is_decision_event
 from ftx_paper.strategy.orderflow_contract import feature_values_to_dict, stable_orderflow_id
 from ftx_paper.strategy.orderflow_producer import CausalOrderflowProducer
 from ftx_paper.runtime.futures_source import FuturesSessionSourceResolver
-from ftx_paper.runtime.parity_artifacts import build_parity_artifact
+from ftx_paper.runtime.parity_artifacts import (
+    NORMALIZED_BAR_FINGERPRINT_RECIPE,
+    build_parity_artifact,
+    normalized_bar_fingerprint,
+)
 from ftx_paper.runtime.state import ReplayRuntimeState
 from ftx_paper.execution.cost import futures_cost, synthetic_futures_cost
 from ftx_paper.execution import PaperExecutionCoordinator
@@ -64,10 +68,12 @@ def _timestamp_string(value: Any) -> str:
 
 def _strip_legacy_fields(value: Any) -> Any:
     if isinstance(value, Mapping):
+        legacy = {str(key) for key in value if str(key) in LEGACY_REPLAY_FIELDS}
+        if legacy:
+            raise ValueError("legacy replay fields are not accepted: " + ", ".join(sorted(legacy)))
         return {
             str(key): _strip_legacy_fields(item)
             for key, item in value.items()
-            if str(key) not in LEGACY_REPLAY_FIELDS
         }
     if isinstance(value, (list, tuple)):
         return [_strip_legacy_fields(item) for item in value]
@@ -360,6 +366,10 @@ class ReplayWorker:
                 or str(row.get("symbol", "")).upper() in {"NIFTY", "NIFTY 50", "INDIA VIX"}
             )
         ]
+        selected_futures_rows = [
+            row for row in strategy_rows
+            if str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
+        ]
         by_instrument: dict[str, int] = {}
         for row in strategy_rows:
             key = ":".join(str(row.get(field) or "").upper() for field in ("exchange", "symbol", "instrument_type"))
@@ -421,19 +431,15 @@ class ReplayWorker:
                 "aggregator": {"required_roles": ["futures"], "deadline_seconds": 0},
             },
         }
-        fingerprint_source = {**payload, "rows": sorted(
-            strategy_rows,
-            key=lambda row: tuple(str(row.get(field) or "") for field in (
-                "minute", "exchange", "symbol", "instrument_type", "expiry", "strike", "option_type",
-                "open", "high", "low", "close", "volume", "open_interest",
-            )),
-        )}
-        # The parity input identity is the producer-neutral selected futures
-        # source fingerprint. Supporting bars are provenance, not a second
-        # population that changes the identity recipe.
-        payload["input_fingerprint"] = str(
-            current_source.get("source_fingerprint") if isinstance(current_source, Mapping) else ""
-        ) or hashlib.sha256(json.dumps(fingerprint_source, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+        # The parity input identity is a versioned hash of normalized selected
+        # futures bars. Contract labels remain provenance and do not alter it.
+        payload["fingerprint_recipe"] = NORMALIZED_BAR_FINGERPRINT_RECIPE
+        payload["normalized_fingerprint"] = normalized_bar_fingerprint(selected_futures_rows)
+        if isinstance(current_source, Mapping):
+            source_provenance["current"] = {
+                **current_source,
+                "normalized_fingerprint": payload["normalized_fingerprint"],
+            }
         return payload
 
     def cancel(self, run_id: str) -> bool:
@@ -515,6 +521,7 @@ class ReplayWorker:
         }
         ledger_records = parity_records["portfolio_ledger"]
         emitted_orderflow_trigger_ids: set[str] = set()
+        order_parent_ids: dict[str, str] = {}
         unavailable_fields: set[str] = set()
         shadow_trades: list[dict[str, Any]] = []
         bars_seen = 0
@@ -624,6 +631,7 @@ class ReplayWorker:
                         prior_date, rows=prior_rows, futures_source=prior_source,
                     )
                     if prior_bars:
+                        orderflow_producer.set_prior_bars(prior_bars)
                         orderflow_producer.set_prior_close(prior_bars[-1].close)
             aggregator = self._aggregator(
                 bars,
@@ -632,6 +640,7 @@ class ReplayWorker:
             )
             feature_service = FeatureService(None)
             open_trades: list[dict[str, Any]] = []
+            daily_reset_emitted = False
             # Synthetic is a reporting-only view of the accepted futures
             # decision.  Keep its diagnostic lifecycle separate so it cannot
             # consume risk, margin, cooldown, or execution state.
@@ -707,7 +716,8 @@ class ReplayWorker:
                     exit_event = {"event_type": "EXITDECISION", "decision_id": action.intent.client_order_id,
                                   "vehicle": action.intent.vehicle,
                                   "entry_decision_id": open_trade["entry_order_id"] if open_trade else None,
-                                  "decision_at": futures_bar.timestamp.isoformat(), "reason": action.reason,
+                                  "decision_at": futures_bar.timestamp.isoformat(), "outcome": "triggered",
+                                  "reason": action.reason,
                                   "exit_mode": action.intent.exit_mode,
                                   "bars_held": action.bars_held, "mae_bp": action.mae_bp, "mfe_bp": action.mfe_bp,
                                   "exit_price": action.price, "trigger_price": action.price,
@@ -794,6 +804,15 @@ class ReplayWorker:
                     if "context" not in str(exc):
                         raise
                     result = engine.on_bundle(bundle)
+                if mode == "replay" and not daily_reset_emitted:
+                    ledger_records.append({
+                        "event_type": "DAILY_RESET",
+                        "kind": "daily_reset",
+                        "timestamp": futures_bar.timestamp.isoformat(),
+                        "date": date,
+                        "daily_baseline": portfolio.daily_baseline,
+                    })
+                    daily_reset_emitted = True
                 bars_seen += 1
                 # Scope parity by evidence actually available to orderflow,
                 # rather than by every futures-clocked bundle.  A source row
@@ -823,6 +842,9 @@ class ReplayWorker:
                 for event in trigger_events:
                     parity_records["decision"].append(dict(event))
                 for order in result.orders:
+                    order_parent_ids[order.client_order_id] = (
+                        order.lifecycle_id or order.client_order_id.rsplit(":", 1)[0]
+                    )
                     if mode == "shadow":
                         continue
                     all_events.append({"event_type": "ORDER_INTENT",
@@ -860,7 +882,13 @@ class ReplayWorker:
                                                "decision_id": order.client_order_id,
                                                "account_revision": account.revision,
                                                "timestamp": futures_bar.timestamp.isoformat(),
-                                                "source": "replay", "session_date": date})
+                                                 "source": "replay", "session_date": date})
+                            ledger_records.append({
+                                "event_type": "AUTHORIZATION", "kind": "authorization",
+                                "decision_id": order.client_order_id,
+                                "timestamp": futures_bar.timestamp.isoformat(),
+                                "quantity": order.quantity, "vehicle": order.vehicle,
+                            })
                         all_events.append({"event_type": "SUBMISSION", "decision_id": order.client_order_id,
                                            "client_order_id": order.client_order_id,
                                            "timestamp": futures_bar.timestamp.isoformat(),
@@ -988,13 +1016,19 @@ class ReplayWorker:
                                                       exit_quote, order.reason,
                                                       exit_price=exit_quote.price if exit_quote is not None else futures_bar.close,
                                                       trade=open_trade)
+                        settlement = None
+                        had_reservation = (
+                            order.entry_order_id in portfolio.reservations
+                            if order.entry_order_id is not None else False
+                        )
                         if order.vehicle == "futures":
-                            coordinator.fill(
+                            settlement = coordinator.fill(
                                 order,
                                 price=exit_quote.price if exit_quote is not None else futures_bar.close,
                                 timestamp=futures_bar.timestamp.isoformat(),
                                 cost=_execution_cost(open_trade),
                             )
+                        settlement_values = settlement if isinstance(settlement, Mapping) else {}
                         exit_timestamp = futures_bar.timestamp.isoformat()
                         all_events.append({"event_type": "EXIT_FILL", "decision_id": order.client_order_id,
                                            "client_order_id": order.client_order_id, "fill_timestamp": exit_timestamp,
@@ -1003,10 +1037,21 @@ class ReplayWorker:
                                            "source": "replay", "session_date": date})
                         all_events.append({"event_type": "SETTLEMENT", "decision_id": order.client_order_id,
                                            "timestamp": exit_timestamp, "source": "replay", "session_date": date})
-                        ledger_records.extend([
-                            {"event_type": "EXIT_SETTLEMENT", "decision_id": order.client_order_id,
-                             "timestamp": exit_timestamp, "quantity": order.quantity},
-                        ])
+                        if settlement is not None:
+                            ledger_records.append({
+                                "event_type": "EXIT_SETTLEMENT", "kind": "exit_settlement",
+                                "decision_id": order.client_order_id, "timestamp": exit_timestamp,
+                                "quantity": order.quantity,
+                                "gross_pnl": settlement_values.get("gross_pnl"),
+                                "costs": settlement_values.get("costs"),
+                                "net_pnl": settlement_values.get("net_pnl"),
+                            })
+                        if had_reservation and settlement is not None:
+                            ledger_records.append({
+                                "event_type": "RESERVATION_RELEASE", "kind": "reservation_release",
+                                "decision_id": order.client_order_id, "entry_order_id": order.entry_order_id,
+                                "timestamp": exit_timestamp, "quantity": order.quantity,
+                            })
                         engine.record_exit(strategy_id=order.strategy_id,
                                            cell=realized.cell.name, reason=order.reason,
                                            entry_bar=realized.entry_bar, exit_bar=engine.bars_seen,
@@ -1029,6 +1074,17 @@ class ReplayWorker:
             # Preserve open positions as mark-to-market/open replay results.
             shadow_trades.extend({**trade, "status": "open"} for trade in open_trades)
             shadow_trades.extend({**trade, "status": "open"} for trade in synthetic_open_trades)
+        for records in parity_records.values():
+            for event in records:
+                event_type = str(event.get("event_type") or event.get("kind") or "event").lower()
+                event_key = event.get("client_order_id") or event.get("decision_id") or event.get("date") or "run"
+                timestamp = event.get("timestamp") or event.get("occurred_at") or event.get("fill_timestamp") or ""
+                event.setdefault("neutral_event_key", f"{event_type}:{event_key}:{timestamp}")
+                order_id = event.get("client_order_id") or event.get("decision_id")
+                parent = order_parent_ids.get(str(order_id)) if order_id is not None else None
+                if parent is not None:
+                    event.setdefault("causal_parent_id", parent)
+                    event.setdefault("lifecycle_id", parent)
         scores = [int(event["score"]) for event in all_events
                   if isinstance(event.get("score"), (int, float))]
         normalized_trades = [self._normalize_trade(trade) for trade in shadow_trades]
@@ -1090,7 +1146,7 @@ class ReplayWorker:
             "api_version": "1.1",
             "strategy_version": last_strategy_metadata.version,
             "configuration_hash": last_strategy_metadata.config_hash,
-            "input_fingerprint": input_manifest["input_fingerprint"],
+            "normalized_fingerprint": input_manifest["normalized_fingerprint"],
             "input_provenance": input_manifest["provenance"],
             "input_availability": input_manifest["availability"],
             "selected_source_rows": int(input_manifest["selected_source_rows"]),
@@ -1181,7 +1237,7 @@ class ReplayWorker:
         }
         detached_scope = {
             "source_contract": "orderflow-replay-v1",
-            "input_identity": metadata["input_fingerprint"],
+            "input_identity": metadata["normalized_fingerprint"],
             "requested_dates": [session_date],
             "effective_dates": [session_date],
             "timezone": request.get("timezone", "Asia/Kolkata"),

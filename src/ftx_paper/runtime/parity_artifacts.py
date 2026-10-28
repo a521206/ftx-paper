@@ -14,6 +14,7 @@ from ftx_paper.contracts.replay import LEGACY_REPLAY_FIELDS
 PARITY_ARTIFACT_SCHEMA_VERSION = 2
 PARITY_CONTRACT_ID = "producer_replay_parity"
 PARITY_MANIFEST_VERSION = 1
+NORMALIZED_BAR_FINGERPRINT_RECIPE = "normalized-bars-v1"
 PARITY_LAYERS = ("run_scope", "decision", "execution_settlement", "portfolio_ledger")
 DECISION_STAGES = frozenset({"interaction", "candidate", "admission", "trigger", "exit"})
 DECISION_OUTCOMES = frozenset({"accepted", "rejected", "cancelled", "invalidated", "expired", "observed", "unavailable"})
@@ -35,6 +36,54 @@ def _jsonable(value: Any) -> Any:
 
 def _canonical_json(value: Any) -> str:
     return json.dumps(_jsonable(value), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def normalized_bar_fingerprint(rows: Sequence[Mapping[str, Any]]) -> str:
+    """Hash comparable normalized bars using the canonical source recipe.
+
+    Futures source identity is represented separately in replay provenance. The
+    canonical input identity uses the continuous-series transformation so a
+    dated contract selected by Paper compares with NiftyZoning's series `I`.
+    """
+    normalized = []
+    for row in rows:
+        minute = str(row.get("minute") or row.get("time") or "")
+        try:
+            timestamp = datetime.fromisoformat(minute.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("parity bar timestamps must be ISO timestamps") from exc
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            raise ValueError("parity bar timestamps must be timezone-aware")
+        required = ("open", "high", "low", "close")
+        if any(row.get(name) is None for name in required):
+            raise ValueError("parity bars require complete OHLCV values")
+        try:
+            open_price = float(row["open"])
+            high_price = float(row["high"])
+            low_price = float(row["low"])
+            close_price = float(row["close"])
+            volume = int(row["volume"]) if row.get("volume") is not None else None
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("parity bar OHLCV values must be numeric") from exc
+        normalized.append({
+            "time": timestamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "open": open_price,
+            "high": high_price,
+            "low": low_price,
+            "close": close_price,
+            "volume": volume,
+            "oi": int(row.get("oi", row.get("open_interest")))
+            if row.get("oi", row.get("open_interest")) is not None else None,
+            "symbol": "NIFTY",
+            "expiry": "",
+            "contract_type": "CONTINUOUS",
+            "session_date": timestamp.date().isoformat(),
+        })
+    normalized.sort(key=lambda row: tuple(row[key] for key in (
+        "session_date", "time", "open", "high", "low", "close", "volume", "oi",
+        "symbol", "expiry", "contract_type",
+    )))
+    return hashlib.sha256(_canonical_json(normalized).encode("utf-8")).hexdigest()
 
 
 def _decision_value(record: Mapping[str, Any], name: str) -> Any:
@@ -82,28 +131,42 @@ def _replay_input(metadata: Mapping[str, Any]) -> dict[str, Any]:
     current = provenance.get("current") if isinstance(provenance, Mapping) else None
     if not isinstance(current, Mapping):
         current = {}
-    fingerprint = current.get("source_fingerprint") or metadata.get("input_fingerprint")
+    fingerprint = (
+        current.get("normalized_fingerprint")
+        or metadata.get("normalized_fingerprint")
+    )
     symbol = str(current.get("selected_symbol") or current.get("symbol") or "NIFTY")
     expiry = str(current.get("selected_expiry") or current.get("expiry") or "")
     instrument_type = str(current.get("instrument_type") or "FUT").upper()
-    contract_type = "CONTINUOUS" if not expiry else instrument_type
+    source_identity = {
+        "symbol": symbol,
+        "series": str(current.get("series") or "").upper(),
+        "contract_type": instrument_type,
+        "expiry": expiry,
+    }
     identity = {
         "symbol": symbol,
         "series": "I",
-        "contract_type": contract_type,
-        "expiry": expiry,
+        "contract_type": "CONTINUOUS",
+        "expiry": "",
     }
     source = {
         "symbol": symbol,
         "series": "I",
-        "contract_type": contract_type,
-        "expiry": expiry,
+        "contract_type": "CONTINUOUS",
+        "expiry": "",
         "bar_count": int(current.get("source_bar_count") or metadata.get("input_bar_count") or 0),
         "fingerprint": fingerprint,
         "identity": identity,
         "identities": [identity],
+        "source_identity": source_identity,
+        "fingerprint_recipe": NORMALIZED_BAR_FINGERPRINT_RECIPE,
     }
-    return {"identity": [fingerprint] if fingerprint else [], "provenance": [source]}
+    return {
+        "identity": [fingerprint] if fingerprint else [],
+        "provenance": [source],
+        "fingerprint_recipe": NORMALIZED_BAR_FINGERPRINT_RECIPE,
+    }
 
 
 def _timestamp(record: Mapping[str, Any]) -> str:
@@ -159,10 +222,16 @@ def _neutral_outcome(record: Mapping[str, Any]) -> str:
 
 def _record(record: Mapping[str, Any], *, kind: str, sequence: int,
             parent_identity: str | None = None) -> dict[str, Any]:
+    legacy = set(record).intersection(LEGACY_REPLAY_FIELDS)
+    values_candidate = record.get("comparable_values", record.get("values"))
+    if isinstance(values_candidate, Mapping):
+        legacy.update(set(values_candidate).intersection(LEGACY_REPLAY_FIELDS))
+    if legacy:
+        raise ValueError("legacy replay fields are not accepted: " + ", ".join(sorted(legacy)))
     values = record.get("comparable_values", record.get("values", record))
     values = dict(values) if isinstance(values, Mapping) else {}
     if "comparable_values" not in record and "values" not in record:
-        values = {key: value for key, value in values.items() if key not in LEGACY_REPLAY_FIELDS and key not in {
+        values = {key: value for key, value in values.items() if key not in {
             "event_type", "decision_id", "client_order_id", "producer_local_id",
             "candidate_id", "opportunity_id", "lifecycle_id", "setup_id", "causal_parent_id",
             "comparison_identity", "source", "session_date", "sequence", "stream_sequence",
@@ -269,6 +338,25 @@ def _record_field(record: Mapping[str, Any], name: str) -> Any:
                 return causal_ids[name]
             if extension.get(name) is not None:
                 return extension[name]
+    return None
+
+
+def _parent_identity(record: Mapping[str, Any], identities: Mapping[str, str]) -> str | None:
+    """Resolve producer lifecycle IDs without exposing them in canonical values."""
+    candidates = (
+        record.get("causal_parent_id"), record.get("decision_id"),
+        record.get("entry_decision_id"), record.get("opportunity_id"),
+        record.get("candidate_id"), record.get("lifecycle_id"),
+    )
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        value = str(candidate)
+        if value in identities:
+            return identities[value]
+        base = value.rsplit(":", 1)[0]
+        if base in identities:
+            return identities[base]
     return None
 
 
@@ -538,8 +626,8 @@ def build_parity_artifact(
                        "ORDER_SUPPRESSED": "cancellation", "RISK_REJECTED": "cancellation"}
     execution = []
     for index, event in enumerate(source_execution):
-        parent = local_identities.get(str(event.get("decision_id") or event.get("causal_parent_id")))
-        if (event.get("decision_id") or event.get("causal_parent_id")) and parent is None:
+        parent = _parent_identity(event, local_identities)
+        if any(event.get(key) for key in ("decision_id", "causal_parent_id", "entry_decision_id", "opportunity_id", "candidate_id", "lifecycle_id")) and parent is None:
             projection_issues.append(f"missing_parent_link:execution:{index}")
         execution.append(_record(
             event, kind=execution_kinds.get(str(event.get("event_type", "")).upper(), "order_intent"),
@@ -552,8 +640,8 @@ def build_parity_artifact(
         if isinstance(event, Mapping):
             if not event.get("neutral_event_key") and not event.get("event_key"):
                 projection_issues.append(f"missing_event_key:ledger:{len(ledger_records)}")
-            parent = local_identities.get(str(event.get("decision_id") or event.get("causal_parent_id")))
-            if (event.get("decision_id") or event.get("causal_parent_id")) and parent is None:
+            parent = _parent_identity(event, local_identities)
+            if any(event.get(key) for key in ("decision_id", "causal_parent_id", "entry_decision_id", "opportunity_id", "candidate_id", "lifecycle_id")) and parent is None:
                 projection_issues.append(f"missing_parent_link:ledger:{len(ledger_records)}")
             ledger_records.append(_record(
                 event,
@@ -580,6 +668,9 @@ def build_parity_artifact(
         "vehicles": list(request.get("vehicles", ("futures", "synthetic"))),
         "session_end_cutoff": request.get("session_end_cutoff", "15:30"),
         "decision_clock": request.get("decision_clock", {"start": "inclusive", "end": "exclusive"}),
+        "fingerprint_recipe": NORMALIZED_BAR_FINGERPRINT_RECIPE,
+        "execution_scope": str(result.get("execution_scope") or request.get("mode") or "shadow"),
+        "ledger_scope": str(result.get("ledger_scope") or "replay"),
         "capture_mode": request.get("capture_mode", metadata.get("capture_mode", "full")),
         "capital_profile": request.get("capital_profile", {"name": "research"}),
         "strategy_configuration": request.get("strategy_configuration", {
@@ -600,7 +691,8 @@ def build_parity_artifact(
             "processed_decision_bars": int(metadata.get("processed_decision_bars", result.get("bars_seen", 0))),
         },
     }
-    input_identity = metadata.get("input_fingerprint")
+    replay_identity = replay_input.get("identity", ())
+    input_identity = replay_identity[0] if replay_identity else None
     coverage = _coverage(
         decisions,
         int(result.get("causal_bars_seen", result.get("bars_seen", 0))),
@@ -822,9 +914,9 @@ def compare_parity_artifacts(left: Mapping[str, Any], right: Mapping[str, Any], 
     return {**result, "left_count": len(left_layer), "right_count": len(right_layer), "context": context}
 
 
-__all__ = ["PARITY_ARTIFACT_SCHEMA_VERSION", "PARITY_CONTRACT_ID", "PARITY_LAYERS",
+__all__ = ["NORMALIZED_BAR_FINGERPRINT_RECIPE", "PARITY_ARTIFACT_SCHEMA_VERSION", "PARITY_CONTRACT_ID", "PARITY_LAYERS",
            "build_parity_artifact", "build_parity_manifest", "causal_lifecycle_diff",
            "causal_lifecycle_records",
            "compare_parity_artifacts",
            "compare_parity_manifests", "parity_layer_records", "read_parity_artifact",
-           "strategy_payload_hash", "validate_parity_artifact"]
+            "strategy_payload_hash", "normalized_bar_fingerprint", "validate_parity_artifact"]

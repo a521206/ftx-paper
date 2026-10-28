@@ -17,7 +17,7 @@ def _artifact() -> dict:
         "bars_seen": 1,
         "events": [],
         "ledger": {"2026-01-05": {"net_pnl_rs": 1.0}},
-        "metadata": {"timezone": "UTC", "input_fingerprint": "fixture",
+        "metadata": {"timezone": "UTC", "normalized_fingerprint": "fixture",
                      "selected_source_rows": 1, "filtered_source_rows": 0,
                      "completed_source_rows": 1, "gap_rows": 0},
     }
@@ -47,13 +47,13 @@ def test_manifest_comparison_detects_first_layer_difference() -> None:
 
 
 def test_observed_empty_layers_are_matchable() -> None:
-    artifact = build_parity_artifact({"strategy": {}, "bars_seen": 1, "metadata": {"input_fingerprint": "fixture"}}, request={"session_date": "2026-01-05"})
+    artifact = build_parity_artifact({"strategy": {}, "bars_seen": 1, "metadata": {"normalized_fingerprint": "fixture"}}, request={"session_date": "2026-01-05"})
     assert artifact["manifest"]["layers"]["execution_settlement"]["status"] == "UNAVAILABLE"
 
 
 def test_orderflow_scope_uses_canonical_session_and_vehicle_fields() -> None:
     artifact = build_parity_artifact(
-        {"strategy": {}, "bars_seen": 1, "metadata": {"input_fingerprint": "fixture"}},
+        {"strategy": {}, "bars_seen": 1, "metadata": {"normalized_fingerprint": "fixture"}},
         request={"session_date": "2026-01-05", "strategy_id": "ftx-paper-orderflow", "vehicles": ["futures"]},
     )
 
@@ -64,11 +64,11 @@ def test_orderflow_scope_uses_canonical_session_and_vehicle_fields() -> None:
 def test_scope_uses_selected_source_fingerprint_and_neutral_contract() -> None:
     artifact = build_parity_artifact(
         {"strategy": {}, "bars_seen": 1, "metadata": {
-            "input_fingerprint": "source-fingerprint",
+            "normalized_fingerprint": "source-fingerprint",
             "input_provenance": {"current": {
                 "selected_symbol": "NIFTY", "selected_expiry": "",
                 "instrument_type": "FUT_CONTINUOUS", "source_bar_count": 375,
-                "source_fingerprint": "source-fingerprint",
+                "normalized_fingerprint": "normalized-fingerprint",
             }},
             "selected_source_rows": 375, "completed_source_rows": 375,
             "processed_decision_bars": 375,
@@ -77,7 +77,7 @@ def test_scope_uses_selected_source_fingerprint_and_neutral_contract() -> None:
     )
     scope = artifact["scope"]
     assert scope["source_contract"] == "orderflow-replay-v1"
-    assert scope["replay_input"]["identity"] == ["source-fingerprint"]
+    assert scope["replay_input"]["identity"] == ["normalized-fingerprint"]
     assert scope["counts"]["processed_decision_bars"] == 375
 
 
@@ -98,7 +98,7 @@ def test_decision_diagnostics_exposes_paper_stage_and_reason_counts() -> None:
 
 def test_projection_preserves_decision_lineage_and_excludes_extensions() -> None:
     artifact = build_parity_artifact(
-        {"strategy": {}, "bars_seen": 1, "metadata": {"input_fingerprint": "fixture"}},
+        {"strategy": {}, "bars_seen": 1, "metadata": {"normalized_fingerprint": "fixture"}},
         request={"session_date": "2026-01-05"},
         layer_records={"decision": [{
             "event_type": "POLICY_DECISION", "decision_id": "d1",
@@ -120,7 +120,7 @@ def test_projection_preserves_decision_lineage_and_excludes_extensions() -> None
     assert "paper_only" not in record["values"]
     artifact["layers"]["decision"][0]["producer_extensions"] = {"paper_only": False}
     assert artifact["manifest"] == build_parity_artifact(
-        {"strategy": {}, "bars_seen": 1, "metadata": {"input_fingerprint": "fixture"}},
+        {"strategy": {}, "bars_seen": 1, "metadata": {"normalized_fingerprint": "fixture"}},
         request={"session_date": "2026-01-05"},
         layer_records={"decision": [{
             "event_type": "POLICY_DECISION", "decision_id": "d1",
@@ -136,7 +136,7 @@ def test_projection_preserves_decision_lineage_and_excludes_extensions() -> None
 
 def test_projection_does_not_wrap_producer_identity_into_strict_identity() -> None:
     artifact = build_parity_artifact(
-        {"strategy": {}, "bars_seen": 1, "metadata": {"input_fingerprint": "fixture"}},
+        {"strategy": {}, "bars_seen": 1, "metadata": {"normalized_fingerprint": "fixture"}},
         request={"session_date": "2026-01-05"},
         layer_records={"decision": [{
             "event_type": "POLICY_DECISION", "decision_at": "2026-01-05T14:30:00Z", "stage": "admission",
@@ -149,7 +149,7 @@ def test_projection_does_not_wrap_producer_identity_into_strict_identity() -> No
 
 def test_settlement_availability_reflects_projected_settlements() -> None:
     artifact = build_parity_artifact(
-        {"strategy": {}, "bars_seen": 1, "metadata": {"input_fingerprint": "fixture"},
+        {"strategy": {}, "bars_seen": 1, "metadata": {"normalized_fingerprint": "fixture"},
          "synthetic_settlements": [{"timestamp": "2026-01-05T14:31:00Z"}]},
         request={"session_date": "2026-01-05"},
     )
@@ -157,7 +157,7 @@ def test_settlement_availability_reflects_projected_settlements() -> None:
 
 def test_ledger_projection_does_not_invent_closeout() -> None:
     artifact = build_parity_artifact(
-        {"strategy": {}, "bars_seen": 1, "metadata": {"input_fingerprint": "fixture"},
+        {"strategy": {}, "bars_seen": 1, "metadata": {"normalized_fingerprint": "fixture"},
          "ledger": {"2026-01-05": {"net_pnl_rs": 2.0}}},
         request={"session_date": "2026-01-05"},
     )
@@ -184,7 +184,7 @@ def test_projection_excludes_reference_replacement_and_preserves_native_reason()
         },
     ]
     artifact = build_parity_artifact(
-        {"strategy": {}, "bars_seen": 1, "metadata": {"input_fingerprint": "fixture"}},
+        {"strategy": {}, "bars_seen": 1, "metadata": {"normalized_fingerprint": "fixture"}},
         request={"session_date": "2026-01-05"},
         layer_records={"decision": decisions},
     )
@@ -219,7 +219,7 @@ def test_causal_lifecycle_diff_reports_duplicate_terminal_structural_stages() ->
             "outcome": "rejected", "reason": reason, "opportunity_id": "opp-1",
         })
     artifact = build_parity_artifact(
-        {"strategy": {}, "bars_seen": 1, "metadata": {"input_fingerprint": "fixture"}},
+        {"strategy": {}, "bars_seen": 1, "metadata": {"normalized_fingerprint": "fixture"}},
         request={"session_date": "2026-01-05"}, layer_records={"decision": decisions},
     )
     report = causal_lifecycle_diff(artifact, artifact)
@@ -229,7 +229,7 @@ def test_causal_lifecycle_diff_reports_duplicate_terminal_structural_stages() ->
 
 def test_causal_lifecycle_diff_indexes_ids_and_reports_terminal_duplicates() -> None:
     paper = build_parity_artifact(
-        {"strategy": {}, "bars_seen": 1, "metadata": {"input_fingerprint": "fixture"}},
+        {"strategy": {}, "bars_seen": 1, "metadata": {"normalized_fingerprint": "fixture"}},
         request={"session_date": "2026-01-05"},
         layer_records={"decision": [
             {"event_type": "POLICY_DECISION", "decision_at": "2026-01-05T14:30:00Z",
@@ -241,7 +241,7 @@ def test_causal_lifecycle_diff_indexes_ids_and_reports_terminal_duplicates() -> 
         ]},
     )
     canonical = build_parity_artifact(
-        {"strategy": {}, "bars_seen": 1, "metadata": {"input_fingerprint": "fixture"}},
+        {"strategy": {}, "bars_seen": 1, "metadata": {"normalized_fingerprint": "fixture"}},
         request={"session_date": "2026-01-05"},
         layer_records={"decision": [
             {"event_type": "POLICY_DECISION", "decision_at": "2026-01-05T14:30:00Z",
@@ -275,7 +275,7 @@ def test_projection_reads_reason_and_outcome_from_canonical_policy_view() -> Non
         },
     ]
     artifact = build_parity_artifact(
-        {"strategy": {}, "bars_seen": 1, "metadata": {"input_fingerprint": "fixture"}},
+        {"strategy": {}, "bars_seen": 1, "metadata": {"normalized_fingerprint": "fixture"}},
         request={"session_date": "2026-01-05"},
         layer_records={"decision": decisions},
     )
@@ -287,7 +287,7 @@ def test_projection_reads_reason_and_outcome_from_canonical_policy_view() -> Non
 
 def test_neutral_projection_uses_stage_outcome_and_utc_identity() -> None:
     artifact = build_parity_artifact(
-        {"strategy": {}, "bars_seen": 1, "metadata": {"input_fingerprint": "fixture"}},
+        {"strategy": {}, "bars_seen": 1, "metadata": {"normalized_fingerprint": "fixture"}},
         request={"session_date": "2026-01-05"},
         layer_records={"decision": [{
             "event_type": "POLICY_DECISION", "decision_at": "2026-01-05T14:30:00+05:30",

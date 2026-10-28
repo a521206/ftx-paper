@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone, tzinfo
 import math
 
@@ -74,6 +74,23 @@ class CausalOrderflowProducer:
     def set_prior_value_bounds(self, high: float | None, low: float | None) -> None:
         self._prior_value_high = high
         self._prior_value_low = low
+
+    def set_prior_bars(self, bars: Sequence[MarketBar]) -> None:
+        """Provide completed prior-session bars for PD location publication."""
+        self._prior_bars = tuple(sorted(
+            (item for item in bars
+             if item.instrument.instrument_type.upper() in {"FUT", "FUTURE", "FUTURES"}),
+            key=lambda item: item.timestamp,
+        ))
+        expected = int((
+            datetime.combine(datetime.min, self._session_end)
+            - datetime.combine(datetime.min, self._session_start)
+        ).total_seconds() // 60)
+        times = [item.timestamp.astimezone(self._session_timezone) for item in self._prior_bars]
+        self._prior_complete = len(times) == expected and all(
+            right - left == timedelta(minutes=1)
+            for left, right in zip(times, times[1:])
+        )
 
     def ingest(self, bar: MarketBar) -> None:
         local = bar.timestamp.astimezone(self._session_timezone)
@@ -150,24 +167,11 @@ class CausalOrderflowProducer:
         cumulative_volume = 0.0
         cumulative_dollar_volume = 0.0
         vwap_unavailable = False
-        recovery_indices: set[int] = set()
         session_start = datetime.combine(
             datetime.fromisoformat(trading_date).date(), self._session_start,
         ).replace(
             tzinfo=self._session_timezone
         ).astimezone(timezone.utc)
-        for gap_index in range(1, len(bars)):
-            if bars[gap_index].timestamp - bars[gap_index - 1].timestamp <= timedelta(minutes=1):
-                continue
-            for end_index in range(gap_index + 4, len(bars)):
-                window = bars[end_index - 4:end_index + 1]
-                if (
-                    len(window) == 5
-                    and all(right.timestamp - left.timestamp == timedelta(minutes=1) for left, right in zip(window, window[1:]))
-                    and ((window[0].timestamp.astimezone(self._session_timezone).hour * 60 + window[0].timestamp.astimezone(self._session_timezone).minute - (self._session_start.hour * 60 + self._session_start.minute)) % 5 == 0)
-                ):
-                    recovery_indices.add(end_index + 1)
-                    break
         for bar_index, bar in enumerate(bars):
             boundary_gap = bar_index == 0 and bar.timestamp > session_start
             source_gap = bool(
@@ -177,7 +181,22 @@ class CausalOrderflowProducer:
             bar_has_gap = boundary_gap or source_gap
             volume = float(bar.volume or 0.0)
             available_at = bar.timestamp + timedelta(minutes=1)
-            if bar_index in recovery_indices:
+            recovery_window = bars[bar_index - 4:bar_index + 1] if bar_index >= 4 else ()
+            recovery_available = bool(
+                len(recovery_window) == 5
+                and all(
+                    right.timestamp - left.timestamp == timedelta(minutes=1)
+                    for left, right in zip(recovery_window, recovery_window[1:])
+                )
+                and (
+                    (
+                        recovery_window[0].timestamp.astimezone(self._session_timezone).hour * 60
+                        + recovery_window[0].timestamp.astimezone(self._session_timezone).minute
+                        - (self._session_start.hour * 60 + self._session_start.minute)
+                    ) % 5 == 0
+                )
+            )
+            if recovery_available:
                 vwap_unavailable = False
                 cumulative_volume = 0.0
                 cumulative_dollar_volume = 0.0

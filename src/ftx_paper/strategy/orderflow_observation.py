@@ -110,16 +110,16 @@ def observe_market(replay: OrderflowReplayInput) -> MarketObservation:
     session_rows = tuple(
         row for row in replay.rows
         if expected_start <= normalize_exchange_timestamp(row.timestamp) < expected_end
-        and source_row_is_complete(row)
     )
+    complete_rows = tuple(row for row in session_rows if source_row_is_complete(row))
     start_text, end_text = replay.metadata.session_partition.split("-", maxsplit=1)
     producer = CausalOrderflowProducer(
         session_timezone=IST, session_start=start_text, session_end=end_text,
     )
-    for row in session_rows:
+    for row in complete_rows:
         producer.ingest(row)
-    gaps = _source_gaps(session_rows, expected_start, expected_end)
-    if session_rows:
+    gaps = _source_gaps(complete_rows, expected_start, expected_end)
+    if complete_rows:
         context = producer.context(replay.session_date, "23:59")
         if context is None:
             raise ValueError("source rows did not produce an observation context")
@@ -131,7 +131,7 @@ def observe_market(replay: OrderflowReplayInput) -> MarketObservation:
         window_end = min(window_start + timedelta(minutes=5), expected_end)
         children = tuple(
             normalize_exchange_timestamp(row.timestamp)
-            for row in session_rows
+        for row in complete_rows
             if window_start <= normalize_exchange_timestamp(row.timestamp) < window_end
         )
         expected_children = tuple(
@@ -146,6 +146,13 @@ def observe_market(replay: OrderflowReplayInput) -> MarketObservation:
     for parent in context.observations_for("5m"):
         if not context.validate_complete_parent(parent):
             raise ValueError(f"incomplete 5m parent publication: {parent.observation_id}")
+    for row in session_rows:
+        if not source_row_is_complete(row):
+            timestamp = normalize_exchange_timestamp(row.timestamp)
+            issues.append(ObservationIssue(
+                "1m", timestamp, timestamp + timedelta(minutes=1),
+                "incomplete_source_row", (timestamp,),
+            ))
     # Preserve the canonical fingerprint of the selected input rows through
     # every aggregate; derived child hashes are not a substitute for lineage.
     if replay.metadata.source_fingerprint:

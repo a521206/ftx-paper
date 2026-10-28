@@ -2,6 +2,23 @@
 
 Status: proposed implementation plan for `docs/PRODUCER_NEUTRAL_PARITY.md`.
 
+## Canonical References
+
+The authoritative replay behavior and acceptance sequence live in the
+NiftyZoning repository. Paper uses these files as read-only comparison
+references and must not import their runtime code, state, databases, or
+generated outputs:
+
+- `C:\Users\agraw\Python\NiftyZoning\docs\orderflow\ORDERFLOW_ARCHITECTURE.md`
+- `C:\Users\agraw\Python\NiftyZoning\docs\orderflow\PAPER_ORDERFLOW_PARITY_UPDATE_PLAN.md`
+- `C:\Users\agraw\Python\NiftyZoning\scripts\ftx\live\parity\docs\PARITY_CONTRACT.md`
+
+The Paper implementation target is the registered `ftx-paper-orderflow`
+strategy replay path, `PaperEngine`, execution coordinator, portfolio state,
+replay worker, and persisted parity artifact. Paper's diagnostic
+`strategy.orderflow_replay.ReplayMachine` remains a detached diagnostic capture
+boundary and is not an authoritative execution comparison source.
+
 The goal is simple: organize Paper's existing orderflow facts and reporting
 boundaries so the equivalent NiftyZoning behavior can be compared directly. This
 plan does not add a second runtime, lifecycle store, checkpoint database, or

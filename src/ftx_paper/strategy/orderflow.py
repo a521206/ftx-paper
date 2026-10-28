@@ -57,7 +57,7 @@ class OrderflowConfig:
     response_window_candles: int = 3
     confirmation_rule: str = "completed_response_candle"
     invalidation_rule: str = "close_outside_frozen_band"
-    trigger_type: str = "diagnostic_touch"
+    trigger_type: str = "breakout"
     admission_policy_version: str = "diagnostic_v1"
     stop_policy: str = "shared_adaptive_stop"
     exit_policy: str = "shared_exit_state_machine"
@@ -249,7 +249,11 @@ class OrderflowPolicy:
                     self._opening_gap_observation_id = first_1m.observation_id
                     results.append(PolicyDecision({
                         **base,
-                        "decision_at": first_1m.observed_at.isoformat(),
+                         # The opening-gap fact becomes a decision only when
+                         # the completed 1m evidence is available.  Stamping
+                         # it at observed_at would place `at` before the
+                         # published availability boundary.
+                         "decision_at": first_1m.available_at.isoformat(),
                         "available_at": first_1m.available_at.isoformat(),
                         "outcome": "recorded",
                         "decision_stage": "interaction",
@@ -288,7 +292,7 @@ class OrderflowPolicy:
                 if advanced_gap.status != previous_gap.status:
                     results.append(PolicyDecision({
                         **base,
-                        "decision_at": observation.observed_at.isoformat(),
+                         "decision_at": observation.available_at.isoformat(),
                         "available_at": observation.available_at.isoformat(),
                         "outcome": "recorded",
                         "decision_stage": "interaction",
@@ -302,7 +306,7 @@ class OrderflowPolicy:
                     }))
                     results.append(PolicyDecision({
                         **base,
-                        "decision_at": observation.observed_at.isoformat(),
+                         "decision_at": observation.available_at.isoformat(),
                         "available_at": observation.available_at.isoformat(),
                         "outcome": "accepted",
                         "decision_stage": "interaction",
@@ -337,10 +341,10 @@ class OrderflowPolicy:
                         continue
                     results.append(PolicyDecision({
                         **base,
-                        "decision_at": (
-                            (observation.interval_end - timedelta(minutes=1))
-                            if observation.interval_end is not None else observation.observed_at
-                        ).isoformat(),
+                        # Extreme registration is decided when the completed
+                        # parent observation is available, not at its final
+                        # minute before the availability boundary.
+                        "decision_at": observation.available_at.isoformat(),
                         "available_at": observation.available_at.isoformat(),
                         "decision_stage": "candidate",
                         "outcome": "recorded",
@@ -493,10 +497,7 @@ class OrderflowPolicy:
                             "source_aggregate_id": location.source_aggregate_id,
                             "source_observation_ids": [location_key],
                         }
-                        lifecycle_at = (
-                            observation.interval_end - timedelta(minutes=1)
-                            if observation.interval_end is not None else location.available_at
-                        )
+                        lifecycle_at = location.available_at
                         interaction_context_events.append(PolicyDecision({
                                 **base,
                                 "decision_at": lifecycle_at.isoformat(),
@@ -539,6 +540,30 @@ class OrderflowPolicy:
                         "response_state": "ENDED",
                         "source_observation_ids": [location_key],
                     }))
+                    if ended.close_reason is None:
+                        raise RuntimeError("ended interaction is missing close reason")
+                    for opportunity_id, opportunity in tuple(self._opportunities.items()):
+                        if (
+                            opportunity.status is OpportunityStatus.ACTIVE
+                            and opportunity.source_interaction_id == ended.interaction_id
+                        ):
+                            invalidated = opportunity.invalidate(
+                                at=ended.closed_at or observation.available_at,
+                                reason=f"source_interaction_{ended.close_reason.value.lower()}",
+                                evidence_ids=(location_key,),
+                            )
+                            self._opportunities[opportunity_id] = invalidated
+                            results.append(PolicyDecision({
+                                **base,
+                                "decision_stage": "opportunity",
+                                "outcome": "rejected",
+                                "reason": invalidated.transitions[-1].reason,
+                                "decision_id": _decision_id(
+                                    "opportunity_invalidated", opportunity_id, location_key,
+                                ),
+                                "opportunity_id": opportunity_id,
+                                "source_observation_ids": [location_key],
+                            }))
                 if interaction is not None and interaction.status is InteractionStatus.ACTIVE:
                     results.append(PolicyDecision({
                         **base,
@@ -573,7 +598,9 @@ class OrderflowPolicy:
                 response_observations = tuple(sorted((
                     item for item in observations
                     if item.timeframe == self.config.response_timeframe
-                    and item.observed_at > interaction.created_at
+                    # The interaction's completed contact candle is the first
+                    # response-window evidence in the canonical replay.
+                    and item.observed_at >= interaction.created_at
                 ), key=lambda item: (item.observed_at, item.available_at, item.observation_id)))
                 if not response_observations:
                     continue
@@ -669,7 +696,7 @@ class OrderflowPolicy:
                     if next_status == "PENDING":
                         next_status = "PENDING_RESPONSE"
                     current = next((item for item in interaction.hypothesis_states if item.hypothesis_id == hypothesis_id), None)
-                    if current is not None and (
+                    if current is not None and next_status not in {"PENDING_RESPONSE", "UNAVAILABLE"} and (
                         tuple(evidence_ids) == current.evidence_ids
                         and next_status == current.status
                         and evaluation.armed == current.armed
@@ -843,11 +870,10 @@ class OrderflowPolicy:
                         trigger = observe_trigger(
                             trigger_observation,
                             boundary=opportunity.setup.failure_boundary,
-                            # Trigger eligibility is a shared diagnostic
-                            # projection; execution mode gates authorization
-                            # below without changing the causal decision.
+                            # Diagnostic mode reports the same eligibility
+                            # projection; execution authorization is separate.
                             execution_mode=ExecutionMode.EXECUTABLE.value,
-                            trigger_type=self.config.trigger_type,
+                            trigger_type=template.trigger_type.value,
                             effective_at=formed_at.isoformat(),
                             expires_at=opportunity.setup.expires_at.isoformat(),
                             setup_version=opportunity.setup.setup_id,

@@ -20,6 +20,7 @@ from ftx_paper.contracts import (
 from ftx_paper.runtime.events import (
     EXECUTION_EVENT_TYPES,
     LEGACY_DECISION_TIME_FIELDS,
+    RUNTIME_EVENT_SCHEMA_VERSION,
     RISK_EVENT_TYPES,
     DecisionTimestampError,
     event_category,
@@ -543,6 +544,8 @@ class SqliteRuntimeStore:
                      *, timestamp: str | None = None) -> bool:
         event_type = str(event_type).upper()
         payload = dict(payload)
+        if payload.get("event_schema_version", RUNTIME_EVENT_SCHEMA_VERSION) != RUNTIME_EVENT_SCHEMA_VERSION:
+            raise ValueError("unsupported runtime event schema version")
         if (
             "decision_view" not in payload
             and payload.get("decision_id")
@@ -865,7 +868,18 @@ class SqliteRuntimeStore:
                 "SELECT event_type, payload, created_at FROM runtime_events ORDER BY id DESC LIMIT ?",
                 (limit,),
             ).fetchall()
-        return self._events_from_rows(rows)
+        events = self._events_from_rows(rows)
+        def ordering_key(event: dict[str, Any]) -> tuple[str, int, str, str, str, str]:
+            payload = event["payload"]
+            raw_sequence = payload.get("sequence")
+            sequence = raw_sequence if isinstance(raw_sequence, int) and not isinstance(raw_sequence, bool) else 2**31
+            return (
+                str(payload.get("session_date", "")), sequence,
+                str(payload.get("decision_at") or payload.get("available_at") or event["created_at"].isoformat()),
+                str(payload.get("decision_id", "")), event["event_type"],
+                json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
+            )
+        return sorted(events, key=ordering_key, reverse=True)
 
     def read_market_bar_stats(self) -> dict[str, Any]:
         """Read market-bar coverage for diagnostics without mutating state."""

@@ -9,6 +9,7 @@ from ftx_paper.config import IST
 
 
 DECISION_EVENT_TYPES = frozenset({"POLICY_DECISION"})
+RUNTIME_EVENT_SCHEMA_VERSION = 1
 
 # These names are rejected on new decision events. They are retained only so
 # callers get a clear validation error instead of silently storing old fields.
@@ -104,6 +105,7 @@ __all__ = [
     "IST",
     "LEGACY_DECISION_TIME_FIELDS",
     "RISK_EVENT_TYPES",
+    "RUNTIME_EVENT_SCHEMA_VERSION",
     "decision_session_bucket",
     "event_category",
     "is_decision_event",

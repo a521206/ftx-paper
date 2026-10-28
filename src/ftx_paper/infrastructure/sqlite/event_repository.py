@@ -7,7 +7,8 @@ from datetime import datetime, timezone
 from .mappers import event_from_row
 from .connection import SqliteDatabase
 from ftx_paper.ports.records import StoredEvent
-from ftx_paper.contracts import validate_decision_view
+from ftx_paper.contracts import build_decision_view, validate_decision_view
+from ftx_paper.runtime.events import RUNTIME_EVENT_SCHEMA_VERSION, is_decision_event
 
 
 class SqliteEventRepository:
@@ -15,13 +16,31 @@ class SqliteEventRepository:
         self._connection = connection
 
     def append(self, event_type: str, payload: Mapping[str, object], idempotency_key: str | None = None) -> bool:
-        cursor = self._connection.execute("INSERT OR IGNORE INTO runtime_events(event_type, payload, created_at, idempotency_key) VALUES (?, ?, ?, ?)", (event_type.upper(), json.dumps(dict(payload), default=str), datetime.now(timezone.utc).isoformat(), idempotency_key))
+        event_type = event_type.upper()
+        detached = json.loads(json.dumps(dict(payload), default=str))
+        if detached.get("event_schema_version", RUNTIME_EVENT_SCHEMA_VERSION) != RUNTIME_EVENT_SCHEMA_VERSION:
+            raise ValueError("unsupported runtime event schema version")
+        if is_decision_event(event_type, detached):
+            view = detached.get("decision_view")
+            if not isinstance(view, Mapping):
+                view = build_decision_view(detached, event_type=event_type)
+            detached["decision_view"] = validate_decision_view(view)
+        cursor = self._connection.execute("INSERT OR IGNORE INTO runtime_events(event_type, payload, created_at, idempotency_key) VALUES (?, ?, ?, ?)", (event_type, json.dumps(detached, separators=(",", ":")), datetime.now(timezone.utc).isoformat(), idempotency_key))
         return cursor.rowcount == 1
 
     def read_recent(self, limit: int = 100) -> Sequence[StoredEvent]:
         self._connection.row_factory = sqlite3.Row
         rows = self._connection.execute("SELECT id, event_type, payload, created_at FROM runtime_events ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
-        return tuple(event_from_row(row) for row in rows)
+        def ordering_key(event: StoredEvent) -> tuple[str, int, str, str, str, str]:
+            raw_sequence = event.payload.get("sequence")
+            sequence = raw_sequence if isinstance(raw_sequence, int) and not isinstance(raw_sequence, bool) else 2**31
+            return (
+                str(event.payload.get("session_date", "")), sequence,
+                str(event.payload.get("decision_at", event.created_at.isoformat())),
+                str(event.payload.get("decision_id", "")), event.event_type,
+                json.dumps(event.payload, sort_keys=True, separators=(",", ":"), default=str),
+            )
+        return tuple(sorted((event_from_row(row) for row in rows), key=ordering_key, reverse=True))
 
 
 class SqliteEventQueryRepository:

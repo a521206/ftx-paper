@@ -135,6 +135,15 @@ def test_runtime_store_preserves_warmup_event_payload(tmp_path):
     }
 
 
+def test_runtime_store_retry_is_idempotent_and_rejects_event_schema(tmp_path):
+    store = RuntimeStore(tmp_path)
+    payload = {"decision_at": "2026-09-10T09:17:00+05:30", "decision_id": "d1", "outcome": "accepted"}
+    assert store.append_event("POLICY_DECISION", payload, "retry-safe") is True
+    assert store.append_event("POLICY_DECISION", payload, "retry-safe") is False
+    with pytest.raises(ValueError, match="unsupported runtime event schema"):
+        store.append_event("POLICY_DECISION", {**payload, "event_schema_version": 99}, "bad-schema")
+
+
 def test_runtime_store_summary_preserves_unavailable_outcome(tmp_path):
     store = RuntimeStore(tmp_path)
     store.append_event("POLICY_DECISION", {

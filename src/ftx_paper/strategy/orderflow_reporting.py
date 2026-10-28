@@ -39,15 +39,16 @@ def causal_actions(records: tuple[ReplayRecord, ...]) -> tuple[Mapping[str, obje
 
 def build_session_summary(records: tuple[ReplayRecord, ...]) -> Mapping[str, object]:
     """Build a bounded diagnostic summary from recorded facts."""
+    ordered_records = tuple(sorted(records, key=lambda item: (item.sequence, item.timestamp, item.record_id)))
     return {
         "schema_version": 1,
-        "record_count": len(records),
-        "first_timestamp": records[0].timestamp.isoformat() if records else None,
-        "last_timestamp": records[-1].timestamp.isoformat() if records else None,
-        "decision_count": sum(len(record.decisions) for record in records),
-        "observation_count": sum(len(record.observations) for record in records),
-        "checkpoint_count": sum(len(record.checkpoints) for record in records),
-        "actions": causal_actions(records),
+        "record_count": len(ordered_records),
+        "first_timestamp": ordered_records[0].timestamp.isoformat() if ordered_records else None,
+        "last_timestamp": ordered_records[-1].timestamp.isoformat() if ordered_records else None,
+        "decision_count": sum(len(record.decisions) for record in ordered_records),
+        "observation_count": sum(len(record.observations) for record in ordered_records),
+        "checkpoint_count": sum(len(record.checkpoints) for record in ordered_records),
+        "actions": causal_actions(ordered_records),
     }
 
 
@@ -59,7 +60,7 @@ def build_multi_session_report(
     return {
         "schema_version": 1,
         "sessions": tuple(
-            {"session_date": session_date, **build_session_summary(records)}
+            {"session_date": session_date, **dict(build_session_summary(records))}
             for session_date, records in ordered
         ),
     }
@@ -95,7 +96,14 @@ def detached_replay_records(
         grouped.setdefault(timestamp, []).append(dict(event))
     records: list[ReplayRecord] = []
     for sequence, timestamp in enumerate(sorted(grouped), start=1):
-        facts = tuple(grouped[timestamp])
+        facts = tuple(sorted(
+            grouped[timestamp],
+            key=lambda event: (
+                str(event.get("decision_id", "")),
+                str(event.get("event_type", "")).upper(),
+                repr(sorted(event.items())),
+            ),
+        ))
         checkpoints = tuple(
             {
                 "phase": (

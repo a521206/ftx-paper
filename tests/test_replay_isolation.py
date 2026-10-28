@@ -63,3 +63,18 @@ def test_shadow_parity_is_opt_in(tmp_path) -> None:
     for layer_records in result["parity_artifact"]["layers"].values():
         for record in layer_records:
             assert {"schema_version", "run_id", "execution_scope", "ledger_scope"} <= set(record)
+
+
+def test_replay_scope_projects_authoritative_orderflow_artifact(tmp_path) -> None:
+    request = _request(include_parity_layers=True)
+    request.update({"mode": "replay"})
+    result = _worker(tmp_path).execute_detached(request)
+
+    artifact = result["parity_artifact"]
+    assert result["execution_scope"] == "replay"
+    assert artifact["scope"]["fingerprint_recipe"] == "normalized-bars-v1"
+    assert all(record["execution_scope"] == "replay"
+               for records in artifact["layers"].values() for record in records)
+    assert any(record["kind"] == "daily_reset" for record in artifact["layers"]["portfolio_ledger"])
+    assert result["authoritative_trades"] == []
+    assert result["authoritative_ledger"] == []

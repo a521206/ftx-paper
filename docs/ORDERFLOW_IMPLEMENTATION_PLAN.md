@@ -1007,6 +1007,173 @@ this implementation roadmap:
 - `C:\Users\agraw\Python\NiftyZoning\tests\test_orderflow_parity_artifacts.py`
 - `C:\Users\agraw\Python\NiftyZoning\tests\test_orderflow_parity_comparison.py`
 
+## NiftyZoning To FTX Paper File Mapping
+
+This is a responsibility mapping, not an import or code-copying map. The
+NiftyZoning paths are read-only behavioral references. The Paper paths are the
+implementation owners and may split one reference responsibility across
+strategy, contracts, runtime, and execution modules. A listed Paper file is
+not evidence that the corresponding behavior is complete; the phase exit
+criteria and verified gaps above remain authoritative.
+Paper source paths below are relative to `src/`; Paper documentation paths are
+relative to the repository root.
+
+### Foundation, Input, And Observations
+
+- `NiftyZoning/src/orderflow/config.py`, `state_machine_types.py` ->
+  `ftx_paper/strategy/config.py`, `strategy/orderflow.py`, and
+  `strategy/orderflow_contract.py`: validated orderflow configuration, stable
+  identities, typed unavailable values, and policy contracts.
+- `NiftyZoning/src/orderflow/state_machine_source.py`, `research_replay.py`,
+  `replay_common.py`, `runner.py` -> `ftx_paper/strategy/orderflow_source.py`,
+  `strategy/orderflow_replay.py`, `application/run_replay.py`, and
+  `contracts/replay.py`: source identity, input selection, replay scope, and
+  replay orchestration.
+- `NiftyZoning/src/orderflow/market_observation.py`, `orderflow_common.py` ->
+  `ftx_paper/strategy/orderflow_producer.py`,
+  `strategy/orderflow_observation.py`, and `contracts/market.py`: completed
+  market evidence, aggregate availability, gaps, lineage, and source-row
+  fingerprints.
+- `NiftyZoning/src/orderflow/vwap_location.py` ->
+  `ftx_paper/strategy/orderflow_producer.py` and
+  `strategy/orderflow_observation.py`: causal VWAP and prefix evidence only;
+  Paper does not treat VWAP as executable location policy.
+
+### Context, Locations, And Interactions
+
+- `NiftyZoning/src/orderflow/market_context_history.py`,
+  `value_publication.py`, `opening_gap_policy.py`, `regime_classification.py`,
+  `hierarchy.py` -> `ftx_paper/strategy/orderflow_context.py` and
+  `strategy/orderflow_contract.py`: as-of context, values, opening-gap state,
+  permissions, generations, and unavailable context evidence.
+- `NiftyZoning/src/orderflow/state_machine_types.py`,
+  `location_geometry.py`, `location_observation.py` ->
+  `ftx_paper/strategy/orderflow_location.py`: location records, bands,
+  generations, as-of resolution, ownership, and observation provenance.
+- `NiftyZoning/src/orderflow/interaction_detector.py`, `interactions.py` ->
+  `ftx_paper/strategy/orderflow_interaction.py`: independent 1m/5m
+  interaction clocks, frozen contact lineage, lifecycle transitions, and
+  close reasons.
+
+### Responses, Opportunities, And Admission
+
+- `NiftyZoning/src/orderflow/response.py`, `policies/`, `templates.py` ->
+  `ftx_paper/strategy/orderflow_response.py` and `strategy/templates.py`:
+  response hypotheses, location-specific policies, response state, template
+  identity, confirmation, invalidation, and expiry.
+- `NiftyZoning/src/orderflow/opportunity_coordinator.py`, `opportunity.py`,
+  `opportunity_timeout.py`, `lifecycle.py` ->
+  `ftx_paper/strategy/orderflow_opportunity.py`,
+  `strategy/opportunity_timeout.py`, and `strategy/opportunity.py`:
+  structural setups, bounded opportunity lifecycles, timeout ordering,
+  execution-group claims, and setup identities.
+- `NiftyZoning/src/orderflow/intent_policy.py`, `execution.py`,
+  `active_position_gate.py`, `allocation.py` ->
+  `ftx_paper/strategy/orderflow_admission.py`,
+  `strategy/orderflow_trigger.py`, `strategy/active_position_gate.py`,
+  `strategy/allocation.py`, `strategy/intent_policy.py`, and
+  `strategy/coordinator.py`: ordered admission predicates, diagnostic versus
+  executable intents, trigger eligibility, active-position gates, sizing, and
+  proposal arbitration.
+
+### Execution, Persistence, And Reporting
+
+- `NiftyZoning/src/orderflow/execution.py`, `lifecycle.py`, `hierarchy.py` ->
+  `ftx_paper/execution/coordinator.py`, `execution/service.py`,
+  `execution/settlement.py`, `contracts/orders.py`, and
+  `runtime/engine.py`: Paper execution ownership, order lifecycle,
+  management, fills, exits, reservations, and settlement. Diagnostic mode
+  must remain mutation-free.
+- `NiftyZoning/src/orderflow/state_engine.py` ->
+  `ftx_paper/strategy/orderflow_capture.py` and `contracts/replay.py`:
+  replay capture modes and detached replay records. This mapping does not
+  introduce a live replay recorder.
+- `NiftyZoning/src/orderflow/state_machine_reporting.py`,
+  `state_machine_evidence.py`, `reporting.py` ->
+  `ftx_paper/strategy/orderflow_reporting.py`, `contracts/decision_view.py`,
+  `contracts/decision_artifacts.py`, `runtime/events.py`, and
+  `runtime/session.py`: recorded-fact projections, generic decision views,
+  runtime event envelopes, persistence, and reports.
+- `NiftyZoning/src/orderflow/state_machine.py` ->
+  `ftx_paper/strategy/orderflow.py`, `strategy/orderflow_replay.py`,
+  `runtime/engine.py`, and `runtime/session.py`: causal sequencing is split
+  between the live `OrderflowPolicy`, replay-only `ReplayMachine`, shared
+  runtime coordination, and persistence; no single Paper file replaces the
+  reference state machine.
+
+### Reference-Only Or Intentionally Unmapped Areas
+
+- `NiftyZoning/src/orderflow/parity_artifacts.py` and its parity tests map to
+  the separate Paper parity deliverables in
+  `ftx_paper/runtime/parity_artifacts.py`, `docs/PRODUCER_NEUTRAL_PARITY.md`,
+  and `docs/PRODUCER_NEUTRAL_PARITY_IMPLEMENTATION_PLAN.md`; they are not part
+  of the live orderflow owner.
+- NiftyZoning VWAP execution locations, `reversal_at_vwap`, VWAP legacy cell
+  policies, and `OR_VWAP` stops have no executable Paper mapping. They remain
+  diagnostic evidence or explicit unavailable behavior under this plan.
+- NiftyZoning's single replay/state-machine owner has no direct live Paper
+  equivalent. Paper preserves separate ownership between `OrderflowPolicy`,
+  `ReplayMachine`, `RuntimeSession`, and `PaperExecutionCoordinator`.
+
+## Cross-Project Omissions And Paper-Only Responsibilities
+
+The mapping above can hide important asymmetries. These are the omissions and
+additional responsibilities that must remain visible when assessing parity.
+
+### Paper Omissions Relative To NiftyZoning
+
+- There is no Paper equivalent of NiftyZoning's dedicated
+  `entry_features.py`. Entry-time feature construction and lineage are not yet
+  a separate Paper contract; they must not be inferred from the generic market
+  feature cache or from a later decision payload.
+- There is no Paper equivalent of `liquidity_sweep.py` or
+  `vwap_acceptance_delay.py`. Liquidity-sweep evidence and delayed,
+  direction-aware VWAP acceptance are therefore unavailable unless explicitly
+  implemented as Paper-owned diagnostic contracts. They must not be replaced
+  with a generic response or VWAP rule.
+- NiftyZoning's `release_sequence.py` and `canonical_projection.py` have no
+  one-to-one Paper module. Release ordering and canonical producer-neutral
+  projection remain cross-cutting concerns covered by runtime/event and parity
+  contracts, not by `OrderflowPolicy` alone.
+- Paper currently has a generic response adapter rather than NiftyZoning's
+  complete `policies/` package. Prior-day behavior, per-hypothesis arming and
+  evidence, repeated pending/unavailable outcomes, and the full response
+  template registry remain implementation gaps identified in Phase 6.
+- Paper's live producer and policy do not yet expose every source-selection,
+  incomplete-parent, and candidate-rejection diagnostic required by the plan.
+  A skipped or unavailable result is not equivalent to the detailed
+  NiftyZoning diagnostic unless its reason, boundary, lineage, and identity are
+  persisted.
+- Paper does not have a direct equivalent of NiftyZoning's single
+  `ExecutionEngine` lifecycle owner. This is intentional, but the split across
+  `PaperExecutionCoordinator`, `contracts/orders.py`, portfolio state, and
+  settlement must still provide one authoritative idempotent lifecycle before
+  Phase 9 can be accepted.
+
+### Paper Responsibilities Without A NiftyZoning Counterpart
+
+- `ftx_paper/runtime/session.py`, `runtime/engine.py`, `runtime/store.py`, and
+  `application/` own the loopback runtime lifecycle, recovery, leases, and
+  persistence boundary. NiftyZoning's research replay runner is not a
+  substitute for these operational responsibilities.
+- `ftx_paper/broker/` and `runtime/futures_source.py` own broker market-data
+  connectivity, authentication, feed normalization, and source selection for
+  Paper's supported providers. NiftyZoning's local replay inputs do not cover
+  this deployment boundary.
+- `ftx_paper/domain/`, `execution/`, `contracts/orders.py`, and
+  `execution/settlement.py` own Paper's simulated account, portfolio, costs,
+  order lifecycle, and settlement. These are paper-trading concerns and must
+  not be interpreted as broker/live execution parity.
+- `ftx_paper/contracts/decision_view.py`, `contracts/events.py`,
+  `runtime/events.py`, and `runtime/parity_artifacts.py` provide strategy-neutral
+  persisted decision/event and producer-neutral parity boundaries. They extend
+  beyond the NiftyZoning orderflow module and must remain separate from its
+  replay implementation.
+- `ftx_paper/contracts/futures_rollover.py` and the broker adapters provide
+  explicit futures contract identity and rollover handling. This is a Paper
+  deployment concern even where the NiftyZoning reference assumes a prepared
+  replay series.
+
 ## Test And Delivery Workflow
 
 For each phase:
@@ -1040,6 +1207,20 @@ phase can be marked complete:
   still emits lifecycle/status transitions rather than the full recorded
   hypothesis stream; repeated pending and unavailable outcomes remain
   selectively published.
+- Incomplete in-session source rows are retained as explicit observation issues
+  while remaining unavailable to aggregation. Recovery VWAP state is advanced
+  only when the current completed bar closes an aligned five-minute window; it
+  no longer scans future rows to decide an earlier observation.
+- Response hypotheses now retain their existing per-hypothesis state while
+  publishing newly available pending and unavailable outcomes instead of
+  suppressing unchanged causal evidence.
+- Active opportunities sourced from an interaction are explicitly invalidated
+  when that interaction ends, with the interaction close reason and source
+  observation retained in the transition.
+- Runtime order handling now passes executable proposals through the existing
+  `PaperExecutionCoordinator` before authorization. Denied proposals are
+  persisted as explicit `ORDER_DENIED` events instead of disappearing between
+  policy output and execution.
 - Interaction, response, opportunity, admission, and execution-group state is
   not yet fully independent at the persistence boundary. Hypothesis status is
   serialized, but hypothesis evidence and arming state are not.
@@ -1053,6 +1234,23 @@ phase can be marked complete:
 
 ### Resolved Gaps
 
+- Phase 10 runtime decision views now reject missing outcomes instead of mapping
+  them to `recorded`, preserve unavailable expected-availability boundaries, and
+  recursively detach nested evidence before persistence and publication.
+- Runtime persistence now validates the versioned event envelope, uses a
+  collision-safe retry key containing strategy/session/source/event/bundle/
+  decision identity, and exposes deterministic causal ordering with explicit
+  tie-breakers rather than SQLite insertion order alone.
+- Replay reporting now sorts records and same-timestamp facts deterministically
+  and keeps multi-session aggregation ordered by session date. Focused
+  regression tests cover status distinction, detachment, retry idempotency,
+  schema rejection, causal ties, and report ordering.
+- Normalized parity fingerprints now reject malformed timestamps and incomplete
+  OHLC data and sort normalized rows by canonical content, while preserving
+  optional volume handling used by existing Paper bars.
+- Legacy source fingerprints and replay fields are no longer adapted into
+  canonical parity/replay artifacts; canonical boundaries reject them instead.
+
 - Trigger eligibility is now projected through `orderflow_trigger.py` from the
   live policy path; executable authorization requires that projection while
   diagnostic decisions retain the same causal result without creating orders.
@@ -1063,6 +1261,9 @@ phase can be marked complete:
   removed from the API and OpenAPI contract.
 - Replay artifacts no longer expose `candidate_trace`; decision projections are
   derived only from the canonical causal decision stream.
+- Phase 10 is still not complete: API-facing projections and the generic event
+  repository need the same persisted-fact envelope guarantees as the runtime
+  store, and the remaining Phase 10 conformance tests are not all implemented.
 
 The current implementation therefore provides a substantial Phase 0-5
 foundation and partial Phase 6-8 behavior, but it must not be described as a

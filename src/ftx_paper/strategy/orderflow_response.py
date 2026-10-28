@@ -325,7 +325,10 @@ def evaluate_policy_responses(
             if getattr(item, "timeframe", None) == template_for_evaluation.response_timeframe
             and isinstance(getattr(item, "observed_at", None), datetime)
             and isinstance(created_at, datetime)
-            and getattr(item, "observed_at") > created_at
+            # The contact candle is response-window candle one.  NiftyZoning
+            # includes the creation candle once its completed evidence is
+            # available; excluding it shifts every response window by one bar.
+            and getattr(item, "observed_at") >= created_at
             and isinstance(getattr(item, "available_at", None), datetime)
             and getattr(item, "available_at") <= cutoff
             and (expiry is None or getattr(item, "available_at") <= expiry)

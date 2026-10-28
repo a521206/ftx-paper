@@ -15,6 +15,20 @@ plan. Detailed behavior remains in:
 NiftyZoning remains a read-only reference. Paper does not import its code or
 share its runtime state.
 
+## Canonical References
+
+Use the following NiftyZoning documents as the authoritative behavioral and
+artifact references while implementing this plan:
+
+- `C:\Users\agraw\Python\NiftyZoning\docs\orderflow\ORDERFLOW_ARCHITECTURE.md`
+- `C:\Users\agraw\Python\NiftyZoning\docs\orderflow\PAPER_ORDERFLOW_PARITY_UPDATE_PLAN.md`
+- `C:\Users\agraw\Python\NiftyZoning\scripts\ftx\live\parity\docs\PARITY_CONTRACT.md`
+
+The comparison target is the registered Paper strategy replay and its
+authoritative execution and portfolio owners. The diagnostic
+`strategy.orderflow_replay.ReplayMachine` is not the execution comparison
+target.
+
 ## Organization Rules
 
 1. Use one Paper module for each major behavioral responsibility.

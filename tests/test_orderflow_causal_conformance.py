@@ -28,6 +28,22 @@ def test_live_producer_marks_forward_gap_and_resets_vwap_prefix() -> None:
     assert observations[-1].context.replay_provenance["gap_status"] == "source_gap"
 
 
+def test_live_producer_does_not_recover_vwap_before_five_completed_minutes() -> None:
+    producer = CausalOrderflowProducer()
+    start = datetime(2026, 1, 1, 3, 45, tzinfo=UTC)
+    producer.ingest(_bar(start, 100.0))
+    producer.ingest(_bar(start + timedelta(minutes=2), 110.0))
+    for index in range(3, 10):
+        producer.ingest(_bar(start + timedelta(minutes=index), 110.0 + index))
+
+    context = producer.context("2026-01-01", "09:24")
+    assert context is not None
+    observations = context.observations_for("1m")
+    assert observations[1].features["vwap"].reason == "source_gap"
+    assert observations[6].features["vwap"].reason == "source_gap"
+    assert isinstance(observations[-1].features["vwap"], float)
+
+
 def test_trigger_expiry_uses_available_evidence_and_versions() -> None:
     observed = datetime(2026, 1, 1, 3, 45, tzinfo=UTC)
     available = observed + timedelta(minutes=1)

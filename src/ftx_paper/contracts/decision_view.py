@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 from datetime import datetime
+from copy import deepcopy
 
 
 DECISION_VIEW_SCHEMA_VERSION = 1
@@ -41,7 +42,7 @@ def build_decision_view(
     strategies migrate to the structured contract. Decision identity is not
     migrated from strategy-specific candidate identifiers.
     """
-    subject = _mapping(payload.get("subject"))
+    subject = deepcopy(_mapping(payload.get("subject")))
     _set_if_missing(subject, "instrument", _value(payload, "instrument", "symbol", "market", "contract"))
     _set_if_missing(subject, "vehicle", _value(payload, "vehicle"))
     _set_if_missing(subject, "location", _value(payload, "location", "cell", "zone"))
@@ -49,14 +50,14 @@ def build_decision_view(
     _set_if_missing(subject, "setup", _value(payload, "setup", "setup_type"))
     subject = {key: value for key, value in subject.items() if value is not None and value != ""}
 
-    policy = _mapping(payload.get("policy"))
-    _set_if_missing(policy, "outcome", _value(payload, "outcome") or "recorded")
+    policy = deepcopy(_mapping(payload.get("policy")))
+    _set_if_missing(policy, "outcome", _value(payload, "outcome"))
     _set_if_missing(policy, "reason_code", _value(payload, "reason", "reason_code"))
     _set_if_missing(policy, "message", _value(payload, "message", "detail", "signal", "trigger"))
     policy = {key: value for key, value in policy.items() if value is not None and value != ""}
 
-    evidence = _mapping(payload.get("evidence"))
-    metrics = _mapping(evidence.get("metrics"))
+    evidence = deepcopy(_mapping(payload.get("evidence")))
+    metrics = deepcopy(_mapping(evidence.get("metrics")))
     for key in (
         "score", "setup_score", "stop", "stop_basis", "stop_bp", "vix", "vix_at_event",
         "pcr", "pcr_at_event", "quantity", "bars_held", "mae_bp", "mfe_bp",
@@ -68,7 +69,7 @@ def build_decision_view(
             metrics.setdefault(key, payload[key])
     if metrics:
         evidence["metrics"] = metrics
-    provenance = _mapping(evidence.get("provenance"))
+    provenance = deepcopy(_mapping(evidence.get("provenance")))
     for key in (
         "bundle_id", "decision_source", "session_date", "source_observation_id", "source_observation_ids",
         "response_evidence_ids", "feature_version", "availability_cutoff", "timeframe", "instrument",
@@ -80,18 +81,18 @@ def build_decision_view(
             provenance.setdefault(key, payload[key])
     if provenance:
         evidence["provenance"] = provenance
-    features = _mapping(evidence.get("features"))
+    features = deepcopy(_mapping(evidence.get("features")))
     if isinstance(payload.get("feature_values"), Mapping):
         features.update(payload["feature_values"])
     if features:
         evidence["features"] = features
-    diagnostics = _mapping(evidence.get("diagnostics"))
+    diagnostics = deepcopy(_mapping(evidence.get("diagnostics")))
     for key in ("score_factors", "required_input_availability", "sizing_pipeline"):
         if isinstance(payload.get(key), Mapping):
             diagnostics[key] = dict(payload[key])
     if diagnostics:
         evidence["diagnostics"] = diagnostics
-    state = _mapping(evidence.get("state"))
+    state = deepcopy(_mapping(evidence.get("state")))
     for key in ("response_state", "interaction_state", "generation", "trigger"):
         if key in payload and payload[key] is not None:
             state[key] = payload[key]
@@ -117,7 +118,7 @@ def build_decision_view(
         "detail": policy.get("reason_code") or policy.get("message") or event_type,
         "outcome": policy.get("outcome", "recorded"),
     }
-    return view
+    return deepcopy(view)
 
 
 def validate_decision_view(view: Mapping[str, Any]) -> dict[str, Any]:
@@ -148,11 +149,46 @@ def validate_decision_view(view: Mapping[str, Any]) -> dict[str, Any]:
         provenance = view["evidence"].get("provenance", {})
         if not view["policy"].get("reason_code"):
             raise ValueError("unavailable decision requires a reason code")
-        if not isinstance(provenance, Mapping) or not provenance.get("available_at"):
+        if not isinstance(provenance, Mapping) or not (
+            provenance.get("available_at") or provenance.get("expected_available_at")
+        ):
             raise ValueError("unavailable decision requires an availability boundary")
     if outcome == "rejected" and not view["policy"].get("reason_code"):
         raise ValueError("rejected decision requires a reason code")
-    return dict(view)
+    canonical = deepcopy(dict(view))
+    provenance = canonical["evidence"].get("provenance", {})
+    raw_timestamps = (
+        provenance.get("observed_at"), provenance.get("available_at"), canonical.get("at")
+    ) if isinstance(provenance, Mapping) and canonical["policy"].get("outcome") != "unavailable" else (
+        provenance.get("observed_at"), canonical.get("at")
+    ) if isinstance(provenance, Mapping) else ()
+    if canonical["policy"].get("outcome") == "unavailable" and isinstance(provenance, Mapping):
+        boundary = provenance.get("available_at") or provenance.get("expected_available_at")
+        if boundary is not None:
+            if not isinstance(boundary, str):
+                raise ValueError("decision view availability boundary must be an ISO string")
+            try:
+                parsed_boundary = datetime.fromisoformat(boundary.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ValueError("decision view availability boundary must be an ISO timestamp") from exc
+            if parsed_boundary.tzinfo is None or parsed_boundary.utcoffset() is None:
+                raise ValueError("decision view availability boundary must be timezone-aware")
+    parsed = []
+    for value in raw_timestamps:
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            raise ValueError("decision view causal timestamps must be ISO strings")
+        try:
+            item = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("decision view causal timestamps must be ISO timestamps") from exc
+        if item.tzinfo is None or item.utcoffset() is None:
+            raise ValueError("decision view causal timestamps must be timezone-aware")
+        parsed.append(item)
+    if len(parsed) == 2 and parsed[0] > parsed[1]:
+        raise ValueError("decision view evidence timestamps must be causally ordered")
+    return canonical
 
 
 __all__ = ["DECISION_VIEW_SCHEMA_VERSION", "build_decision_view", "validate_decision_view"]

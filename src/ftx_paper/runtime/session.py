@@ -537,7 +537,10 @@ class RuntimeSession:
             event_identity = hashlib.sha256(
                 json.dumps(stable_payload, sort_keys=True, separators=(",", ":"), default=str).encode()
             ).hexdigest()[:24]
-        idempotency_key = ":".join((strategy_id, session_date, source, event_type, bundle_id, event_identity))
+        idempotency_key = json.dumps(
+            (strategy_id, session_date, source, event_type, bundle_id, event_identity),
+            separators=(",", ":"), ensure_ascii=True,
+        )
         self.store.append_event(
             event_type, deepcopy(payload), idempotency_key,
             timestamp=serialize_datetime(event_decision_at) if decision_event else timestamp,
@@ -621,7 +624,31 @@ class RuntimeSession:
             "decision_source": source, "session_date": bundle.trading_date,
             "execution_allowed": source == "live",
         }, f"strategy_evaluation:{source}:{bundle.bundle_id}", timestamp=timestamp)
-        for order in result.orders:
+        orders = result.orders
+        if self.coordinator is not None and orders:
+            selected_orders = self.coordinator.arbitrate(orders)
+            selected_ids = {item.client_order_id for item in selected_orders}
+            for denied in orders:
+                if denied.client_order_id in selected_ids:
+                    continue
+                reason = self.coordinator.denied_proposals[denied.client_order_id]
+                self.store.append_event(
+                    "ORDER_DENIED",
+                    {
+                        "client_order_id": denied.client_order_id,
+                        "strategy_id": denied.strategy_id,
+                        "account_id": denied.account_id,
+                        "role": denied.role.value,
+                        "reason": reason,
+                        "decision_source": source,
+                        "session_date": bundle.trading_date,
+                        "execution_allowed": source == "live",
+                    },
+                    f"order_denied:{source}:{bundle.bundle_id}:{denied.client_order_id}",
+                    timestamp=timestamp,
+                )
+            orders = selected_orders
+        for order in orders:
             order_decision_id = order.client_order_id.rsplit(":", 1)[0]
             if source == "live":
                 create_order = getattr(self.store, "create_order_lifecycle", None)
