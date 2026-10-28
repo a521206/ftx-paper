@@ -10,12 +10,9 @@ if TYPE_CHECKING:
     from .orderflow_vwap import VwapMeasurement
 
 
-DIAGNOSTIC_LOCATION_TYPES = frozenset({"diagnostic_reference"})
-
-
 def is_diagnostic_location(location_type: str) -> bool:
     """Return whether a location is evidence-only, never an executable setup."""
-    return location_type in DIAGNOSTIC_LOCATION_TYPES
+    return location_type == "diagnostic_reference"
 
 
 @dataclass(frozen=True, slots=True)
@@ -273,6 +270,6 @@ class LocationRegistry:
 
 
 __all__ = [
-    "DIAGNOSTIC_LOCATION_TYPES", "LocationBand", "LocationObservation",
+    "LocationBand", "LocationObservation",
     "LocationRecord", "LocationRegistry", "is_diagnostic_location",
 ]

@@ -60,7 +60,7 @@ def test_executable_admission_uses_same_gates_without_creating_execution_state()
         _opportunity(), context_available=True, regime_allowed=True,
         opening_gap_allowed=True, active_position_allowed=True,
         exposure_allowed=True, allocation_allowed=True,
-        sizing_allowed=True, risk_allowed=True, diagnostic=False,
+        sizing_allowed=True, risk_allowed=True,
     )
 
     assert decision.status is PredicateStatus.PASSED

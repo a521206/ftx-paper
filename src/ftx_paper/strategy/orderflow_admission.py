@@ -87,7 +87,6 @@ def evaluate_admission(
     expected_setup_version: str | None = None,
     expected_context_version: str | None = None,
     reference_window: str | None = None,
-    diagnostic: bool = True,
 ) -> AdmissionDecision:
     """Apply gates in canonical order without owning executable mutations.
 

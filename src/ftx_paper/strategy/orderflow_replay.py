@@ -53,9 +53,6 @@ class OrderflowRuntimeState:
     """Single owner for mutable causal replay lifecycle state."""
 
     context: object | None = None
-    interactions: dict[str, object] = field(default_factory=dict)
-    opportunities: dict[str, object] = field(default_factory=dict)
-    execution: dict[str, object] = field(default_factory=dict)
     replay_records: list[ReplayRecord] = field(default_factory=list)
     phase_history: list[tuple[ReplayPhase, ...]] = field(default_factory=list)
 
