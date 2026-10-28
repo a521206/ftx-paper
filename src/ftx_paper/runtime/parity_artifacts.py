@@ -110,7 +110,10 @@ def _timestamp(record: Mapping[str, Any]) -> str:
     parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     if parsed.tzinfo is None:
         raise ValueError("parity timestamps must be timezone-aware")
-    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    # Preserve the producer's aware offset.  The strict contract compares the
+    # deterministic local session boundary and causal evidence timestamps as
+    # published, rather than silently changing their representation to UTC.
+    return parsed.isoformat().replace("+00:00", "Z")
 
 
 def _record(record: Mapping[str, Any], *, kind: str, sequence: int) -> dict[str, Any]:
@@ -135,10 +138,15 @@ def _record(record: Mapping[str, Any], *, kind: str, sequence: int) -> dict[str,
         evidence = record.get("evidence")
     occurred_at = _timestamp(record)
     native_kind = _native_kind(record, kind=kind)
-    comparison_identity = record.get("comparison_identity") or record.get("identity")
+    causal_identity = (
+        record.get("candidate_id") or values.get("candidate_id")
+        or record.get("lifecycle_id") or values.get("lifecycle_id")
+        or record.get("opportunity_id") or values.get("opportunity_id")
+    )
     identity_basis = {
         "kind": kind,
         "minute": occurred_at[:16],
+        "causal_identity": causal_identity,
         "dimensions": {key: values.get(key) for key in (
             "cell", "vehicle", "direction", "side", "instrument", "status", "quantity",
         ) if values.get(key) is not None},
@@ -151,7 +159,7 @@ def _record(record: Mapping[str, Any], *, kind: str, sequence: int) -> dict[str,
         "native_kind": native_kind,
         "stage": stage,
         "outcome": outcome,
-        "comparison_identity": comparison_identity or identity,
+        "comparison_identity": identity,
         "causal_parent_id": record.get("causal_parent_id") or record.get("decision_id"),
         "evidence": _jsonable(dict(evidence)),
         "producer_extensions": _jsonable(record.get("producer_extensions", {})),
@@ -182,9 +190,243 @@ def decision_diagnostics(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]
         "outcome_counts": dict(sorted(outcomes.items())),
         "reason_counts": dict(sorted(reasons.items())),
     }
+
+
+_STRUCTURAL_STAGE_BY_REASON = {
+    "setup_candidate_formed": "candidate_formation",
+    "candidate_formed": "candidate_formation",
+    "setup_expired": "setup_expiry",
+    "expired": "setup_expiry",
+    "opportunity_invalidated_by_source_gap": "setup_invalidation",
+    "setup_invalidated": "setup_invalidation",
+    "invalidated": "setup_invalidation",
+    "orderflow_admission": "admission",
+    "admission": "admission",
+}
+_TERMINAL_STRUCTURAL_STAGES = frozenset({"setup_expiry", "setup_invalidation", "admission"})
+
+
+def _record_field(record: Mapping[str, Any], name: str) -> Any:
+    value = record.get(name)
+    if value is not None:
+        return value
+    values = record.get("values")
+    if isinstance(values, Mapping) and values.get(name) is not None:
+        return values[name]
+    extensions = record.get("producer_extensions")
+    if isinstance(extensions, Mapping):
+        for extension in extensions.values():
+            if not isinstance(extension, Mapping):
+                continue
+            causal_ids = extension.get("causal_ids")
+            if isinstance(causal_ids, Mapping) and causal_ids.get(name) is not None:
+                return causal_ids[name]
+            if extension.get(name) is not None:
+                return extension[name]
+    return None
+
+
+def _causal_opportunity_id(record: Mapping[str, Any]) -> str | None:
+    for name in ("lifecycle_id", "opportunity_id", "candidate_id", "causal_parent_id"):
+        value = _record_field(record, name)
+        if value:
+            return str(value)
+    return None
+
+
+def _structural_stage(record: Mapping[str, Any]) -> str | None:
+    reason = _record_field(record, "reason") or _record_field(record, "reason_code")
+    if reason is not None:
+        stage = _STRUCTURAL_STAGE_BY_REASON.get(str(reason).lower())
+        if stage is not None:
+            return stage
+    native = str(record.get("native_kind") or record.get("kind") or "").lower()
+    return _STRUCTURAL_STAGE_BY_REASON.get(native)
+
+
+def causal_lifecycle_records(
+    left: Sequence[Mapping[str, Any]], right: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Compare structural lifecycle facts while retaining producer populations.
+
+    This is diagnostic only.  It indexes every record, deduplicates only the
+    structural view by causal opportunity identity, and reports repeated
+    terminal transitions instead of hiding them from the parity layer.
+    """
+    def index(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+        indexed: dict[str, list[dict[str, Any]]] = {}
+        structural: dict[tuple[str, str], dict[str, Any]] = {}
+        duplicates: Counter[tuple[str, str]] = Counter()
+        native_kinds: Counter[str] = Counter()
+        for record in records:
+            native_kinds[str(record.get("native_kind") or record.get("kind") or "")] += 1
+            identity = str(record.get("comparison_identity") or record.get("identity") or "")
+            indexed.setdefault(identity, []).append(dict(record))
+            opportunity = _causal_opportunity_id(record)
+            stage = _structural_stage(record)
+            if opportunity is None or stage is None:
+                continue
+            key = (opportunity, stage)
+            if key in structural:
+                duplicates[key] += 1
+            else:
+                structural[key] = dict(record)
+        return {
+            "record_count": len(records),
+            "native_kind_counts": dict(sorted(native_kinds.items())),
+            "identity_index": indexed,
+            "structural_count": len(structural),
+            "structural_index": {f"{key[0]}::{key[1]}": value for key, value in structural.items()},
+            "duplicate_structural_records": [
+                {"opportunity_id": key[0], "stage": key[1], "duplicates": count}
+                for key, count in sorted(duplicates.items())
+            ],
+            "duplicate_terminal_transitions": [
+                {"opportunity_id": key[0], "stage": key[1], "duplicates": count}
+                for key, count in sorted(duplicates.items()) if key[1] in _TERMINAL_STRUCTURAL_STAGES
+            ],
+        }
+
+    left_index = index(left)
+    right_index = index(right)
+    return {"left": left_index, "right": right_index}
+
+
+def _deduplicate_structural_records(records: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    seen: set[tuple[str, str]] = set()
+    result: list[Mapping[str, Any]] = []
+    for record in records:
+        opportunity = _causal_opportunity_id(record)
+        stage = _structural_stage(record)
+        key = (opportunity, stage) if opportunity is not None and stage is not None else None
+        if key is not None and key in seen:
+            continue
+        if key is not None:
+            seen.add(key)
+        result.append(record)
+    return result
+
+
+def _causal_id(record: Mapping[str, Any]) -> str | None:
+    values = record.get("values", record.get("comparable_values", record))
+    values = values if isinstance(values, Mapping) else {}
+    for key in ("candidate_id", "opportunity_id", "lifecycle_id", "setup_id", "causal_parent_id"):
+        value = _record_field(record, key) or record.get(key) or values.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def _evidence_timestamp(record: Mapping[str, Any]) -> str | None:
+    evidence = record.get("evidence")
+    if isinstance(evidence, Mapping):
+        timestamps = evidence.get("timestamps")
+        if isinstance(timestamps, Sequence) and not isinstance(timestamps, (str, bytes)) and timestamps:
+            return str(timestamps[0])
+    values = record.get("values")
+    if isinstance(values, Mapping):
+        for key in ("observed_at", "available_at", "decision_at", "timestamp", "fill_timestamp"):
+            if values.get(key):
+                return str(values[key])
+    return str(record.get("occurred_at")) if record.get("occurred_at") else None
+
+
+def _provenance_gaps(artifact: Mapping[str, Any], layer: str, *, max_records: int) -> list[Mapping[str, Any]]:
+    layers = artifact.get("layers", {})
+    all_records = [item for values in layers.values() if isinstance(values, list)
+                   for item in values if isinstance(item, Mapping)] if isinstance(layers, Mapping) else []
+    known = {str(value) for item in all_records for value in (
+        item.get("identity"), item.get("comparison_identity"), item.get("causal_parent_id"),
+        _record_field(item, "decision_id"),
+    ) if value}
+    records = layers.get(layer, []) if isinstance(layers, Mapping) else []
+    return [item for item in records if isinstance(item, Mapping)
+            and (not item.get("causal_parent_id") or str(item["causal_parent_id"]) not in known)][:max_records]
+
+
+def causal_lifecycle_diff(
+    paper: Mapping[str, Any], canonical: Mapping[str, Any], *, max_records: int = 100,
+) -> dict[str, Any]:
+    """Report lifecycle coverage without changing the strict four-layer verdict."""
+    def records(artifact: Mapping[str, Any], layer: str) -> list[Mapping[str, Any]]:
+        raw = artifact.get("layers", {}).get(layer, [])
+        return [item for item in raw if isinstance(item, Mapping)]
+
+    paper_decisions = records(paper, "decision")
+    canonical_decisions = records(canonical, "decision")
+
+    def index(items: Sequence[Mapping[str, Any]]) -> dict[str, list[Mapping[str, Any]]]:
+        indexed: dict[str, list[Mapping[str, Any]]] = {}
+        for item in items:
+            key = _causal_id(item) or str(item.get("comparison_identity") or item.get("identity"))
+            indexed.setdefault(key, []).append(item)
+        return indexed
+
+    def indexes(items: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, list[Mapping[str, Any]]]]:
+        fields = ("candidate_id", "opportunity_id", "lifecycle_id", "causal_parent_id",
+                  "comparison_identity")
+        result: dict[str, dict[str, list[Mapping[str, Any]]]] = {field: {} for field in fields}
+        result["evidence_timestamp"] = {}
+        for item in items:
+            for field in fields:
+                value = _record_field(item, field) or item.get(field)
+                if value is not None:
+                    result[field].setdefault(str(value), []).append(item)
+            timestamp = _evidence_timestamp(item)
+            if timestamp is not None:
+                result["evidence_timestamp"].setdefault(timestamp, []).append(item)
+        return result
+
+    paper_index = index(paper_decisions)
+    canonical_index = index(canonical_decisions)
+    terminal_reasons = {
+        "setup_expired", "setup_invalidated", "opportunity_invalidated_by_source_gap",
+        "invalidated", "filled", "exit", "exit_decision", "position_closed", "hard_stop",
+        "same_side_departure", "eod", "session_close",
+    }
+
+    def terminal_duplicates(items: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        seen: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+        for item in items:
+            reason = _record_field(item, "reason") or _record_field(item, "reason_code")
+            native = str(item.get("native_kind") or reason or item.get("kind") or "").lower()
+            stage = _structural_stage(item) or native
+            if native in terminal_reasons or stage in _TERMINAL_STRUCTURAL_STAGES:
+                seen.setdefault((_causal_id(item) or "", stage), []).append(item)
+        return [
+            {"causal_id": key[0], "stage": key[1], "records": [
+                {"identity": item.get("identity"), "native_kind": item.get("native_kind"),
+                 "occurred_at": item.get("occurred_at"), "evidence_timestamp": _evidence_timestamp(item)}
+                for item in values
+            ]}
+            for key, values in seen.items() if key[0] and len(values) > 1
+        ][:max_records]
+
+    paper_keys, canonical_keys = set(paper_index), set(canonical_index)
+    return {
+        "first_concrete_mismatch": next((
+            {"causal_id": key, "paper": paper_index.get(key, []), "canonical": canonical_index.get(key, [])}
+            for key in sorted(paper_keys | canonical_keys)
+            if paper_index.get(key, [{}])[0] != canonical_index.get(key, [{}])[0]
+        ), None),
+        "missing_paper_records": [item for key in sorted(canonical_keys - paper_keys) for item in canonical_index[key]][:max_records],
+        "extra_paper_records": [item for key in sorted(paper_keys - canonical_keys) for item in paper_index[key]][:max_records],
+        "duplicate_terminal_transitions": terminal_duplicates(paper_decisions),
+        "counts_by_native_kind": {
+            "paper": dict(sorted(Counter(str(item.get("native_kind") or item.get("kind")) for item in paper_decisions).items())),
+            "canonical": dict(sorted(Counter(str(item.get("native_kind") or item.get("kind")) for item in canonical_decisions).items())),
+        },
+        "indexes": {"paper": indexes(paper_decisions), "canonical": indexes(canonical_decisions)},
+        "execution_provenance_gaps": _provenance_gaps(paper, "execution_settlement", max_records=max_records),
+        "ledger_provenance_gaps": _provenance_gaps(paper, "portfolio_ledger", max_records=max_records),
+        "remaining_canonical_coverage_blockers": canonical.get("coverage", {}).get("issues", []),
+    }
+
+
 def _coverage(
     decisions: Sequence[Mapping[str, Any]], bars_seen: int, unavailable: Sequence[str],
-    *, execution_observed: bool, ledger_observed: bool, input_identity: Any,
+    *, execution_observed: bool, settlement_observed: bool, ledger_observed: bool,
+    input_identity: Any,
 ) -> dict[str, Any]:
     issues = []
     if bars_seen <= 0:
@@ -197,7 +439,7 @@ def _coverage(
                                  "execution_settlement": execution_observed,
                                  "portfolio_ledger": ledger_observed},
             "field_availability": {"decision": bool(decisions), "execution": execution_observed,
-                                    "settlement": False, "ledger": ledger_observed},
+                                     "settlement": settlement_observed, "ledger": ledger_observed},
             "unavailable": sorted({str(item) for item in unavailable})}
 
 
@@ -280,11 +522,16 @@ def build_parity_artifact(
         int(result.get("causal_bars_seen", result.get("bars_seen", 0))),
         result.get("unavailable_fields", ()),
         execution_observed=bool(execution or settlements),
+        settlement_observed=bool(settlements),
         ledger_observed=bool(ledger_records),
         input_identity=input_identity,
     )
     layers = {
-        "run_scope": [_record({"occurred_at": f"{session_date}T00:00:00Z", "values": scope}, kind="run_scope", sequence=0)],
+        "run_scope": [_record({
+            "occurred_at": f"{session_date}T05:30:00+05:30", "values": scope,
+            "identity": hashlib.sha256(_canonical_json(scope).encode("utf-8")).hexdigest(),
+            "comparison_identity": hashlib.sha256(_canonical_json(scope).encode("utf-8")).hexdigest(),
+        }, kind="run_scope", sequence=0)],
         "decision": decisions,
         "execution_settlement": [*execution, *settlements],
         "portfolio_ledger": ledger_records,
@@ -436,6 +683,8 @@ def compare_parity_artifacts(left: Mapping[str, Any], right: Mapping[str, Any], 
 
 
 __all__ = ["PARITY_ARTIFACT_SCHEMA_VERSION", "PARITY_CONTRACT_ID", "PARITY_LAYERS",
-           "build_parity_artifact", "build_parity_manifest", "compare_parity_artifacts",
+           "build_parity_artifact", "build_parity_manifest", "causal_lifecycle_diff",
+           "causal_lifecycle_records",
+           "compare_parity_artifacts",
            "compare_parity_manifests", "parity_layer_records", "read_parity_artifact",
            "strategy_payload_hash", "validate_parity_artifact"]

@@ -53,3 +53,37 @@ def test_template_identity_scopes_opportunity_and_conflict_group() -> None:
     )
     assert first.lifecycle_id != second.lifecycle_id
     assert first.execution_group_id == second.execution_group_id == "or-low"
+
+
+def test_terminal_transition_is_idempotent_but_conflicts_are_rejected() -> None:
+    opportunity = _opportunity()
+    at = datetime(2026, 1, 1, 9, 25, tzinfo=UTC)
+    expired = opportunity.transition(OpportunityStatus.EXPIRED, at=at, reason="expired")
+    assert expired.transition(OpportunityStatus.EXPIRED, at=at, reason="expired") == expired
+    try:
+        expired.transition(OpportunityStatus.INVALIDATED, at=at, reason="gap")
+    except ValueError as exc:
+        assert "conflicting transition" in str(exc)
+    else:
+        raise AssertionError("conflicting terminal transition was accepted")
+
+
+def test_snapshot_rejects_inconsistent_transition_history() -> None:
+    opportunity = _opportunity()
+    snapshot = opportunity.snapshot()
+    snapshot["status"] = OpportunityStatus.EXPIRED.value
+    try:
+        SetupOpportunity.from_snapshot(snapshot)
+    except ValueError as exc:
+        assert "status does not match" in str(exc)
+    else:
+        raise AssertionError("inconsistent snapshot was accepted")
+
+    duplicate = opportunity.snapshot()
+    duplicate["transitions"] = [*duplicate["transitions"], duplicate["transitions"][0]]
+    try:
+        SetupOpportunity.from_snapshot(duplicate)
+    except ValueError as exc:
+        assert "duplicate transitions" in str(exc)
+    else:
+        raise AssertionError("duplicate transition history was accepted")

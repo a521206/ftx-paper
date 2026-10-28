@@ -269,7 +269,14 @@ class SetupOpportunity:
         evidence_ids: tuple[str, ...] = (),
     ) -> "SetupOpportunity":
         if self.status is not OpportunityStatus.ACTIVE:
-            return self
+            previous = self.transitions[-1] if self.transitions else None
+            if previous is not None and (
+                previous.status is status
+                and previous.reason == reason
+                and previous.evidence_ids == evidence_ids
+            ):
+                return self
+            raise ValueError("conflicting transition after terminal opportunity state")
         if status is OpportunityStatus.CONFIRMED and not evidence_ids:
             raise ValueError("confirmation transition requires evidence")
         if not reason.strip():
@@ -356,13 +363,39 @@ class SetupOpportunity:
             raise ValueError("invalid opportunity regime version")
         if not isinstance(timeout_count, int):
             raise ValueError("invalid opportunity timeout count")
+        if not transitions:
+            raise ValueError("opportunity snapshot requires an initial transition")
+        if len(set(transitions)) != len(transitions):
+            raise ValueError("opportunity snapshot contains duplicate transitions")
+        if transitions[0].status is not OpportunityStatus.ACTIVE or transitions[0].at != setup.formed_at:
+            raise ValueError("opportunity snapshot has an invalid initial transition")
+        if transitions[0].reason != "formed":
+            raise ValueError("opportunity snapshot initial transition must be formed")
+        if any(current.at < previous.at for previous, current in zip(transitions, transitions[1:])):
+            raise ValueError("opportunity snapshot transitions must be chronological")
+        terminal_index = next(
+            (index for index, item in enumerate(transitions) if item.status is not OpportunityStatus.ACTIVE),
+            None,
+        )
+        if terminal_index is not None and any(
+            item.status is OpportunityStatus.ACTIVE for item in transitions[terminal_index + 1:]
+        ):
+            raise ValueError("opportunity snapshot reactivates a terminal lifecycle")
+        expected_status = transitions[-1].status
+        if OpportunityStatus(str(raw["status"])) is not expected_status:
+            raise ValueError("opportunity snapshot status does not match transition history")
+        timeout_evidence = strings(raw.get("timeout_evidence_ids", ()), "timeout_evidence_ids")
+        if len(set(timeout_evidence)) != len(timeout_evidence):
+            raise ValueError("opportunity snapshot contains duplicate timeout evidence")
+        if timeout_count < len(timeout_evidence):
+            raise ValueError("opportunity timeout count is below timeout evidence count")
         return cls(
             str(raw["lifecycle_id"]), str(raw["response_episode_id"]),
             str(raw["execution_group_id"]), setup,
             OpportunityStatus(str(raw["status"])),
             regime_version,
             str(raw["evidence_timeframe"]), timeout_count,
-            strings(raw.get("timeout_evidence_ids", ()), "timeout_evidence_ids"), transitions,
+            timeout_evidence, transitions,
             str(raw.get("template_id", "")), str(raw.get("policy_version", "")),
             str(raw["context_relation"]) if raw.get("context_relation") is not None else None,
             str(raw["source_interaction_id"]) if raw.get("source_interaction_id") is not None else None,

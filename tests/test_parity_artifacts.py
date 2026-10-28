@@ -1,6 +1,9 @@
 from ftx_paper.runtime.parity_artifacts import (
     PARITY_LAYERS,
     build_parity_artifact,
+    build_parity_manifest,
+    causal_lifecycle_diff,
+    compare_parity_artifacts,
     compare_parity_manifests,
     decision_diagnostics,
     parity_layer_records,
@@ -97,7 +100,6 @@ def test_projection_preserves_decision_lineage_and_excludes_extensions() -> None
     assert record["evidence"]["references"] == ["bar-1"]
     assert record["producer_extensions"] == {"paper_only": True}
     assert "paper_only" not in record["values"]
-
     artifact["layers"]["decision"][0]["producer_extensions"] = {"paper_only": False}
     assert artifact["manifest"] == build_parity_artifact(
         {"strategy": {}, "bars_seen": 1, "metadata": {"input_fingerprint": "fixture"}},
@@ -113,6 +115,27 @@ def test_projection_preserves_decision_lineage_and_excludes_extensions() -> None
         }]},
     )["manifest"]
 
+
+def test_projection_does_not_wrap_producer_identity_into_strict_identity() -> None:
+    artifact = build_parity_artifact(
+        {"strategy": {}, "bars_seen": 1, "metadata": {"input_fingerprint": "fixture"}},
+        request={"session_date": "2026-01-05"},
+        layer_records={"decisions": [{
+            "event_type": "POLICY_DECISION", "decision_at": "2026-01-05T14:30:00Z",
+            "outcome": "accepted", "identity": "producer-local-id",
+        }]},
+    )
+    record = artifact["layers"]["decision"][0]
+    assert record["identity"] != "producer-local-id"
+
+
+def test_settlement_availability_reflects_projected_settlements() -> None:
+    artifact = build_parity_artifact(
+        {"strategy": {}, "bars_seen": 1, "metadata": {"input_fingerprint": "fixture"},
+         "synthetic_settlements": [{"timestamp": "2026-01-05T14:31:00Z"}]},
+        request={"session_date": "2026-01-05"},
+    )
+    assert artifact["coverage"]["field_availability"]["settlement"] is True
 
 def test_ledger_projection_does_not_invent_closeout() -> None:
     artifact = build_parity_artifact(
@@ -151,6 +174,66 @@ def test_projection_excludes_reference_replacement_and_preserves_native_reason()
     records = artifact["layers"]["decision"]
     assert len(records) == 1
     assert records[0]["native_kind"] == "setup_expired"
+
+
+def test_run_scope_record_identity_remains_strict() -> None:
+    left = _artifact()
+    right = _artifact()
+    right["producer"] = {"name": "NiftyZoning", "version": "fixture"}
+    right["layers"]["run_scope"][0]["occurred_at"] = "2026-01-05T05:30:00+05:30"
+    right["layers"]["run_scope"][0]["identity"] = "canonical-local-scope"
+    right["layers"]["run_scope"][0]["comparison_identity"] = "canonical-local-scope"
+    right["manifest"] = build_parity_manifest(right)
+    result = compare_parity_artifacts(left, right)
+    assert result["layer"] == "run_scope"
+
+
+def test_run_scope_uses_deterministic_local_session_boundary() -> None:
+    artifact = _artifact()
+    assert artifact["layers"]["run_scope"][0]["occurred_at"] == "2026-01-05T05:30:00+05:30"
+
+
+def test_causal_lifecycle_diff_reports_duplicate_terminal_structural_stages() -> None:
+    decisions = []
+    for reason in ("setup_invalidated", "setup_invalidated", "orderflow_admission", "orderflow_admission"):
+        decisions.append({
+            "event_type": "POLICY_DECISION", "decision_at": "2026-01-05T14:30:00Z",
+            "outcome": "rejected", "reason": reason, "opportunity_id": "opp-1",
+        })
+    artifact = build_parity_artifact(
+        {"strategy": {}, "bars_seen": 1, "metadata": {"input_fingerprint": "fixture"}},
+        request={"session_date": "2026-01-05"}, layer_records={"decisions": decisions},
+    )
+    report = causal_lifecycle_diff(artifact, artifact)
+    assert {(item["causal_id"], item["records"][0]["native_kind"]) for item in report["duplicate_terminal_transitions"]} == {
+        ("opp-1", "setup_invalidated"), ("opp-1", "orderflow_admission"),
+    }
+
+
+def test_causal_lifecycle_diff_indexes_ids_and_reports_terminal_duplicates() -> None:
+    paper = build_parity_artifact(
+        {"strategy": {}, "bars_seen": 1, "metadata": {"input_fingerprint": "fixture"}},
+        request={"session_date": "2026-01-05"},
+        layer_records={"decisions": [
+            {"event_type": "POLICY_DECISION", "decision_at": "2026-01-05T14:30:00Z",
+             "outcome": "recorded", "reason": "setup_candidate_formed", "opportunity_id": "opp-1"},
+            {"event_type": "POLICY_DECISION", "decision_at": "2026-01-05T14:31:00Z",
+             "outcome": "rejected", "reason": "setup_expired", "opportunity_id": "opp-1"},
+            {"event_type": "POLICY_DECISION", "decision_at": "2026-01-05T14:32:00Z",
+             "outcome": "rejected", "reason": "setup_expired", "opportunity_id": "opp-1"},
+        ]},
+    )
+    canonical = build_parity_artifact(
+        {"strategy": {}, "bars_seen": 1, "metadata": {"input_fingerprint": "fixture"}},
+        request={"session_date": "2026-01-05"},
+        layer_records={"decisions": [
+            {"event_type": "POLICY_DECISION", "decision_at": "2026-01-05T14:30:00Z",
+             "outcome": "recorded", "reason": "setup_candidate_formed", "opportunity_id": "opp-1"},
+        ]},
+    )
+    report = causal_lifecycle_diff(paper, canonical)
+    assert report["duplicate_terminal_transitions"][0]["causal_id"] == "opp-1"
+    assert report["counts_by_native_kind"]["paper"]["setup_expired"] == 2
 
 
 def test_projection_reads_reason_and_outcome_from_canonical_policy_view() -> None:
