@@ -30,6 +30,7 @@ from ftx_paper.execution.settlement import ExitValidationError, validate_exit_or
 from ftx_paper.strategy.exits import ExitAction
 from ftx_paper.strategy import ConfiguredStrategyFactory, StrategyFactory
 from ftx_paper.strategy.orderflow import OrderflowConfig
+from ftx_paper.strategy.orderflow_reporting import detached_replay_records
 from ftx_paper.strategy.policy_contract import ExecutionMode
 from ftx_paper.strategy.config import (
     AFTERNOON_ENTRY_MINUTES,
@@ -881,7 +882,9 @@ class ReplayWorker:
             "filtered_source_rows": int(input_manifest["filtered_source_rows"]),
             "completed_source_rows": int(input_manifest["completed_source_rows"]),
             "gap_rows": int(input_manifest["gap_rows"]),
-            "processed_decision_bars": int(bars_seen),
+            # Decision scope excludes futures-clocked bars whose orderflow
+            # observation is incomplete or carries a source gap.
+            "processed_decision_bars": int(causal_bars_seen if native_orderflow else bars_seen),
             "incomplete_causal_bars": max(0, int(bars_seen) - int(causal_bars_seen)),
             "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "directional_exposure": directional_exposure,
@@ -889,7 +892,9 @@ class ReplayWorker:
                 "session_date": session_date,
                 "vehicles": list(vehicles),
                 "emit_rejected_decisions": emit_rejected_decisions,
+                "capture_mode": request.get("capture_mode", "full"),
             },
+            "capture_mode": request.get("capture_mode", "full"),
         }
         execution_by_decision: dict[Any, list[dict[str, Any]]] = {}
         for item in all_events:
@@ -952,6 +957,27 @@ class ReplayWorker:
                 "score_average": sum(scores) / len(scores) if scores else None,
             },
         }
+        detached_scope = {
+            "source_contract": "ftx-paper-replay",
+            "input_identity": metadata["input_fingerprint"],
+            "requested_sessions": [session_date],
+            "effective_sessions": [session_date],
+            "timezone": request.get("timezone", "Asia/Kolkata"),
+            "session_end": request.get("session_end", str(SESSION_DATA_END)),
+            "decision_clock": request.get("decision_clock", {"cutoff": "exclusive"}),
+            "vehicles": list(vehicles),
+            "strategy_configuration": {"hash": metadata["configuration_hash"]},
+            "counts": {
+                "selected_source_rows": metadata["selected_source_rows"],
+                "filtered_source_rows": metadata["filtered_source_rows"],
+                "completed_source_rows": metadata["completed_source_rows"],
+                "gap_rows": metadata["gap_rows"],
+                "processed_decision_bars": metadata["processed_decision_bars"],
+            },
+        }
+        replay_result["replay_records"] = [
+            record.to_dict() for record in detached_replay_records(tuple(all_events), scope=detached_scope)
+        ]
         replay_result["parity_artifact"] = build_parity_artifact(
             replay_result, request=request, layer_records=parity_records,
         )

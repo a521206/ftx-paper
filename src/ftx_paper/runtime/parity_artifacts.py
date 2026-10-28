@@ -15,6 +15,10 @@ PARITY_ARTIFACT_SCHEMA_VERSION = 2
 PARITY_CONTRACT_ID = "producer_replay_parity"
 PARITY_MANIFEST_VERSION = 1
 PARITY_LAYERS = ("run_scope", "decision", "execution_settlement", "portfolio_ledger")
+DECISION_STAGES = frozenset({"interaction", "candidate", "admission", "trigger", "exit"})
+DECISION_OUTCOMES = frozenset({"accepted", "rejected", "cancelled", "invalidated", "expired", "observed", "unavailable"})
+EXECUTION_KINDS = frozenset({"reservation", "authorization", "submission", "order_intent", "fill", "pending_exit", "exit", "exit_fill", "cancellation", "settlement", "synthetic_settlement"})
+LEDGER_KINDS = frozenset({"reservation", "reservation_release", "authorization", "fill", "partial_fill", "cancellation", "exit_settlement", "daily_reset", "closeout"})
 
 
 def _jsonable(value: Any) -> Any:
@@ -110,18 +114,55 @@ def _timestamp(record: Mapping[str, Any]) -> str:
     parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     if parsed.tzinfo is None:
         raise ValueError("parity timestamps must be timezone-aware")
-    # Preserve the producer's aware offset.  The strict contract compares the
-    # deterministic local session boundary and causal evidence timestamps as
-    # published, rather than silently changing their representation to UTC.
-    return parsed.isoformat().replace("+00:00", "Z")
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _record(record: Mapping[str, Any], *, kind: str, sequence: int) -> dict[str, Any]:
+def _neutral_stage(record: Mapping[str, Any]) -> str:
+    raw = _decision_value(record, "stage") or _decision_value(record, "decision_stage")
+    reason = str(_decision_value(record, "reason") or _decision_value(record, "reason_code") or "").lower()
+    value = str(raw or "").lower()
+    if value in DECISION_STAGES:
+        return value
+    if "interaction" in value or value in {"lifecycle", "location"}:
+        return "interaction"
+    if "admission" in value or "admission" in reason:
+        return "admission"
+    if "trigger" in value:
+        return "trigger"
+    if "exit" in value or str(record.get("event_type", "")).upper() in {"EXITDECISION", "EXIT", "CLOSE"}:
+        return "exit"
+    if "candidate" in value or "setup" in value or "opportunity" in value or "candidate" in reason or "setup_" in reason:
+        return "candidate"
+    raise ValueError("decision is missing a neutral stage")
+
+
+def _neutral_outcome(record: Mapping[str, Any]) -> str:
+    value = _decision_value(record, "outcome")
+    reason = str(_decision_value(record, "reason") or _decision_value(record, "reason_code") or "").lower()
+    if value is None:
+        value = "unavailable" if record.get("unavailable") else "observed"
+    outcome = str(value).lower()
+    if outcome == "recorded":
+        return "observed"
+    if outcome not in DECISION_OUTCOMES:
+        if "invalid" in reason:
+            return "invalidated"
+        if "expire" in reason:
+            return "expired"
+        if "cancel" in reason:
+            return "cancelled"
+        raise ValueError("decision has an unsupported outcome")
+    return outcome
+
+
+def _record(record: Mapping[str, Any], *, kind: str, sequence: int,
+            parent_identity: str | None = None) -> dict[str, Any]:
     values = record.get("comparable_values", record.get("values", record))
     values = dict(values) if isinstance(values, Mapping) else {}
     if "comparable_values" not in record and "values" not in record:
         values = {key: value for key, value in values.items() if key not in {
             "event_type", "decision_id", "client_order_id", "producer_local_id",
+            "candidate_id", "opportunity_id", "lifecycle_id", "setup_id", "causal_parent_id",
             "comparison_identity", "source", "session_date", "sequence", "stream_sequence",
             "account_revision",
             "producer_extensions",
@@ -138,15 +179,11 @@ def _record(record: Mapping[str, Any], *, kind: str, sequence: int) -> dict[str,
         evidence = record.get("evidence")
     occurred_at = _timestamp(record)
     native_kind = _native_kind(record, kind=kind)
-    causal_identity = (
-        record.get("candidate_id") or values.get("candidate_id")
-        or record.get("lifecycle_id") or values.get("lifecycle_id")
-        or record.get("opportunity_id") or values.get("opportunity_id")
-    )
     identity_basis = {
         "kind": kind,
         "minute": occurred_at[:16],
-        "causal_identity": causal_identity,
+        "event_key": record.get("neutral_event_key") or record.get("event_key") or record.get("event_type"),
+        "reason": _decision_value(record, "reason") or _decision_value(record, "reason_code"),
         "dimensions": {key: values.get(key) for key in (
             "cell", "vehicle", "direction", "side", "instrument", "status", "quantity",
         ) if values.get(key) is not None},
@@ -154,21 +191,28 @@ def _record(record: Mapping[str, Any], *, kind: str, sequence: int) -> dict[str,
     identity = hashlib.sha256(_canonical_json(identity_basis).encode("utf-8")).hexdigest()
     if not isinstance(evidence, Mapping):
         evidence = {}
-    return {
+    projected = {
         "kind": kind,
         "native_kind": native_kind,
         "stage": stage,
         "outcome": outcome,
         "comparison_identity": identity,
-        "causal_parent_id": record.get("causal_parent_id") or record.get("decision_id"),
+        "causal_parent_id": parent_identity,
         "evidence": _jsonable(dict(evidence)),
         "producer_extensions": _jsonable(record.get("producer_extensions", {})),
         "occurred_at": occurred_at,
         "sequence": sequence,
         "identity": identity,
         "values": _jsonable(values),
-        "unavailable": [key for key, value in values.items() if value is None],
+        "unavailable": list(record.get("unavailable", ())) + [key for key, value in values.items() if value is None],
+        "identity_basis": identity_basis,
     }
+    if kind == "decision":
+        projected["stage"] = _neutral_stage(record)
+        projected["outcome"] = _neutral_outcome(record)
+        if projected["stage"] not in DECISION_STAGES or projected["outcome"] not in DECISION_OUTCOMES:
+            raise ValueError("invalid neutral decision stage or outcome")
+    return projected
 
 
 def decision_diagnostics(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -426,9 +470,9 @@ def causal_lifecycle_diff(
 def _coverage(
     decisions: Sequence[Mapping[str, Any]], bars_seen: int, unavailable: Sequence[str],
     *, execution_observed: bool, settlement_observed: bool, ledger_observed: bool,
-    input_identity: Any,
+    input_identity: Any, projection_issues: Sequence[str] = (),
 ) -> dict[str, Any]:
-    issues = []
+    issues = list(projection_issues)
     if bars_seen <= 0:
         issues.append("no_completed_bars")
     if not input_identity:
@@ -452,37 +496,72 @@ def build_parity_artifact(
     layer_records = layer_records or {}
     source_decisions = list(layer_records.get("decisions", ()))
     source_decisions = [event for event in source_decisions
-                        if is_decision_event(str(event.get("event_type", "")), event)
-                        and _is_structural_decision(event)
-                        and (str(_decision_value(event, "outcome") or "").lower() in {"", "accepted", "rejected"}
-                             or str(_decision_value(event, "reason") or "").lower() == "setup_candidate_formed"
-                             or str(event.get("event_type", "")).upper() == "EXITDECISION")]
-    decisions = [_record(event, kind=("candidate" if str(_decision_value(event, "reason") or "").lower() == "setup_candidate_formed"
-                                       else "exit" if str(event.get("event_type", "")).upper() == "EXITDECISION"
-                                       else str(_decision_value(event, "outcome") or "rejected")), sequence=index)
-                 for index, event in enumerate(source_decisions)]
+                        if (is_decision_event(str(event.get("event_type", "")), event)
+                            or event.get("decision_stage") is not None
+                            or event.get("stage") is not None
+                            or isinstance(event.get("decision_view"), Mapping))
+                        and _is_structural_decision(event)]
+    projection_issues = [
+        f"missing_event_key:{index}"
+        for index, event in enumerate(source_decisions)
+        if not event.get("neutral_event_key") and not event.get("event_key")
+    ]
+    decisions = []
+    local_identities: dict[str, str] = {}
+    for index, event in enumerate(source_decisions):
+        local_parent = event.get("causal_parent_id") or event.get("decision_id")
+        try:
+            projected = _record(event, kind="decision", sequence=len(decisions))
+        except ValueError as exc:
+            projection_issues.append(f"decision_projection_error:{index}:{exc}")
+            continue
+        if local_parent is not None and str(local_parent) in local_identities:
+            projected["causal_parent_id"] = local_identities[str(local_parent)]
+        decisions.append(projected)
+        for key in ("decision_id", "candidate_id", "opportunity_id", "lifecycle_id", "setup_id"):
+            value = event.get(key)
+            if value is not None:
+                local_identities[str(value)] = str(projected["identity"])
     execution_types = {"ORDER_INTENT", "ORDER_AUTHORIZED", "ORDER_ACK", "FILL", "ORDER_UNFILLED", "ORDER_SUPPRESSED", "RISK_REJECTED", "RESERVATION", "AUTHORIZATION", "SUBMISSION", "PENDING_EXIT", "EXIT_FILL", "CANCELLATION", "SETTLEMENT"}
     source_execution = [event for event in layer_records.get("execution", ())
-                        if str(event.get("event_type", "")).upper() in execution_types]
-    source_exits = [event for event in layer_records.get("execution", ())
-                    if str(event.get("event_type", "")).upper() in {"EXIT", "CLOSE"}]
+                        if str(event.get("event_type", "")).upper() in execution_types
+                        or str(event.get("event_type", "")).upper() in {"EXIT", "CLOSE"}]
+    projection_issues.extend(
+        f"missing_event_key:execution:{index}"
+        for index, event in enumerate(source_execution)
+        if not event.get("neutral_event_key") and not event.get("event_key")
+    )
     execution_kinds = {"ORDER_INTENT": "order_intent", "ORDER_AUTHORIZED": "authorization",
                        "ORDER_ACK": "submission", "AUTHORIZATION": "authorization",
                        "SUBMISSION": "submission", "RESERVATION": "reservation", "FILL": "fill",
                        "EXIT_FILL": "exit_fill", "PENDING_EXIT": "pending_exit",
                        "CANCELLATION": "cancellation", "SETTLEMENT": "settlement",
-                       "EXIT": "exit", "CLOSE": "exit"}
-    execution = [_record(event, kind=execution_kinds.get(str(event.get("event_type", "")).upper(), "order_intent"), sequence=index)
-                 for index, event in enumerate([*source_execution, *source_exits])]
+                       "EXIT": "exit", "CLOSE": "exit", "ORDER_UNFILLED": "cancellation",
+                       "ORDER_SUPPRESSED": "cancellation", "RISK_REJECTED": "cancellation"}
+    execution = []
+    for index, event in enumerate(source_execution):
+        parent = local_identities.get(str(event.get("decision_id") or event.get("causal_parent_id")))
+        if (event.get("decision_id") or event.get("causal_parent_id")) and parent is None:
+            projection_issues.append(f"missing_parent_link:execution:{index}")
+        execution.append(_record(
+            event, kind=execution_kinds.get(str(event.get("event_type", "")).upper(), "order_intent"),
+            sequence=index, parent_identity=parent,
+        ))
     settlements = [_record(event, kind="synthetic_settlement", sequence=len(execution) + index)
                    for index, event in enumerate(result.get("synthetic_settlements", ()))]
     ledger_records: list[dict[str, Any]] = []
     for event in layer_records.get("ledger", ()):
         if isinstance(event, Mapping):
+            if not event.get("neutral_event_key") and not event.get("event_key"):
+                projection_issues.append(f"missing_event_key:ledger:{len(ledger_records)}")
+            parent = local_identities.get(str(event.get("decision_id") or event.get("causal_parent_id")))
+            if (event.get("decision_id") or event.get("causal_parent_id")) and parent is None:
+                projection_issues.append(f"missing_parent_link:ledger:{len(ledger_records)}")
             ledger_records.append(_record(
                 event,
                 kind=str(event.get("kind") or event.get("event_type") or "ledger_mutation").lower(),
                 sequence=len(ledger_records),
+                parent_identity=parent,
             ))
     strategy, strategy_hash = strategy_payload_hash(result.get("strategy"))
     metadata = result.get("metadata", {})
@@ -501,6 +580,11 @@ def build_parity_artifact(
         "sessions": ["orderflow"] if str(request.get("strategy_id", "")).startswith("ftx-paper-orderflow") else [],
         "vehicles": list(request.get("vehicles", ())),
         "partitions": {"source": ["orderflow"]} if str(request.get("strategy_id", "")).startswith("ftx-paper-orderflow") else {},
+        "session_end": request.get("session_end"),
+        "decision_clock": request.get("decision_clock", {"cutoff": "exclusive"}),
+        "capture_mode": request.get("capture_mode", metadata.get("capture_mode")),
+        "capital_profile": request.get("capital_profile", result.get("configuration", {})),
+        "strategy_configuration_hash": metadata.get("configuration_hash"),
         "replay_input": replay_input,
         "counts": {
             "selected_source_rows": int(metadata.get("selected_source_rows", 0)),
@@ -512,7 +596,7 @@ def build_parity_artifact(
             "processed_decision_bars": int(metadata.get("processed_decision_bars", result.get("bars_seen", 0))),
         },
         "processed": {
-            "bar_count": int(result.get("causal_bars_seen", result.get("bars_seen", 0))),
+            "bar_count": int(metadata.get("processed_decision_bars", result.get("bars_seen", 0))),
             "session_count": 1 if session_date else 0,
         },
     }
@@ -521,14 +605,24 @@ def build_parity_artifact(
         decisions,
         int(result.get("causal_bars_seen", result.get("bars_seen", 0))),
         result.get("unavailable_fields", ()),
-        execution_observed=bool(execution or settlements),
-        settlement_observed=bool(settlements),
-        ledger_observed=bool(ledger_records),
+        execution_observed="execution" in layer_records,
+        settlement_observed="synthetic_settlements" in result or any(
+            str(item.get("event_type", "")).upper() in {"SETTLEMENT", "SYNTHETIC_SETTLEMENT"}
+            for item in layer_records.get("execution", ()) if isinstance(item, Mapping)
+        ),
+        ledger_observed="ledger" in layer_records,
         input_identity=input_identity,
+        projection_issues=projection_issues,
     )
+    coverage["layer_issues"] = {
+        "run_scope": ["missing_input_identity"] if not input_identity else [],
+        "decision": [issue for issue in projection_issues if ":execution:" not in issue and ":ledger:" not in issue],
+        "execution_settlement": [issue for issue in projection_issues if ":execution:" in issue],
+        "portfolio_ledger": [issue for issue in projection_issues if ":ledger:" in issue],
+    }
     layers = {
         "run_scope": [_record({
-            "occurred_at": f"{session_date}T05:30:00+05:30", "values": scope,
+            "occurred_at": f"{session_date}T00:00:00Z", "values": scope,
             "identity": hashlib.sha256(_canonical_json(scope).encode("utf-8")).hexdigest(),
             "comparison_identity": hashlib.sha256(_canonical_json(scope).encode("utf-8")).hexdigest(),
         }, kind="run_scope", sequence=0)],
@@ -571,7 +665,12 @@ def build_parity_manifest(artifact: Mapping[str, Any]) -> dict[str, Any]:
         coverage = artifact.get("coverage", {})
         observed_layers = coverage.get("observed_layers", {})
         observed = bool(observed_layers.get(layer, False)) if isinstance(observed_layers, Mapping) else False
-        status = "INCOMPLETE" if not coverage.get("complete", False) else (
+        layer_issues = coverage.get("layer_issues", {})
+        incomplete = (
+            any(issue in {"no_completed_bars", "missing_input_identity"} for issue in coverage.get("issues", ()))
+            or (isinstance(layer_issues, Mapping) and bool(layer_issues.get(layer)))
+        )
+        status = "INCOMPLETE" if incomplete else (
             "AVAILABLE" if observed else "UNAVAILABLE"
         )
         layers[layer] = {"status": status, "observed": observed, "count": len(records),
@@ -605,7 +704,34 @@ def validate_parity_artifact(artifact: Mapping[str, Any]) -> dict[str, Any]:
                 raise ValueError(f"{layer} sequence must be contiguous")
             if not isinstance(record["occurred_at"], str):
                 raise ValueError(f"{layer} record timestamp is required")
-            _timestamp(record)
+            if _timestamp(record) != record["occurred_at"]:
+                raise ValueError(f"{layer} timestamps must be normalized to UTC")
+            identity_basis = record.get("identity_basis")
+            if not isinstance(identity_basis, Mapping):
+                raise ValueError(f"{layer} record identity basis is required")
+            expected_identity = hashlib.sha256(_canonical_json(identity_basis).encode("utf-8")).hexdigest()
+            if record.get("identity") != expected_identity or record.get("comparison_identity") != expected_identity:
+                raise ValueError(f"{layer} record identity is not canonical")
+            if layer == "decision":
+                if record.get("kind") != "decision" or record.get("stage") not in DECISION_STAGES:
+                    raise ValueError("decision records require a neutral stage")
+                if record.get("outcome") not in DECISION_OUTCOMES:
+                    raise ValueError("decision records require a neutral outcome")
+            elif layer == "execution_settlement" and record.get("kind") not in EXECUTION_KINDS:
+                raise ValueError("unsupported execution lifecycle kind")
+            elif layer == "portfolio_ledger" and record.get("kind") not in LEDGER_KINDS:
+                raise ValueError("unsupported ledger mutation kind")
+    identities = {
+        str(record.get("identity"))
+        for layer in PARITY_LAYERS
+        for record in layers[layer]
+        if isinstance(record, Mapping)
+    }
+    for layer in PARITY_LAYERS:
+        for record in layers[layer]:
+            parent = record.get("causal_parent_id")
+            if parent is not None and str(parent) not in identities:
+                raise ValueError(f"{layer} causal parent is unavailable")
     if artifact["manifest"] != build_parity_manifest(artifact):
         raise ValueError("parity manifest does not match layers")
     return dict(artifact)

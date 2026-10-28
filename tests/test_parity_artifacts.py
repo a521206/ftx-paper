@@ -266,3 +266,21 @@ def test_projection_reads_reason_and_outcome_from_canonical_policy_view() -> Non
     records = artifact["layers"]["decision"]
     assert len(records) == 1
     assert records[0]["native_kind"] == "setup_expired"
+
+
+def test_neutral_projection_uses_stage_outcome_and_utc_identity() -> None:
+    artifact = build_parity_artifact(
+        {"strategy": {}, "bars_seen": 1, "metadata": {"input_fingerprint": "fixture"}},
+        request={"session_date": "2026-01-05"},
+        layer_records={"decisions": [{
+            "event_type": "POLICY_DECISION", "decision_at": "2026-01-05T14:30:00+05:30",
+            "stage": "interaction_response", "outcome": "invalidated",
+            "interaction_id": "producer-local", "reason": "source_gap",
+        }], "execution": [], "ledger": []},
+    )
+    record = artifact["layers"]["decision"][0]
+    assert record["kind"] == "decision"
+    assert record["stage"] == "interaction"
+    assert record["outcome"] == "invalidated"
+    assert record["occurred_at"] == "2026-01-05T09:00:00Z"
+    assert artifact["manifest"]["layers"]["execution_settlement"]["status"] == "AVAILABLE"

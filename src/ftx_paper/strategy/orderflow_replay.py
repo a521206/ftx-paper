@@ -74,6 +74,8 @@ class ReplayMachine:
         events: tuple[Mapping[str, object], ...] = (),
         transitions: tuple[Mapping[str, object], ...] = (),
         unavailable: tuple[Mapping[str, object], ...] = (),
+        checkpoints: tuple[Mapping[str, object], ...] = (),
+        scope: Mapping[str, object] | None = None,
     ) -> ReplayBarResult:
         if self._last_timestamp is not None and timestamp <= self._last_timestamp:
             raise ValueError("replay bars must be strictly chronological")
@@ -105,6 +107,7 @@ class ReplayMachine:
         self.recorder.record(ReplayRecord(
             sequence, timestamp, available_at or timestamp, before_state, after_state,
             available_ids, decisions, aggregates, predicates, events, transitions, unavailable,
+            checkpoints=checkpoints, scope=scope or {},
         ))
         self.state.replay_records = list(self.recorder.records)
         self._last_timestamp = timestamp

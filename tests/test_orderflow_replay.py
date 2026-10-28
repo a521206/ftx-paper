@@ -1,6 +1,10 @@
 from datetime import datetime, timezone
+from threading import Event
 import pytest
 
+from ftx_paper.contracts import Instrument, MarketBar
+from ftx_paper.runtime.replay_worker import ReplayWorker
+from ftx_paper.runtime.store import RuntimeStore
 from ftx_paper.strategy import (
     CANONICAL_PHASE_ORDER, ReplayMachine, ReplayPhase,
     observe_market, prepare_replay_input,
@@ -69,3 +73,21 @@ def test_explicit_orderflow_dispatch_is_executable_and_not_vwap() -> None:
     assert isinstance(strategy, OrderflowStrategy)
     assert strategy.metadata.name == "ftx-paper-orderflow"
     assert strategy.policy.execution_mode is ExecutionMode.EXECUTABLE
+
+
+def test_replay_regression_executes_worker_for_canonical_session_date(tmp_path) -> None:
+    """Exercise the real worker path with an owned deterministic input bar."""
+    bar = MarketBar(
+        Instrument("NIFTY26SEP", "NFO", "FUTURES", "2026-09-29"),
+        datetime(2026, 9, 29, 3, 45, tzinfo=UTC),
+        22600, 22610, 22590, 22600,
+    )
+    worker = ReplayWorker(RuntimeStore(tmp_path))
+    worker._bars = lambda session_date, **_kwargs: (bar,)
+
+    result = worker._execute({"session_date": "2026-09-29"}, Event())
+
+    assert result["source"] == "replay"
+    assert result["bars_seen"] == 1
+    assert result["trades"] == []
+    assert result["metadata"]["requested_parameters"]["session_date"] == "2026-09-29"

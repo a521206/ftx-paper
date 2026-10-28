@@ -49,9 +49,9 @@ if TYPE_CHECKING:
         AdmissionDecision, DiagnosticDecisionIntent, PredicateResult,
         PredicateStatus, evaluate_admission,
     )
-    from .orderflow_capture import CaptureMode, ReplayRecord, ReplayRecorder
+    from .orderflow_capture import CaptureMode, REPLAY_RECORD_SCHEMA_VERSION, ReplayRecord, ReplayRecorder, validate_replay_scope
     from .orderflow_replay import CANONICAL_PHASE_ORDER, OrderflowRuntimeState, ReplayBarResult, ReplayMachine, ReplayPhase
-    from .orderflow_reporting import build_multi_session_report, build_session_summary, causal_actions
+    from .orderflow_reporting import CAUSAL_CHECKPOINT_PHASES, build_multi_session_report, build_session_summary, causal_actions, first_divergent_phase
     from .orderflow_execution import (
         ExecutionAuthorization, ExecutionProposal, ExecutionState, ExecutionStatus,
         OrderflowExecutionCoordinator,
@@ -203,9 +203,9 @@ def __getattr__(name: str):
             "can_requalify": can_requalify,
             "evaluate_admission": evaluate_admission,
         }[name]
-    if name in {"CaptureMode", "ReplayRecord", "ReplayRecorder"}:
-        from .orderflow_capture import CaptureMode, ReplayRecord, ReplayRecorder
-        return {"CaptureMode": CaptureMode, "ReplayRecord": ReplayRecord, "ReplayRecorder": ReplayRecorder}[name]
+    if name in {"CaptureMode", "REPLAY_RECORD_SCHEMA_VERSION", "ReplayRecord", "ReplayRecorder", "validate_replay_scope"}:
+        from .orderflow_capture import CaptureMode, REPLAY_RECORD_SCHEMA_VERSION, ReplayRecord, ReplayRecorder, validate_replay_scope
+        return {"CaptureMode": CaptureMode, "REPLAY_RECORD_SCHEMA_VERSION": REPLAY_RECORD_SCHEMA_VERSION, "ReplayRecord": ReplayRecord, "ReplayRecorder": ReplayRecorder, "validate_replay_scope": validate_replay_scope}[name]
     if name in {"CANONICAL_PHASE_ORDER", "OrderflowRuntimeState", "ReplayBarResult", "ReplayMachine", "ReplayPhase"}:
         from .orderflow_replay import CANONICAL_PHASE_ORDER, OrderflowRuntimeState, ReplayBarResult, ReplayMachine, ReplayPhase
         return {
@@ -215,9 +215,9 @@ def __getattr__(name: str):
             "ReplayMachine": ReplayMachine,
             "ReplayPhase": ReplayPhase,
         }[name]
-    if name in {"build_multi_session_report", "build_session_summary", "causal_actions"}:
-        from .orderflow_reporting import build_multi_session_report, build_session_summary, causal_actions
-        return {"build_multi_session_report": build_multi_session_report, "build_session_summary": build_session_summary, "causal_actions": causal_actions}[name]
+    if name in {"CAUSAL_CHECKPOINT_PHASES", "build_multi_session_report", "build_session_summary", "causal_actions", "first_divergent_phase"}:
+        from .orderflow_reporting import CAUSAL_CHECKPOINT_PHASES, build_multi_session_report, build_session_summary, causal_actions, first_divergent_phase
+        return {"CAUSAL_CHECKPOINT_PHASES": CAUSAL_CHECKPOINT_PHASES, "build_multi_session_report": build_multi_session_report, "build_session_summary": build_session_summary, "causal_actions": causal_actions, "first_divergent_phase": first_divergent_phase}[name]
     if name in {"ExecutionAuthorization", "ExecutionProposal", "ExecutionState", "ExecutionStatus", "OrderflowExecutionCoordinator"}:
         from .orderflow_execution import (
             ExecutionAuthorization, ExecutionProposal, ExecutionState, ExecutionStatus,
@@ -266,9 +266,9 @@ __all__ = [
     "ExecutionGroupClaim", "ExecutionGroupRegistry", "OpportunityStatus",
     "OpportunityTransition", "SetupOpportunity", "StructuralSetup",
     "AdmissionDecision", "DiagnosticDecisionIntent", "PredicateResult", "PredicateStatus", "evaluate_admission",
-    "CaptureMode", "ReplayRecord", "ReplayRecorder",
+    "CaptureMode", "REPLAY_RECORD_SCHEMA_VERSION", "ReplayRecord", "ReplayRecorder", "validate_replay_scope",
     "CANONICAL_PHASE_ORDER", "OrderflowRuntimeState", "ReplayBarResult", "ReplayMachine", "ReplayPhase",
-    "build_multi_session_report", "build_session_summary", "causal_actions",
+    "CAUSAL_CHECKPOINT_PHASES", "build_multi_session_report", "build_session_summary", "causal_actions", "first_divergent_phase",
     "ExecutionAuthorization", "ExecutionProposal", "ExecutionState", "ExecutionStatus",
     "Direction", "LocationTemplate", "OpeningInteractionKind", "ResponseType", "TradeTemplate", "TriggerType",
     "ResponseCandle", "ResponseSpec", "build_response_spec",

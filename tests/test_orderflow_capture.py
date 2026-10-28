@@ -42,3 +42,22 @@ def test_summary_capture_preserves_decisions_but_reduces_observation_detail() ->
 
     assert recorder.records[0].decisions == ("decision",)
     assert recorder.records[0].observations == ()
+
+
+def test_replay_record_detaches_causal_checkpoints_and_freezes_scope() -> None:
+    checkpoints = [{"phase": "source_row", "parent_identity": "source-1"}]
+    scope = {"source_contract": "fixture", "input_identity": "input-1",
+             "requested_sessions": ["2026-01-01"], "effective_sessions": ["2026-01-01"],
+             "vehicles": ["futures"], "strategy_configuration": {},
+             "timezone": "UTC", "decision_clock": {"cutoff": "inclusive"},
+             "counts": {"selected_source_rows": 1, "filtered_source_rows": 0,
+                        "completed_source_rows": 1, "gap_rows": 0,
+                        "processed_decision_bars": 1}}
+    record = ReplayRecord(
+        1, datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 1, 1, 0, 1, tzinfo=UTC),
+        {}, {}, checkpoints=tuple(checkpoints), scope=scope,
+    )
+    checkpoints[0]["phase"] = "mutated"
+    scope["timezone"] = "mutated"
+    assert record.checkpoints[0]["phase"] == "source_row"
+    assert record.scope["timezone"] == "UTC"
