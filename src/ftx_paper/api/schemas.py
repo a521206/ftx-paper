@@ -88,14 +88,18 @@ def openapi_document() -> dict[str, Any]:
             "/api/v1/orderflow": {"get": {"parameters": [{"name": "date", "in": "query", "schema": {"type": "string", "format": "date"}}, {"name": "strategy_id", "in": "query", "schema": {"type": "string", "default": "orderflow-research"}}], "responses": {"200": {"description": "Trader-facing orderflow projection"}}}},
             "/api/v1/replay": {
                 "get": {"responses": {"200": {"description": "Replay runs"}}},
-                "post": {"responses": {"202": {"description": "Replay queued"}, "400": {"description": "Invalid request"}}},
+                "post": {"requestBody": {"required": True, "content": {"application/json": {"schema": {
+                    "type": "object", "additionalProperties": False,
+                    "required": ["session_date", "strategy_id", "vehicles", "mode", "include_parity_layers"],
+                    "properties": {
+                        "session_date": {"type": "string", "format": "date"},
+                        "strategy_id": {"type": "string"},
+                        "vehicles": {"type": "array", "items": {"type": "string", "enum": ["futures", "synthetic"]}},
+                        "mode": {"type": "string", "enum": ["shadow", "replay"]},
+                        "include_parity_layers": {"type": "boolean"},
+                    },
+                }}}}, "responses": {"202": {"description": "Replay queued"}, "400": {"description": "Invalid request"}}},
             },
-            "/api/v1/replay/dates": {"get": {"responses": {"200": {"description": "Available replay dates"}}}},
-            "/api/v1/replay/inputs": {"get": {"parameters": [{"name": "date", "in": "query", "required": True, "schema": {"type": "string", "format": "date"}}], "responses": {"200": {"description": "Deterministic replay input manifest"}}}},
-            "/api/v1/replay/{run_id}": {"get": {"parameters": [{"name": "run_id", "in": "path", "required": True, "schema": {"type": "string"}}, {"name": "include", "in": "query", "schema": {"type": "string", "example": "result,events"}, "description": "Debug-only opt-in to replay result fields"}], "responses": {"200": {"description": "Replay status metadata; result requires explicit include=result"}, "400": {"description": "Invalid include value"}, "404": {"description": "Not found"}}}},
-            "/api/v1/replay/{run_id}/parity/manifest": {"get": {"responses": {"200": {"description": "Producer-neutral replay parity manifest with contract, scope, status, counts, and SHA-256 layer hashes"}, "202": {"description": "Replay is not complete"}, "404": {"description": "Artifact unavailable"}}}},
-            "/api/v1/replay/compare": {"post": {"responses": {"200": {"description": "Cross-producer parity comparison"}, "400": {"description": "Invalid artifacts"}}}},
-            "/api/v1/replay/{run_id}/parity/{layer}": {"get": {"parameters": [{"name": "layer", "in": "path", "required": True, "schema": {"type": "string", "enum": ["run_scope", "decision", "execution_settlement", "portfolio_ledger"]}}, {"name": "offset", "in": "query", "schema": {"type": "integer", "minimum": 0}}, {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 10000}}], "responses": {"200": {"description": "Bounded paginated producer-neutral parity layer records"}, "202": {"description": "Replay is not complete"}, "404": {"description": "Layer unavailable"}, "409": {"description": "Layer coverage incomplete"}}}},
-            "/api/v1/replay/{run_id}/cancel": {"post": {"parameters": [{"name": "run_id", "in": "path", "required": True, "schema": {"type": "string"}}], "responses": {"200": {"description": "Replay cancelled"}, "409": {"description": "Replay cannot be cancelled"}}}},
+            "/api/v1/replay/{run_id}": {"get": {"parameters": [{"name": "run_id", "in": "path", "required": True, "schema": {"type": "string"}}], "responses": {"200": {"description": "Replay bookkeeping with the canonical result envelope"}, "202": {"description": "Replay is not complete"}, "404": {"description": "Not found"}}}},
         },
     }

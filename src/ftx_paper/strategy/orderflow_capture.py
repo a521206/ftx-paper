@@ -24,7 +24,7 @@ REPLAY_RECORD_SCHEMA_VERSION = 2
 def validate_replay_scope(scope: Mapping[str, object]) -> dict[str, object]:
     """Validate the frozen replay contract before facts are captured."""
     normalized = deepcopy(dict(scope))
-    required = {"source_contract", "input_identity", "requested_sessions", "effective_sessions",
+    required = {"source_contract", "input_identity", "requested_dates", "effective_dates",
                 "vehicles", "strategy_configuration", "counts"}
     missing = sorted(required - normalized.keys())
     if missing:

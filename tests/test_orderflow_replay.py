@@ -1,5 +1,4 @@
 from datetime import datetime, timezone
-from threading import Event
 import pytest
 
 from ftx_paper.contracts import Instrument, MarketBar
@@ -87,29 +86,32 @@ def test_orderflow_replay_defaults_to_diagnostic_without_execution_mutations(tmp
     before_status = store.read_status()
     before_events = store.read_events(1000)
 
-    result = worker._execute({
+    result = worker.execute_detached({
         "session_date": "2026-09-29",
         "strategy_id": "ftx-paper-orderflow",
         "vehicles": ["futures", "synthetic"],
-    }, Event())
+        "mode": "shadow",
+        "include_parity_layers": False,
+    })
 
-    assert result["metadata"]["execution_mode"] == "diagnostic"
-    assert result["trades"] == []
-    assert result["ledger"] == {}
+    assert result["execution_scope"] == "shadow"
+    assert result["shadow_trades"] == []
+    assert result["shadow_ledger"] == []
     assert result["execution_scope"] == "shadow"
     assert result["ledger_scope"] == "replay"
-    assert result["shadow_ledger"] == {}
-    assert not any(str(event.get("event_type", "")).upper() in {"FILL", "RESERVATION", "SETTLEMENT"}
+    assert not any(str(event.get("values", {}).get("event_type", "")).upper() in {"FILL", "RESERVATION", "SETTLEMENT"}
                    for event in result["events"])
     assert store.read_status() == before_status
     assert store.read_events(1000) == before_events
 
 
+
+
 def test_replay_summary_counts_unique_lifecycles_and_risk() -> None:
-    summary = ReplayWorker._build_replay_summary(
+    summary = ReplayWorker._build_summary(
         [
-            {"reason": "location_interaction_observed", "lifecycle_id": "loc-1"},
-            {"reason": "location_interaction_observed", "lifecycle_id": "loc-1"},
+            {"reason": "location_interaction_observed", "interaction_id": "loc-1"},
+            {"reason": "location_interaction_observed", "interaction_id": "loc-1"},
             {"reason": "setup_candidate_formed", "decision_id": "candidate-1"},
             {"reason": "setup_candidate_formed", "decision_id": "candidate-2"},
         ],

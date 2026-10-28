@@ -8,7 +8,7 @@ import hashlib
 import json
 from typing import Any
 
-from ftx_paper.runtime.events import is_decision_event
+from ftx_paper.contracts.replay import LEGACY_REPLAY_FIELDS
 
 
 PARITY_ARTIFACT_SCHEMA_VERSION = 2
@@ -133,6 +133,8 @@ def _neutral_stage(record: Mapping[str, Any]) -> str:
         return "exit"
     if "candidate" in value or "setup" in value or "opportunity" in value or "candidate" in reason or "setup_" in reason:
         return "candidate"
+    if str(record.get("event_type", "")).upper() == "POLICY_DECISION":
+        return "interaction"
     raise ValueError("decision is missing a neutral stage")
 
 
@@ -160,7 +162,7 @@ def _record(record: Mapping[str, Any], *, kind: str, sequence: int,
     values = record.get("comparable_values", record.get("values", record))
     values = dict(values) if isinstance(values, Mapping) else {}
     if "comparable_values" not in record and "values" not in record:
-        values = {key: value for key, value in values.items() if key not in {
+        values = {key: value for key, value in values.items() if key not in LEGACY_REPLAY_FIELDS and key not in {
             "event_type", "decision_id", "client_order_id", "producer_local_id",
             "candidate_id", "opportunity_id", "lifecycle_id", "setup_id", "causal_parent_id",
             "comparison_identity", "source", "session_date", "sequence", "stream_sequence",
@@ -482,8 +484,8 @@ def _coverage(
             "observed_layers": {"run_scope": True, "decision": bars_seen > 0,
                                  "execution_settlement": execution_observed,
                                  "portfolio_ledger": ledger_observed},
-            "field_availability": {"decision": bool(decisions), "execution": execution_observed,
-                                     "settlement": settlement_observed, "ledger": ledger_observed},
+             "field_availability": {"decision": bool(decisions), "execution_settlement": execution_observed or settlement_observed,
+                                      "portfolio_ledger": ledger_observed},
             "unavailable": sorted({str(item) for item in unavailable})}
 
 
@@ -494,36 +496,32 @@ def build_parity_artifact(
     """Build the four-layer artifact from producer-owned replay facts."""
     request = request or {}
     layer_records = layer_records or {}
-    source_decisions = list(layer_records.get("decisions", ()))
-    source_decisions = [event for event in source_decisions
-                        if (is_decision_event(str(event.get("event_type", "")), event)
-                            or event.get("decision_stage") is not None
-                            or event.get("stage") is not None
-                            or isinstance(event.get("decision_view"), Mapping))
-                        and _is_structural_decision(event)]
-    projection_issues = [
-        f"missing_event_key:{index}"
-        for index, event in enumerate(source_decisions)
-        if not event.get("neutral_event_key") and not event.get("event_key")
-    ]
+    source_decisions = list(layer_records.get("decision", ()))
+    source_decisions = [event for event in source_decisions if _is_structural_decision(event)]
+    projection_issues: list[str] = []
     decisions = []
     local_identities: dict[str, str] = {}
     for index, event in enumerate(source_decisions):
-        local_parent = event.get("causal_parent_id") or event.get("decision_id")
+        local_parent = (
+            event.get("causal_parent_id") or event.get("decision_id")
+            or event.get("opportunity_id") or event.get("candidate_id")
+            or event.get("lifecycle_id") or event.get("setup_id")
+        )
         try:
             projected = _record(event, kind="decision", sequence=len(decisions))
         except ValueError as exc:
-            projection_issues.append(f"decision_projection_error:{index}:{exc}")
-            continue
-        if local_parent is not None and str(local_parent) in local_identities:
-            projected["causal_parent_id"] = local_identities[str(local_parent)]
+            raise ValueError(f"decision projection failed at {index}: {exc}") from exc
+        if local_parent is not None:
+            projected["causal_parent_id"] = local_identities.get(
+                str(local_parent), str(projected["identity"]),
+            )
         decisions.append(projected)
         for key in ("decision_id", "candidate_id", "opportunity_id", "lifecycle_id", "setup_id"):
             value = event.get(key)
             if value is not None:
                 local_identities[str(value)] = str(projected["identity"])
     execution_types = {"ORDER_INTENT", "ORDER_AUTHORIZED", "ORDER_ACK", "FILL", "ORDER_UNFILLED", "ORDER_SUPPRESSED", "RISK_REJECTED", "RESERVATION", "AUTHORIZATION", "SUBMISSION", "PENDING_EXIT", "EXIT_FILL", "CANCELLATION", "SETTLEMENT"}
-    source_execution = [event for event in layer_records.get("execution", ())
+    source_execution = [event for event in layer_records.get("execution_settlement", ())
                         if str(event.get("event_type", "")).upper() in execution_types
                         or str(event.get("event_type", "")).upper() in {"EXIT", "CLOSE"}]
     projection_issues.extend(
@@ -550,7 +548,7 @@ def build_parity_artifact(
     settlements = [_record(event, kind="synthetic_settlement", sequence=len(execution) + index)
                    for index, event in enumerate(result.get("synthetic_settlements", ()))]
     ledger_records: list[dict[str, Any]] = []
-    for event in layer_records.get("ledger", ()):
+    for event in layer_records.get("portfolio_ledger", ()):
         if isinstance(event, Mapping):
             if not event.get("neutral_event_key") and not event.get("event_key"):
                 projection_issues.append(f"missing_event_key:ledger:{len(ledger_records)}")
@@ -579,30 +577,27 @@ def build_parity_artifact(
         "effective_date_to": session_date,
         "timezone": timezone_name,
         "market_session": request.get("market_session", ["09:15", "15:30"]),
-        "requested_sessions": [requested_from] if requested_from else [],
-        "effective_sessions": [session_date] if session_date else [],
-        "sessions": ["orderflow"] if str(request.get("strategy_id", "")).startswith("ftx-paper-orderflow") else [],
-        "vehicles": list(request.get("vehicles", ())),
-        "partitions": {"source": ["orderflow"]} if str(request.get("strategy_id", "")).startswith("ftx-paper-orderflow") else {},
-        "session_end": request.get("session_end", "15:30"),
-        "session_end_cutoff": request.get("session_end_cutoff", request.get("session_end", "15:30")),
-        "decision_clock": request.get("decision_clock", {"cutoff": "exclusive"}),
-        "capture_mode": request.get("capture_mode", metadata.get("capture_mode")),
-        "capital_profile": request.get("capital_profile", result.get("configuration", {})),
-        "strategy_configuration_hash": metadata.get("configuration_hash"),
+        "vehicles": list(request.get("vehicles", ("futures", "synthetic"))),
+        "session_end_cutoff": request.get("session_end_cutoff", "15:30"),
+        "decision_clock": request.get("decision_clock", {"start": "inclusive", "end": "exclusive"}),
+        "capture_mode": request.get("capture_mode", metadata.get("capture_mode", "full")),
+        "capital_profile": request.get("capital_profile", {"name": "research"}),
+        "strategy_configuration": request.get("strategy_configuration", {
+            "candidate_states_are_actionable": False,
+            "cost_basis": "gross_before_costs",
+            "dynamic_session_extrema": "updated from completed 5m aggregates at their available_at",
+            "entry_basis": "5m structural candidate plus causal 1m displacement or 5m recovery retest",
+            "exit_basis": "owner-authorized 1m or 5m policy signal",
+            "registered_locations": ["OR_LOW", "OR_HIGH", "PD_LOW", "PD_HIGH", "SESSION_HIGH", "SESSION_LOW"],
+            "research_only": True,
+        }),
         "replay_input": replay_input,
         "counts": {
             "selected_source_rows": int(metadata.get("selected_source_rows", 0)),
             "filtered_source_rows": int(metadata.get("filtered_source_rows", 0)),
             "completed_source_rows": int(metadata.get("completed_source_rows", 0)),
             "gap_rows": int(metadata.get("gap_rows", 0)),
-            "completed_causal_bars": int(result.get("causal_bars_seen", 0)),
-            "incomplete_causal_bars": int(metadata.get("incomplete_causal_bars", 0)),
             "processed_decision_bars": int(metadata.get("processed_decision_bars", result.get("bars_seen", 0))),
-        },
-        "processed": {
-            "bar_count": int(metadata.get("processed_decision_bars", result.get("bars_seen", 0))),
-            "session_count": 1 if session_date else 0,
         },
     }
     input_identity = metadata.get("input_fingerprint")
@@ -610,12 +605,12 @@ def build_parity_artifact(
         decisions,
         int(result.get("causal_bars_seen", result.get("bars_seen", 0))),
         result.get("unavailable_fields", ()),
-        execution_observed="execution" in layer_records,
+        execution_observed="execution_settlement" in layer_records,
         settlement_observed="synthetic_settlements" in result or any(
             str(item.get("event_type", "")).upper() in {"SETTLEMENT", "SYNTHETIC_SETTLEMENT"}
-            for item in layer_records.get("execution", ()) if isinstance(item, Mapping)
+            for item in layer_records.get("execution_settlement", ()) if isinstance(item, Mapping)
         ),
-        ledger_observed="ledger" in layer_records,
+        ledger_observed="portfolio_ledger" in layer_records,
         input_identity=input_identity,
         projection_issues=projection_issues,
     )
@@ -625,20 +620,29 @@ def build_parity_artifact(
         "execution_settlement": [issue for issue in projection_issues if ":execution:" in issue],
         "portfolio_ledger": [issue for issue in projection_issues if ":ledger:" in issue],
     }
+    run_scope_identity = hashlib.sha256(_canonical_json({"kind": "run_scope", "scope": scope}).encode("utf-8")).hexdigest()
     layers = {
-        "run_scope": [_record({
-            "occurred_at": f"{session_date}T00:00:00Z", "values": scope,
-            "identity": hashlib.sha256(_canonical_json(scope).encode("utf-8")).hexdigest(),
-            "comparison_identity": hashlib.sha256(_canonical_json(scope).encode("utf-8")).hexdigest(),
-        }, kind="run_scope", sequence=0)],
+        "run_scope": [{"kind": "run_scope", "occurred_at": f"{session_date}T00:00:00Z", "sequence": 0,
+                       "identity": run_scope_identity, "comparison_identity": run_scope_identity,
+                       "identity_basis": {"kind": "run_scope", "scope": scope}, "values": _jsonable(scope), "unavailable": []}],
         "decision": decisions,
         "execution_settlement": [*execution, *settlements],
         "portfolio_ledger": ledger_records,
     }
+    run_id = str(request.get("run_id") or result.get("run_id") or "paper-replay")
+    execution_scope = str(result.get("execution_scope") or request.get("mode") or "shadow")
+    for records in layers.values():
+        for record in records:
+            record.update({
+                "schema_version": 1,
+                "run_id": run_id,
+                "execution_scope": execution_scope,
+                "ledger_scope": "replay",
+            })
     artifact = {"artifact_type": "producer_parity", "schema_version": PARITY_ARTIFACT_SCHEMA_VERSION,
                 "contract": {"id": PARITY_CONTRACT_ID, "version": 1, "layers": list(PARITY_LAYERS)},
                  "producer": {"name": "ftx-paper", "version": str(strategy.get("version", "unknown"))},
-                "run_id": str(request.get("run_id") or result.get("run_id") or "paper-replay"),
+                 "run_id": run_id,
                 "scope": scope, "coverage": coverage,
                 "producer_configuration": {"payload": strategy, "payload_hash": strategy_hash},
                 "layers": layers}
@@ -672,12 +676,13 @@ def build_parity_manifest(artifact: Mapping[str, Any]) -> dict[str, Any]:
         observed = bool(observed_layers.get(layer, False)) if isinstance(observed_layers, Mapping) else False
         layer_issues = coverage.get("layer_issues", {})
         incomplete = (
+            not bool(coverage.get("complete", True))
+            or (
             any(issue in {"no_completed_bars", "missing_input_identity"} for issue in coverage.get("issues", ()))
             or (isinstance(layer_issues, Mapping) and bool(layer_issues.get(layer)))
+            )
         )
-        status = "INCOMPLETE" if incomplete else (
-            "AVAILABLE" if observed else "UNAVAILABLE"
-        )
+        status = "UNAVAILABLE" if not observed else ("INCOMPLETE" if incomplete else "AVAILABLE")
         layers[layer] = {"status": status, "observed": observed, "count": len(records),
                          "sha256": hashlib.sha256(_canonical_json(canonical_records(records)).encode("utf-8")).hexdigest()}
     scope = artifact.get("scope", {})
@@ -703,10 +708,14 @@ def validate_parity_artifact(artifact: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(records, list):
             raise ValueError(f"parity layer {layer} must be an array")
         for sequence, record in enumerate(records):
-            if not isinstance(record, Mapping) or any(key not in record for key in ("kind", "occurred_at", "sequence", "identity", "values", "unavailable")):
+            if not isinstance(record, Mapping) or any(key not in record for key in ("schema_version", "run_id", "execution_scope", "ledger_scope", "kind", "occurred_at", "sequence", "identity", "values", "unavailable")):
                 raise ValueError(f"invalid {layer} record")
             if record["sequence"] != sequence:
                 raise ValueError(f"{layer} sequence must be contiguous")
+            if record.get("schema_version") != 1 or record.get("run_id") != artifact.get("run_id"):
+                raise ValueError(f"{layer} record scope is invalid")
+            if record.get("execution_scope") not in {"shadow", "replay"} or record.get("ledger_scope") != "replay":
+                raise ValueError(f"{layer} record scope is invalid")
             if not isinstance(record["occurred_at"], str):
                 raise ValueError(f"{layer} record timestamp is required")
             if _timestamp(record) != record["occurred_at"]:

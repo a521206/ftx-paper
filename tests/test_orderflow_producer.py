@@ -35,6 +35,19 @@ def test_causal_producer_builds_complete_five_minute_context() -> None:
     assert all(item.source_aggregate_id == parent.observation_id for item in parent.location_observations)
 
 
+def test_causal_producer_accepts_detached_prior_close_for_opening_gap() -> None:
+    producer = CausalOrderflowProducer()
+    producer.set_prior_close(100.0)
+    instrument = Instrument("NIFTYFUT", "NSE", "FUTURES")
+    start = datetime(2026, 1, 1, 3, 45, tzinfo=timezone.utc)
+    producer.ingest(MarketBar(instrument, start, 102.0, 103.0, 101.0, 102.0, 10.0))
+
+    context = producer.context("2026-01-01", "09:15")
+
+    assert context is not None
+    assert context.observations_for("1m")[0].features["previous_close"] == 100.0
+
+
 def test_causal_producer_keeps_later_parent_windows_complete() -> None:
     producer = CausalOrderflowProducer()
     instrument = Instrument("NIFTYFUT", "NSE", "FUTURES")

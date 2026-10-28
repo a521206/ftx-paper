@@ -23,7 +23,7 @@ from .coordinator import SharedDecisionCoordinator
 from .orderflow_contract import OrderflowObservation
 from .orderflow_context import (
     ContextHistory, ContextVersion, OpeningGapState, SessionLevels,
-    classify_opening_gap,
+    advance_opening_gap, classify_opening_gap,
 )
 from .orderflow_opportunity import (
     ExecutionGroupRegistry, OpportunityStatus, SetupOpportunity,
@@ -120,6 +120,9 @@ class OrderflowPolicy:
         self._session_low: float | None = None
         self._admission_suspended = False
         self._gap_end: datetime | None = None
+        self._opening_gap_state = OpeningGapState("UNAVAILABLE")
+        self._opening_gap_initialized = False
+        self._opening_gap_observation_id: str | None = None
         self._opportunities: dict[str, SetupOpportunity] = {}
         self._execution_groups = ExecutionGroupRegistry()
 
@@ -189,6 +192,9 @@ class OrderflowPolicy:
             self._session_low = None
             self._admission_suspended = False
             self._gap_end = None
+            self._opening_gap_state = OpeningGapState("UNAVAILABLE")
+            self._opening_gap_initialized = False
+            self._opening_gap_observation_id = None
             self._opportunities.clear()
             self._session_id = orderflow.session_id
 
@@ -205,6 +211,50 @@ class OrderflowPolicy:
         results: list[PolicyDecision] = list(session_transitions)
         futures = bundle.bars.get(MarketRole.FUTURES)
         expected_instrument = futures.instrument.symbol if futures is not None else None
+
+        # Publish the opening-gap fact from the first causally available 1m
+        # observation.  Waiting for the first 5m parent changes the strategy's
+        # permission clock and drops the producer fact entirely.
+        if not self._opening_gap_initialized:
+            first_1m = next((item for item in observations if item.timeframe == "1m"), None)
+            if first_1m is not None:
+                opening = _number(first_1m, "open")
+                previous_close = _number(first_1m, "previous_close")
+                if opening is not None and previous_close is not None:
+                    prior_high = _number(first_1m, "prior_value_high")
+                    prior_low = _number(first_1m, "prior_value_low")
+                    reference = (
+                        prior_low if prior_low is not None and opening < prior_low
+                        else prior_high if prior_high is not None and opening > prior_high
+                        else previous_close
+                    )
+                    classified_gap = classify_opening_gap(
+                        opening_price=opening,
+                        prior_close=reference,
+                        observed_at=first_1m.observed_at,
+                    )
+                    self._opening_gap_state = OpeningGapState(
+                        "GAP_CANDIDATE" if classified_gap.status in {"UP", "DOWN"}
+                        else classified_gap.status,
+                        classified_gap.gap_points, classified_gap.reference_price,
+                        classified_gap.observed_at, (first_1m.observation_id,),
+                    )
+                    self._opening_gap_observation_id = first_1m.observation_id
+                    results.append(PolicyDecision({
+                        **base,
+                        "decision_at": first_1m.observed_at.isoformat(),
+                        "available_at": first_1m.available_at.isoformat(),
+                        "outcome": "recorded",
+                        "decision_stage": "interaction",
+                        "reason": "opening_gap_context",
+                        "decision_id": _decision_id("opening_gap_context", first_1m.observation_id),
+                        "direction": "down" if (self._opening_gap_state.gap_points or 0) < 0 else "up" if (self._opening_gap_state.gap_points or 0) > 0 else "none",
+                        "gap_points": self._opening_gap_state.gap_points,
+                        "reference_level": self._opening_gap_state.reference_price,
+                        "source_observation_ids": [first_1m.observation_id],
+                    }))
+                    self._opening_gap_initialized = True
+
         for observation in observations:
             if observation.observation_id in self._processed_observation_ids:
                 continue
@@ -214,6 +264,52 @@ class OrderflowPolicy:
                 continue
             if observation.available_at > min(context.as_of, orderflow.cutoff):
                 continue
+            if (
+                observation.timeframe == "1m"
+                and self._opening_gap_initialized
+                and observation.observation_id != self._opening_gap_observation_id
+            ):
+                advanced_gap = self._opening_gap_state
+                if self._opening_gap_state.status == "GAP_CANDIDATE":
+                    advanced_gap = OpeningGapState(
+                        "GAP_ACCEPTED", self._opening_gap_state.gap_points,
+                        self._opening_gap_state.reference_price, observation.available_at,
+                        (*self._opening_gap_state.evidence_ids, observation.observation_id),
+                    )
+                else:
+                    advanced_gap = advance_opening_gap(
+                        self._opening_gap_state,
+                        close=_number(observation, "close"),
+                        available_at=observation.available_at,
+                        evidence_id=observation.observation_id,
+                        complete=(observation.context is not None and observation.context.completeness == "complete"),
+                    )
+                if advanced_gap != self._opening_gap_state:
+                    previous_gap = self._opening_gap_state
+                    self._opening_gap_state = advanced_gap
+                    results.append(PolicyDecision({
+                        **base,
+                        "decision_at": observation.observed_at.isoformat(),
+                        "available_at": observation.available_at.isoformat(),
+                        "outcome": "recorded",
+                        "decision_stage": "interaction",
+                        "reason": "opening_gap_transition",
+                        "decision_id": _decision_id("opening_gap_transition", observation.observation_id),
+                        "from_state": previous_gap.status,
+                        "state": advanced_gap.status,
+                        "source_observation_ids": [observation.observation_id],
+                    }))
+                    results.append(PolicyDecision({
+                        **base,
+                        "decision_at": observation.observed_at.isoformat(),
+                        "available_at": observation.available_at.isoformat(),
+                        "outcome": "accepted",
+                        "decision_stage": "interaction",
+                        "reason": "opening_gap_permission",
+                        "decision_id": _decision_id("opening_gap_permission", observation.observation_id),
+                        "direction": advanced_gap.status,
+                        "source_observation_ids": [observation.observation_id],
+                    }))
             if observation.context is None or observation.context.session_id != orderflow.session_id:
                 continue
             gap_status = observation.context.replay_provenance.get("gap_status")
@@ -234,6 +330,10 @@ class OrderflowPolicy:
                     prior_close=_number(observation, "previous_close"),
                     observed_at=observation.available_at,
                 )
+                context_gap = (
+                    self._opening_gap_state
+                    if self._opening_gap_state.status != "UNAVAILABLE" else opening_gap
+                )
                 self._context_history.publish(ContextVersion(
                     context_id=f"context:{orderflow.session_id}",
                     version=self._context_version,
@@ -248,12 +348,17 @@ class OrderflowPolicy:
                         observation.available_at,
                         source_ids=(observation.observation_id,),
                     ),
-                    opening_gap=opening_gap if opening_gap.status != "UNAVAILABLE" else OpeningGapState(
+                    opening_gap=context_gap if context_gap.status != "UNAVAILABLE" else OpeningGapState(
                         "GAP_CANDIDATE" if gap_status == "source_gap" else "UNAVAILABLE",
                         observed_at=observation.available_at,
                         evidence_ids=(observation.observation_id,),
                     ),
-                    permission="UNAVAILABLE" if gap_status == "source_gap" else "BOTH",
+                    permission=(
+                        "UNAVAILABLE" if gap_status == "source_gap"
+                        else "SHORT" if (context_gap.status == "DOWN" or (context_gap.gap_points or 0) < 0)
+                        else "LONG" if (context_gap.status == "UP" or (context_gap.gap_points or 0) > 0)
+                        else "BOTH"
+                    ),
                     evidence_ids=(observation.observation_id,),
                 ))
             if gap_status == "source_gap":
@@ -531,6 +636,11 @@ class OrderflowPolicy:
                             opening_gap_allowed=(
                                 current_context is not None
                                 and current_context.opening_gap.status != "UNAVAILABLE"
+                                and (
+                                    current_context.opening_gap.status not in {"UP", "DOWN"}
+                                    or (direction == "long" and (current_context.opening_gap.gap_points or 0) >= 0)
+                                    or (direction == "short" and (current_context.opening_gap.gap_points or 0) <= 0)
+                                )
                                 and not self._admission_suspended
                             ),
                             active_position_allowed=context.exposure.open_positions == 0,

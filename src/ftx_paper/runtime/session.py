@@ -30,6 +30,7 @@ from .facades import FeedController, FeedManager, OrderManager, PnlManager, Stra
 from .event_bus import EventBus
 from ftx_paper.execution import ExecutionService, PaperExecutionCoordinator
 from .events import is_decision_event, serialize_datetime
+from .state import LiveRuntimeState
 
 
 logger = logging.getLogger("ftx-paper")
@@ -77,6 +78,9 @@ class RuntimeSession:
         self.capital_context = capital_context or CapitalRuntimeContext(
             self.capital_profile, environment="live",
         )
+        self.live_state = LiveRuntimeState(
+            portfolio=self.portfolio, capital_context=self.capital_context, engine=self.engine,
+        )
         # The session is the account owner; strategies receive the same objects
         # rather than being queried as an alternate source of runtime state.
         strategy = getattr(self.engine, "strategy", None)
@@ -110,6 +114,7 @@ class RuntimeSession:
         self.market_clock = market_clock or (lambda: datetime.now(IST))
         self.feed = None
         self.broker = None
+        self.live_state.broker = self.broker
         self._thread = None
         self._lock = threading.RLock()
         self._stopping = False
@@ -320,10 +325,12 @@ class RuntimeSession:
             )
             if self.broker_factory:
                 self.broker = self.broker_factory(client)
+                self.live_state.broker = self.broker
             else:
                 # External brokers supply market data only. Orders must remain paper
                 # executions even when the live feed is broker-backed.
                 self.broker = PaperBroker()
+                self.live_state.broker = self.broker
             if not isinstance(self.broker, PaperBroker):
                 raise TypeError("runtime order execution must use PaperBroker")
             backfill_kwargs: dict[str, Any] = {"contract_store": self.store}

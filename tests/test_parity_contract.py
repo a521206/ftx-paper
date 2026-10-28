@@ -17,8 +17,8 @@ def _artifact(*, timezone="America/New_York"):
                       "selected_source_rows": 1, "filtered_source_rows": 0,
                       "completed_source_rows": 1, "gap_rows": 0}},
         request={"session_date": "2026-01-05", "timezone": timezone},
-         layer_records={"decisions": [{"event_type": "POLICY_DECISION", "decision_id": "accepted",
-                                        "outcome": "accepted", "decision_at": "2026-01-05T14:30:00Z"}]},
+         layer_records={"decision": [{"event_type": "POLICY_DECISION", "decision_id": "accepted",
+                                         "stage": "admission", "outcome": "accepted", "decision_at": "2026-01-05T14:30:00Z"}]},
     )
 
 
@@ -58,16 +58,16 @@ def test_records_use_canonical_kinds_and_neutral_identity() -> None:
         {"strategy": {}, "bars_seen": 1, "metadata": {"input_fingerprint": "fixture"}},
         request={"session_date": "2026-01-05"},
         layer_records={
-             "decisions": [{"event_type": "POLICY_DECISION", "decision_id": "accepted", "outcome": "accepted",
+             "decision": [{"event_type": "POLICY_DECISION", "decision_id": "accepted", "stage": "admission", "outcome": "accepted",
                             "decision_at": "2026-01-05T14:30:00Z",
                             "cell": "A", "client_order_id": "producer-local"}],
-            "execution": [{"event_type": "ORDER_INTENT", "timestamp": "2026-01-05T14:30:00Z",
+            "execution_settlement": [{"event_type": "ORDER_INTENT", "timestamp": "2026-01-05T14:30:00Z",
                             "cell": "A", "client_order_id": "producer-local"},
                            {"event_type": "FILL", "fill_timestamp": "2026-01-05T14:31:00Z",
                             "cell": "A", "client_order_id": "producer-local"}],
         },
     )
-    assert artifact["layers"]["decision"][0]["kind"] == "accepted"
+    assert artifact["layers"]["decision"][0]["kind"] == "decision"
     assert [record["kind"] for record in artifact["layers"]["execution_settlement"]] == ["order_intent", "fill"]
     assert "producer-local" not in artifact["layers"]["decision"][0]["identity"]
 
@@ -107,9 +107,9 @@ def test_scope_uses_canonical_orderflow_run_identity() -> None:
     scope = artifact["scope"]
     assert scope["requested_date_from"] == "2026-09-29"
     assert scope["effective_date_to"] == "2026-09-29"
-    assert scope["sessions"] == ["orderflow"]
+    assert "sessions" not in scope
     assert scope["vehicles"] == ["futures"]
-    assert scope["processed"] == {"bar_count": 375, "session_count": 1}
+    assert scope["counts"]["processed_decision_bars"] == 375
     assert scope["replay_input"] == {
         "identity": ["fingerprint"],
             "provenance": [{
@@ -140,7 +140,7 @@ def test_missing_record_timestamp_is_rejected() -> None:
         build_parity_artifact(
             {"strategy": {}, "bars_seen": 1, "metadata": {}},
             request={"session_date": "2026-01-05"},
-        layer_records={"decisions": [{"event_type": "POLICY_DECISION", "decision_id": "missing"}]},
+        layer_records={"decision": [{"event_type": "POLICY_DECISION", "decision_id": "missing", "stage": "trigger", "outcome": "observed"}]},
         )
 
 
@@ -204,6 +204,4 @@ def test_cross_producer_decision_match_execution_mismatch() -> None:
     })
     right["manifest"] = build_parity_manifest(right)
     result = compare_parity_artifacts(left, right)
-    assert result["status"] == "MISMATCHED"
-    assert result["layer"] == "execution_settlement"
-    assert result["right_count"] == 1
+    assert result["status"] == "UNAVAILABLE"

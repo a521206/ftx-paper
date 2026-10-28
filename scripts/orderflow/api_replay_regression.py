@@ -43,8 +43,12 @@ def _actual_metrics(result: Mapping[str, Any]) -> dict[str, Any]:
     summary = result.get("summary")
     if not isinstance(summary, Mapping):
         raise RuntimeError("replay result does not contain the versioned summary contract")
-    if result.get("summary_schema_version") != 1:
-        raise RuntimeError("replay result has an unsupported summary schema version")
+    required = {"run_id", "schema_version", "execution_scope", "ledger_scope", "summary",
+                "events", "shadow_trades", "shadow_ledger", "authoritative_trades",
+                "authoritative_ledger", "parity_artifact"}
+    missing = required - set(result)
+    if missing:
+        raise RuntimeError(f"replay result is missing required fields: {sorted(missing)}")
     return {name: summary.get(name) for name in CANONICAL}
 
 
@@ -65,6 +69,8 @@ def run(base_url: str, *, timeout: float, interval: float) -> int:
             "session_date": "2026-09-29",
             "strategy_id": "ftx-paper-orderflow",
             "vehicles": ["futures", "synthetic"],
+            "mode": "shadow",
+            "include_parity_layers": False,
         },
     )
     run_id = queued.get("run_id")

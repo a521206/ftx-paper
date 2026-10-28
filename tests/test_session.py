@@ -65,7 +65,7 @@ def test_replay_and_runtime_share_paper_engine_bundle_path(monkeypatch, tmp_path
     result = replay._execute({"session_date": "2026-01-01"}, Event())
 
     assert calls == [bundle.bundle_id, bundle.bundle_id]
-    assert any(event["event_type"] == "BUNDLE_PATH_CHECK" for event in result["events"])
+    assert any(event["values"]["event_type"] == "BUNDLE_PATH_CHECK" for event in result["events"])
 
 
 def test_replay_worker_stop_cancels_active_job(monkeypatch):
@@ -96,7 +96,10 @@ def test_replay_worker_stop_cancels_active_job(monkeypatch):
         return {}
 
     monkeypatch.setattr(worker, "_execute", execute)
-    run_id = worker.submit({"session_date": "2026-01-01"})
+    run_id = worker.submit({
+        "session_date": "2026-01-01", "strategy_id": "ftx-paper-orderflow",
+        "vehicles": ["futures"], "mode": "shadow", "include_parity_layers": False,
+    })
     assert started.wait(1)
 
     worker.stop()

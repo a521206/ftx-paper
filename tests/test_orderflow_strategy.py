@@ -414,7 +414,7 @@ def test_non_executable_location_decision_is_persisted_in_parity_stream() -> Non
         {"strategy": {"name": "ftx-paper-orderflow"}, "bars_seen": 1,
          "metadata": {"input_fingerprint": "fixture"}},
         request={"session_date": "2026-01-01"},
-        layer_records={"decisions": list(result.events)},
+        layer_records={"decision": list(result.events)},
     )
     record = artifact["layers"]["decision"][0]
     assert record["values"]["decision_stage"] == "opportunity"

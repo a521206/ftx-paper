@@ -77,9 +77,20 @@ class CausalOrderflowProducer:
         self._selected_identity: str | None = None
         self._prior_bars: tuple[MarketBar, ...] = ()
         self._prior_complete = False
+        self._prior_close: float | None = None
+        self._prior_value_high: float | None = None
+        self._prior_value_low: float | None = None
         self._session_timezone = session_timezone
         self._session_start = datetime.strptime(session_start, "%H:%M").time()
         self._session_end = datetime.strptime(session_end, "%H:%M").time()
+
+    def set_prior_close(self, close: float | None) -> None:
+        """Provide the prior-session close when replay starts mid-history."""
+        self._prior_close = close
+
+    def set_prior_value_bounds(self, high: float | None, low: float | None) -> None:
+        self._prior_value_high = high
+        self._prior_value_low = low
 
     def ingest(self, bar: MarketBar) -> None:
         local = bar.timestamp.astimezone(self._session_timezone)
@@ -221,8 +232,11 @@ class CausalOrderflowProducer:
                     "previous_close": (
                         bars[bar_index - 1].close if bar_index and not bar_has_gap
                         else self._prior_bars[-1].close if bar_index == 0 and self._prior_bars
+                        else self._prior_close if bar_index == 0
                         else None
                     ),
+                    "prior_value_high": self._prior_value_high,
+                    "prior_value_low": self._prior_value_low,
                     "vwap": vwap,
                 },
                 context=OrderflowObservationContext(

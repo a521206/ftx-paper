@@ -7,7 +7,7 @@ from flask import Flask, jsonify, redirect, request
 from typing import Any
 
 from ftx_paper.config import IST
-from ftx_paper.contracts import validate_decision_view
+from ftx_paper.contracts import ReplayRequest, validate_decision_view
 from ftx_paper.infrastructure.sqlite.runtime_store import ProcessAlreadyRunningError
 from ftx_paper.runtime.session import RuntimeSession
 from ftx_paper.runtime.store import RuntimeStore
@@ -18,9 +18,6 @@ from ftx_paper.runtime.events import (
     EXECUTION_EVENT_TYPES, RISK_EVENT_TYPES, DecisionTimestampError,
 )
 from ftx_paper.runtime.events import serialize_datetime
-from ftx_paper.runtime.parity_artifacts import (
-    PARITY_LAYERS, compare_parity_artifacts, parity_layer_records, read_parity_artifact,
-)
 from .schemas import error_payload, openapi_document
 from .orderflow import build_orderflow_projection
 
@@ -82,24 +79,12 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             return rows
         return [row for row in rows if row.get("payload", {}).get("strategy_id") == selected]
 
-    def replay_metadata(run: dict[str, Any]) -> dict[str, Any]:
-        result = run.get("result")
-        result = result if isinstance(result, dict) else {}
-        return {
-            "run_id": run.get("run_id"),
-            "status": run.get("status"),
-            "request": run.get("request"),
-            "result_schema_version": result.get("result_schema_version"),
-            "strategy": result.get("strategy"),
-            "configuration": result.get("configuration"),
-            "metadata": result.get("metadata", {}),
-        }
-
     def incomplete_replay_response(run: dict[str, Any]):
         return jsonify({
             "run_id": run.get("run_id"),
             "status": run.get("status"),
-            "replay_metadata": replay_metadata(run),
+            "request": run.get("request"),
+            "error": run.get("error"),
         }), 202
 
     @app.errorhandler(DecisionTimestampError)
@@ -133,72 +118,24 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
         payload = request.get_json(silent=True)
         if not isinstance(payload, dict):
             return jsonify(error_payload("invalid_request", "JSON object body required")), 400
-        if "vehicle" in payload:
-            return jsonify(error_payload("invalid_request", "use vehicles array; vehicle is no longer supported")), 400
-        range_aliases = (("date_from", "date_to"), ("from", "to"), ("from_date", "to_date"))
-        range_pair = next((pair for pair in range_aliases if any(key in payload for key in pair)), None)
-        supported = {"session_date", "strategy_id", "vehicles", "emit_rejected_decisions", "execution_mode", "include_shadow_layers"}
-        if range_pair:
-            supported.update(range_pair)
-        if set(payload) - supported:
-            return jsonify(error_payload("invalid_request", "unsupported replay request fields")), 400
-        if "emit_rejected_decisions" in payload and not isinstance(
-            payload["emit_rejected_decisions"], bool,
-        ):
+        required_fields = {"session_date", "strategy_id", "vehicles", "mode", "include_parity_layers"}
+        missing_fields = required_fields - set(payload)
+        if missing_fields:
             return jsonify(error_payload(
-                "invalid_request", "emit_rejected_decisions must be a boolean",
+                "invalid_request", "missing replay request fields: " + ", ".join(sorted(missing_fields)),
             )), 400
-        if "execution_mode" in payload and payload["execution_mode"] not in {"diagnostic", "executable"}:
-            return jsonify(error_payload("invalid_request", "execution_mode must be diagnostic or executable")), 400
-        if "include_shadow_layers" in payload and not isinstance(payload["include_shadow_layers"], bool):
-            return jsonify(error_payload("invalid_request", "include_shadow_layers must be a boolean")), 400
-        if "strategy_id" in payload and (
-            not isinstance(payload["strategy_id"], str) or not payload["strategy_id"].strip()
-        ):
-            return jsonify(error_payload("invalid_strategy", "strategy_id must be a non-empty string")), 400
-        vehicles = payload.get("vehicles")
-        if vehicles is not None and (
-            not isinstance(vehicles, list)
-            or not vehicles
-            or any(not isinstance(item, str) for item in vehicles)
-            or any(item not in {"futures", "synthetic"} for item in vehicles)
-            or "futures" not in vehicles
-        ):
-            return jsonify(error_payload("invalid_request", "vehicles must include futures; synthetic is reporting-only")), 400
-        requested_date = payload.get("session_date")
-        if range_pair and requested_date is not None:
-            return jsonify(error_payload("invalid_request", "use either session_date or a date range")), 400
-        if range_pair:
-            start_raw, end_raw = (payload.get(key) for key in range_pair)
-            if not isinstance(start_raw, str) or not isinstance(end_raw, str):
-                return jsonify(error_payload("invalid_date", "both range dates are required and must be YYYY-MM-DD")), 400
-            try:
-                start = datetime.strptime(start_raw, "%Y-%m-%d").date().isoformat()
-                end = datetime.strptime(end_raw, "%Y-%m-%d").date().isoformat()
-            except ValueError:
-                return jsonify(error_payload("invalid_date", "range dates must be YYYY-MM-DD")), 400
-            if start != start_raw or end != end_raw or start > end:
-                return jsonify(error_payload("invalid_date", "range dates must be ordered YYYY-MM-DD values")), 400
-            dates = [value for value in store.read_market_dates() if start <= value <= end]
-            if not dates:
-                return jsonify(error_payload("no_data", "no market data in requested date range")), 404
-            request_base = {key: value for key, value in payload.items() if key not in range_pair}
-            run_ids = []
-            try:
-                for session_date in dates:
-                    run_request = {**request_base, "session_date": session_date}
-                    run_ids.append(operations.submit_replay(run_request))
-            except RuntimeError as exc:
-                return jsonify(error_payload("replay_queue_full", str(exc))), 409
-            return jsonify({"run_ids": run_ids, "date_from": start, "date_to": end, "dates": dates}), 202
-        if not isinstance(requested_date, str):
-            return jsonify(error_payload("invalid_date", "session_date is required and must be YYYY-MM-DD")), 400
+        try:
+            replay_request = ReplayRequest.from_mapping(payload)
+        except (TypeError, ValueError) as exc:
+            return jsonify(error_payload("invalid_request", str(exc))), 400
+        requested_date = replay_request.session_date
         try:
             parsed_date = datetime.strptime(requested_date, "%Y-%m-%d").date().isoformat()
         except ValueError:
             return jsonify(error_payload("invalid_date", "session_date must be YYYY-MM-DD")), 400
         if parsed_date != requested_date or parsed_date not in store.read_market_dates():
             return jsonify(error_payload("no_data", "no market data for session_date")), 404
+        payload = replay_request.to_dict()
         payload["session_date"] = parsed_date
         try:
             run_id = operations.submit_replay(payload)
@@ -207,139 +144,20 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
         queued = store.read_replay_run(run_id)
         if queued is None:
             return jsonify(error_payload("not_found", "replay not found")), 404
-        queued["replay_metadata"] = replay_metadata(queued)
         return jsonify(json_safe(queued)), 202
 
     @app.get("/api/v1/replay")
     def list_replays():
         return jsonify(json_safe({"runs": store.read_replay_run_summaries()}))
 
-    @app.get("/api/v1/replay/dates")
-    def replay_dates():
-        return jsonify({"dates": store.read_market_dates()})
-
-    @app.get("/api/v1/replay/inputs")
-    def replay_inputs():
-        session_date = request.args.get("date", "")
-        try:
-            parsed = datetime.strptime(session_date, "%Y-%m-%d").date().isoformat()
-        except ValueError:
-            return jsonify(error_payload("invalid_date", "date must be YYYY-MM-DD")), 400
-        if parsed != session_date:
-            return jsonify(error_payload("invalid_date", "date must be YYYY-MM-DD")), 400
-        if session_date not in store.read_market_dates():
-            return jsonify(error_payload("no_data", "no market data for session_date")), 404
-        return jsonify(json_safe(replay_worker.input_manifest(session_date)))
-
     @app.get("/api/v1/replay/<run_id>")
     def replay_detail(run_id: str):
         run = store.read_replay_run(run_id)
         if run is None:
             return jsonify(error_payload("not_found", "replay not found")), 404
-        # Polling is intentionally small. Large replay results are available
-        # through the parity endpoints; `include=result` is a debug escape hatch.
-        include = {item.strip() for item in request.args.get("include", "").split(",") if item.strip()}
-        if include and "result" not in include:
-            return jsonify(error_payload("invalid_request", "include=result is required for debug replay output")), 400
-        include_result = "result" in include
-        if not include_result:
-            return jsonify(json_safe({
-                "run_id": run.get("run_id"),
-                "status": run.get("status"),
-                "error": run.get("error"),
-            }))
-        result = run.get("result")
-        if isinstance(result, dict):
-            invalid = include - {"result", "events"}
-            if invalid:
-                return jsonify(error_payload("invalid_request", "include supports result and events only")), 400
-            result = dict(result)
-            if "events" not in include:
-                result.pop("events", None)
-            run["result"] = result
-        run["replay_metadata"] = replay_metadata(run)
+        if run.get("status") not in {"completed", "failed", "cancelled"}:
+            return incomplete_replay_response(run)
         return jsonify(json_safe(run))
-
-    @app.get("/api/v1/replay/<run_id>/parity/manifest")
-    def replay_parity_manifest(run_id: str):
-        run = store.read_replay_run(run_id)
-        if run is None:
-            return jsonify(error_payload("not_found", "replay not found")), 404
-        if run.get("status") not in {"completed", "failed", "cancelled"}:
-            return incomplete_replay_response(run)
-        result = run.get("result")
-        if not isinstance(result, dict) or not isinstance(result.get("parity_artifact"), dict):
-            return jsonify(error_payload("unavailable", "parity artifact is unavailable")), 404
-        try:
-            artifact = read_parity_artifact(result["parity_artifact"])
-        except ValueError:
-            return jsonify(error_payload("unavailable", "parity artifact is invalid")), 404
-        manifest = artifact.get("manifest")
-        if not isinstance(manifest, dict):
-            return jsonify(error_payload("unavailable", "persisted parity manifest is unavailable")), 404
-        return jsonify(json_safe({**manifest, "run_id": run_id, "contract": artifact.get("contract")}))
-
-    @app.post("/api/v1/replay/compare")
-    def compare_replay_parity():
-        payload = request.get_json(silent=True)
-        if not isinstance(payload, dict):
-            return jsonify(error_payload("invalid_request", "JSON object body required")), 400
-        left = payload.get("paper_artifact")
-        right = payload.get("canonical_artifact")
-        if not isinstance(left, dict) or not isinstance(right, dict):
-            return jsonify(error_payload(
-                "invalid_request", "paper_artifact and canonical_artifact are required",
-            )), 400
-        result = compare_parity_artifacts(left, right)
-        return jsonify(json_safe(result))
-
-    @app.get("/api/v1/replay/<run_id>/parity/<layer>")
-    def replay_parity_layer(run_id: str, layer: str):
-        run = store.read_replay_run(run_id)
-        if run is None:
-            return jsonify(error_payload("not_found", "replay not found")), 404
-        if run.get("status") not in {"completed", "failed", "cancelled"}:
-            return incomplete_replay_response(run)
-        result = run.get("result")
-        artifact = result.get("parity_artifact") if isinstance(result, dict) else None
-        if not isinstance(artifact, dict):
-            return jsonify(error_payload("unavailable", "parity artifact is unavailable")), 404
-        try:
-            artifact = read_parity_artifact(artifact)
-        except ValueError:
-            return jsonify(error_payload("unavailable", "parity artifact is invalid")), 404
-        try:
-            records = parity_layer_records(artifact, layer.lower())
-        except ValueError:
-            return jsonify(error_payload("invalid_request", f"layer must be one of {', '.join(PARITY_LAYERS)}")), 400
-        try:
-            offset = max(0, int(request.args.get("offset", 0)))
-            limit = min(10_000, max(1, int(request.args.get("limit", 1_000))))
-        except ValueError:
-            return jsonify(error_payload("invalid_request", "offset and limit must be integers")), 400
-        persisted_manifest = artifact.get("manifest")
-        if not isinstance(persisted_manifest, dict):
-            return jsonify(error_payload("unavailable", "persisted parity manifest is unavailable")), 404
-        manifest = persisted_manifest["layers"].get(layer.lower())
-        if not isinstance(manifest, dict):
-            return jsonify(error_payload("unavailable", "parity stage is unavailable")), 404
-        if manifest.get("status") == "UNAVAILABLE":
-            return jsonify(error_payload("unavailable", "parity stage is unavailable")), 404
-        if manifest.get("status") == "INCOMPLETE":
-            return jsonify(error_payload("incomplete", "parity stage coverage is incomplete")), 409
-        return jsonify(json_safe({
-            "run_id": run_id, "layer": layer.lower(), **manifest,
-            "offset": offset, "limit": limit, "total_count": len(records),
-            "records": records[offset:offset + limit],
-            "has_more": offset + limit < len(records),
-            "next_offset": offset + limit if offset + limit < len(records) else None,
-        }))
-
-    @app.post("/api/v1/replay/<run_id>/cancel")
-    def cancel_replay(run_id: str):
-        if not operations.cancel_replay(run_id):
-            return jsonify(error_payload("not_cancellable", "replay cannot be cancelled")), 409
-        return jsonify(json_safe(store.read_replay_run(run_id)))
 
     @app.get("/api/v1/openapi.json")
     def openapi():

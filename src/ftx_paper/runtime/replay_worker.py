@@ -6,11 +6,12 @@ import hashlib
 import json
 from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread, current_thread
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, cast
 from uuid import uuid4
 
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderRole, OrderSide, Role, SyntheticFutureQuote, build_decision_view, synthetic_future_quote, validate_decision_view
+from ftx_paper.contracts.replay import ExecutionScope, LEGACY_REPLAY_FIELDS, ReplayEvent, ReplayLedgerEntry, ReplayRequest, ReplayResult, ReplaySummary, ReplayTrade, REPLAY_SCHEMA_VERSION
 from ftx_paper.domain.capital import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE, CapitalRuntimeContext
 from ftx_paper.market import (
     AggregatorConfig, Cell, CompletedBarAggregator, FeatureService, InstrumentKey,
@@ -24,6 +25,7 @@ from ftx_paper.strategy.orderflow_contract import stable_orderflow_id
 from ftx_paper.strategy.orderflow_producer import CausalOrderflowProducer
 from ftx_paper.runtime.futures_source import FuturesSessionSourceResolver
 from ftx_paper.runtime.parity_artifacts import build_parity_artifact
+from ftx_paper.runtime.state import ReplayRuntimeState
 from ftx_paper.execution.cost import futures_cost, synthetic_futures_cost
 from ftx_paper.execution import PaperExecutionCoordinator
 from ftx_paper.execution.settlement import ExitValidationError, validate_exit_order
@@ -53,6 +55,25 @@ _EXECUTION_EVENT_TYPES = frozenset({
 REPLAY_SUMMARY_SCHEMA_VERSION = 1
 
 
+def _timestamp_string(value: Any) -> str:
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _strip_legacy_fields(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _strip_legacy_fields(item)
+            for key, item in value.items()
+            if str(key) not in LEGACY_REPLAY_FIELDS
+        }
+    if isinstance(value, (list, tuple)):
+        return [_strip_legacy_fields(item) for item in value]
+    return value
+
+
 class _ScopedEvents(list[dict[str, Any]]):
     """Attach replay ownership when an event enters the replay stream."""
 
@@ -67,6 +88,12 @@ class _ScopedEvents(list[dict[str, Any]]):
         scoped.setdefault("run_id", self._run_id)
         scoped.setdefault("execution_scope", self._scope)
         scoped.setdefault("ledger_scope", self._ledger_scope)
+        scoped.setdefault(
+            "neutral_event_key",
+            ":".join(str(scoped.get(field) or "") for field in (
+                "event_type", "decision_id", "client_order_id", "timestamp", "decision_at",
+            )),
+        )
         super().append(scoped)
 
     def extend(self, events: Any) -> None:
@@ -165,6 +192,7 @@ class ReplayWorker:
             thread.join()
 
     def submit(self, request: dict[str, Any]) -> str:
+        request = ReplayRequest.from_mapping(request).to_dict()
         run_id = uuid4().hex
         cancel = Event()
         session_date = str(request.get("session_date") or "").strip()[:10]
@@ -183,6 +211,14 @@ class ReplayWorker:
             self.store.update_replay_run(run_id, status="rejected", error="replay queue is full")
             raise RuntimeError("replay queue is full") from None
         return run_id
+
+    def execute_detached(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Run an isolated replay without creating or updating a stored run."""
+        request = ReplayRequest.from_mapping(request).to_dict()
+        mode = str(request.get("mode", "shadow")).lower()
+        if mode not in {"shadow", "replay"}:
+            raise ValueError("mode must be 'shadow' or 'replay'")
+        return self._execute({**request, "mode": mode, "run_id": request.get("run_id") or uuid4().hex}, Event())
 
     def input_manifest(
         self,
@@ -300,8 +336,12 @@ class ReplayWorker:
                 "open", "high", "low", "close", "volume", "open_interest",
             )),
         )}
-        canonical = json.dumps(fingerprint_source, sort_keys=True, separators=(",", ":"), default=str).encode()
-        payload["input_fingerprint"] = hashlib.sha256(canonical).hexdigest()
+        # The parity input identity is the producer-neutral selected futures
+        # source fingerprint. Supporting bars are provenance, not a second
+        # population that changes the identity recipe.
+        payload["input_fingerprint"] = str(
+            current_source.get("source_fingerprint") if isinstance(current_source, Mapping) else ""
+        ) or hashlib.sha256(json.dumps(fingerprint_source, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
         return payload
 
     def cancel(self, run_id: str) -> bool:
@@ -340,14 +380,19 @@ class ReplayWorker:
                 self._queue.task_done()
 
     def _execute(self, request: dict[str, Any], cancel: Event) -> dict[str, Any]:
-        session_date = str(request.get("session_date") or "")[:10]
+        session_date_value = request.get("session_date")
+        if not isinstance(session_date_value, str):
+            raise ValueError("replay requires session_date as a string")
+        session_date = session_date_value[:10]
         if not session_date:
             raise ValueError("replay requires one session_date")
         raw_vehicles = request.get("vehicles")
         if raw_vehicles is None:
             vehicles = ("futures", "synthetic")
         elif isinstance(raw_vehicles, (list, tuple)):
-            vehicles = tuple(dict.fromkeys(str(item).lower() for item in raw_vehicles))
+            if any(not isinstance(item, str) for item in raw_vehicles):
+                raise ValueError("replay vehicles must contain strings")
+            vehicles = tuple(dict.fromkeys(item.lower() for item in raw_vehicles))
         else:
             raise ValueError("replay vehicles must be an array containing 'futures' and/or 'synthetic'")
         if not vehicles or any(item not in {"futures", "synthetic"} for item in vehicles):
@@ -357,25 +402,29 @@ class ReplayWorker:
         emit_rejected_decisions = request.get("emit_rejected_decisions", False)
         if not isinstance(emit_rejected_decisions, bool):
             raise ValueError("emit_rejected_decisions must be a boolean")
-        raw_execution_mode = request.get("execution_mode", ExecutionMode.DIAGNOSTIC.value)
-        try:
-            execution_mode = ExecutionMode(str(raw_execution_mode).lower())
-        except ValueError as exc:
-            raise ValueError("execution_mode must be 'diagnostic' or 'executable'") from exc
-        diagnostic_mode = request.get("strategy_id") == "ftx-paper-orderflow" and execution_mode is ExecutionMode.DIAGNOSTIC
-        include_shadow_layers = request.get("include_shadow_layers", False)
-        if not isinstance(include_shadow_layers, bool):
-            raise ValueError("include_shadow_layers must be a boolean")
+        mode_value = request.get("mode", "shadow")
+        if not isinstance(mode_value, str):
+            raise ValueError("mode must be 'shadow' or 'replay'")
+        mode = mode_value.lower()
+        if mode not in {"shadow", "replay"}:
+            raise ValueError("mode must be 'shadow' or 'replay'")
+        include_parity_layers = request.get("include_parity_layers", False)
+        if not isinstance(include_parity_layers, bool):
+            raise ValueError("include_parity_layers must be a boolean")
         dates = [session_date]
+        run_id = str(request.get("run_id") or uuid4().hex)
         all_events = _ScopedEvents(
-            run_id=str(request.get("run_id") or ""),
-            execution_scope="shadow" if diagnostic_mode else "replay",
+            run_id=run_id,
+            execution_scope=cast(ExecutionScope, mode),
             ledger_scope="replay",
         )
-        parity_records: dict[str, list[dict[str, Any]]] = {"decisions": [], "execution": [], "ledger": []}
+        parity_records: dict[str, list[dict[str, Any]]] = {
+            "decision": [], "execution_settlement": [], "portfolio_ledger": [],
+        }
+        ledger_records = parity_records["portfolio_ledger"]
         emitted_orderflow_trigger_ids: set[str] = set()
         unavailable_fields: set[str] = set()
-        diagnostic_trades: list[dict[str, Any]] = []
+        shadow_trades: list[dict[str, Any]] = []
         bars_seen = 0
         causal_bars_seen = 0
         initial_capital = self.capital_profile.initial_capital
@@ -423,6 +472,14 @@ class ReplayWorker:
             ):
                 effective_expiry_dates.add(date)
             capital_context = CapitalRuntimeContext(self.capital_profile, environment="replay")
+            replay_state = ReplayRuntimeState(
+                portfolio=portfolio,
+                capital_context=capital_context,
+                engine=None,
+                shadow_trades=shadow_trades,
+                replay_ledger=ledger_records,
+                parity_records=parity_records,
+            )
             strategy_kwargs = {}
             strategy_id = request.get("strategy_id")
             if strategy_id is not None:
@@ -430,27 +487,30 @@ class ReplayWorker:
             if strategy_id == "ftx-paper-orderflow":
                 strategy_kwargs["config"] = OrderflowConfig(
                     enabled_vehicles=tuple(vehicles),
-                    # Diagnostic replay uses executable policy decisions inside
-                    # the isolated shadow engine; authoritative state remains
-                    # protected by the replay-side mutation gates below.
-                    execution_mode=ExecutionMode.EXECUTABLE if diagnostic_mode else execution_mode,
+                    execution_mode=ExecutionMode.EXECUTABLE,
                 )
             strategy = self.strategy_factory.create(
                 **strategy_kwargs,
                 enabled_vehicles=vehicles,
-                portfolio=portfolio,
-                capital_context=capital_context,
+                portfolio=replay_state.portfolio,
+                capital_context=replay_state.capital_context,
                 prior_day_high=prior_day_high,
                 prior_day_low=prior_day_low,
                 expiry_dates=frozenset(effective_expiry_dates),
             )
             last_portfolio = portfolio
             last_strategy_metadata = strategy.metadata
-            coordinator = PaperExecutionCoordinator(portfolio, capital_context)
-            account = AccountAggregate(portfolio, capital_context)
+            coordinator = PaperExecutionCoordinator(replay_state.portfolio, replay_state.capital_context)
+            account = AccountAggregate(replay_state.portfolio, replay_state.capital_context)
             engine = PaperEngine(
                 strategy, emit_rejected_decisions=emit_rejected_decisions,
             )
+            replay_state.engine = engine
+            replay_state.coordinator = coordinator
+            replay_state.account = account
+            portfolio = replay_state.portfolio
+            capital_context = replay_state.capital_context
+            last_portfolio = replay_state.portfolio
             # Each date gets a fresh position/risk session while cumulative
             # capital is carried by the authoritative PortfolioState.
             native_orderflow = strategy.metadata.name == "ftx-paper-orderflow"
@@ -458,15 +518,24 @@ class ReplayWorker:
                 CausalOrderflowProducer()
                 if native_orderflow else None
             )
+            if orderflow_producer is not None:
+                orderflow_producer.set_prior_value_bounds(prior_day_high, prior_day_low)
+                prior_dates = [item for item in available_dates if item < date]
+                if prior_dates:
+                    prior_date = max(prior_dates)
+                    prior_rows = self.store.read_market_bars(prior_date)
+                    prior_source = self._resolve_source(prior_date)
+                    prior_bars = self._bars(
+                        prior_date, rows=prior_rows, futures_source=prior_source,
+                    )
+                    if prior_bars:
+                        orderflow_producer.set_prior_close(prior_bars[-1].close)
             aggregator = self._aggregator(
                 bars,
                 orderflow_producer,
                 tuple(getattr(getattr(strategy, "policy", None), "required_features", ())),
             )
-            feature_service = FeatureService(
-                self.store.feature_repository()
-                if callable(getattr(self.store, "feature_repository", None)) else None,
-            )
+            feature_service = FeatureService(None)
             open_trades: list[dict[str, Any]] = []
             # Synthetic is a reporting-only view of the accepted futures
             # decision.  Keep its diagnostic lifecycle separate so it cannot
@@ -566,7 +635,7 @@ class ReplayWorker:
                                        "client_order_id": action.intent.client_order_id, "vehicle": action.intent.vehicle,
                                        "timestamp": futures_bar.timestamp.isoformat(), "source": "replay",
                                        "session_date": date, "status": "ACKNOWLEDGED"})
-                    realized = self._settle_trade(open_trades, diagnostic_trades, action.intent, futures_bar,
+                    realized = self._settle_trade(open_trades, shadow_trades, action.intent, futures_bar,
                                                   exit_quote, action.reason, exit_price=exit_price,
                                                   trade=open_trade)
                     if action.intent.vehicle == "futures" and "synthetic" in vehicles:
@@ -593,12 +662,12 @@ class ReplayWorker:
                                 ),
                             )
                             self._settle_trade(
-                                synthetic_open_trades, diagnostic_trades,
+                                synthetic_open_trades, shadow_trades,
                                 synthetic_order, futures_bar, synthetic_exit_quote,
                                 action.reason, exit_price=synthetic_exit_quote.price,
                                 trade=synthetic_trade,
                             )
-                    if action.intent.vehicle == "futures" and not diagnostic_mode:
+                    if action.intent.vehicle == "futures":
                         coordinator.fill(action.intent, price=exit_price,
                                          timestamp=futures_bar.timestamp.isoformat(),
                                          cost=_execution_cost(open_trade))
@@ -657,7 +726,7 @@ class ReplayWorker:
                 result_events = [{**event, "source": "replay", "session_date": date} for event in result.events]
                 all_events.extend(result_events)
                 for event in trigger_events:
-                    parity_records["decisions"].append(dict(event))
+                    parity_records["decision"].append(dict(event))
                 for order in result.orders:
                     all_events.append({"event_type": "ORDER_INTENT",
                                        "decision_id": order.client_order_id.rsplit(":", 1)[0],
@@ -670,7 +739,7 @@ class ReplayWorker:
                                        "source": "replay",
                                        "session_date": date})
                     if order.role is OrderRole.ENTRY:
-                        if order.vehicle == "futures" and not diagnostic_mode:
+                        if order.vehicle == "futures":
                             try:
                                 account.authorize_and_reserve(order)
                             except ValueError as exc:
@@ -689,8 +758,7 @@ class ReplayWorker:
                                                  "quantity": order.quantity, "vehicle": order.vehicle,
                                                  "source": "replay", "session_date": date}
                             all_events.append(reservation_event)
-                            if not diagnostic_mode:
-                                parity_records["ledger"].append({**reservation_event, "kind": "reservation"})
+                            ledger_records.append({**reservation_event, "kind": "reservation"})
                             all_events.append({"event_type": "ORDER_AUTHORIZED",
                                                "decision_id": order.client_order_id,
                                                "account_revision": account.revision,
@@ -716,9 +784,8 @@ class ReplayWorker:
                             all_events.append({"event_type": "ORDER_UNFILLED", "decision_id": order.client_order_id,
                                                "vehicle": order.vehicle, "timestamp": futures_bar.timestamp.isoformat(),
                                                "source": "replay", "session_date": date, "reason": "missing_synthetic_future_quote"})
-                            if not diagnostic_mode:
-                                parity_records["ledger"].append({"event_type": "CANCELLATION", "decision_id": order.client_order_id,
-                                                                  "timestamp": futures_bar.timestamp.isoformat(), "reason": "missing_synthetic_future_quote"})
+                            ledger_records.append({"event_type": "CANCELLATION", "decision_id": order.client_order_id,
+                                                   "timestamp": futures_bar.timestamp.isoformat(), "reason": "missing_synthetic_future_quote"})
                             continue
                         fill_price = entry_quote.price if entry_quote is not None else futures_bar.close
                         for event in reversed(all_events):
@@ -735,14 +802,13 @@ class ReplayWorker:
                                            "price": fill_price, "quantity": order.quantity,
                                            "vehicle": order.vehicle, "source": "replay",
                                              "session_date": date})
-                        if not diagnostic_mode:
-                            parity_records["ledger"].append({"event_type": "FILL", "decision_id": order.client_order_id,
-                                                              "timestamp": futures_bar.timestamp.isoformat(),
-                                                              "quantity": order.quantity, "price": fill_price})
+                        ledger_records.append({"event_type": "FILL", "decision_id": order.client_order_id,
+                                               "timestamp": futures_bar.timestamp.isoformat(),
+                                               "quantity": order.quantity, "price": fill_price})
                         engine.register_entry(order, fill_price=fill_price,
                                               entry_fill_time=futures_bar.timestamp,
                                               reference_price=futures_bar.close)
-                        if order.vehicle == "futures" and not diagnostic_mode:
+                        if order.vehicle == "futures":
                             coordinator.fill(order, price=fill_price,
                                               timestamp=futures_bar.timestamp.isoformat())
                         engine.on_execution_event(ExecutionNotification(
@@ -821,11 +887,11 @@ class ReplayWorker:
                                                "reason": "missing_synthetic_future_quote", "source": "replay", "session_date": date})
                             engine.settle_exit(order.client_order_id, filled=False)
                             continue
-                        realized = self._settle_trade(open_trades, diagnostic_trades, order, futures_bar,
+                        realized = self._settle_trade(open_trades, shadow_trades, order, futures_bar,
                                                       exit_quote, order.reason,
                                                       exit_price=exit_quote.price if exit_quote is not None else futures_bar.close,
                                                       trade=open_trade)
-                        if order.vehicle == "futures" and not diagnostic_mode:
+                        if order.vehicle == "futures":
                             coordinator.fill(
                                 order,
                                 price=exit_quote.price if exit_quote is not None else futures_bar.close,
@@ -840,11 +906,10 @@ class ReplayWorker:
                                            "source": "replay", "session_date": date})
                         all_events.append({"event_type": "SETTLEMENT", "decision_id": order.client_order_id,
                                            "timestamp": exit_timestamp, "source": "replay", "session_date": date})
-                        if not diagnostic_mode:
-                            parity_records["ledger"].extend([
-                                {"event_type": "EXIT_SETTLEMENT", "decision_id": order.client_order_id,
-                                 "timestamp": exit_timestamp, "quantity": order.quantity},
-                            ])
+                        ledger_records.extend([
+                            {"event_type": "EXIT_SETTLEMENT", "decision_id": order.client_order_id,
+                             "timestamp": exit_timestamp, "quantity": order.quantity},
+                        ])
                         engine.record_exit(strategy_id=order.strategy_id,
                                            cell=realized.cell.name, reason=order.reason,
                                            entry_bar=realized.entry_bar, exit_bar=engine.bars_seen,
@@ -857,29 +922,24 @@ class ReplayWorker:
                 for event in result.events:
                     event_type = str(event.get("event_type", "")).upper()
                     if is_decision_event(event_type, event):
-                        parity_records["decisions"].append(dict(event))
+                        parity_records["decision"].append(dict(event))
                 for event in all_events[event_start:]:
                     event_type = str(event.get("event_type", "")).upper()
                     if event_type == "EXITDECISION":
                         parity_records["decisions"].append(dict(event))
-                    if (
-                        not diagnostic_mode or include_shadow_layers
-                    ) and (event_type in _EXECUTION_EVENT_TYPES or event_type in {"EXITDECISION", "EXIT", "CLOSE"}):
-                        parity_records["execution"].append(dict(event))
+                    if event_type in _EXECUTION_EVENT_TYPES or event_type in {"EXITDECISION", "EXIT", "CLOSE"}:
+                        parity_records["execution_settlement"].append(dict(event))
             # Preserve open positions as mark-to-market/open replay results.
-            diagnostic_trades.extend({**trade, "status": "open"} for trade in open_trades)
-            diagnostic_trades.extend({**trade, "status": "open"} for trade in synthetic_open_trades)
+            shadow_trades.extend({**trade, "status": "open"} for trade in open_trades)
+            shadow_trades.extend({**trade, "status": "open"} for trade in synthetic_open_trades)
         scores = [int(event["score"]) for event in all_events
                   if isinstance(event.get("score"), (int, float))]
-        normalized_trades = [self._normalize_trade(trade) for trade in diagnostic_trades]
-        replay_summary = self._build_replay_summary(all_events, normalized_trades)
-        if diagnostic_mode:
-            mutation_counts = {
-                "portfolio_mutations": sum((len(last_portfolio.positions), len(last_portfolio.reservations), len(last_portfolio.pending_orders))) if last_portfolio else 0,
-                "ledger_mutations": len(parity_records["ledger"]),
-            }
-            if any(mutation_counts.values()):
-                raise RuntimeError(f"diagnostic orderflow replay mutated execution state: {mutation_counts}")
+        normalized_trades = [self._normalize_trade(trade) for trade in shadow_trades]
+        summary = {
+            **self._build_summary(all_events, normalized_trades),
+            "bars_seen": bars_seen,
+            "decisions_scored": len(scores),
+        }
         ledger_by_date: dict[str, dict[str, Any]] = {}
         for trade in normalized_trades:
             if trade.get("vehicle") != "futures":
@@ -951,12 +1011,12 @@ class ReplayWorker:
                     "vehicles": list(vehicles),
                     "emit_rejected_decisions": emit_rejected_decisions,
                     "capture_mode": request.get("capture_mode", "full"),
-                    "execution_mode": execution_mode.value,
-                    "include_shadow_layers": include_shadow_layers,
+                    "mode": mode,
+                    "include_parity_layers": include_parity_layers,
                 },
                 "capture_mode": request.get("capture_mode", "full"),
-                "execution_mode": execution_mode.value,
-                "include_shadow_layers": include_shadow_layers,
+                "mode": mode,
+                "include_parity_layers": include_parity_layers,
             }
         execution_by_decision: dict[Any, list[dict[str, Any]]] = {}
         for item in all_events:
@@ -977,7 +1037,8 @@ class ReplayWorker:
             })
             normalized_decisions.append(normalized)
         replay_result = {
-            "result_schema_version": 2,
+            "run_id": run_id,
+            "schema_version": REPLAY_SCHEMA_VERSION,
             "source": "replay",
             "vehicles": list(vehicles),
             "vehicle_semantics": "shared_portfolio_directional_and_margin",
@@ -999,15 +1060,13 @@ class ReplayWorker:
             "decision_trace": normalized_decisions,
             "unavailable_fields": sorted(unavailable_fields),
             "summary_schema_version": REPLAY_SUMMARY_SCHEMA_VERSION,
-            "summary": replay_summary,
+            "summary": summary,
             "first_divergent_stage": None,
             # Diagnostic-only trades live inside the replay run result. They
             # are never written to runtime_events, the broker ledger, or the
             # live trades/capital projections.
-            "execution_scope": "shadow" if diagnostic_mode else "replay",
+            "execution_scope": mode,
             "ledger_scope": "replay",
-            "trades": [] if diagnostic_mode else normalized_trades,
-            "shadow_trades": normalized_trades if diagnostic_mode else [],
             "capital": {
                 "initial_capital": initial_capital,
                 "current_equity": current_equity,
@@ -1016,8 +1075,6 @@ class ReplayWorker:
                 "max_drawdown": max_drawdown,
                 "lot_size": NIFTY_LOT_SIZE,
             },
-            "ledger": {} if diagnostic_mode else ledger_by_date,
-            "shadow_ledger": ledger_by_date if diagnostic_mode else {},
             "scoring": {
                 "decisions_scored": len(scores),
                 "score_min": min(scores) if scores else None,
@@ -1026,15 +1083,25 @@ class ReplayWorker:
             },
         }
         detached_scope = {
-            "source_contract": "ftx-paper-replay",
+            "source_contract": "orderflow-replay-v1",
             "input_identity": metadata["input_fingerprint"],
-            "requested_sessions": [session_date],
-            "effective_sessions": [session_date],
+            "requested_dates": [session_date],
+            "effective_dates": [session_date],
             "timezone": request.get("timezone", "Asia/Kolkata"),
-            "session_end": request.get("session_end", str(SESSION_DATA_END)),
-            "decision_clock": request.get("decision_clock", {"cutoff": "exclusive"}),
+            "market_session": list(request.get("market_session", ["09:15", "15:30"])),
+            "session_end_cutoff": request.get("session_end_cutoff", "15:30"),
+            "decision_clock": request.get("decision_clock", {"start": "inclusive", "end": "exclusive"}),
             "vehicles": list(vehicles),
-            "strategy_configuration": {"hash": metadata["configuration_hash"]},
+            "capital_profile": {"name": "research"},
+            "strategy_configuration": request.get("strategy_configuration", {
+                "candidate_states_are_actionable": False,
+                "cost_basis": "gross_before_costs",
+                "dynamic_session_extrema": "updated from completed 5m aggregates at their available_at",
+                "entry_basis": "5m structural candidate plus causal 1m displacement or 5m recovery retest",
+                "exit_basis": "owner-authorized 1m or 5m policy signal",
+                "registered_locations": ["OR_LOW", "OR_HIGH", "PD_LOW", "PD_HIGH", "SESSION_HIGH", "SESSION_LOW"],
+                "research_only": True,
+            }),
             "counts": {
                 "selected_source_rows": metadata["selected_source_rows"],
                 "filtered_source_rows": metadata["filtered_source_rows"],
@@ -1046,20 +1113,64 @@ class ReplayWorker:
         replay_result["replay_records"] = [
             record.to_dict() for record in detached_replay_records(tuple(all_events), scope=detached_scope)
         ]
-        replay_result["parity_artifact"] = build_parity_artifact(
+        parity_artifact = build_parity_artifact(
             replay_result, request=request, layer_records=parity_records,
+        ) if include_parity_layers else None
+        canonical_events = self._canonical_events(
+            all_events, run_id=run_id, execution_scope=cast(ExecutionScope, mode),
         )
-        return replay_result
+        canonical = ReplayResult(
+            run_id=run_id,
+            schema_version=REPLAY_SCHEMA_VERSION,
+            execution_scope=cast(ExecutionScope, mode),
+            ledger_scope="replay",
+            summary=ReplaySummary(summary),
+            events=tuple(canonical_events),
+            shadow_trades=tuple(ReplayTrade(item) for item in normalized_trades),
+            shadow_ledger=tuple(ReplayLedgerEntry(item) for item in ledger_records),
+            authoritative_trades=(),
+            authoritative_ledger=(),
+            parity_artifact=parity_artifact,
+        )
+        return canonical.to_dict()
 
     @staticmethod
-    def _build_replay_summary(
+    def _canonical_events(events: Sequence[Mapping[str, Any]], *, run_id: str,
+                           execution_scope: ExecutionScope) -> list[ReplayEvent]:
+        """Wrap producer events in one strict, producer-neutral event envelope."""
+        result: list[ReplayEvent] = []
+        for sequence, event in enumerate(events):
+            raw_timestamp = (
+                event.get("occurred_at") or event.get("timestamp") or event.get("decision_at")
+                or event.get("fill_timestamp") or f"{event.get('session_date', '1970-01-01')}T00:00:00Z"
+            )
+            occurred_at = _timestamp_string(raw_timestamp)
+            identity_source = json.dumps(
+                {"sequence": sequence, "event_type": event.get("event_type"),
+                 "decision_id": event.get("decision_id"), "occurred_at": occurred_at},
+                sort_keys=True, separators=(",", ":"), default=str,
+            ).encode()
+            identity = hashlib.sha256(identity_source).hexdigest()
+            result.append(ReplayEvent(
+                schema_version=REPLAY_SCHEMA_VERSION, run_id=run_id,
+                execution_scope=cast(ExecutionScope, execution_scope), ledger_scope="replay",
+                sequence=sequence, occurred_at=occurred_at, identity=identity,
+                values=_strip_legacy_fields(event),
+            ))
+        return result
+
+    @staticmethod
+    def _build_summary(
         events: list[dict[str, Any]], trades: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        def count_reason(reason: str) -> int:
+        def count_reason(
+            reason: str, *, identity_fields: tuple[str, ...], exclude_locations: frozenset[str] = frozenset(),
+        ) -> int:
             identities = {
-                str(event.get("lifecycle_id") or event.get("decision_id") or index)
+                str(next((event.get(field) for field in identity_fields if event.get(field) is not None), index))
                 for index, event in enumerate(events)
                 if event.get("reason") == reason
+                and str(event.get("location", "")) not in exclude_locations
             }
             return len(identities)
 
@@ -1071,8 +1182,12 @@ class ReplayWorker:
             if initial_risk_rs:
                 risk_reward_values.append(float(trade.get("gross_pnl_rs") or 0.0) / initial_risk_rs)
         return {
-            "setup_candidates": count_reason("setup_candidate_formed"),
-            "location_interactions": count_reason("location_interaction_observed"),
+            "setup_candidates": count_reason(
+                "setup_candidate_formed", identity_fields=("opportunity_id", "setup_id", "decision_id"),
+            ),
+            "location_interactions": count_reason(
+                "location_interaction_observed", identity_fields=("interaction_id",), exclude_locations=frozenset({"VWAP"}),
+            ),
             "entries_filled": len(futures),
             "gross_reward_points": gross_pnl_rs / NIFTY_LOT_SIZE,
             "achieved_risk_reward": round(sum(risk_reward_values), 5) if risk_reward_values else None,
