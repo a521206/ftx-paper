@@ -8,6 +8,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone, tzinfo
 from bisect import bisect_right
 import math
+from typing import cast
 
 from ftx_paper.contracts import MarketBar
 from ftx_paper.config import IST
@@ -18,6 +19,7 @@ from .orderflow_contract import (
 )
 from .orderflow_location import LocationBand, LocationObservation, LocationRecord
 from .orderflow_source import source_fingerprint
+from .orderflow_scores import score_aggregate
 
 
 def _numeric_feature(features: Mapping[str, object], name: str) -> float:
@@ -227,6 +229,7 @@ class CausalOrderflowProducer:
             tzinfo=self._session_timezone
         ).astimezone(timezone.utc)
         start_index = len(prefix)
+        prior_1m: OrderflowObservation | None = prefix[-1] if prefix else None
         for bar_index, bar in enumerate(bars[start_index:], start=start_index):
             boundary_gap = bar_index == 0 and bar.timestamp > session_start
             source_gap = bool(
@@ -241,7 +244,33 @@ class CausalOrderflowProducer:
                 else "source_gap" if source_gap
                 else "none"
             )
-            prefix.append(OrderflowObservation(
+            features = {
+                "open": bar.open,
+                "high": bar.high,
+                "low": bar.low,
+                "close": bar.close,
+                "volume": volume,
+                "previous_close": (
+                    bars[bar_index - 1].close if bar_index and not bar_has_gap
+                    else self._prior_bars[-1].close if bar_index == 0 and self._prior_bars
+                    else self._prior_close if bar_index == 0
+                    else None
+                ),
+                "prior_value_high": self._prior_value_high,
+                "prior_value_low": self._prior_value_low,
+            }
+            prior_features = prior_1m.features if prior_1m is not None and not bar_has_gap else None
+            scores = score_aggregate(
+                features, prior_features, atr=self._frozen_atr,
+                volume_average=(
+                    sum(_numeric_feature(cast(Mapping[str, object], item.features), "volume")
+                        for item in prefix[-20:]) / min(len(prefix), 20)
+                    if prefix else None
+                ),
+            )
+            if scores is not None:
+                features["long_score"], features["short_score"] = scores
+            current = OrderflowObservation(
                 observation_id=stable_orderflow_id("observation", trading_date, stream_identity, "1m", bar.timestamp.isoformat()),
                 source_observation_id=stable_orderflow_id("source", trading_date, stream_identity, bar.timestamp.isoformat()),
                 feature_version="typical_price_volume_v1",
@@ -251,21 +280,7 @@ class CausalOrderflowProducer:
                 available_at=available_at,
                 interval_start=bar.timestamp,
                 interval_end=available_at,
-                features={
-                    "open": bar.open,
-                    "high": bar.high,
-                    "low": bar.low,
-                    "close": bar.close,
-                    "volume": volume,
-                    "previous_close": (
-                        bars[bar_index - 1].close if bar_index and not bar_has_gap
-                        else self._prior_bars[-1].close if bar_index == 0 and self._prior_bars
-                        else self._prior_close if bar_index == 0
-                        else None
-                    ),
-                    "prior_value_high": self._prior_value_high,
-                    "prior_value_low": self._prior_value_low,
-                },
+                features=features,
                 context=OrderflowObservationContext(
                     session_id=trading_date, completeness="complete", availability_status="available",
                     replay_provenance={
@@ -278,7 +293,9 @@ class CausalOrderflowProducer:
                     }, generation=1,
                     causal_sequence=1,
                 ),
-            ))
+            )
+            prefix.append(current)
+            prior_1m = current
         self._context_bars = tuple(bars)
         self._context_prefix = tuple(prefix)
         five_minute: list[OrderflowObservation] = (
@@ -335,6 +352,7 @@ class CausalOrderflowProducer:
             parent_source_fingerprint = source_fingerprint(source_rows)
             child_features = [item.features for item in children]
             total_volume = sum(_numeric_feature(item, "volume") for item in child_features)
+            atr = self._frozen_atr
             parent_features = {
                 "open": _numeric_feature(child_features[0], "open"),
                 "high": max(_numeric_feature(item, "high") for item in child_features),
@@ -343,10 +361,32 @@ class CausalOrderflowProducer:
                 "previous_close": child_features[0].get("previous_close"),
                 "volume": total_volume,
             }
+            prior_parent = next(
+                (item for item in reversed(five_minute)
+                 if item.observed_at < start), None,
+            )
+            child_scores = tuple(
+                (cast(float, item.features["long_score"]), cast(float, item.features["short_score"]))
+                for item in children
+                if isinstance(item.features.get("long_score"), (int, float))
+                and isinstance(item.features.get("short_score"), (int, float))
+            )
+            parent_scores = score_aggregate(
+                parent_features,
+                prior_parent.features if prior_parent is not None else None,
+                atr=atr,
+                child_scores=child_scores,
+                volume_average=(
+                    sum(_numeric_feature(cast(Mapping[str, object], item.features), "volume")
+                        for item in five_minute[-20:])
+                    / min(len(five_minute), 20) if five_minute else None
+                ),
+            )
+            if parent_scores is not None:
+                parent_features["long_score"], parent_features["short_score"] = parent_scores
             session_children = [
                 item for item in prefix if item.observed_at <= children[-1].observed_at
             ]
-            atr = self._frozen_atr
             session_high = max(_numeric_feature(item.features, "high") for item in session_children)
             session_low = min(_numeric_feature(item.features, "low") for item in session_children)
             session_open = [

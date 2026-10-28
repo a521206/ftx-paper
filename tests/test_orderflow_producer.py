@@ -40,6 +40,29 @@ def test_causal_producer_builds_complete_five_minute_context() -> None:
     assert all("vwap" not in parent.features for parent in context.observations)
 
 
+def test_causal_producer_publishes_directional_scores_with_causal_lineage() -> None:
+    producer = CausalOrderflowProducer()
+    producer.set_frozen_atr(1.0)
+    instrument = Instrument("NIFTYFUT", "NSE", "FUTURES")
+    start = datetime(2026, 1, 1, 3, 45, tzinfo=timezone.utc)
+    for index in range(10):
+        producer.ingest(MarketBar(
+            instrument, start + timedelta(minutes=index),
+            100.0, 101.0 + (index % 2), 99.0, 100.5 + (index % 2), 10.0 + index,
+        ))
+
+    context = producer.context("2026-01-01", "09:40")
+
+    assert context is not None
+    children = context.observations_for("1m")
+    parents = context.observations_for("5m")
+    assert all("long_score" in item.features for item in children)
+    assert all("short_score" in item.features for item in children)
+    assert all("long_score" in item.features for item in parents)
+    assert all("short_score" in item.features for item in parents)
+    assert parents[0].available_at <= parents[1].available_at
+
+
 def test_causal_producer_uses_frozen_atr_for_structural_bands() -> None:
     producer = CausalOrderflowProducer()
     producer.set_frozen_atr(10.0)
