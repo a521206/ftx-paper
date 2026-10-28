@@ -214,6 +214,7 @@ class OrderIntent:
     # Entry provenance used to reconstruct live protective exits.
     cell: str | None = None
     stop_price: float | None = None
+    stop_policy: str | None = None
     exit_mode: str | None = None
     target_price: float | None = None
     entry_bar: int | None = None

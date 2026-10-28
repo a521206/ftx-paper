@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import hashlib
 import json
+from typing import cast
 
 from ftx_paper.domain.decision_context import (
     CapitalSnapshot,
@@ -20,10 +22,10 @@ from ftx_paper.config import SESSION_EXIT_DEADLINE_TIME
 from ftx_paper.market.bundles import DecisionBundle
 
 from .coordinator import SharedDecisionCoordinator
-from .orderflow_contract import OrderflowObservation, feature_values_to_dict
+from .orderflow_contract import OrderflowObservation, feature_values_to_dict, stable_orderflow_id
 from .orderflow_context import (
-    ContextHistory, ContextVersion, OpeningGapState, SessionLevels,
-    advance_opening_gap, classify_opening_gap,
+    ContextHistory, MarketContext, ContextVersionRef, OpeningGapState, SessionLevels,
+    advance_opening_gap, classify_context_relation, classify_opening_gap,
 )
 from .orderflow_opportunity import (
     ExecutionGroupRegistry, OpportunityStatus, SetupOpportunity,
@@ -32,8 +34,15 @@ from .opportunity_timeout import advance_opportunity_timeout
 from .orderflow_admission import evaluate_admission
 from .orderflow_capture import CaptureMode
 from .orderflow_interaction import HypothesisState, InteractionCloseReason, InteractionDetector, InteractionStatus
-from .orderflow_location import LocationBand, LocationObservation, LocationRecord, LocationRegistry
+from .orderflow_location import (
+    LocationBand, LocationObservation, LocationRecord, LocationRegistry,
+    is_diagnostic_location,
+)
 from .orderflow_response import evaluate_policy_responses
+from .orderflow_vwap import (
+    MarketAggregate, VwapLocationProvider, calculate_session_vwap, calculate_vwap_stop,
+    evaluate_vwap_diagnostic_response,
+)
 from .orderflow_trigger import observe_trigger
 from .policy_contract import ExecutionMode, FeatureRequirement, PolicyDecision
 from .protocol import StrategyMetadata
@@ -69,6 +78,7 @@ class OrderflowConfig:
     vehicle: str = "futures"
     replay_mode: str = "causal"
     capture_mode: CaptureMode = CaptureMode.FULL
+    vwap_enabled: bool = True
 
     def __post_init__(self) -> None:
         if self.response_timeframe not in self.enabled_timeframes:
@@ -125,6 +135,7 @@ class OrderflowPolicy:
         self._opening_gap_observation_id: str | None = None
         self._opportunities: dict[str, SetupOpportunity] = {}
         self._execution_groups = ExecutionGroupRegistry()
+        self._vwap_provider = VwapLocationProvider()
 
     @property
     def execution_mode(self) -> ExecutionMode:
@@ -179,6 +190,7 @@ class OrderflowPolicy:
             ]
             # Registry generations are advanced once at the authoritative
             # session boundary; carried references remain immutable evidence.
+            self._location_registry.remove_diagnostic_locations()
             self._location_registry.next_generation(at=boundary, carry=self._session_id is not None)
             self._processed_observation_ids.clear()
             self._processed_location_observation_ids.clear()
@@ -202,6 +214,59 @@ class OrderflowPolicy:
             (*orderflow.observations_for("1m"), *orderflow.observations_for("5m")),
             key=lambda item: (item.available_at, item.timeframe, item.observed_at, item.observation_id),
         ))
+        vwap_locations: tuple[LocationRecord, ...] = ()
+        if self.config.vwap_enabled:
+            vwap_measurements = self._vwap_provider.publish(
+                cast(tuple[MarketAggregate, ...], tuple(
+                    item for item in observations
+                    if item.context is not None
+                    and item.context.replay_provenance.get("producer") == "ftx-paper"
+                )),
+                cutoff=min(context.as_of, orderflow.cutoff),
+            )
+            ranges: list[float] = []
+            for item in observations:
+                if item.timeframe != "5m":
+                    continue
+                high, low = _number(item, "high"), _number(item, "low")
+                if high is not None and low is not None:
+                    ranges.append(high - low)
+            atr = sum(ranges[-20:]) / len(ranges[-20:]) if ranges else None
+            vwap_locations = self._location_registry.publish_measurements(
+                vwap_measurements, atr=atr,
+                band_fraction=self._vwap_provider.config.band_atr_fraction,
+            )
+        locations_by_source: dict[str, list[LocationRecord]] = {}
+        for location in vwap_locations:
+            locations_by_source.setdefault(location.source_aggregate_id, []).append(location)
+        if locations_by_source:
+            def numeric(item: OrderflowObservation, name: str) -> float:
+                value = _number(item, name)
+                if value is None:
+                    raise ValueError(f"VWAP location requires numeric {name!r} evidence")
+                return value
+
+            observations = tuple(
+                replace(
+                    item,
+                    location_observations=item.location_observations + tuple(
+                        LocationObservation(
+                            location.location_id, location.alias, location.generation, location.price,
+                            location.band.lower, location.band.upper,
+                            numeric(item, "open"), numeric(item, "high"),
+                            numeric(item, "low"), numeric(item, "close"),
+                            location.band.contains(numeric(item, "high"))
+                            and location.band.contains(numeric(item, "low")),
+                            item.observation_id, item.observed_at, item.available_at,
+                            stable_orderflow_id("location_observation", item.observation_id, location.location_id),
+                            location.location_type,
+                            location.source_observation_id,
+                        )
+                        for location in locations_by_source.get(item.observation_id, ())
+                    ),
+                )
+                for item in observations
+            )
         if not observations:
             return (*session_transitions, PolicyDecision({**base, "outcome": "unavailable", "reason": "required_features_unavailable",
                                      "decision_id": _decision_id(
@@ -357,6 +422,7 @@ class OrderflowPolicy:
                 level_values = {
                     item.location_alias.upper(): item.reference
                     for item in observation.location_observations
+                    if not is_diagnostic_location(item.location_type)
                 }
                 opening_gap = classify_opening_gap(
                     opening_price=_number(observation, "open"),
@@ -367,7 +433,7 @@ class OrderflowPolicy:
                     self._opening_gap_state
                     if self._opening_gap_state.status != "UNAVAILABLE" else opening_gap
                 )
-                self._context_history.publish(ContextVersion(
+                parent_context = MarketContext(
                     context_id=f"context:{orderflow.session_id}",
                     version=self._context_version,
                     available_at=observation.available_at,
@@ -393,7 +459,53 @@ class OrderflowPolicy:
                         else "BOTH"
                     ),
                     evidence_ids=(observation.observation_id,),
-                ))
+                    evidence=({"completed_bar": True, "observation_id": observation.observation_id},),
+                    source_provenance=({"source_observation_id": observation.observation_id},),
+                )
+                self._context_history.publish(parent_context)
+                parent_reference = ContextVersionRef(parent_context.context_id, parent_context.version)
+                for location_observation in observation.location_observations:
+                    self._context_version += 1
+                    self._context_history.publish(MarketContext(
+                        context_id=f"interaction:{location_observation.location_alias}:{orderflow.session_id}",
+                        version=self._context_version,
+                        available_at=observation.available_at,
+                        levels=parent_context.levels,
+                        opening_gap=parent_context.opening_gap,
+                        permission=parent_context.permission,
+                        evidence_ids=(observation.observation_id, location_observation.observation_id),
+                        value_reference=parent_context.value_reference,
+                        location=location_observation.location_alias,
+                        parent_context_id=parent_context.context_id,
+                        evidence=({"location_observation_id": location_observation.observation_id},),
+                        source_provenance=({
+                            "source_observation_id": observation.observation_id,
+                            "source_aggregate_id": location_observation.source_aggregate_id,
+                            "parent_context": asdict(parent_reference),
+                        },),
+                    ))
+                active_interactions = {
+                    item.interaction_id: item
+                    for detector in self._location_detectors.values()
+                    for item in detector.active_interactions
+                }
+                for opportunity_id, opportunity in tuple(self._opportunities.items()):
+                    if opportunity.status is not OpportunityStatus.ACTIVE:
+                        continue
+                    source = active_interactions.get(opportunity.source_interaction_id or "")
+                    if source is None:
+                        continue
+                    decision_context = self._context_history.as_of_location(
+                        source.location_alias, observation.available_at,
+                    )
+                    if decision_context is not None:
+                        reference = ContextVersionRef(
+                            decision_context.context_id, decision_context.version,
+                        )
+                        if opportunity.decision_context != reference:
+                            self._opportunities[opportunity_id] = replace(
+                                opportunity, decision_context=reference,
+                            )
             if gap_status == "source_gap":
                 self._admission_suspended = True
                 self._gap_end = observation.interval_end or observation.available_at
@@ -467,7 +579,10 @@ class OrderflowPolicy:
             self._processed_observation_ids.add(observation.observation_id)
             interaction_context_events: list[PolicyDecision] = []
             interaction_created_events: list[PolicyDecision] = []
-            for location_observation in location_observations:
+            for location_observation in sorted(
+                location_observations,
+                key=lambda item: (is_diagnostic_location(item.location_type), item.location_alias),
+            ):
                 if not isinstance(location_observation, LocationObservation):
                     raise ValueError("invalid causal location observation")
                 location_key = location_observation.observation_id
@@ -484,6 +599,7 @@ class OrderflowPolicy:
                     location_observation.source_aggregate_id,
                     timeframe=observation.timeframe,
                     source_identity=observation.instrument,
+                    location_type=location_observation.location_type,
                 )
                 if not any(item.location_id == location.location_id for item in self._location_registry.records):
                     self._location_registry.publish(location)
@@ -577,8 +693,22 @@ class OrderflowPolicy:
                         "source_observation_ids": [location_key],
                         "observed_at": location_observation.observed_at.isoformat(),
                          "available_at": location_observation.available_at.isoformat(),
-                         "feature_values": feature_values_to_dict(observation.features),
-                     }))
+                      "feature_values": feature_values_to_dict(observation.features),
+                      }))
+                    if is_diagnostic_location(interaction.location_type):
+                        diagnostic = evaluate_vwap_diagnostic_response(
+                            interaction, interaction.contact_candles,
+                        )
+                        results.append(PolicyDecision({
+                            **base,
+                            "decision_stage": "interaction",
+                            "outcome": "recorded",
+                            "reason": "vwap_diagnostic_response",
+                            "decision_id": _decision_id(
+                                "vwap_diagnostic", interaction.interaction_id, location_key,
+                            ),
+                            **diagnostic,
+                        }))
             results.extend(interaction_context_events)
             results.extend(interaction_created_events)
             # Advance opportunity timeouts before any response can form a new
@@ -594,6 +724,10 @@ class OrderflowPolicy:
             detector = self._location_detectors[observation.timeframe]
             for interaction in detector.active_interactions:
                 if interaction.timeframe != self.config.response_timeframe:
+                    continue
+                # Standalone VWAP interactions remain non-opportunity references;
+                # structural acceptance templates may use OR_VWAP stops.
+                if is_diagnostic_location(interaction.location_type):
                     continue
                 response_observations = tuple(sorted((
                     item for item in observations
@@ -750,6 +884,31 @@ class OrderflowPolicy:
                              "source_observation_ids": list(evidence_ids),
                         }))
                         continue
+                    formation_context = self._context_history.as_of_location(
+                        interaction.location_alias, formed_at,
+                    )
+                    confirmation_observation = next(
+                        (item for item in response_observations
+                         if item.observation_id == confirmation_id),
+                        None,
+                    )
+                    confirmation_close = (
+                        _number(confirmation_observation, "close")
+                        if confirmation_observation is not None else None
+                    )
+                    acceptance = (
+                        confirmation_close is not None
+                        and (
+                            confirmation_close > (interaction.band_upper or interaction.reference_level)
+                            if direction == "long"
+                            else confirmation_close < (interaction.band_lower or interaction.reference_level)
+                        )
+                    )
+                    relation = classify_context_relation(
+                        location=interaction.location_alias,
+                        direction=direction,
+                        evidence={"acceptance": acceptance, "evidence_ids": evidence_ids},
+                    )
                     opportunity = SetupOpportunity.create(
                         interaction_id=interaction.interaction_id,
                         direction=direction,
@@ -765,13 +924,19 @@ class OrderflowPolicy:
                         ) or interaction.reference_level,
                         evidence_ids=evidence_ids,
                         evidence_timeframe=interaction.timeframe,
-                        regime_version=observation.context.generation if observation.context else None,
+                        regime_version=formation_context.version if formation_context is not None else None,
                         template_id=template.template_id,
                         policy_version=template.version,
                         conflict_group_id=template.execution_conflict_group,
+                        context_relation=relation.value,
+                        formation_context=(
+                            ContextVersionRef(formation_context.context_id, formation_context.version)
+                            if formation_context is not None else None
+                        ),
                     )
                     if opportunity.lifecycle_id not in self._opportunities:
-                        current_context = self._context_history.as_of(formed_at)
+                        current_context = formation_context
+                        context_relation = relation
                         admission = evaluate_admission(
                             opportunity,
                             context_available=current_context is not None,
@@ -819,6 +984,11 @@ class OrderflowPolicy:
                             direction_matches=direction is not None,
                             confirmations_available=confirmation_id is not None,
                             current_at=formed_at,
+                            context_version=(
+                                str(current_context.version) if current_context is not None else None
+                            ),
+                            context_relation=context_relation.value,
+                            evidence_ids=evidence_ids,
                         )
                         self._opportunities[opportunity.lifecycle_id] = opportunity
                         results.append(PolicyDecision({
@@ -910,11 +1080,12 @@ class OrderflowPolicy:
                                     )}",
                                     instrument=instrument,
                                     side=OrderSide.BUY if direction == "long" else OrderSide.SELL,
-                                    quantity=quantity,
+                                     quantity=quantity,
                                     reason="causally_accepted_orderflow_opportunity",
                                      cell=interaction.location_alias.lower(),
-                                    stop_price=opportunity.setup.failure_boundary,
-                                    exit_mode=self.config.exit_policy,
+                                     stop_price=opportunity.setup.failure_boundary,
+                                     stop_policy=template.stop_policy.value,
+                                     exit_mode=self.config.exit_policy,
                                     role=OrderRole.ENTRY,
                                      entry_bar=context.as_of.minute,
                                      strategy_id=self.config.name,
@@ -937,6 +1108,14 @@ class OrderflowPolicy:
                             "admission_status": admission.status.value,
                             "admission_reason": admission.reason,
                             "admission_predicates": [asdict(item) for item in admission.predicates],
+                            "formation_context": (
+                                asdict(opportunity.formation_context)
+                                if opportunity.formation_context is not None else None
+                            ),
+                            "decision_context": (
+                                asdict(opportunity.decision_context)
+                                if opportunity.decision_context is not None else None
+                            ),
                             "trigger": asdict(trigger),
                             "trigger_eligible": trigger.eligible,
                             "source_observation_ids": list(evidence_ids),
@@ -1120,6 +1299,8 @@ class OrderflowStrategy:
         self._decision_positions: dict[str, tuple[PositionState, ExitStateMachine]] = {}
         self._pending_exits: dict[str, str] = {}
         self._pending_exit_actions: dict[str, tuple[ExitAction, datetime]] = {}
+        self._completed_bars: list[MarketBar] = []
+        self._stop_update_evidence: list[dict[str, object]] = []
 
     @property
     def metadata(self) -> StrategyMetadata:
@@ -1166,11 +1347,13 @@ class OrderflowStrategy:
             entry_fill_time = datetime.fromisoformat(entry_fill_time)
         position = PositionState(
             order.instrument, fill_price if fill_price is not None else 0.0,
-            order.stop_price, order.quantity, order.side, cell=order.cell,
+            order.stop_price, order.quantity, order.side, stop_policy=order.stop_policy,
+            cell=order.cell,
             exit_mode=order.exit_mode or "signal", entry_fill_time=entry_fill_time,
             exit_reference_price=reference_price, vehicle=order.vehicle,
             synthetic_legs=order.synthetic_legs, entry_bar=order.entry_bar,
             entry_order_id=order.client_order_id,
+            initial_risk_points=abs((fill_price if fill_price is not None else 0.0) - order.stop_price),
         )
         self._decision_positions[order.client_order_id] = (
             position, ExitStateMachine(close_time=SESSION_EXIT_DEADLINE_TIME),
@@ -1178,6 +1361,7 @@ class OrderflowStrategy:
 
     def on_closed_bar(self, bar: MarketBar) -> tuple[ExitAction, ...]:
         actions: list[ExitAction] = []
+        self._completed_bars.append(bar)
         delayed_actions = tuple(self._pending_exit_actions.items())
         for exit_order_id, (action, discovered_at) in delayed_actions:
             if bar.instrument == action.intent.instrument and bar.timestamp > discovered_at:
@@ -1188,6 +1372,66 @@ class OrderflowStrategy:
                 continue
             if position.entry_fill_time is not None and bar.timestamp < position.entry_fill_time:
                 continue
+            if position.stop_policy == "or_vwap":
+                vwap_bars = tuple(item for item in self._completed_bars if item.instrument == bar.instrument)
+                vwap, source_bar = calculate_session_vwap(
+                    cast(tuple[MarketAggregate, ...], vwap_bars),
+                    cutoff=bar.timestamp, timezone=self.policy.config.timezone,
+                    session_start=self.policy.config.market_session[0],
+                )
+                local_date = bar.timestamp.astimezone(ZoneInfo(self.policy.config.timezone)).date()
+                session_bars = tuple(
+                    item for item in vwap_bars
+                    if item.timestamp.astimezone(ZoneInfo(self.policy.config.timezone)).date() == local_date
+                )[-20:]
+                ranges = [item.high - item.low for item in session_bars if item.high >= item.low]
+                atr = sum(ranges) / len(ranges) if ranges else None
+                result = calculate_vwap_stop(
+                    direction="long" if position.side is OrderSide.BUY else "short",
+                    entry_price=position.entry_price, vwap=vwap, atr=atr,
+                    source_aggregate_id=getattr(source_bar, "aggregate_id", None),
+                    source_observation_id=getattr(source_bar, "observation_id", None),
+                )
+                initial_risk = position.initial_risk_points or 0.0
+                favorable = (
+                    bar.high - position.entry_price if position.side is OrderSide.BUY
+                    else position.entry_price - bar.low
+                )
+                post_3r = position.post_3r_activated or (
+                    initial_risk > 0 and favorable >= 3.0 * initial_risk
+                )
+                if post_3r and result.candidate is not None and initial_risk > 0:
+                    one_r = (
+                        position.entry_price + initial_risk
+                        if position.side is OrderSide.BUY
+                        else position.entry_price - initial_risk
+                    )
+                    result = replace(
+                        result,
+                        candidate=(max(one_r, result.candidate) if position.side is OrderSide.BUY
+                                   else min(one_r, result.candidate)),
+                    )
+                tightens = result.candidate is not None and (
+                    result.candidate > position.stop_price if position.side is OrderSide.BUY
+                    else result.candidate < position.stop_price
+                )
+                if tightens:
+                    position = replace(
+                        position, stop_price=result.candidate, stop_source="vwap",
+                        post_3r_activated=post_3r,
+                    )
+                    self._decision_positions[order_id] = (position, exits)
+                elif post_3r and not position.post_3r_activated:
+                    position = replace(position, post_3r_activated=True)
+                    self._decision_positions[order_id] = (position, exits)
+                self._stop_update_evidence.append({
+                    "event": "stop_updated", "vwap_stop_reference": result.vwap,
+                    "active_stop": position.stop_price, "stop_source": position.stop_source,
+                    "atr": result.atr, "source_aggregate_id": result.source_aggregate_id,
+                    "source_observation_id": result.source_observation_id,
+                    "reason": result.reason, "changed": tightens,
+                    "observed_at": bar.timestamp.isoformat(),
+                })
             action = exits.evaluate(
                 position, timestamp=bar.timestamp, high=bar.high, low=bar.low,
                 close=bar.close, open=bar.open, volume=bar.volume,
@@ -1199,6 +1443,10 @@ class OrderflowStrategy:
                     action, bar.timestamp,
                 )
         return tuple(actions)
+
+    @property
+    def stop_update_evidence(self) -> tuple[Mapping[str, object], ...]:
+        return tuple(self._stop_update_evidence)
 
     def settle_exit(self, exit_order_id: str, *, filled: bool, **_kwargs: object) -> None:
         entry_order_id = self._pending_exits.pop(exit_order_id, None)
@@ -1223,6 +1471,7 @@ class OrderflowStrategy:
         strategy._decision_positions = {}
         strategy._pending_exits = {}
         strategy._pending_exit_actions = {}
+        strategy._completed_bars = []
         return strategy
 
 

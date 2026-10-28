@@ -716,7 +716,7 @@ class ReplayWorker:
                     exit_event = {"event_type": "EXITDECISION", "decision_id": action.intent.client_order_id,
                                   "vehicle": action.intent.vehicle,
                                   "entry_decision_id": open_trade["entry_order_id"] if open_trade else None,
-                                  "decision_at": futures_bar.timestamp.isoformat(), "outcome": "triggered",
+                                  "decision_at": futures_bar.timestamp.isoformat(), "outcome": "recorded",
                                   "reason": action.reason,
                                   "exit_mode": action.intent.exit_mode,
                                   "bars_held": action.bars_held, "mae_bp": action.mae_bp, "mfe_bp": action.mfe_bp,

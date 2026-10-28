@@ -12,7 +12,7 @@ from ftx_paper.config import IST
 
 from .orderflow_contract import (
     OrderflowContext, OrderflowObservation, OrderflowObservationContext,
-    UnavailableValue, stable_orderflow_id,
+    stable_orderflow_id,
 )
 from .orderflow_location import LocationBand, LocationObservation, LocationRecord
 from .orderflow_source import source_fingerprint
@@ -164,9 +164,6 @@ class CausalOrderflowProducer:
         instrument = bars[-1].instrument.symbol
         bars = [bar for bar in bars if _source_identity(bar) == stream_identity]
         prefix: list[OrderflowObservation] = []
-        cumulative_volume = 0.0
-        cumulative_dollar_volume = 0.0
-        vwap_unavailable = False
         session_start = datetime.combine(
             datetime.fromisoformat(trading_date).date(), self._session_start,
         ).replace(
@@ -181,39 +178,10 @@ class CausalOrderflowProducer:
             bar_has_gap = boundary_gap or source_gap
             volume = float(bar.volume or 0.0)
             available_at = bar.timestamp + timedelta(minutes=1)
-            recovery_window = bars[bar_index - 4:bar_index + 1] if bar_index >= 4 else ()
-            recovery_available = bool(
-                len(recovery_window) == 5
-                and all(
-                    right.timestamp - left.timestamp == timedelta(minutes=1)
-                    for left, right in zip(recovery_window, recovery_window[1:])
-                )
-                and (
-                    (
-                        recovery_window[0].timestamp.astimezone(self._session_timezone).hour * 60
-                        + recovery_window[0].timestamp.astimezone(self._session_timezone).minute
-                        - (self._session_start.hour * 60 + self._session_start.minute)
-                    ) % 5 == 0
-                )
-            )
-            if recovery_available:
-                vwap_unavailable = False
-                cumulative_volume = 0.0
-                cumulative_dollar_volume = 0.0
-            if bar_has_gap:
-                vwap_unavailable = True
             gap_status = (
                 "boundary_gap" if boundary_gap
-                else "source_gap" if source_gap or vwap_unavailable
+                else "source_gap" if source_gap
                 else "none"
-            )
-            if not vwap_unavailable:
-                cumulative_volume += max(0.0, volume)
-                cumulative_dollar_volume += ((bar.high + bar.low + bar.close) / 3.0) * max(0.0, volume)
-            vwap: float | UnavailableValue = (
-                cumulative_dollar_volume / cumulative_volume
-                if not vwap_unavailable and cumulative_volume > 0
-                else UnavailableValue(gap_status if bar_has_gap else "source_gap", available_at)
             )
             prefix.append(OrderflowObservation(
                 observation_id=stable_orderflow_id("observation", trading_date, stream_identity, "1m", bar.timestamp.isoformat()),
@@ -239,7 +207,6 @@ class CausalOrderflowProducer:
                     ),
                     "prior_value_high": self._prior_value_high,
                     "prior_value_low": self._prior_value_low,
-                    "vwap": vwap,
                 },
                 context=OrderflowObservationContext(
                     session_id=trading_date, completeness="complete", availability_status="available",
@@ -307,10 +274,6 @@ class CausalOrderflowProducer:
                 "close": _numeric_feature(child_features[-1], "close"),
                 "previous_close": child_features[0].get("previous_close"),
                 "volume": total_volume,
-                "vwap": (
-                    sum(((_numeric_feature(item.features, "high") + _numeric_feature(item.features, "low") + _numeric_feature(item.features, "close")) / 3.0) * _numeric_feature(item.features, "volume") for item in children) / total_volume
-                    if not parent_has_gap and total_volume > 0 else UnavailableValue("source_gap" if parent_has_gap else "missing_source", end)
-                ),
             }
             session_children = [
                 item for item in prefix if item.observed_at <= children[-1].observed_at
@@ -342,9 +305,6 @@ class CausalOrderflowProducer:
                     "pd_high": max(float(item.high) for item in self._prior_bars),
                     "pd_low": min(float(item.low) for item in self._prior_bars),
                 })
-            parent_vwap = parent_features.get("vwap")
-            if isinstance(parent_vwap, (int, float)) and not isinstance(parent_vwap, bool):
-                levels["vwap"] = float(parent_vwap)
             location_observations: list[LocationObservation] = []
             for alias, level in levels.items():
                 alias = alias.upper()
@@ -364,6 +324,7 @@ class CausalOrderflowProducer:
                         location_id, alias, level, band, generation, end, parent_id,
                         timeframe="5m", source_identity=stream_identity,
                         replaced_location_id=previous.location_id if previous else None,
+                        location_type="session_reference",
                     )
                 record = location_records[alias]
                 parent_high = _numeric_feature(parent_features, "high")
@@ -386,6 +347,7 @@ class CausalOrderflowProducer:
                     observation_id=stable_orderflow_id(
                         "location_observation", parent_id, record.location_id,
                     ),
+                    location_type=record.location_type,
                 ))
             five_minute.append(OrderflowObservation(
                 observation_id=parent_id,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from collections.abc import Mapping
 from datetime import datetime
 from enum import StrEnum
@@ -84,6 +84,8 @@ class LocationInteraction:
     pd_role: str | None = None
     pd_role_transition_candle_id: str | None = None
     pd_role_transition_available_at: datetime | None = None
+    location_type: str = "session_reference"
+    reference_provenance: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.interaction_id.strip() or not self.location_id.strip():
@@ -169,6 +171,12 @@ class InteractionDetector:
                 location.price, location.generation, observation.observation_id,
                 observation.observed_at, InteractionStatus.ACTIVE, (candle,),
                 band_lower=location.band.lower, band_upper=location.band.upper,
+                location_type=location.location_type,
+                reference_provenance={
+                    "source_observation_id": location.source_observation_id or observation.observation_id,
+                    "source_aggregate_id": location.source_aggregate_id,
+                    "source_timeframe": location.timeframe or observation.timeframe,
+                },
             )
             self._active[key] = interaction
             return interaction
@@ -221,6 +229,8 @@ class InteractionDetector:
                 "timeframe": item.timeframe,
                 "location_id": item.location_id,
                 "location_alias": item.location_alias,
+                "location_type": item.location_type,
+                "reference_provenance": dict(item.reference_provenance),
                 "reference_level": item.reference_level,
                 "reference_generation": item.reference_generation,
                 "source_observation_id": item.source_observation_id,
@@ -335,6 +345,8 @@ class InteractionDetector:
                 str(raw["pd_role"]) if raw.get("pd_role") is not None else None,
                 str(raw["pd_role_transition_candle_id"]) if raw.get("pd_role_transition_candle_id") is not None else None,
                 datetime.fromisoformat(str(raw["pd_role_transition_available_at"])) if raw.get("pd_role_transition_available_at") is not None else None,
+                str(raw.get("location_type", "session_reference")),
+                dict(raw.get("reference_provenance", {})),
             )
 
         active = snapshot.get("active", ())

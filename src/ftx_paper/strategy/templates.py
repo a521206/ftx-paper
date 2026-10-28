@@ -46,6 +46,7 @@ class TriggerType(StrEnum):
 
 class StopPolicy(StrEnum):
     STRUCTURAL_TRAILING = "structural_trailing"
+    OR_VWAP = "or_vwap"
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,8 +166,10 @@ TRADE_TEMPLATES: Mapping[tuple[str, str], TradeTemplate] = {
     ("5m_recovery_breakout", "SESSION_LOW"): LONG_RECOVERY_LOW,
     ("5m_acceptance_breakout", "PD_HIGH"): _template("pd_high-short-acceptance_breakout", LocationTemplate.PD_HIGH, Direction.SHORT, ResponseType.ACCEPTANCE, TriggerType.PULLBACK, exits=(TRADE_EXITS["pd_high_short"],)),
     ("5m_acceptance_breakout", "PD_LOW"): _template("pd_low-long-acceptance_breakout", LocationTemplate.PD_LOW, Direction.LONG, ResponseType.ACCEPTANCE, TriggerType.PULLBACK, exits=(TRADE_EXITS["pd_low_long"],)),
-    ("5m_acceptance_breakout", "SESSION_HIGH"): _template("session_high-long-acceptance_breakout", LocationTemplate.SESSION_HIGH, Direction.LONG, ResponseType.ACCEPTANCE, TriggerType.BREAKOUT, exits=(TRADE_EXITS["short_to_or_low"],)),
-    ("5m_acceptance_breakout", "SESSION_LOW"): _template("session_low-short-acceptance_breakout", LocationTemplate.SESSION_LOW, Direction.SHORT, ResponseType.ACCEPTANCE, TriggerType.BREAKOUT, exits=(TRADE_EXITS["long_to_or_high"],)),
+    ("5m_acceptance_breakout", "OR_HIGH"): _template("or_high-long-acceptance_breakout", LocationTemplate.OR_HIGH, Direction.LONG, ResponseType.ACCEPTANCE, TriggerType.BREAKOUT, stop=StopPolicy.OR_VWAP),
+    ("5m_acceptance_breakout", "OR_LOW"): _template("or_low-short-acceptance_breakout", LocationTemplate.OR_LOW, Direction.SHORT, ResponseType.ACCEPTANCE, TriggerType.BREAKOUT, stop=StopPolicy.OR_VWAP),
+    ("5m_acceptance_breakout", "SESSION_HIGH"): _template("session_high-long-acceptance_breakout", LocationTemplate.SESSION_HIGH, Direction.LONG, ResponseType.ACCEPTANCE, TriggerType.BREAKOUT, stop=StopPolicy.OR_VWAP, exits=(TRADE_EXITS["short_to_or_low"],)),
+    ("5m_acceptance_breakout", "SESSION_LOW"): _template("session_low-short-acceptance_breakout", LocationTemplate.SESSION_LOW, Direction.SHORT, ResponseType.ACCEPTANCE, TriggerType.BREAKOUT, stop=StopPolicy.OR_VWAP, exits=(TRADE_EXITS["long_to_or_high"],)),
 }
 
 DEFAULT_TEMPLATES: Mapping[str, TradeTemplate] = {item.template_id: item for item in TRADE_TEMPLATES.values()}

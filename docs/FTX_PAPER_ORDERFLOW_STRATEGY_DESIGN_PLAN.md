@@ -226,7 +226,7 @@ The first hypothesis should be intentionally narrow and diagnostic-only:
 5m VWAP rejection or recovery
 ```
 
-Suggested diagnostic behavior:
+Standalone VWAP remains diagnostic for location and opportunity formation:
 
 - location: VWAP with a frozen interaction band;
 - response timeframe: 5m;
@@ -235,13 +235,14 @@ Suggested diagnostic behavior:
   future response type;
 - trigger: recorded as a diagnostic `TriggerObservation`, not an executable
   order trigger; and
-- entry, stop, and exit: not created during the initial diagnostic phase.
+- standalone entry, stop, and exit: not created from a VWAP interaction.
+- structural acceptance templates may use the causal `OR_VWAP` protective stop.
 
-The current `NiftyZoning` replay intentionally treats VWAP as diagnostic
-context. It publishes VWAP observations and rejection evidence, but excludes
-VWAP interactions from executable opportunity evaluation. Executable VWAP use
-requires a separate policy decision and a later phase covering templates,
-direction rules, trigger semantics, admission, and paired replay.
+The current `NiftyZoning` replay treats VWAP interactions as diagnostic context
+and excludes standalone VWAP interactions from executable opportunity
+evaluation. Its structural acceptance templates nevertheless use the causal
+`OR_VWAP` protective-stop policy, which Paper reproduces after paired replay
+validation.
 
 Do not begin by combining every orderflow feature. Delta divergence, CLV,
 profile skew, POC movement, liquidity sweeps, and volume/range features should
@@ -595,17 +596,14 @@ Enable the strategy in this order:
 4. Paired deterministic replay against the baseline with full capture.
 5. Diagnostic operation beside the existing strategy with stable attribution.
 
-### Phase 9: Optional Executable VWAP Policy
+### Phase 9: Executable VWAP Stop Policy
 
-This phase is not part of the initial implementation. It requires explicit
-approval and a new paired validation design. VWAP remains diagnostic-only and
-must not be an executable location, entry reference, or stop reference. The
-executable policy must instead use the canonical non-VWAP location and response
-semantics already represented by the reference implementation. It must add:
+This phase aligns Paper with the reference execution boundary. VWAP remains
+non-standalone for location/opportunity formation, but may be an executable
+protective-stop reference for structural acceptance templates. It must add:
 
-- executable response-to-opportunity mapping;
-- trigger and entry semantics;
 - stop and exit policy;
+- causal VWAP stop calculation and availability handling;
 - interaction/opportunity arbitration;
 - executable-output comparison against the diagnostic baseline; and
 - a versioned strategy configuration and replay artifact.
@@ -614,8 +612,8 @@ Phase 9 must also add executable-only tests for accepted `OrderIntent`
 construction and shared sizing/risk behavior. These tests do not belong to the
 diagnostic implementation's acceptance criteria.
 
-Only after those gates pass may the strategy produce executable orders for the
-approved non-VWAP policy set.
+Only after those gates pass may the strategy produce executable orders with the
+approved `OR_VWAP` stop policy.
 
 ## Required Tests
 
@@ -634,11 +632,11 @@ Add focused tests for:
 - snapshot round-trip and invalid snapshots;
 - `MultiStrategyEngine` attribution;
 - paired replay determinism; and
-- no baseline-output changes when orderflow is diagnostic-only.
+- no baseline-output changes when VWAP stop policy is unavailable.
 
 Diagnostic acceptance additionally requires zero executable orders and no
-changes to baseline execution outputs. Accepted order construction and shared
- sizing/risk tests are deferred to Phase 9 with executable VWAP policy.
+changes to baseline execution outputs. Executable acceptance requires causal
+VWAP stop and shared sizing/risk tests.
 
 ## Replay Acceptance Gates
 

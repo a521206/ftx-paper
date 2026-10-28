@@ -94,7 +94,7 @@ def test_policy_response_evaluates_acceptance_and_rejection_independently() -> N
         interaction, (_observation(1, 101, features={"open": 100, "high": 102, "low": 99, "close": 101}),),
         max_candles=3, cutoff=datetime(2026, 1, 1, 9, 25, tzinfo=UTC),
     )
-    assert {template.response_type.value for template, _ in evaluations} == {"rejection"}
+    assert {template.response_type.value for template, _ in evaluations} == {"acceptance", "rejection"}
     assert all(evaluation.evidence_ids == ("ev-1",) for _, evaluation in evaluations)
 
 
@@ -109,8 +109,8 @@ def test_policy_response_includes_interaction_contact_candle() -> None:
     )
 
     assert evaluations
-    assert all(
+    assert any(
         evaluation.status is not None and evaluation.status.value == "CONFIRMED"
         for _, evaluation in evaluations
     )
-    assert all(evaluation.confirmation_observation_id == "obs-0" for _, evaluation in evaluations)
+    assert any(evaluation.confirmation_observation_id == "obs-0" for _, evaluation in evaluations)

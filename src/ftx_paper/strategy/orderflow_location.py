@@ -4,6 +4,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .orderflow_vwap import VwapMeasurement
+
+
+DIAGNOSTIC_LOCATION_TYPES = frozenset({"diagnostic_reference"})
+
+
+def is_diagnostic_location(location_type: str) -> bool:
+    """Return whether a location is evidence-only, never an executable setup."""
+    return location_type in DIAGNOSTIC_LOCATION_TYPES
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +47,10 @@ class LocationRecord:
     owner: str = "orderflow"
     aliases: tuple[str, ...] = ()
     source_identity: str | None = None
+    source_observation_id: str | None = None
+    frozen_atr: float | None = None
+    session_id: str | None = None
+    calculation_version: str | None = None
 
     def __post_init__(self) -> None:
         if not self.location_id.strip() or not self.alias.strip():
@@ -60,6 +76,10 @@ class LocationRecord:
             "location_type": self.location_type,
             "owner": self.owner,
             "replaced_location_id": self.replaced_location_id,
+            "source_observation_id": self.source_observation_id,
+            "frozen_atr": self.frozen_atr,
+            "session_id": self.session_id,
+            "calculation_version": self.calculation_version,
         }
 
     def matches(self, alias: str) -> bool:
@@ -85,6 +105,8 @@ class LocationObservation:
     observed_at: datetime
     available_at: datetime
     observation_id: str
+    location_type: str = "session_reference"
+    source_observation_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.location_id or not self.location_alias or not self.observation_id:
@@ -111,6 +133,8 @@ class LocationObservation:
             "observed_at": self.observed_at.isoformat(),
             "available_at": self.available_at.isoformat(),
             "observation_id": self.observation_id,
+            "location_type": self.location_type,
+            "source_observation_id": self.source_observation_id,
         }
 
 
@@ -130,6 +154,18 @@ class LocationRegistry:
                 record = replace(record, replaced_location_id=previous.location_id)
         self._records.append(record)
         self._records.sort(key=lambda item: (item.available_at, -item.priority, item.location_id))
+
+    def publish_measurements(
+        self, measurements: tuple[VwapMeasurement, ...], *, atr: float | None = None,
+        band_fraction: float = 0.06,
+    ) -> tuple[LocationRecord, ...]:
+        """Publish provider-owned measurements without interpreting them."""
+        from .orderflow_vwap import publish_vwap_locations
+        return publish_vwap_locations(self, measurements, atr=atr, band_fraction=band_fraction)
+
+    def remove_diagnostic_locations(self) -> None:
+        """Keep diagnostic references session-scoped while retaining structure."""
+        self._records = [item for item in self._records if item.location_type != "diagnostic_reference"]
 
     def resolve_as_of(self, alias: str, cutoff: datetime, *, timeframe: str | None = None) -> LocationRecord | None:
         candidates = [
@@ -185,6 +221,10 @@ class LocationRegistry:
                 str(item.get("location_type", "session_reference")), str(item.get("owner", "orderflow")),
                 tuple(str(value) for value in item.get("aliases", ())),
                 str(item["source_identity"]) if item.get("source_identity") is not None else None,
+                str(item["source_observation_id"]) if item.get("source_observation_id") is not None else None,
+                float(item["frozen_atr"]) if item.get("frozen_atr") is not None else None,
+                str(item["session_id"]) if item.get("session_id") is not None else None,
+                str(item["calculation_version"]) if item.get("calculation_version") is not None else None,
             ))
         return registry
 
@@ -212,4 +252,7 @@ class LocationRegistry:
         return tuple(carried)
 
 
-__all__ = ["LocationBand", "LocationObservation", "LocationRecord", "LocationRegistry"]
+__all__ = [
+    "DIAGNOSTIC_LOCATION_TYPES", "LocationBand", "LocationObservation",
+    "LocationRecord", "LocationRegistry", "is_diagnostic_location",
+]

@@ -25,6 +25,7 @@ class PositionState:
     stop_price: float
     quantity: int
     side: OrderSide
+    stop_policy: str | None = None
     cell: str | None = None
     exit_mode: str = "signal"
     entry_fill_time: datetime | None = None
@@ -39,6 +40,8 @@ class PositionState:
     entry_order_id: str | None = None
     initial_risk_points: float | None = None
     partial_exit_enabled: bool = False
+    stop_source: str = "initial"
+    post_3r_activated: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,7 +217,11 @@ class ExitStateMachine:
                     else high >= position.stop_price)
         if stop_hit:
             stop_fill = self._fill_at_or_beyond_level(position, open_price, position.stop_price)
-            return self._action(position, stop_fill, "hard_stop", client_order_id)
+            return self._action(
+                position, stop_fill,
+                "vwap_stop" if position.stop_source == "vwap" else "hard_stop",
+                client_order_id,
+            )
         favorable = high if position.side is OrderSide.BUY else low
         risk_points = position.initial_risk_points
         if (

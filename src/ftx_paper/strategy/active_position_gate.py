@@ -18,8 +18,8 @@ class ActivePositionBlock:
     candidate_lifecycle_id: str
     source_completed_bar_timestamp: str
     available_at: str
-    vwap: float
     close: float
+    vwap: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -31,8 +31,8 @@ class ActivePositionBlock:
             "candidate_lifecycle_id": self.candidate_lifecycle_id,
             "source_completed_bar_timestamp": self.source_completed_bar_timestamp,
             "available_at": self.available_at,
-            "vwap": self.vwap,
             "close": self.close,
+            "vwap": self.vwap,
             "blocking_timestamp": self.blocking_timestamp,
             "block_reason": "active_position_session_extreme_gate",
         }
@@ -43,14 +43,14 @@ class ActivePositionGate:
     blocks: dict[tuple[str, str], list[ActivePositionBlock]] = field(default_factory=dict)
     blocked_lifecycles: set[str] = field(default_factory=set)
 
-    def update(self, context: Any) -> None:
+    def update(self, context: Any, timestamp: Any | None = None) -> None:
         positions = tuple(context.execution_engine.open_positions()) if hasattr(context, "execution_engine") else ()
         if not positions:
             self.blocks.clear()
             self.blocked_lifecycles.clear()
 
     def check(self, context: Any, opportunity: Any, timestamp: Any) -> dict[str, Any] | None:
-        self.update(context)
+        self.update(context, timestamp)
         positions = tuple(context.execution_engine.open_positions()) if hasattr(context, "execution_engine") else ()
         location = str(getattr(opportunity, "location", ""))
         if not positions or location not in {"SESSION_LOW", "SESSION_HIGH"}:
@@ -59,16 +59,21 @@ class ActivePositionGate:
         bars = tuple(item for item in bars if item.available_at <= timestamp)
         if not bars:
             return None
-        volume = sum(max(0.0, float(item.volume)) for item in bars)
-        vwap = sum(((float(item.high) + float(item.low) + float(item.close)) / 3.0) * max(0.0, float(item.volume)) for item in bars)
-        latest = bars[-1]
-        vwap = vwap / volume if volume else float(latest.close)
+        eligible = tuple(item for item in bars if timestamp is None or item.available_at <= timestamp)
+        if not eligible:
+            return None
+        latest = eligible[-1]
         active = positions[0]
+        volume = sum(max(0.0, float(item.volume or 0.0)) for item in eligible)
+        vwap = (
+            sum(((item.high + item.low + item.close) / 3.0) * max(0.0, float(item.volume or 0.0)) for item in eligible) / volume
+            if volume else None
+        )
         block = ActivePositionBlock(
             str(getattr(opportunity, "session_date", "")), location, str(timestamp),
             str(active.position_id), getattr(active, "location", None), str(active.direction),
             str(opportunity.direction), str(opportunity.lifecycle_id), str(latest.end_time),
-            str(latest.available_at), vwap, float(latest.close),
+            str(latest.available_at), float(latest.close), vwap,
         )
         self.blocks.setdefault((block.session_date, location), []).append(block)
         self.blocked_lifecycles.add(block.candidate_lifecycle_id)

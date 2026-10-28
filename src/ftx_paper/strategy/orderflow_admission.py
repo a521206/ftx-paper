@@ -81,6 +81,7 @@ def evaluate_admission(
     current_at: datetime | None = None,
     evidence_ids: tuple[str, ...] = (),
     context_version: str | None = None,
+    context_relation: str | None = None,
     permission_version: str | None = None,
     reference_window: str | None = None,
     diagnostic: bool = True,
@@ -97,8 +98,16 @@ def evaluate_admission(
         )
         return AdmissionDecision(opportunity.lifecycle_id, PredicateStatus.FAILED,
                                  predicate.reason or "setup_not_active", (predicate,))
+    if context_relation is not None and context_relation not in {
+        "confirmed", "conflicted", "neutral", "unavailable",
+    }:
+        raise ValueError("invalid context relation")
+    relation_allowed = (
+        context_available
+        and context_relation not in {"conflicted", "unavailable"}
+    ) if context_relation is not None else context_available
     checks = [
-        ("context_relation", context_available),
+        ("context_relation", relation_allowed),
         ("regime_permission", regime_allowed),
         ("opening_gap_permission", opening_gap_allowed),
         ("active_position_gate", active_position_allowed),

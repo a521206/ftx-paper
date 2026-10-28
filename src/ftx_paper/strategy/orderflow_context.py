@@ -6,6 +6,7 @@ from dataclasses import dataclass, asdict
 from datetime import datetime
 from collections.abc import Iterable
 from collections.abc import Sequence, Mapping
+from enum import StrEnum
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,7 +73,24 @@ class OpeningGapState:
 
 
 @dataclass(frozen=True, slots=True)
-class ContextVersion:
+class ContextVersionRef:
+    """Stable reference to the exact context consulted by a decision."""
+
+    context_id: str
+    version: int
+
+
+class ContextRelation(StrEnum):
+    """Relationship between a location response and its parent context."""
+
+    CONFIRMED = "confirmed"
+    CONFLICTED = "conflicted"
+    NEUTRAL = "neutral"
+    UNAVAILABLE = "unavailable"
+
+
+@dataclass(frozen=True, slots=True)
+class MarketContext:
     context_id: str
     version: int
     available_at: datetime
@@ -81,6 +99,14 @@ class ContextVersion:
     permission: str
     evidence_ids: tuple[str, ...] = ()
     value_reference: ValueReference | None = None
+    location: str | None = None
+    market_state: str | None = None
+    long_score: float | None = None
+    short_score: float | None = None
+    source_timeframe: str = "5m"
+    parent_context_id: str | None = None
+    evidence: tuple[Mapping[str, object], ...] = ()
+    source_provenance: tuple[Mapping[str, object], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.context_id.strip() or self.version < 1:
@@ -91,6 +117,8 @@ class ContextVersion:
             raise ValueError("context evidence IDs must be unique")
         if self.available_at.tzinfo is None or self.available_at.utcoffset() is None:
             raise ValueError("context availability must be timezone-aware")
+        if self.source_timeframe != "5m":
+            raise ValueError("orderflow context must be sourced from completed 5m evidence")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -99,30 +127,55 @@ class ContextVersion:
             "levels": asdict(self.levels), "opening_gap": asdict(self.opening_gap),
             "permission": self.permission, "evidence_ids": list(self.evidence_ids),
             "value_reference": asdict(self.value_reference) if self.value_reference else None,
+            "location": self.location, "market_state": self.market_state,
+            "long_score": self.long_score, "short_score": self.short_score,
+            "source_timeframe": self.source_timeframe,
+            "parent_context_id": self.parent_context_id,
+            "evidence": [dict(item) for item in self.evidence],
+            "source_provenance": [dict(item) for item in self.source_provenance],
         }
 
 
 class ContextHistory:
     """Append-only context versions resolved strictly as-of a replay clock."""
 
-    def __init__(self, versions: Iterable[ContextVersion] = ()) -> None:
-        self._versions: list[ContextVersion] = []
+    def __init__(self, versions: Iterable[MarketContext] = ()) -> None:
+        self._versions: list[MarketContext] = []
         for version in versions:
             self.publish(version)
 
-    def publish(self, version: ContextVersion) -> None:
+    def publish(self, version: MarketContext) -> None:
         if self._versions and version.available_at < self._versions[-1].available_at:
             raise ValueError("context versions must be published in availability order")
         if self._versions and version.version <= self._versions[-1].version:
             raise ValueError("context versions must increase")
         self._versions.append(version)
 
-    def as_of(self, cutoff: datetime) -> ContextVersion | None:
+    def as_of(self, cutoff: datetime) -> MarketContext | None:
         available = [version for version in self._versions if version.available_at <= cutoff]
         return available[-1] if available else None
 
+    def by_reference(self, reference: ContextVersionRef | None) -> MarketContext | None:
+        if reference is None:
+            return None
+        return next((item for item in self._versions
+                     if item.context_id == reference.context_id and item.version == reference.version), None)
+
+    def as_of_location(self, location: str | None, cutoff: datetime) -> MarketContext | None:
+        candidates = [
+            item for item in self._versions
+            if item.available_at <= cutoff
+            and (location is None or item.location == location)
+        ]
+        if not candidates and location is not None:
+            candidates = [
+                item for item in self._versions
+                if item.available_at <= cutoff and item.location is None
+            ]
+        return max(candidates, key=lambda item: item.available_at, default=None)
+
     @property
-    def versions(self) -> tuple[ContextVersion, ...]:
+    def versions(self) -> tuple[MarketContext, ...]:
         return tuple(self._versions)
 
     def to_dict(self) -> dict[str, object]:
@@ -135,7 +188,7 @@ class ContextHistory:
         versions = raw.get("versions")
         if not isinstance(versions, (list, tuple)):
             raise ValueError("context history versions must be a sequence")
-        decoded: list[ContextVersion] = []
+        decoded: list[MarketContext] = []
         for item in versions:
             if not isinstance(item, Mapping):
                 raise ValueError("context history version must be an object")
@@ -174,10 +227,18 @@ class ContextHistory:
                 int(gap_raw.get("completed_bars", 0)),
                 str(gap_raw["reference_id"]) if gap_raw.get("reference_id") is not None else None,
             )
-            decoded.append(ContextVersion(
+            decoded.append(MarketContext(
                 str(item["context_id"]), int(item["version"]), datetime.fromisoformat(str(item["available_at"])),
                 levels, gap, str(item["permission"]),
                 tuple(str(value) for value in item.get("evidence_ids", ())), value,
+                str(item["location"]) if item.get("location") is not None else None,
+                str(item["market_state"]) if item.get("market_state") is not None else None,
+                float(item["long_score"]) if item.get("long_score") is not None else None,
+                float(item["short_score"]) if item.get("short_score") is not None else None,
+                str(item.get("source_timeframe", "5m")),
+                str(item["parent_context_id"]) if item.get("parent_context_id") is not None else None,
+                tuple(dict(entry) for entry in item.get("evidence", ())),
+                tuple(dict(entry) for entry in item.get("source_provenance", ())),
             ))
         return cls(decoded)
 
@@ -246,6 +307,21 @@ def permission_for_context(
     return "BOTH", evidence_ids
 
 
+def classify_context_relation(*, location: str | None, direction: str | None,
+                              evidence: Mapping[str, object]) -> ContextRelation:
+    """Classify response evidence without allowing a wick to rewrite context."""
+    if location is None or direction not in {"long", "short"}:
+        return ContextRelation.NEUTRAL
+    expected = {"OR_LOW": "long", "OR_HIGH": "short"}.get(location.upper())
+    if expected is None:
+        return ContextRelation.NEUTRAL
+    strong = bool(evidence.get("displacement") or evidence.get("acceptance")
+                  or evidence.get("confirmed"))
+    if not strong:
+        return ContextRelation.NEUTRAL
+    return ContextRelation.CONFIRMED if direction == expected else ContextRelation.CONFLICTED
+
+
 def admission_recovery_available(
     *, recovery_timeframe: str, completed_timeframe: str,
     gap_end: datetime, evidence_available_at: datetime,
@@ -291,7 +367,8 @@ def advance_opening_gap(
 
 
 __all__ = [
-    "ContextHistory", "ContextVersion", "OpeningGapState", "SessionLevels", "ValueReference",
+    "ContextHistory", "MarketContext", "ContextVersionRef", "ContextRelation",
+    "OpeningGapState", "SessionLevels", "ValueReference",
     "advance_opening_gap", "classify_opening_gap", "derive_session_levels",
-    "permission_for_context", "admission_recovery_available",
+    "permission_for_context", "classify_context_relation", "admission_recovery_available",
 ]

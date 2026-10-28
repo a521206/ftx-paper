@@ -3,16 +3,17 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from ftx_paper.strategy import (
-    ContextHistory, ContextVersion, OpeningGapState, SessionLevels, ValueReference,
-    advance_opening_gap, classify_opening_gap,
+    ContextHistory, ContextVersionRef, MarketContext, OpeningGapState,
+    SessionLevels, ValueReference, advance_opening_gap, classify_context_relation,
+    classify_opening_gap,
 )
 
 
 UTC = timezone.utc
 
 
-def _version(number: int, available_at: datetime) -> ContextVersion:
-    return ContextVersion(
+def _version(number: int, available_at: datetime) -> MarketContext:
+    return MarketContext(
         "ctx-2026-01-01", number, available_at,
         SessionLevels("2026-01-01"), OpeningGapState("NONE"), "BOTH",
     )
@@ -80,3 +81,32 @@ def test_value_reference_requires_complete_causal_publication() -> None:
     )
     assert reference.complete
     assert reference.source_ids == ("profile",)
+
+
+def test_market_context_preserves_parent_child_identity_and_location_as_of() -> None:
+    available = datetime(2026, 1, 1, 9, 20, tzinfo=UTC)
+    parent = MarketContext(
+        "context:2026-01-01", 1, available, SessionLevels("2026-01-01"),
+        OpeningGapState("NONE"), "BOTH", location=None,
+    )
+    child = MarketContext(
+        "interaction:OR_LOW:2026-01-01", 2, available, parent.levels, parent.opening_gap,
+        parent.permission, parent_context_id=parent.context_id, location="OR_LOW",
+    )
+    history = ContextHistory((parent, child))
+
+    selected = history.as_of_location("OR_LOW", available)
+    assert selected is child
+    assert history.by_reference(ContextVersionRef(child.context_id, child.version)) is child
+
+
+def test_context_relation_is_directional_and_does_not_treat_weak_evidence_as_confirmation() -> None:
+    assert classify_context_relation(
+        location="OR_LOW", direction="long", evidence={"confirmed": True},
+    ).value == "confirmed"
+    assert classify_context_relation(
+        location="OR_LOW", direction="short", evidence={"confirmed": True},
+    ).value == "conflicted"
+    assert classify_context_relation(
+        location="OR_LOW", direction="long", evidence={},
+    ).value == "neutral"

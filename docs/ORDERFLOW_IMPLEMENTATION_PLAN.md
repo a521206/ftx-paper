@@ -40,20 +40,19 @@ implementing the execution layer.
 
 ## Phase 9 Scope Decisions
 
-These decisions resolve the remaining P9 scope without adding a new trade
-template or treating VWAP as executable policy.
+These decisions resolve the remaining P9 scope while aligning VWAP stop behavior
+with the causal NiftyZoning reference pipeline.
 
 ### Authoritative Executable Scope
 
 The authoritative scope is the executable behavior already represented by
-NiftyZoning's causal orderflow pipeline, with Paper's explicit VWAP execution
-exclusions applied below. Paper may read those modules and tests as a behavioral reference only;
+NiftyZoning's causal orderflow pipeline. Paper may read those modules and tests as a behavioral reference only;
 it must not import, execute, or modify NiftyZoning. The scope includes only
 remaining canonical location/response/opportunity templates and their defined
 admission, trigger, management, exit, duplicate, and settlement rules. It
-explicitly excludes `reversal_at_vwap`, VWAP location templates, VWAP legacy
-cell policies, and `OR_VWAP` stop policy. VWAP calculation and diagnostic
-location detection remain available as evidence, but never authorize an order.
+explicitly excludes legacy `reversal_at_vwap` and standalone VWAP location
+templates. Structural acceptance templates may use the causal `OR_VWAP`
+protective-stop policy. VWAP remains non-standalone for opportunity formation.
 
 If the reference does not define a policy, transition, fill rule, or accounting
 result, Paper records an explicit unavailable reason and does not infer a
@@ -82,9 +81,9 @@ following executable contracts to reproduce:
   existing `PaperExecutionCoordinator` and portfolio/ledger boundaries rather
   than copying NiftyZoning's owner.
 - `src/orderflow/templates.py` defines the remaining response, trigger,
-  conflict-group, exit-rule, and expiry identities. Its `OR_VWAP` stop policy
-  and any VWAP execution location are reference evidence only and are excluded
-  from Paper's executable template registry by this plan.
+  conflict-group, exit-rule, and expiry identities. Paper reproduces the
+  `OR_VWAP` stop policy for the corresponding structural acceptance templates,
+  while excluding standalone VWAP location templates.
 
 ### Paper Execution Opt-In
 
@@ -107,8 +106,9 @@ handling, fills/partial fills, reservations, settlement, and ledger results.
 The diagnostic side must remain mutation-free; the executable side may mutate
 only the existing Paper portfolio, capital, and execution state. Comparisons
 are made at each causal boundary using canonical IDs, evidence, timestamps,
-availability, generations, source IDs, and unavailable reasons. VWAP-specific
-templates are absent from all paired fixtures.
+availability, generations, source IDs, and unavailable reasons. Standalone VWAP
+location templates are absent from paired fixtures; `OR_VWAP` protective-stop
+behavior is covered by executable acceptance fixtures.
 
 Scope and decision-clock equivalence is checked before population comparison.
 Paired replay first aligns source/session bounds, cutoff inclusivity, and
@@ -1036,8 +1036,9 @@ relative to the repository root.
   fingerprints.
 - `NiftyZoning/src/orderflow/vwap_location.py` ->
   `ftx_paper/strategy/orderflow_producer.py` and
-  `strategy/orderflow_observation.py`: causal VWAP and prefix evidence only;
-  Paper does not treat VWAP as executable location policy.
+  `strategy/orderflow_observation.py`: causal VWAP and prefix evidence;
+  standalone VWAP remains excluded from opportunity formation, while structural
+  acceptance templates may use the executable `OR_VWAP` protective stop.
 
 ### Context, Locations, And Interactions
 
@@ -1108,9 +1109,9 @@ relative to the repository root.
   `ftx_paper/runtime/parity_artifacts.py`, `docs/PRODUCER_NEUTRAL_PARITY.md`,
   and `docs/PRODUCER_NEUTRAL_PARITY_IMPLEMENTATION_PLAN.md`; they are not part
   of the live orderflow owner.
-- NiftyZoning VWAP execution locations, `reversal_at_vwap`, VWAP legacy cell
-  policies, and `OR_VWAP` stops have no executable Paper mapping. They remain
-  diagnostic evidence or explicit unavailable behavior under this plan.
+- NiftyZoning standalone VWAP execution locations, `reversal_at_vwap`, and VWAP
+  legacy cell policies have no executable Paper mapping. Structural acceptance
+  templates do map the `OR_VWAP` protective-stop policy.
 - NiftyZoning's single replay/state-machine owner has no direct live Paper
   equivalent. Paper preserves separate ownership between `OrderflowPolicy`,
   `ReplayMachine`, `RuntimeSession`, and `PaperExecutionCoordinator`.

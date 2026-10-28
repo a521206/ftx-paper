@@ -28,11 +28,17 @@ if TYPE_CHECKING:
         observe_market, rows_available_for_observation,
     )
     from .orderflow_context import (
-        ContextHistory, ContextVersion, OpeningGapState, SessionLevels, ValueReference,
+        ContextHistory, MarketContext, ContextVersionRef, ContextRelation,
+        OpeningGapState, SessionLevels, ValueReference,
         advance_opening_gap, classify_opening_gap, derive_session_levels,
-        permission_for_context, admission_recovery_available,
+        permission_for_context, classify_context_relation, admission_recovery_available,
     )
     from .orderflow_location import LocationBand, LocationObservation, LocationRecord, LocationRegistry
+    from .orderflow_vwap import (
+        MarketAggregate, VwapCalculationConfig, VwapMeasurement, VwapStopResult, VwapLocationProvider,
+        calculate_session_vwap, calculate_vwap_stop, derive_vwap_band,
+        evaluate_vwap_diagnostic_response, publish_vwap_locations,
+    )
     from .orderflow_interaction import (
         HypothesisState, InteractionCandle, InteractionCloseReason, InteractionDetector,
         InteractionStatus, LocationInteraction,
@@ -94,7 +100,22 @@ def __getattr__(name: str):
     if name in {"LocationBand", "LocationObservation", "LocationRecord", "LocationRegistry"}:
         from .orderflow_location import LocationBand, LocationObservation, LocationRecord, LocationRegistry
         return {"LocationBand": LocationBand, "LocationObservation": LocationObservation,
-                "LocationRecord": LocationRecord, "LocationRegistry": LocationRegistry}[name]
+                 "LocationRecord": LocationRecord, "LocationRegistry": LocationRegistry}[name]
+    if name in {"MarketAggregate", "VwapCalculationConfig", "VwapMeasurement", "VwapStopResult", "VwapLocationProvider", "calculate_session_vwap", "calculate_vwap_stop", "derive_vwap_band", "evaluate_vwap_diagnostic_response", "publish_vwap_locations"}:
+        from .orderflow_vwap import (
+            MarketAggregate, VwapCalculationConfig, VwapMeasurement, VwapStopResult, VwapLocationProvider,
+            calculate_session_vwap, calculate_vwap_stop, derive_vwap_band,
+            evaluate_vwap_diagnostic_response, publish_vwap_locations,
+        )
+        return {
+            "MarketAggregate": MarketAggregate, "VwapCalculationConfig": VwapCalculationConfig,
+            "VwapMeasurement": VwapMeasurement, "VwapStopResult": VwapStopResult,
+            "VwapLocationProvider": VwapLocationProvider,
+            "calculate_session_vwap": calculate_session_vwap, "calculate_vwap_stop": calculate_vwap_stop,
+            "derive_vwap_band": derive_vwap_band,
+            "evaluate_vwap_diagnostic_response": evaluate_vwap_diagnostic_response,
+            "publish_vwap_locations": publish_vwap_locations,
+        }[name]
     if name == "SharedDecisionCoordinator":
         from .coordinator import SharedDecisionCoordinator
         return SharedDecisionCoordinator
@@ -133,15 +154,18 @@ def __getattr__(name: str):
             "observe_market": observe_market,
             "rows_available_for_observation": rows_available_for_observation,
         }[name]
-    if name in {"ContextHistory", "ContextVersion", "OpeningGapState", "SessionLevels", "ValueReference", "advance_opening_gap", "classify_opening_gap", "derive_session_levels", "permission_for_context", "admission_recovery_available"}:
+    if name in {"ContextHistory", "MarketContext", "ContextVersionRef", "ContextRelation", "OpeningGapState", "SessionLevels", "ValueReference", "advance_opening_gap", "classify_opening_gap", "derive_session_levels", "permission_for_context", "classify_context_relation", "admission_recovery_available"}:
         from .orderflow_context import (
-            ContextHistory, ContextVersion, OpeningGapState, SessionLevels, ValueReference,
+            ContextHistory, MarketContext, ContextVersionRef, ContextRelation,
+            OpeningGapState, SessionLevels, ValueReference,
             advance_opening_gap, classify_opening_gap, derive_session_levels,
-            permission_for_context, admission_recovery_available,
+            permission_for_context, classify_context_relation, admission_recovery_available,
         )
         return {
             "ContextHistory": ContextHistory,
-            "ContextVersion": ContextVersion,
+            "MarketContext": MarketContext,
+            "ContextVersionRef": ContextVersionRef,
+            "ContextRelation": ContextRelation,
             "OpeningGapState": OpeningGapState,
             "SessionLevels": SessionLevels,
             "ValueReference": ValueReference,
@@ -149,6 +173,7 @@ def __getattr__(name: str):
             "classify_opening_gap": classify_opening_gap,
             "derive_session_levels": derive_session_levels,
             "permission_for_context": permission_for_context,
+            "classify_context_relation": classify_context_relation,
             "admission_recovery_available": admission_recovery_available,
         }[name]
     if name in {"LocationBand", "LocationObservation", "LocationRecord", "LocationRegistry"}:
@@ -240,10 +265,14 @@ __all__ = [
     "prepare_replay_input", "source_fingerprint",
     "MarketObservation", "ObservationBoundary", "ObservationGap", "ObservationIssue",
     "observe_market", "rows_available_for_observation",
-    "ContextHistory", "ContextVersion", "OpeningGapState", "SessionLevels", "ValueReference",
+    "ContextHistory", "MarketContext", "ContextVersionRef", "ContextRelation",
+    "OpeningGapState", "SessionLevels", "ValueReference",
     "advance_opening_gap", "classify_opening_gap", "derive_session_levels",
-    "permission_for_context", "admission_recovery_available",
+    "permission_for_context", "classify_context_relation", "admission_recovery_available",
     "LocationBand", "LocationObservation", "LocationRecord", "LocationRegistry",
+    "MarketAggregate", "VwapCalculationConfig", "VwapMeasurement", "VwapStopResult", "VwapLocationProvider",
+    "calculate_session_vwap", "calculate_vwap_stop",
+    "derive_vwap_band", "evaluate_vwap_diagnostic_response", "publish_vwap_locations",
     "HypothesisState", "InteractionCandle", "InteractionCloseReason", "InteractionDetector",
     "InteractionStatus", "LocationInteraction",
     "ResponseEvaluation", "ResponseHypothesis", "ResponseOutcomeStatus",

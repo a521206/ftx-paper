@@ -8,6 +8,8 @@ from enum import StrEnum
 from collections.abc import Iterable, Mapping
 import hashlib
 
+from .orderflow_context import ContextVersionRef
+
 
 class OpportunityStatus(StrEnum):
     ACTIVE = "ACTIVE"
@@ -155,6 +157,8 @@ class SetupOpportunity:
     policy_version: str = ""
     context_relation: str | None = None
     source_interaction_id: str | None = None
+    formation_context: ContextVersionRef | None = None
+    decision_context: ContextVersionRef | None = None
 
     @property
     def decision_id(self) -> str:
@@ -226,6 +230,7 @@ class SetupOpportunity:
          evidence_timeframe: str = "5m", regime_version: int | None = None,
          template_id: str = "", policy_version: str = "", conflict_group_id: str | None = None,
          context_relation: str | None = None,
+         formation_context: ContextVersionRef | None = None,
     ) -> "SetupOpportunity":
         seed = (
             f"{interaction_id}|{formed_at.isoformat()}|{direction}|{evidence_ids}|"
@@ -245,6 +250,7 @@ class SetupOpportunity:
                 OpportunityStatus.ACTIVE, formed_at, "formed", evidence_ids,
             ),), template_id=template_id, policy_version=policy_version,
             context_relation=context_relation, source_interaction_id=interaction_id,
+            formation_context=formation_context, decision_context=formation_context,
         )
 
     def advance_timeout(self, *, timeframe: str, at: datetime, evidence_id: str | None = None) -> "SetupOpportunity":
@@ -322,6 +328,14 @@ class SetupOpportunity:
             "policy_version": self.policy_version,
             "context_relation": self.context_relation,
             "source_interaction_id": self.source_interaction_id,
+            "formation_context": (
+                {"context_id": self.formation_context.context_id, "version": self.formation_context.version}
+                if self.formation_context is not None else None
+            ),
+            "decision_context": (
+                {"context_id": self.decision_context.context_id, "version": self.decision_context.version}
+                if self.decision_context is not None else None
+            ),
         }
 
     @classmethod
@@ -389,6 +403,13 @@ class SetupOpportunity:
             raise ValueError("opportunity snapshot contains duplicate timeout evidence")
         if timeout_count < len(timeout_evidence):
             raise ValueError("opportunity timeout count is below timeout evidence count")
+        def context_ref(value: object) -> ContextVersionRef | None:
+            if value is None:
+                return None
+            if not isinstance(value, Mapping):
+                raise ValueError("invalid opportunity context reference")
+            return ContextVersionRef(str(value["context_id"]), int(value["version"]))
+
         return cls(
             str(raw["lifecycle_id"]), str(raw["response_episode_id"]),
             str(raw["execution_group_id"]), setup,
@@ -399,6 +420,7 @@ class SetupOpportunity:
             str(raw.get("template_id", "")), str(raw.get("policy_version", "")),
             str(raw["context_relation"]) if raw.get("context_relation") is not None else None,
             str(raw["source_interaction_id"]) if raw.get("source_interaction_id") is not None else None,
+            context_ref(raw.get("formation_context")), context_ref(raw.get("decision_context")),
         )
 
 

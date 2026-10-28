@@ -522,12 +522,12 @@ def test_setup_policy_cannot_trade_vwap_as_a_standalone_reference() -> None:
     assert SetupPolicy().evaluate(bar, features) is None
 
 
-def test_orderflow_templates_have_no_vwap_execution_references() -> None:
+def test_orderflow_templates_use_only_canonical_vwap_stop_references() -> None:
     from ftx_paper.strategy.config import SESSION_POLICIES
     from ftx_paper.strategy.templates import TRADE_TEMPLATES
 
     assert all("VWAP" not in {location.value for location in template.locations} for template in TRADE_TEMPLATES.values())
-    assert "or_vwap" not in {template.stop_policy.value for template in TRADE_TEMPLATES.values()}
+    assert "or_vwap" in {template.stop_policy.value for template in TRADE_TEMPLATES.values()}
     assert all("vwap_zone" not in policy.cell.name for _, policies in SESSION_POLICIES for policy in policies)
 
 
