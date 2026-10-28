@@ -25,49 +25,6 @@ class TriggerObservation:
     permission_version: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class RetestState:
-    touched: bool = False
-    touch_observation_id: str | None = None
-    touch_available_at: str | None = None
-    confirmed: bool = False
-    confirmation_observation_id: str | None = None
-    confirmation_available_at: str | None = None
-
-
-def advance_retest(
-    observation: OrderflowObservation, *, boundary: float, state: RetestState = RetestState(),
-) -> RetestState:
-    """Accumulate retest touch then confirmation from completed causal bars."""
-    high = observation.features.get("high")
-    low = observation.features.get("low")
-    close = observation.features.get("close")
-    previous = observation.features.get("previous_close")
-    if (
-        not isinstance(high, (int, float)) or isinstance(high, bool)
-        or not isinstance(low, (int, float)) or isinstance(low, bool)
-        or not isinstance(close, (int, float)) or isinstance(close, bool)
-        or not isinstance(previous, (int, float)) or isinstance(previous, bool)
-    ):
-        return state
-    high_value = float(high)
-    low_value = float(low)
-    close_value = float(close)
-    previous_value = float(previous)
-    prior_touched = state.touched
-    touched = prior_touched or low_value <= boundary <= high_value
-    touch_id = state.touch_observation_id or (observation.observation_id if touched else None)
-    touch_at = state.touch_available_at or (observation.available_at.isoformat() if touched else None)
-    confirmed = state.confirmed or (
-        prior_touched and ((previous_value >= boundary > close_value) or (previous_value <= boundary < close_value))
-    )
-    return RetestState(
-        touched, touch_id, touch_at, confirmed,
-        observation.observation_id if confirmed and not state.confirmed else state.confirmation_observation_id,
-        observation.available_at.isoformat() if confirmed and not state.confirmed else state.confirmation_available_at,
-    )
-
-
 def observe_trigger(
     observation: OrderflowObservation,
     *,
@@ -207,4 +164,4 @@ def observe_trigger(
     )
 
 
-__all__ = ["RetestState", "TriggerObservation", "advance_retest", "observe_trigger"]
+__all__ = ["TriggerObservation", "observe_trigger"]

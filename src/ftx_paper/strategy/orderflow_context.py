@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from collections.abc import Iterable
-from collections.abc import Sequence, Mapping
+from collections.abc import Mapping
 from enum import StrEnum
 
 
@@ -260,53 +260,6 @@ def classify_opening_gap(
     return OpeningGapState(status, gap, prior_close, observed_at, reference_id=reference_id)
 
 
-def derive_session_levels(
-    observations: Sequence[object],
-    *,
-    session_date: str,
-    prior_high: float | None = None,
-    prior_low: float | None = None,
-    prior_complete: bool = False,
-) -> SessionLevels:
-    """Derive levels from completed 5m observations only."""
-    completed = [
-        item for item in observations
-        if getattr(item, "timeframe", None) == "5m"
-        and getattr(getattr(item, "context", None), "completeness", None) == "complete"
-        and getattr(getattr(item, "context", None), "availability_status", None) == "available"
-    ]
-    opening = next((item for item in completed if getattr(item, "interval_start", None) is not None), None)
-    features: Mapping[str, object] = getattr(opening, "features", {}) if opening is not None else {}
-    high = features.get("high")
-    low = features.get("low")
-    return SessionLevels(
-        session_date,
-        float(high) if isinstance(high, (int, float)) and not isinstance(high, bool) else None,
-        float(low) if isinstance(low, (int, float)) and not isinstance(low, bool) else None,
-        prior_high if prior_complete else None,
-        prior_low if prior_complete else None,
-        prior_complete,
-        getattr(opening, "available_at", None) if opening is not None else None,
-        (getattr(opening, "observation_id"),) if opening is not None else (),
-    )
-
-
-def permission_for_context(
-    *,
-    opening_gap: OpeningGapState,
-    relation: str | None,
-    evidence_ids: tuple[str, ...],
-) -> tuple[str, tuple[str, ...]]:
-    """Return directional permission without treating unavailable evidence as neutral."""
-    if opening_gap.status == "UNAVAILABLE" or relation is None:
-        return "UNAVAILABLE", evidence_ids
-    if opening_gap.status == "UP" and relation == "above_value":
-        return "SHORT", evidence_ids
-    if opening_gap.status == "DOWN" and relation == "below_value":
-        return "LONG", evidence_ids
-    return "BOTH", evidence_ids
-
-
 def classify_context_relation(*, location: str | None, direction: str | None,
                               evidence: Mapping[str, object]) -> ContextRelation:
     """Classify response evidence without allowing a wick to rewrite context."""
@@ -320,18 +273,6 @@ def classify_context_relation(*, location: str | None, direction: str | None,
     if not strong:
         return ContextRelation.NEUTRAL
     return ContextRelation.CONFIRMED if direction == expected else ContextRelation.CONFLICTED
-
-
-def admission_recovery_available(
-    *, recovery_timeframe: str, completed_timeframe: str,
-    gap_end: datetime, evidence_available_at: datetime,
-) -> bool:
-    """Return true only for completed 5m evidence after a source gap."""
-    return (
-        recovery_timeframe == "5m"
-        and completed_timeframe == "5m"
-        and evidence_available_at >= gap_end
-    )
 
 
 def advance_opening_gap(
@@ -368,7 +309,6 @@ def advance_opening_gap(
 
 __all__ = [
     "ContextHistory", "MarketContext", "ContextVersionRef", "ContextRelation",
-    "OpeningGapState", "SessionLevels", "ValueReference",
-    "advance_opening_gap", "classify_opening_gap", "derive_session_levels",
-    "permission_for_context", "classify_context_relation", "admission_recovery_available",
+    "OpeningGapState", "SessionLevels", "ValueReference", "advance_opening_gap",
+    "classify_opening_gap", "classify_context_relation",
 ]

@@ -30,8 +30,7 @@ if TYPE_CHECKING:
     from .orderflow_context import (
         ContextHistory, MarketContext, ContextVersionRef, ContextRelation,
         OpeningGapState, SessionLevels, ValueReference,
-        advance_opening_gap, classify_opening_gap, derive_session_levels,
-        permission_for_context, classify_context_relation, admission_recovery_available,
+        advance_opening_gap, classify_opening_gap, classify_context_relation,
     )
     from .orderflow_location import LocationBand, LocationObservation, LocationRecord, LocationRegistry
     from .orderflow_vwap import (
@@ -43,10 +42,6 @@ if TYPE_CHECKING:
         HypothesisState, InteractionCandle, InteractionCloseReason, InteractionDetector,
         InteractionStatus, LocationInteraction,
     )
-    from .orderflow_response import (
-        ResponseEvaluation, ResponseHypothesis, ResponseOutcomeStatus,
-        evaluate_response_hypotheses, evaluate_response_window,
-    )
     from .orderflow_opportunity import (
         ExecutionGroupClaim, ExecutionGroupRegistry, OpportunityStatus,
         OpportunityTransition, SetupOpportunity, StructuralSetup,
@@ -57,7 +52,6 @@ if TYPE_CHECKING:
     )
     from .orderflow_capture import CaptureMode, REPLAY_RECORD_SCHEMA_VERSION, ReplayRecord, ReplayRecorder, validate_replay_scope
     from .orderflow_replay import CANONICAL_PHASE_ORDER, OrderflowRuntimeState, ReplayBarResult, ReplayMachine, ReplayPhase
-    from .orderflow_reporting import CAUSAL_CHECKPOINT_PHASES, build_multi_session_report, build_session_summary, causal_actions, first_divergent_phase
     from .research_policy import ResearchPolicyAdapter
     from .snapshot_envelope import unwrap_snapshot, wrap_snapshot
     from .policy_contract import ExecutionMode, PolicyDecision, StrategyPolicy
@@ -154,12 +148,11 @@ def __getattr__(name: str):
             "observe_market": observe_market,
             "rows_available_for_observation": rows_available_for_observation,
         }[name]
-    if name in {"ContextHistory", "MarketContext", "ContextVersionRef", "ContextRelation", "OpeningGapState", "SessionLevels", "ValueReference", "advance_opening_gap", "classify_opening_gap", "derive_session_levels", "permission_for_context", "classify_context_relation", "admission_recovery_available"}:
+    if name in {"ContextHistory", "MarketContext", "ContextVersionRef", "ContextRelation", "OpeningGapState", "SessionLevels", "ValueReference", "advance_opening_gap", "classify_opening_gap", "classify_context_relation"}:
         from .orderflow_context import (
             ContextHistory, MarketContext, ContextVersionRef, ContextRelation,
             OpeningGapState, SessionLevels, ValueReference,
-            advance_opening_gap, classify_opening_gap, derive_session_levels,
-            permission_for_context, classify_context_relation, admission_recovery_available,
+            advance_opening_gap, classify_opening_gap, classify_context_relation,
         )
         return {
             "ContextHistory": ContextHistory,
@@ -171,10 +164,7 @@ def __getattr__(name: str):
             "ValueReference": ValueReference,
             "advance_opening_gap": advance_opening_gap,
             "classify_opening_gap": classify_opening_gap,
-            "derive_session_levels": derive_session_levels,
-            "permission_for_context": permission_for_context,
             "classify_context_relation": classify_context_relation,
-            "admission_recovery_available": admission_recovery_available,
         }[name]
     if name in {"LocationBand", "LocationObservation", "LocationRecord", "LocationRegistry"}:
         from .orderflow_location import LocationBand, LocationObservation, LocationRecord, LocationRegistry
@@ -193,19 +183,6 @@ def __getattr__(name: str):
             "InteractionDetector": InteractionDetector,
             "InteractionStatus": InteractionStatus,
             "LocationInteraction": LocationInteraction,
-        }[name]
-    if name in {"ResponseEvaluation", "ResponseHypothesis", "ResponseOutcomeStatus", "evaluate_response_hypotheses", "evaluate_response_window", "select_response_hypotheses"}:
-        from .orderflow_response import (
-            ResponseEvaluation, ResponseHypothesis, ResponseOutcomeStatus,
-            evaluate_response_hypotheses, evaluate_response_window, select_response_hypotheses,
-        )
-        return {
-            "ResponseEvaluation": ResponseEvaluation,
-            "ResponseHypothesis": ResponseHypothesis,
-            "ResponseOutcomeStatus": ResponseOutcomeStatus,
-            "evaluate_response_hypotheses": evaluate_response_hypotheses,
-            "evaluate_response_window": evaluate_response_window,
-            "select_response_hypotheses": select_response_hypotheses,
         }[name]
     if name in {"ExecutionGroupClaim", "ExecutionGroupRegistry", "OpportunityStatus", "OpportunityTransition", "SetupOpportunity", "StructuralSetup", "advance_timeouts_before_formation"}:
         from .orderflow_opportunity import (
@@ -238,9 +215,6 @@ def __getattr__(name: str):
             "ReplayMachine": ReplayMachine,
             "ReplayPhase": ReplayPhase,
         }[name]
-    if name in {"CAUSAL_CHECKPOINT_PHASES", "build_multi_session_report", "build_session_summary", "causal_actions", "first_divergent_phase"}:
-        from .orderflow_reporting import CAUSAL_CHECKPOINT_PHASES, build_multi_session_report, build_session_summary, causal_actions, first_divergent_phase
-        return {"CAUSAL_CHECKPOINT_PHASES": CAUSAL_CHECKPOINT_PHASES, "build_multi_session_report": build_multi_session_report, "build_session_summary": build_session_summary, "causal_actions": causal_actions, "first_divergent_phase": first_divergent_phase}[name]
     if name == "ResearchPolicyAdapter":
         from .research_policy import ResearchPolicyAdapter
         return ResearchPolicyAdapter
@@ -268,22 +242,18 @@ __all__ = [
     "observe_market", "rows_available_for_observation",
     "ContextHistory", "MarketContext", "ContextVersionRef", "ContextRelation",
     "OpeningGapState", "SessionLevels", "ValueReference",
-    "advance_opening_gap", "classify_opening_gap", "derive_session_levels",
-    "permission_for_context", "classify_context_relation", "admission_recovery_available",
+    "advance_opening_gap", "classify_opening_gap", "classify_context_relation",
     "LocationBand", "LocationObservation", "LocationRecord", "LocationRegistry",
     "MarketAggregate", "VwapCalculationConfig", "VwapMeasurement", "VwapStopResult", "VwapLocationProvider",
     "calculate_session_vwap", "calculate_vwap_stop",
     "derive_vwap_band", "evaluate_vwap_diagnostic_response", "publish_vwap_locations",
     "HypothesisState", "InteractionCandle", "InteractionCloseReason", "InteractionDetector",
     "InteractionStatus", "LocationInteraction",
-    "ResponseEvaluation", "ResponseHypothesis", "ResponseOutcomeStatus",
-    "evaluate_response_hypotheses", "evaluate_response_window",
     "ExecutionGroupClaim", "ExecutionGroupRegistry", "OpportunityStatus",
     "OpportunityTransition", "SetupOpportunity", "StructuralSetup",
     "AdmissionDecision", "DiagnosticDecisionIntent", "PredicateResult", "PredicateStatus", "evaluate_admission",
     "CaptureMode", "REPLAY_RECORD_SCHEMA_VERSION", "ReplayRecord", "ReplayRecorder", "validate_replay_scope",
     "CANONICAL_PHASE_ORDER", "OrderflowRuntimeState", "ReplayBarResult", "ReplayMachine", "ReplayPhase",
-    "CAUSAL_CHECKPOINT_PHASES", "build_multi_session_report", "build_session_summary", "causal_actions", "first_divergent_phase",
     "Direction", "LocationTemplate", "OpeningInteractionKind", "ResponseType", "TradeTemplate", "TriggerType",
     "ResponseCandle", "ResponseSpec", "build_response_spec",
     "OpportunityContext", "OpportunityOutcome", "OpportunityOutcomeStatus", "opportunity_identity",
