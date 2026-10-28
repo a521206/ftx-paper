@@ -107,6 +107,11 @@ class LocationObservation:
     observation_id: str
     location_type: str = "session_reference"
     source_observation_id: str | None = None
+    timeframe: str = ""
+    child_observation_ids: tuple[str, ...] = ()
+    method: str = ""
+    reference_source_aggregate_id: str | None = None
+    reference_source_timeframe: str | None = None
 
     def __post_init__(self) -> None:
         if not self.location_id or not self.location_alias or not self.observation_id:
@@ -115,6 +120,16 @@ class LocationObservation:
             raise ValueError("location observation band bounds are inverted")
         if self.available_at < self.observed_at:
             raise ValueError("location observation availability is not causal")
+        if self.timeframe and self.timeframe not in {"1m", "5m"}:
+            raise ValueError("location observation timeframe must be 1m or 5m")
+        if len(self.child_observation_ids) != len(set(self.child_observation_ids)):
+            raise ValueError("location observation child IDs must be unique")
+        if any(not child_id for child_id in self.child_observation_ids):
+            raise ValueError("location observation child IDs must be non-empty")
+        if self.timeframe == "5m" and len(self.child_observation_ids) != 5:
+            raise ValueError("5m location observations require exactly five child observations")
+        if self.location_alias.upper() == "VWAP" and not self.source_observation_id:
+            raise ValueError("VWAP observations require a source observation ID")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -135,6 +150,11 @@ class LocationObservation:
             "observation_id": self.observation_id,
             "location_type": self.location_type,
             "source_observation_id": self.source_observation_id,
+            "timeframe": self.timeframe,
+            "child_observation_ids": self.child_observation_ids,
+            "method": self.method,
+            "reference_source_aggregate_id": self.reference_source_aggregate_id,
+            "reference_source_timeframe": self.reference_source_timeframe,
         }
 
 

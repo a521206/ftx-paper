@@ -261,6 +261,10 @@ class OrderflowPolicy:
                             stable_orderflow_id("location_observation", item.observation_id, location.location_id),
                             location.location_type,
                             location.source_observation_id,
+                            timeframe=item.timeframe,
+                            method="vwap_provider",
+                            reference_source_aggregate_id=location.source_aggregate_id,
+                            reference_source_timeframe=location.timeframe or item.timeframe,
                         )
                         for location in locations_by_source.get(item.observation_id, ())
                     ),
@@ -571,10 +575,17 @@ class OrderflowPolicy:
                             high, low, close, record.band.contains(close),
                             record.source_aggregate_id, observation.observed_at, observation.available_at,
                             f"{observation.observation_id}:{record.location_id}",
+                            timeframe="1m",
+                            method="registry_fallback",
+                            reference_source_aggregate_id=record.source_aggregate_id,
+                            reference_source_timeframe=record.timeframe or "1m",
                         )
                         for record in self._location_registry.available(observation.available_at)
+                        if not record.timeframe or record.timeframe == "1m"
                     )
-            if not location_observations and not orderflow.validate_complete_parent(observation):
+            if observation.timeframe == "5m" and not orderflow.validate_complete_parent(observation):
+                if location_observations:
+                    raise ValueError("5m location observation parent is incomplete")
                 continue
             self._processed_observation_ids.add(observation.observation_id)
             interaction_context_events: list[PolicyDecision] = []
@@ -585,6 +596,18 @@ class OrderflowPolicy:
             ):
                 if not isinstance(location_observation, LocationObservation):
                     raise ValueError("invalid causal location observation")
+                if (
+                    location_observation.timeframe
+                    and location_observation.timeframe != observation.timeframe
+                ):
+                    raise ValueError("location observation timeframe does not match parent")
+                if observation.timeframe == "5m":
+                    parent_context = observation.context
+                    if parent_context is None or (
+                        location_observation.child_observation_ids
+                        != parent_context.child_observation_ids
+                    ):
+                        raise ValueError("5m location observation lineage does not match parent")
                 location_key = location_observation.observation_id
                 if location_key in self._processed_location_observation_ids:
                     continue
@@ -722,7 +745,12 @@ class OrderflowPolicy:
                     if timeout.opportunity is not None:
                         self._opportunities[key] = timeout.opportunity
             detector = self._location_detectors[observation.timeframe]
-            for interaction in detector.active_interactions:
+            response_interactions = list(detector.active_interactions)
+            response_interactions.extend(
+                item for item in detector.closed_interactions
+                if item.closed_at == observation.available_at
+            )
+            for interaction in response_interactions:
                 if interaction.timeframe != self.config.response_timeframe:
                     continue
                 # Standalone VWAP interactions remain non-opportunity references;
@@ -734,7 +762,7 @@ class OrderflowPolicy:
                     if item.timeframe == self.config.response_timeframe
                     # The interaction's completed contact candle is the first
                     # response-window evidence in the canonical replay.
-                    and item.observed_at >= interaction.created_at
+                    and item.observed_at >= interaction.contact_candles[0].observed_at
                 ), key=lambda item: (item.observed_at, item.available_at, item.observation_id)))
                 if not response_observations:
                     continue

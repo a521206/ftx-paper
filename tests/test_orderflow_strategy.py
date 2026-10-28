@@ -55,6 +55,8 @@ def _context(
         observed_at=OBSERVED,
         available_at=available,
         observation_id=f"location-{observation_id}-g{generation}",
+        timeframe="5m",
+        child_observation_ids=tuple(f"obs-1m-{index}" for index in range(5)),
     )
     children = tuple(
         OrderflowObservation(
@@ -444,3 +446,23 @@ def test_location_observation_has_public_causal_identity_contract() -> None:
     assert isinstance(location, LocationObservation)
     assert location.available_at >= location.observed_at
     assert location.source_aggregate_id == f"parent-{observation.observation_id}"
+
+
+def test_strategy_rejects_mismatched_location_timeframe() -> None:
+    bundle, account = _context()
+    assert bundle.orderflow_context is not None
+    parent = bundle.orderflow_context.observations_for("5m")[0]
+    location = replace(parent.location_observations[0], timeframe="1m")
+    malformed = replace(parent, location_observations=(location,))
+    malformed_context = replace(
+        bundle.orderflow_context,
+        observations=(malformed, *bundle.orderflow_context.observations[1:]),
+        prefixes={
+            "5m": (malformed, *bundle.orderflow_context.observations_for("5m")[1:]),
+            "1m": bundle.orderflow_context.observations_for("1m"),
+        },
+    )
+    malformed_bundle = replace(bundle, orderflow_context=malformed_context)
+
+    with pytest.raises(ValueError, match="timeframe"):
+        OrderflowStrategy().evaluate(malformed_bundle, account)

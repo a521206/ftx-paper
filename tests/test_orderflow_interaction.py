@@ -1,8 +1,10 @@
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from ftx_paper.strategy import (
     HypothesisState, InteractionCloseReason, InteractionDetector, InteractionStatus,
-    LocationBand, LocationRecord, OrderflowObservation, OrderflowObservationContext,
+    LocationBand, LocationObservation, LocationRecord, OrderflowObservation, OrderflowObservationContext,
 )
 
 
@@ -71,7 +73,7 @@ def test_interaction_detector_deduplicates_by_location_observation() -> None:
     assert len(detector.active_interactions) == 2
 
 
-def test_wick_intersection_keeps_interaction_active_when_close_is_outside() -> None:
+def test_wick_intersection_ends_interaction_when_close_is_outside() -> None:
     location = LocationRecord("loc-wick", "opening_range", 100, LocationBand(99, 101), 1,
                               datetime(2026, 1, 1, 9, 15, tzinfo=UTC), "agg-1")
     detector = InteractionDetector("1m")
@@ -85,8 +87,41 @@ def test_wick_intersection_keeps_interaction_active_when_close_is_outside() -> N
     )
     advanced = detector.observe(location, wick)
     assert advanced is not None
-    assert advanced.status is InteractionStatus.ACTIVE
+    assert advanced.status is InteractionStatus.ENDED
+    assert advanced.close_reason is InteractionCloseReason.DEPARTED
     assert advanced.contact_candles[-1].low == 100.5
+
+
+def test_five_minute_location_observation_requires_child_lineage() -> None:
+    with pytest.raises(ValueError, match="exactly five"):
+        LocationObservation(
+            "loc", "OR_HIGH", 1, 100.0, 99.0, 101.0,
+            100.0, 101.0, 99.0, 100.0, True, "parent",
+            datetime(2026, 1, 1, 9, 15, tzinfo=UTC),
+            datetime(2026, 1, 1, 9, 20, tzinfo=UTC), "location-obs",
+            timeframe="5m", child_observation_ids=("child-1",),
+        )
+
+
+def test_location_observation_rejects_empty_child_ids() -> None:
+    with pytest.raises(ValueError, match="non-empty"):
+        LocationObservation(
+            "loc", "OR_HIGH", 1, 100.0, 99.0, 101.0,
+            100.0, 101.0, 99.0, 100.0, True, "parent",
+            datetime(2026, 1, 1, 9, 15, tzinfo=UTC),
+            datetime(2026, 1, 1, 9, 20, tzinfo=UTC), "location-obs",
+            timeframe="5m", child_observation_ids=("", "b", "c", "d", "e"),
+        )
+
+
+def test_vwap_location_observation_requires_source_lineage() -> None:
+    with pytest.raises(ValueError, match="source observation ID"):
+        LocationObservation(
+            "loc", "VWAP", 1, 100.0, 99.0, 101.0,
+            100.0, 101.0, 99.0, 100.0, True, "parent",
+            datetime(2026, 1, 1, 9, 15, tzinfo=UTC),
+            datetime(2026, 1, 1, 9, 20, tzinfo=UTC), "location-obs",
+        )
 
 
 def test_hypothesis_state_snapshot_preserves_causal_lineage() -> None:

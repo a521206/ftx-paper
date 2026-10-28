@@ -152,7 +152,7 @@ class InteractionDetector:
             self._closed.append(replace(
                 replacement, status=InteractionStatus.ENDED,
                 close_reason=InteractionCloseReason.REFERENCE_REPLACED,
-                closed_at=observation.observed_at,
+                closed_at=observation.available_at,
             ))
         candle = InteractionCandle(
             observation.observation_id, observation.timeframe,
@@ -162,7 +162,7 @@ class InteractionDetector:
             location.band.lower <= high_value and low_value <= location.band.upper
             if band_contact is None else band_contact
         )
-        inside = location.band.lower <= high_value and low_value <= location.band.upper
+        inside = location.band.contains(close_value)
         if interaction is None:
             if not contact:
                 return None
@@ -199,7 +199,7 @@ class InteractionDetector:
             ended = replace(
                 interaction, status=InteractionStatus.ENDED,
                 close_reason=close_reason,
-                closed_at=observation.observed_at,
+                closed_at=observation.available_at,
                 contact_candles=(*interaction.contact_candles, candle),
             )
             self._active.pop(key)

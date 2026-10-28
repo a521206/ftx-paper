@@ -348,6 +348,11 @@ class CausalOrderflowProducer:
                         "location_observation", parent_id, record.location_id,
                     ),
                     location_type=record.location_type,
+                    timeframe="5m",
+                    child_observation_ids=child_ids,
+                    method="causal_producer",
+                    reference_source_aggregate_id=record.source_aggregate_id,
+                    reference_source_timeframe=record.timeframe or "5m",
                 ))
             five_minute.append(OrderflowObservation(
                 observation_id=parent_id,
