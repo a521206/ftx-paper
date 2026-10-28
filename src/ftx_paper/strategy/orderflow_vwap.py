@@ -34,7 +34,7 @@ class MarketAggregate(Protocol):
 @dataclass(frozen=True, slots=True)
 class VwapCalculationConfig:
     calculation_version: str = "typical_price_volume_v1"
-    band_atr_fraction: float = 0.05
+    band_atr_fraction: float = 0.06
     recovery_bars: int = 5
 
     def __post_init__(self) -> None:
@@ -227,7 +227,7 @@ class VwapLocationProvider:
         return tuple(sorted(measurements, key=lambda item: (item.available_at, item.timeframe, item.source_aggregate_id)))
 
 
-def derive_vwap_band(value: float, atr: float, *, fraction: float = 0.05) -> LocationBand:
+def derive_vwap_band(value: float, atr: float, *, fraction: float = 0.06) -> LocationBand:
     if atr <= 0:
         raise ValueError("VWAP location bands require a positive frozen ATR")
     width = float(atr) * fraction
@@ -239,7 +239,7 @@ def publish_vwap_locations(
     measurements: Sequence[VwapMeasurement],
     *,
     atr: float | None = None,
-    band_fraction: float = 0.05,
+    band_fraction: float = 0.06,
 ) -> tuple[LocationRecord, ...]:
     """Convert immutable measurements into ordinary diagnostic records."""
     if atr is None or atr <= 0:

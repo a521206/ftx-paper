@@ -187,6 +187,7 @@ def test_completed_five_minute_extreme_publishes_before_same_clock_location() ->
         available_at=parent.available_at,
         location_observations=(location,),
     )
+    assert parent.context is not None
     parent = replace(
         parent,
         context=replace(
@@ -204,6 +205,22 @@ def test_completed_five_minute_extreme_publishes_before_same_clock_location() ->
     reasons = [event.payload.get("reason") for event in events]
 
     assert reasons.index("session_extreme_registered") < reasons.index("location_interaction_observed")
+
+
+def test_future_five_minute_parent_cannot_register_session_extreme() -> None:
+    bundle, account = _context()
+    assert bundle.orderflow_context is not None
+    cutoff = OBSERVED + timedelta(minutes=1)
+
+    events = OrderflowStrategy().evaluate(
+        bundle,
+        replace(account, as_of=cutoff),
+    )
+
+    assert not any(
+        event.payload.get("reason") == "session_extreme_registered"
+        for event in events
+    )
 
 
 def test_first_five_minute_or_location_does_not_start_ordinary_interaction() -> None:

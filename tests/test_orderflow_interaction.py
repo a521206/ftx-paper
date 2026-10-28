@@ -55,7 +55,7 @@ def test_interaction_recreates_after_departure_with_new_creation_candle() -> Non
     assert second.interaction_id.endswith("2026-01-01T09:17:00+00:00")
 
 
-def test_reference_replacement_ends_previous_interaction() -> None:
+def test_reference_replacement_ends_structural_episode() -> None:
     first_location = LocationRecord(
         "loc-1", "SESSION_HIGH", 100, LocationBand(99, 101), 1,
         datetime(2026, 1, 1, 9, 15, tzinfo=UTC), "agg-1",
@@ -72,6 +72,26 @@ def test_reference_replacement_ends_previous_interaction() -> None:
     assert created is not None
     assert created.location_id == "loc-2"
     assert detector.closed_interactions[0].close_reason is InteractionCloseReason.REFERENCE_REPLACED
+
+
+def test_vwap_generation_keeps_active_episode_reference_frozen() -> None:
+    first_location = LocationRecord(
+        "vwap-1", "VWAP", 100, LocationBand(99, 101), 1,
+        datetime(2026, 1, 1, 9, 15, tzinfo=UTC), "agg-1",
+    )
+    replacement = LocationRecord(
+        "vwap-2", "VWAP", 105, LocationBand(104, 106), 2,
+        datetime(2026, 1, 1, 9, 16, tzinfo=UTC), "agg-2",
+    )
+    detector = InteractionDetector("1m")
+
+    assert detector.observe(first_location, _observation(0, 100)) is not None
+    active = detector.observe(replacement, _observation(1, 100))
+
+    assert active is not None
+    assert active.location_id == "vwap-1"
+    assert active.reference_generation == 1
+    assert detector.closed_interactions == ()
 
 
 def test_interaction_detector_closes_all_for_gap() -> None:

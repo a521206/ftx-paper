@@ -243,7 +243,12 @@ class OrderflowPolicy:
             }
         observations = self._evaluation_observations
         vwap_locations: tuple[LocationRecord, ...] = ()
-        if self.config.vwap_enabled:
+        has_causal_5m = any(
+            item.timeframe == "5m"
+            and item.available_at <= min(context.as_of, orderflow.cutoff)
+            for item in observations
+        )
+        if self.config.vwap_enabled and has_causal_5m:
             vwap_measurements = self._vwap_provider.publish(
                 cast(tuple[MarketAggregate, ...], tuple(
                     item for item in observations
@@ -412,8 +417,8 @@ class OrderflowPolicy:
         ordered_observations = sorted(
             observations,
             key=lambda item: (
-                item.available_at,
                 0 if item.timeframe == "5m" else 1,
+                item.available_at,
                 item.observed_at,
                 item.observation_id,
             ),
@@ -432,7 +437,7 @@ class OrderflowPolicy:
                 continue
             if expected_instrument is not None and observation.instrument != expected_instrument:
                 continue
-            if observation.available_at > causal_cutoff:
+            if observation.observed_at > causal_cutoff or observation.available_at > causal_cutoff:
                 continue
             if (
                 observation.timeframe == "1m"
@@ -566,6 +571,7 @@ class OrderflowPolicy:
                         continue
                     results.append(PolicyDecision({
                         **base,
+                        "observed_at": observation.observed_at.isoformat(),
                         # Extreme registration is decided when the completed
                         # parent observation is available, not at its final
                         # minute before the availability boundary.
@@ -579,6 +585,8 @@ class OrderflowPolicy:
                         "value": current,
                         "source_observation_ids": [observation.observation_id],
                     }))
+                if observation.available_at > causal_cutoff:
+                    continue
                 level_values = {
                     item.location_alias.upper(): item.reference
                     for item in observation.location_observations

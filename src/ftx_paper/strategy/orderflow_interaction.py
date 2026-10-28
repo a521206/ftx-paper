@@ -284,7 +284,7 @@ class InteractionDetector:
             first_observed_at = observation.observed_at
         key = f"{location.alias}:{self.timeframe}"
         interaction = self._active.get(key)
-        if interaction is not None and (
+        if interaction is not None and location.alias.upper() != "VWAP" and (
             interaction.location_id != location.location_id
             or interaction.reference_generation != location.generation
             or interaction.reference_level != location.price
@@ -313,7 +313,11 @@ class InteractionDetector:
             observation.context.generation,
         )
         contact = location.band.lower <= high_value and low_value <= location.band.upper if band_contact is None else band_contact
-        inside = location.band.contains(close_value)
+        inside = (
+            interaction.band_lower <= close_value <= interaction.band_upper
+            if interaction is not None and interaction.band_lower is not None and interaction.band_upper is not None
+            else location.band.contains(close_value)
+        )
         if interaction is None:
             # The opening-range seed defines the reference; its wick is not an
             # independent OR interaction in the canonical state machine.
