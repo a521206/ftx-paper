@@ -21,7 +21,7 @@ from ftx_paper.domain import AccountAggregate, PortfolioState
 from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.runtime.engine import PaperEngine
 from ftx_paper.runtime.events import is_decision_event
-from ftx_paper.strategy.orderflow_contract import stable_orderflow_id
+from ftx_paper.strategy.orderflow_contract import feature_values_to_dict, stable_orderflow_id
 from ftx_paper.strategy.orderflow_producer import CausalOrderflowProducer
 from ftx_paper.runtime.futures_source import FuturesSessionSourceResolver
 from ftx_paper.runtime.parity_artifacts import build_parity_artifact
@@ -149,7 +149,7 @@ def _available_orderflow_trigger_events(
             "timeframe": "1m",
             "source_observation_id": observation.source_observation_id,
             "source_observation_ids": [observation.observation_id],
-            "feature_values": dict(observation.features),
+            "feature_values": feature_values_to_dict(observation.features),
             "replay_provenance": dict(observation.context.replay_provenance) if observation.context else {},
             "session_date": observation.context.session_id if observation.context else None,
         })

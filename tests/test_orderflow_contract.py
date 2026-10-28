@@ -15,6 +15,7 @@ from ftx_paper.strategy import (
     SharedDecisionCoordinator,
     UnavailableReason,
     UnavailableValue,
+    feature_values_to_dict,
     stable_orderflow_id,
     feature_union,
 )
@@ -25,6 +26,11 @@ def test_unavailable_values_and_scoped_ids_are_typed_and_deterministic() -> None
 
     assert unavailable.status == "UNAVAILABLE"
     assert unavailable.reason is UnavailableReason.GAP
+    assert feature_values_to_dict({"vwap": unavailable})["vwap"] == {
+        "status": "UNAVAILABLE",
+        "reason": "source_gap",
+        "available_at": "2026-01-01T00:00:00+00:00",
+    }
     assert stable_orderflow_id("observation", "session", "5m", 1) == stable_orderflow_id(
         "observation", "session", "5m", 1,
     )

@@ -20,7 +20,7 @@ from ftx_paper.config import SESSION_EXIT_DEADLINE_TIME
 from ftx_paper.market.bundles import DecisionBundle
 
 from .coordinator import SharedDecisionCoordinator
-from .orderflow_contract import OrderflowObservation
+from .orderflow_contract import OrderflowObservation, feature_values_to_dict
 from .orderflow_context import (
     ContextHistory, ContextVersion, OpeningGapState, SessionLevels,
     advance_opening_gap, classify_opening_gap,
@@ -549,7 +549,7 @@ class OrderflowPolicy:
                         "source_observation_ids": [location_key],
                         "observed_at": location_observation.observed_at.isoformat(),
                         "available_at": location_observation.available_at.isoformat(),
-                        "feature_values": dict(observation.features),
+                        "feature_values": feature_values_to_dict(observation.features),
                     }))
             # Advance opportunity timeouts before any response can form a new
             # same-bar candidate.  This keeps lifecycle ordering explicit.

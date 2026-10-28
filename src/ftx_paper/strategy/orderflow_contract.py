@@ -41,6 +41,14 @@ class UnavailableValue:
 FeatureValue = float | int | str | UnavailableValue | None
 
 
+def feature_values_to_dict(features: Mapping[str, FeatureValue]) -> dict[str, object]:
+    """Project typed feature values into the JSON-safe event representation."""
+    return {
+        name: value.to_dict() if isinstance(value, UnavailableValue) else value
+        for name, value in features.items()
+    }
+
+
 def stable_orderflow_id(kind: str, *scope: object) -> str:
     """Build a deterministic ID scoped to the complete causal identity."""
     if not kind.strip():
@@ -234,6 +242,7 @@ class OrderflowContext:
 
 __all__ = [
     "FeatureValue",
+    "feature_values_to_dict",
     "UnavailableReason",
     "UnavailableValue",
     "stable_orderflow_id",

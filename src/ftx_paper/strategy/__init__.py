@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from .orderflow import OrderflowConfig, OrderflowPolicy, OrderflowStrategy
     from .orderflow_contract import (
         OrderflowContext, OrderflowObservation, OrderflowObservationContext,
-        UnavailableReason, UnavailableValue, stable_orderflow_id,
+        UnavailableReason, UnavailableValue, feature_values_to_dict, stable_orderflow_id,
     )
     from .orderflow_trigger import TriggerObservation, observe_trigger
     from .orderflow_producer import CausalOrderflowProducer
@@ -71,14 +71,15 @@ def __getattr__(name: str):
     if name in {"ConfiguredStrategyFactory", "StrategyFactory"}:
         from .factory import ConfiguredStrategyFactory, StrategyFactory
         return {"ConfiguredStrategyFactory": ConfiguredStrategyFactory, "StrategyFactory": StrategyFactory}[name]
-    if name in {"OrderflowContext", "OrderflowObservation", "OrderflowObservationContext", "UnavailableReason", "UnavailableValue", "stable_orderflow_id"}:
+    if name in {"OrderflowContext", "OrderflowObservation", "OrderflowObservationContext", "UnavailableReason", "UnavailableValue", "feature_values_to_dict", "stable_orderflow_id"}:
         from .orderflow_contract import (
             OrderflowContext, OrderflowObservation, OrderflowObservationContext,
-            UnavailableReason, UnavailableValue, stable_orderflow_id,
+            UnavailableReason, UnavailableValue, feature_values_to_dict, stable_orderflow_id,
         )
         return {"OrderflowContext": OrderflowContext, "OrderflowObservation": OrderflowObservation,
                 "OrderflowObservationContext": OrderflowObservationContext,
                 "UnavailableReason": UnavailableReason, "UnavailableValue": UnavailableValue,
+                "feature_values_to_dict": feature_values_to_dict,
                 "stable_orderflow_id": stable_orderflow_id}[name]
     if name in {"ExecutionMode", "FeatureRequirement", "PolicyDecision", "StrategyPolicy"}:
         from .policy_contract import ExecutionMode, FeatureRequirement, PolicyDecision, StrategyPolicy
@@ -245,7 +246,7 @@ def __getattr__(name: str):
 __all__ = [
     "ConfiguredLiveStrategy", "ConfiguredStrategyFactory", "StrategyFactory",
     "OrderflowContext", "OrderflowObservation", "OrderflowObservationContext",
-    "UnavailableReason", "UnavailableValue", "stable_orderflow_id",
+    "UnavailableReason", "UnavailableValue", "feature_values_to_dict", "stable_orderflow_id",
     "ExecutionMode", "FeatureRequirement", "PolicyDecision", "StrategyPolicy",
     "SharedDecisionCoordinator", "feature_union",
     "OrderflowConfig", "OrderflowPolicy", "OrderflowStrategy",
