@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 import hashlib
 import json
 from typing import Any
@@ -15,6 +16,7 @@ PARITY_ARTIFACT_SCHEMA_VERSION = 2
 PARITY_CONTRACT_ID = "producer_replay_parity"
 PARITY_MANIFEST_VERSION = 1
 NORMALIZED_BAR_FINGERPRINT_RECIPE = "normalized-bars-v1"
+_SESSION_ZONE = ZoneInfo("Asia/Kolkata")
 PARITY_LAYERS = ("run_scope", "decision", "execution_settlement", "portfolio_ledger")
 DECISION_STAGES = frozenset({"interaction", "candidate", "admission", "trigger", "exit"})
 DECISION_OUTCOMES = frozenset({"accepted", "rejected", "cancelled", "invalidated", "expired", "observed", "unavailable"})
@@ -65,19 +67,21 @@ def normalized_bar_fingerprint(rows: Sequence[Mapping[str, Any]]) -> str:
             volume = int(row["volume"]) if row.get("volume") is not None else None
         except (TypeError, ValueError, OverflowError) as exc:
             raise ValueError("parity bar OHLCV values must be numeric") from exc
+        session_timestamp = timestamp.astimezone(_SESSION_ZONE)
         normalized.append({
-            "time": timestamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            # Canonical source identity uses the session-local minute label,
+            # not the transport timestamp or its UTC-derived calendar date.
+            "time": session_timestamp.strftime("%H:%M"),
             "open": open_price,
             "high": high_price,
             "low": low_price,
             "close": close_price,
-            "volume": volume,
-            "oi": int(row.get("oi", row.get("open_interest")))
-            if row.get("oi", row.get("open_interest")) is not None else None,
+            "volume": volume if volume is not None else 0,
+            "oi": int(row.get("oi", row.get("open_interest")) or 0),
             "symbol": "NIFTY",
             "expiry": "",
             "contract_type": "CONTINUOUS",
-            "session_date": timestamp.date().isoformat(),
+            "session_date": str(row.get("session_date") or session_timestamp.date().isoformat()),
         })
     normalized.sort(key=lambda row: tuple(row[key] for key in (
         "session_date", "time", "open", "high", "low", "close", "volume", "oi",

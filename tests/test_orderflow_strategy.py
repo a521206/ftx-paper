@@ -171,6 +171,70 @@ def test_producer_published_location_observation_starts_diagnostic_interaction()
     assert event.order is None
 
 
+def test_first_five_minute_or_location_does_not_start_ordinary_interaction() -> None:
+    bundle, account = _context()
+    assert bundle.orderflow_context is not None
+    parent = bundle.orderflow_context.observations_for("5m")[0]
+    location = replace(parent.location_observations[0], location_alias="OR_HIGH")
+    opening = replace(
+        parent,
+        features={**parent.features, "close": parent.features["open"]},
+        location_observations=(location,),
+    )
+    context = replace(
+        bundle.orderflow_context,
+        observations=(opening, *bundle.orderflow_context.observations[1:]),
+        prefixes={
+            **bundle.orderflow_context.prefixes,
+            "5m": (opening, *bundle.orderflow_context.observations_for("5m")[1:]),
+        },
+    )
+    events = OrderflowStrategy().evaluate(replace(bundle, orderflow_context=context), account)
+
+    assert not any(
+        event.payload.get("reason") == "location_interaction_observed"
+        and event.payload.get("location") == "OR_HIGH"
+        for event in events
+    )
+
+
+def test_opening_gap_uses_latest_causal_one_minute_observation() -> None:
+    bundle, account = _context()
+    assert bundle.orderflow_context is not None
+    children = list(bundle.orderflow_context.observations_for("1m"))
+    children[0] = replace(
+        children[0],
+        features={"open": 101.0, "previous_close": 100.0, "close": 101.0},
+    )
+    future = replace(
+        children[-1],
+        observation_id="future-other-instrument",
+        instrument="OTHER",
+        available_at=account.as_of + timedelta(minutes=1),
+        features={"close": 120.0},
+    )
+    context = replace(
+        bundle.orderflow_context,
+        cutoff=account.as_of + timedelta(minutes=1),
+        observations=(*bundle.orderflow_context.observations[:-5], *children, future),
+        prefixes={
+            **bundle.orderflow_context.prefixes,
+            "1m": (*children, future),
+        },
+    )
+
+    events = OrderflowStrategy().evaluate(
+        replace(bundle, orderflow_context=context),
+        account,
+    )
+
+    transition = next(
+        event for event in events
+        if event.payload.get("reason") == "opening_gap_transition"
+    )
+    assert transition.payload["state"] == "RETURN_TO_VALUE"
+
+
 def test_public_strategy_snapshot_restores_processed_location_lifecycle() -> None:
     bundle, account = _context()
     strategy = OrderflowStrategy()

@@ -43,6 +43,20 @@ def test_normalized_bar_fingerprint_is_ordered_and_identity_neutral() -> None:
     assert normalized_bar_fingerprint(rows) == normalized_bar_fingerprint(relabeled)
 
 
+def test_normalized_bar_fingerprint_uses_session_local_time_and_date() -> None:
+    row = {
+        "minute": "2026-01-01T03:45:00Z",
+        "session_date": "2026-01-01",
+        "open": 100.0,
+        "high": 102.0,
+        "low": 99.0,
+        "close": 101.0,
+    }
+    equivalent = {**row, "minute": "2026-01-01T09:15:00+05:30", "volume": 0, "oi": 0}
+
+    assert normalized_bar_fingerprint([row | {"volume": None, "oi": None}]) == normalized_bar_fingerprint([equivalent])
+
+
 def test_scope_difference_is_reported_before_layer_comparison() -> None:
     assert compare_parity_manifests(_artifact()["manifest"], _artifact(timezone="UTC")["manifest"])["layer"] == "run_scope"
 

@@ -19,7 +19,7 @@ def test_diagnostic_admission_records_ordered_predicates_without_intent() -> Non
                                   sizing_allowed=True, risk_allowed=True)
 
     assert decision.status is PredicateStatus.PASSED
-    assert decision.intent_id is None
+    assert decision.intent_id == decision.diagnostic_intent.intent_id
     assert [item.predicate_id for item in decision.predicates] == [
         "context_relation", "regime_permission", "opening_gap_permission", "active_position_gate",
         "exposure_gate", "allocation_gate", "sizing_gate", "risk_gate",

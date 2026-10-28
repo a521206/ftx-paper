@@ -133,6 +133,8 @@ class OrderflowPolicy:
         self._opening_gap_state = OpeningGapState("UNAVAILABLE")
         self._opening_gap_initialized = False
         self._opening_gap_observation_id: str | None = None
+        self._opening_gap_last_evaluated_id: str | None = None
+        self._opening_seed: dict[str, object] | None = None
         self._opportunities: dict[str, SetupOpportunity] = {}
         self._execution_groups = ExecutionGroupRegistry()
         self._vwap_provider = VwapLocationProvider()
@@ -210,6 +212,8 @@ class OrderflowPolicy:
             self._opening_gap_state = OpeningGapState("UNAVAILABLE")
             self._opening_gap_initialized = False
             self._opening_gap_observation_id = None
+            self._opening_gap_last_evaluated_id = None
+            self._opening_seed = None
             self._opportunities.clear()
             self._session_id = orderflow.session_id
 
@@ -301,12 +305,25 @@ class OrderflowPolicy:
         results: list[PolicyDecision] = list(session_transitions)
         futures = bundle.bars.get(MarketRole.FUTURES)
         expected_instrument = futures.instrument.symbol if futures is not None else None
+        causal_cutoff = min(context.as_of, orderflow.cutoff)
+
+        def is_causally_available(item: OrderflowObservation) -> bool:
+            return (
+                (expected_instrument is None or item.instrument == expected_instrument)
+                and item.available_at <= causal_cutoff
+            )
 
         # Publish the opening-gap fact from the first causally available 1m
         # observation.  Waiting for the first 5m parent changes the strategy's
         # permission clock and drops the producer fact entirely.
         if not self._opening_gap_initialized:
-            first_1m = next((item for item in observations if item.timeframe == "1m"), None)
+            first_1m = next(
+                (
+                    item for item in observations
+                    if item.timeframe == "1m" and is_causally_available(item)
+                ),
+                None,
+            )
             if first_1m is not None:
                 opening = _number(first_1m, "open")
                 previous_close = _number(first_1m, "previous_close")
@@ -356,6 +373,26 @@ class OrderflowPolicy:
                     }))
                     self._opening_gap_initialized = True
 
+        latest_1m = max(
+            (
+                item for item in observations
+                if item.timeframe == "1m" and is_causally_available(item)
+            ),
+            key=lambda item: (item.available_at, item.observed_at, item.observation_id),
+            default=None,
+        )
+        first_causal_5m = next(
+            (
+                item for item in observations
+                if item.timeframe == "5m"
+                and is_causally_available(item)
+                and (
+                    item.context is None
+                    or item.context.session_id == orderflow.session_id
+                )
+            ),
+            None,
+        )
         for observation in observations:
             if observation.observation_id in self._processed_observation_ids:
                 continue
@@ -363,13 +400,17 @@ class OrderflowPolicy:
                 continue
             if expected_instrument is not None and observation.instrument != expected_instrument:
                 continue
-            if observation.available_at > min(context.as_of, orderflow.cutoff):
+            if observation.available_at > causal_cutoff:
                 continue
             if (
                 observation.timeframe == "1m"
                 and self._opening_gap_initialized
+                and latest_1m is not None
+                and observation.observation_id == latest_1m.observation_id
                 and observation.observation_id != self._opening_gap_observation_id
+                and observation.observation_id != self._opening_gap_last_evaluated_id
             ):
+                self._opening_gap_last_evaluated_id = observation.observation_id
                 advanced_gap = advance_opening_gap(
                     self._opening_gap_state,
                     close=_number(observation, "close"),
@@ -409,6 +450,61 @@ class OrderflowPolicy:
                     }))
             if observation.context is None or observation.context.session_id != orderflow.session_id:
                 continue
+            if (
+                observation.timeframe == "1m"
+                and self._opening_seed is not None
+                and self._opening_seed.get("attached_observation_id") is None
+                and observation.observation_id != self._opening_gap_observation_id
+            ):
+                seed = self._opening_seed
+                raw_boundary = seed.get("reference_level")
+                if not isinstance(raw_boundary, (int, float)) or isinstance(raw_boundary, bool):
+                    continue
+                boundary = float(raw_boundary)
+                close = _number(observation, "close")
+                high = _number(observation, "high")
+                low = _number(observation, "low")
+                if close is not None and high is not None and low is not None:
+                    direction = str(seed["direction"])
+                    crossed = (
+                        close >= boundary if direction == "long" else close <= boundary
+                    )
+                    touched = low <= boundary <= high
+                    opening_policy = str(seed.get("opening_policy", ""))
+                    if not touched and not crossed:
+                        continue
+                    if opening_policy == "opening_breakout" and not crossed:
+                        continue
+                    # Canonical retest seeds first record a rejection/touch;
+                    # they only become a retest after later recovery evidence.
+                    opening_kind = (
+                        "opening_breakout"
+                        if opening_policy == "opening_breakout"
+                        else "opening_rejection"
+                    )
+                    self._opening_seed = {
+                        **seed,
+                        "attached_observation_id": observation.observation_id,
+                        "opening_interaction_kind": opening_kind,
+                    }
+                    results.append(PolicyDecision({
+                        **base,
+                        "decision_stage": "interaction",
+                        "outcome": "recorded",
+                        "reason": "opening_interaction_attached",
+                        "decision_id": _decision_id(
+                            "opening_interaction", str(seed["seed_id"]), observation.observation_id,
+                        ),
+                        "candidate_provenance": "opening_hypothesis",
+                        "interaction_id": str(seed["seed_id"]),
+                        "opening_interaction_kind": opening_kind,
+                        "location": seed["location"],
+                        "direction": direction,
+                        "reference_level": boundary,
+                            "reference_generation": seed["reference_generation"],
+                            "source_observation_ids": [observation.observation_id],
+                            "available_at": observation.available_at.isoformat(),
+                    }))
             gap_status = observation.context.replay_provenance.get("gap_status")
             if observation.timeframe == "5m":
                 self._context_version += 1
@@ -608,6 +704,76 @@ class OrderflowPolicy:
                 if location_observations:
                     raise ValueError("5m location observation parent is incomplete")
                 continue
+            opening_parent = (
+                first_causal_5m is not None
+                and observation.observation_id == first_causal_5m.observation_id
+            )
+            if opening_parent:
+                opening_close = _number(observation, "close")
+                opening_open = _number(observation, "open")
+                if opening_close is not None and opening_open is not None and opening_close != opening_open:
+                    direction = "short" if opening_close < opening_open else "long"
+                    long_score = _number(observation, "long_score")
+                    short_score = _number(observation, "short_score")
+                    own_score = short_score if direction == "short" else long_score
+                    opposing_score = long_score if direction == "short" else short_score
+                    opening_alias = "OR_LOW" if direction == "short" else "OR_HIGH"
+                    seed_location = next(
+                        (item for item in location_observations
+                         if item.location_alias.upper() == opening_alias),
+                        None,
+                    )
+                    if (
+                        seed_location is not None
+                        and self._opening_seed is None
+                        and own_score is not None
+                        and opposing_score is not None
+                        and own_score > opposing_score
+                    ):
+                        seed_id = _decision_id(
+                            "opening_seed", orderflow.session_id,
+                            observation.observation_id, opening_alias, direction,
+                        )
+                        self._opening_seed = {
+                            "seed_id": seed_id,
+                            "direction": direction,
+                            "location": opening_alias,
+                            "reference_level": seed_location.reference,
+                            "reference_generation": seed_location.reference_generation,
+                            "source_observation_id": observation.observation_id,
+                            "attached_observation_id": None,
+                            "opening_policy": (
+                                "opening_retest"
+                                if (
+                                    direction == "short" and opening_close <= seed_location.reference
+                                ) or (
+                                    direction == "long" and opening_close >= seed_location.reference
+                                )
+                                else "opening_breakout"
+                            ),
+                        }
+                        results.append(PolicyDecision({
+                            **base,
+                            "decision_stage": "candidate",
+                            "outcome": "recorded",
+                            "reason": "opening_hypothesis",
+                            "decision_id": seed_id,
+                            "candidate_provenance": "opening_hypothesis",
+                            "direction": direction,
+                            "location": opening_alias,
+                            "reference_level": seed_location.reference,
+                            "reference_generation": seed_location.reference_generation,
+                            "source_observation_ids": [observation.observation_id],
+                            "long_score": long_score,
+                            "short_score": short_score,
+                            "available_at": observation.available_at.isoformat(),
+                        }))
+                # The first 5m OR candle seeds the opening hypothesis in the
+                # canonical lifecycle; it is not an ordinary OR interaction.
+                location_observations = tuple(
+                    item for item in location_observations
+                    if item.location_alias.upper() not in {"OR_HIGH", "OR_LOW"}
+                )
             self._processed_observation_ids.add(observation.observation_id)
             interaction_context_events: list[PolicyDecision] = []
             interaction_created_events: list[PolicyDecision] = []
@@ -888,7 +1054,7 @@ class OrderflowPolicy:
                     if next_status == "PENDING":
                         next_status = "PENDING_RESPONSE"
                     current = next((item for item in interaction.hypothesis_states if item.hypothesis_id == hypothesis_id), None)
-                    if current is not None and next_status not in {"PENDING_RESPONSE", "UNAVAILABLE"} and (
+                    if current is not None and (
                         tuple(evidence_ids) == current.evidence_ids
                         and next_status == current.status
                         and evaluation.armed == current.armed
@@ -1287,6 +1453,8 @@ class OrderflowPolicy:
             "session_low": self._session_low,
             "admission_suspended": self._admission_suspended,
             "gap_end": self._gap_end.isoformat() if self._gap_end else None,
+            "opening_gap_last_evaluated_id": self._opening_gap_last_evaluated_id,
+            "opening_seed": dict(self._opening_seed) if self._opening_seed is not None else None,
             "opportunities": [self._opportunities[key].snapshot() for key in sorted(self._opportunities)],
             "execution_groups": self._execution_groups.snapshot(),
         }
@@ -1356,6 +1524,14 @@ class OrderflowPolicy:
             raise ValueError("invalid orderflow gap end")
         policy._admission_suspended = admission_suspended
         policy._gap_end = datetime.fromisoformat(gap_end) if gap_end is not None else None
+        last_gap_observation = snapshot.get("opening_gap_last_evaluated_id")
+        if last_gap_observation is not None and not isinstance(last_gap_observation, str):
+            raise ValueError("invalid opening gap evaluation observation ID")
+        policy._opening_gap_last_evaluated_id = last_gap_observation
+        raw_opening_seed = snapshot.get("opening_seed")
+        if raw_opening_seed is not None and not isinstance(raw_opening_seed, Mapping):
+            raise ValueError("invalid opening seed snapshot")
+        policy._opening_seed = dict(raw_opening_seed) if isinstance(raw_opening_seed, Mapping) else None
         raw_context_version = snapshot.get("context_version", 0)
         if not isinstance(raw_context_version, int) or raw_context_version < 0:
             raise ValueError("invalid orderflow context version")

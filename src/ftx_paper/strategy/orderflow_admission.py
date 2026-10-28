@@ -50,6 +50,7 @@ class AdmissionDecision:
     predicates: tuple[PredicateResult, ...]
     intent_id: str | None = None
     diagnostic_intent: DiagnosticDecisionIntent | None = None
+    decision_at: datetime | None = None
 
     @property
     def decision_id(self) -> str:
@@ -102,7 +103,8 @@ def evaluate_admission(
             permission_version=permission_version, reference_window=reference_window,
         )
         return AdmissionDecision(opportunity.lifecycle_id, PredicateStatus.FAILED,
-                                 predicate.reason or "setup_not_active", (predicate,))
+                                 predicate.reason or "setup_not_active", (predicate,),
+                                 decision_at=current_at)
     if expected_setup_version is not None and setup_version != expected_setup_version:
         predicate = PredicateResult(
             "setup_version", PredicateStatus.FAILED, value=False,
@@ -110,7 +112,7 @@ def evaluate_admission(
             context_version=context_version, permission_version=permission_version,
             reference_window=reference_window,
         )
-        return AdmissionDecision(opportunity.lifecycle_id, PredicateStatus.FAILED, predicate.reason or "setup_version_mismatch", (predicate,))
+        return AdmissionDecision(opportunity.lifecycle_id, PredicateStatus.FAILED, predicate.reason or "setup_version_mismatch", (predicate,), decision_at=current_at)
     if expected_context_version is not None and context_version != expected_context_version:
         predicate = PredicateResult(
             "context_version", PredicateStatus.FAILED, value=False,
@@ -118,7 +120,7 @@ def evaluate_admission(
             context_version=context_version, permission_version=permission_version,
             reference_window=reference_window,
         )
-        return AdmissionDecision(opportunity.lifecycle_id, PredicateStatus.FAILED, predicate.reason or "context_version_mismatch", (predicate,))
+        return AdmissionDecision(opportunity.lifecycle_id, PredicateStatus.FAILED, predicate.reason or "context_version_mismatch", (predicate,), decision_at=current_at)
     if context_relation is not None and context_relation not in {
         "confirmed", "conflicted", "neutral", "unavailable",
     }:
@@ -177,17 +179,18 @@ def evaluate_admission(
                 )
                 for later_id, _ in checks[index + 1:]
             )
-            return AdmissionDecision(opportunity.lifecycle_id, result.status, result.reason or result.status.value, tuple(predicates))
+            return AdmissionDecision(opportunity.lifecycle_id, result.status, result.reason or result.status.value, tuple(predicates), decision_at=current_at)
     intent = DiagnosticDecisionIntent(
         intent_id=f"diagnostic:{opportunity.lifecycle_id}",
         opportunity_id=opportunity.lifecycle_id,
         setup_id=opportunity.setup.setup_id,
-        setup_version=opportunity.setup.setup_id,
-        evidence_ids=opportunity.setup.evidence_ids,
+        setup_version=setup_version or opportunity.policy_version or None,
+        evidence_ids=evidence_ids,
     )
     return AdmissionDecision(
         opportunity.lifecycle_id, PredicateStatus.PASSED,
-        "diagnostic_eligible", tuple(predicates), None, intent,
+        "diagnostic_eligible", tuple(predicates), intent.intent_id, intent,
+        current_at,
     )
 
 

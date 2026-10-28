@@ -76,6 +76,9 @@ def test_trigger_retest_requires_both_confirmation_flags() -> None:
     result = observe_trigger(observation, boundary=100.0, execution_mode="enabled", trigger_type="retest")
     assert not result.eligible
     assert result.ineligible_reason == "retest_confirmation_required"
+    assert result.trigger_type == "retest"
+    assert result.boundary == 100.0
+    assert result.armed is True
 
 
 def test_trigger_rejects_causal_timing_and_version_mismatches() -> None:

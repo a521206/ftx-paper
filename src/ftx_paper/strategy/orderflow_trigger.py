@@ -23,6 +23,10 @@ class TriggerObservation:
     expires_at: str | None = None
     setup_version: str | None = None
     permission_version: str | None = None
+    trigger_type: str | None = None
+    boundary: float | None = None
+    armed: bool | None = None
+    displacement: float | None = None
 
 
 def observe_trigger(
@@ -47,6 +51,7 @@ def observe_trigger(
             ineligible_reason=f"unsupported_trigger:{trigger_type}",
             effective_at=effective_at, expires_at=expires_at,
             setup_version=setup_version, permission_version=permission_version,
+            trigger_type=trigger_type, boundary=boundary, armed=armed, displacement=None,
         )
     value = observation.features.get("close")
     close = float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
@@ -85,6 +90,8 @@ def observe_trigger(
             ineligible_reason="diagnostic_only",
             effective_at=effective_at, expires_at=expires_at,
             setup_version=setup_version, permission_version=permission_version,
+            trigger_type=trigger_type, boundary=boundary, armed=trigger_armed,
+            displacement=float(displacement) if isinstance(displacement, (int, float)) else None,
         )
     if close is None:
         return TriggerObservation(
@@ -97,6 +104,8 @@ def observe_trigger(
             ineligible_reason="missing_trigger_price",
             effective_at=effective_at, expires_at=expires_at,
             setup_version=setup_version, permission_version=permission_version,
+            trigger_type=trigger_type, boundary=boundary, armed=trigger_armed,
+            displacement=float(displacement) if isinstance(displacement, (int, float)) else None,
         )
     beyond_boundary = (
         close is not None
@@ -161,6 +170,8 @@ def observe_trigger(
         ineligible_reason=ineligible_reason,
         effective_at=effective_at, expires_at=expires_at,
         setup_version=setup_version, permission_version=permission_version,
+        trigger_type=trigger_type, boundary=boundary, armed=trigger_armed,
+        displacement=float(displacement) if isinstance(displacement, (int, float)) else None,
     )
 
 
