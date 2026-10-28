@@ -335,6 +335,12 @@ class ReplayWorker:
         emit_rejected_decisions = request.get("emit_rejected_decisions", False)
         if not isinstance(emit_rejected_decisions, bool):
             raise ValueError("emit_rejected_decisions must be a boolean")
+        raw_execution_mode = request.get("execution_mode", ExecutionMode.DIAGNOSTIC.value)
+        try:
+            execution_mode = ExecutionMode(str(raw_execution_mode).lower())
+        except ValueError as exc:
+            raise ValueError("execution_mode must be 'diagnostic' or 'executable'") from exc
+        diagnostic_mode = request.get("strategy_id") == "ftx-paper-orderflow" and execution_mode is ExecutionMode.DIAGNOSTIC
         dates = [session_date]
         all_events: list[dict[str, Any]] = []
         parity_records: dict[str, list[dict[str, Any]]] = {"decisions": [], "execution": [], "ledger": []}
@@ -393,11 +399,9 @@ class ReplayWorker:
             if strategy_id is not None:
                 strategy_kwargs["strategy"] = strategy_id
             if strategy_id == "ftx-paper-orderflow":
-                # Replay is an executable paper simulation.  The live/default
-                # orderflow projection remains diagnostic-only.
                 strategy_kwargs["config"] = OrderflowConfig(
                     enabled_vehicles=tuple(vehicles),
-                    execution_mode=ExecutionMode.EXECUTABLE,
+                    execution_mode=execution_mode,
                 )
             strategy = self.strategy_factory.create(
                 **strategy_kwargs,
@@ -476,7 +480,7 @@ class ReplayWorker:
                     )
                     if quote is not None:
                         last_quotes[trade["entry_order_id"]] = quote
-                exit_actions = cast(tuple[ExitAction, ...], engine.on_closed_bar(futures_bar))
+                exit_actions = () if diagnostic_mode else cast(tuple[ExitAction, ...], engine.on_closed_bar(futures_bar))
                 for action in exit_actions:
                     try:
                         open_trade = self._matching_trade(open_trades, action.intent)
@@ -592,6 +596,8 @@ class ReplayWorker:
                     if "context" not in str(exc):
                         raise
                     result = engine.on_bundle(bundle)
+                if diagnostic_mode and result.orders:
+                    raise RuntimeError("diagnostic orderflow replay produced executable orders")
                 bars_seen += 1
                 # Scope parity by evidence actually available to orderflow,
                 # rather than by every futures-clocked bundle.  A source row
@@ -822,6 +828,17 @@ class ReplayWorker:
         scores = [int(event["score"]) for event in all_events
                   if isinstance(event.get("score"), (int, float))]
         normalized_trades = [self._normalize_trade(trade) for trade in diagnostic_trades]
+        if diagnostic_mode:
+            mutation_counts = {
+                "orders": sum(1 for event in all_events if str(event.get("event_type", "")).upper() in {"ORDER_INTENT", "ORDER_AUTHORIZED", "ORDER_ACK", "SUBMISSION", "AUTHORIZATION"}),
+                "fills": sum(1 for event in all_events if str(event.get("event_type", "")).upper() in {"FILL", "EXIT_FILL"}),
+                "reservations": sum(1 for event in all_events if str(event.get("event_type", "")).upper() == "RESERVATION"),
+                "exits": sum(1 for event in all_events if str(event.get("event_type", "")).upper() in {"EXIT", "EXITDECISION", "PENDING_EXIT", "SETTLEMENT"}),
+                "portfolio_mutations": sum((len(last_portfolio.positions), len(last_portfolio.reservations), len(last_portfolio.pending_orders))) if last_portfolio else 0,
+                "ledger_mutations": len(parity_records["ledger"]),
+            }
+            if normalized_trades or any(mutation_counts.values()):
+                raise RuntimeError(f"diagnostic orderflow replay mutated execution state: {mutation_counts}")
         ledger_by_date: dict[str, dict[str, Any]] = {}
         for trade in normalized_trades:
             if trade.get("vehicle") != "futures":
@@ -888,14 +905,16 @@ class ReplayWorker:
             "incomplete_causal_bars": max(0, int(bars_seen) - int(causal_bars_seen)),
             "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "directional_exposure": directional_exposure,
-            "requested_parameters": {
-                "session_date": session_date,
-                "vehicles": list(vehicles),
-                "emit_rejected_decisions": emit_rejected_decisions,
+                "requested_parameters": {
+                    "session_date": session_date,
+                    "vehicles": list(vehicles),
+                    "emit_rejected_decisions": emit_rejected_decisions,
+                    "capture_mode": request.get("capture_mode", "full"),
+                    "execution_mode": execution_mode.value,
+                },
                 "capture_mode": request.get("capture_mode", "full"),
-            },
-            "capture_mode": request.get("capture_mode", "full"),
-        }
+                "execution_mode": execution_mode.value,
+            }
         execution_by_decision: dict[Any, list[dict[str, Any]]] = {}
         for item in all_events:
             decision_id = item.get("decision_id")

@@ -75,6 +75,35 @@ def test_explicit_orderflow_dispatch_is_executable_and_not_vwap() -> None:
     assert strategy.policy.execution_mode is ExecutionMode.EXECUTABLE
 
 
+def test_canonical_session_regression_uses_available_observations() -> None:
+    rows = [
+        MarketBar(
+            Instrument("NIFTY26SEP", "NFO", "FUTURES", "2026-09-29"),
+            datetime(2026, 9, 29, 3, 45 + index, tzinfo=UTC),
+            22600 + index, 22610 + index, 22590 + index, 22600 + index, 10,
+        )
+        for index in range(6)
+    ]
+    replay = prepare_replay_input(rows, "2026-09-29", session_partition="09:15-09:21")
+    observation = observe_market(replay)
+    machine = ReplayMachine(observation)
+
+    results = tuple(
+        machine.process_bar(row.timestamp, before_state={}, after_state={})
+        for row in rows
+    )
+
+    assert replay.replayed
+    assert replay.metadata.session_date == "2026-09-29"
+    assert len(observation.context.observations_for("1m")) == 6
+    assert len(observation.context.observations_for("5m")) == 1
+    assert all(result.phases == CANONICAL_PHASE_ORDER for result in results)
+    assert len(machine.recorder.records) == 6
+    assert results[-1].available_observation_ids == tuple(
+        item.observation_id for item in observation.available(rows[-1].timestamp).observations
+    )
+
+
 def test_replay_regression_executes_worker_for_canonical_session_date(tmp_path) -> None:
     """Exercise the real worker path with an owned deterministic input bar."""
     bar = MarketBar(
@@ -91,3 +120,25 @@ def test_replay_regression_executes_worker_for_canonical_session_date(tmp_path) 
     assert result["bars_seen"] == 1
     assert result["trades"] == []
     assert result["metadata"]["requested_parameters"]["session_date"] == "2026-09-29"
+
+
+def test_orderflow_replay_defaults_to_diagnostic_without_execution_mutations(tmp_path) -> None:
+    bar = MarketBar(
+        Instrument("NIFTY26SEP", "NFO", "FUTURES", "2026-09-29"),
+        datetime(2026, 9, 29, 3, 45, tzinfo=UTC),
+        22600, 22610, 22590, 22600,
+    )
+    worker = ReplayWorker(RuntimeStore(tmp_path))
+    worker._bars = lambda session_date, **_kwargs: (bar,)
+
+    result = worker._execute({
+        "session_date": "2026-09-29",
+        "strategy_id": "ftx-paper-orderflow",
+        "vehicles": ["futures", "synthetic"],
+    }, Event())
+
+    assert result["metadata"]["execution_mode"] == "diagnostic"
+    assert result["trades"] == []
+    assert result["ledger"] == {}
+    assert not any(str(event.get("event_type", "")).upper() in {"FILL", "RESERVATION", "SETTLEMENT"}
+                   for event in result["events"])

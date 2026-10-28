@@ -572,15 +572,20 @@ def build_parity_artifact(
     requested_to = str(request.get("date_to") or session_date)[:10]
     replay_input = _replay_input(metadata)
     scope = {
+        "source_contract": request.get("source_contract", "orderflow-replay-v1"),
         "requested_date_from": requested_from,
         "requested_date_to": requested_to,
         "effective_date_from": session_date,
         "effective_date_to": session_date,
         "timezone": timezone_name,
+        "market_session": request.get("market_session", ["09:15", "15:30"]),
+        "requested_sessions": [requested_from] if requested_from else [],
+        "effective_sessions": [session_date] if session_date else [],
         "sessions": ["orderflow"] if str(request.get("strategy_id", "")).startswith("ftx-paper-orderflow") else [],
         "vehicles": list(request.get("vehicles", ())),
         "partitions": {"source": ["orderflow"]} if str(request.get("strategy_id", "")).startswith("ftx-paper-orderflow") else {},
-        "session_end": request.get("session_end"),
+        "session_end": request.get("session_end", "15:30"),
+        "session_end_cutoff": request.get("session_end_cutoff", request.get("session_end", "15:30")),
         "decision_clock": request.get("decision_clock", {"cutoff": "exclusive"}),
         "capture_mode": request.get("capture_mode", metadata.get("capture_mode")),
         "capital_profile": request.get("capital_profile", result.get("configuration", {})),
