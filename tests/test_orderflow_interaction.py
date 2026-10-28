@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from ftx_paper.strategy import (
-    HypothesisState, InteractionCloseReason, InteractionDetector, InteractionStatus,
+    EvidenceLineage, HypothesisState, InteractionCloseReason, InteractionDetector, InteractionStatus,
     LocationBand, LocationObservation, LocationRecord, OrderflowObservation, OrderflowObservationContext,
 )
 
@@ -134,6 +134,44 @@ def test_hypothesis_state_snapshot_preserves_causal_lineage() -> None:
     detector.update_response(interaction.interaction_id, state.status, state.hypothesis_id, state=state)
     restored = InteractionDetector.from_snapshot(detector.snapshot())
     assert restored.active_interactions[0].hypothesis_states == (state,)
+
+
+def test_hypothesis_snapshot_preserves_observation_lineage() -> None:
+    location = LocationRecord("loc-lineage", "opening_range", 100, LocationBand(99, 101), 1,
+                              datetime(2026, 1, 1, 9, 15, tzinfo=UTC), "agg-1")
+    detector = InteractionDetector("1m")
+    interaction = detector.observe(location, _observation(0, 100))
+    assert interaction is not None
+    observation = _observation(1, 101)
+    lineage = EvidenceLineage(
+        observation.observation_id, observation.source_observation_id, observation.timeframe,
+        observation.observed_at, observation.available_at, "fingerprint-1",
+    )
+    state = HypothesisState(
+        "acceptance", "v2", "CONFIRMED", True, "long", ("e1",),
+        confirmation_observation_id=observation.observation_id,
+        confirmation_available_at=observation.available_at,
+        evidence_lineage=(lineage,),
+    )
+    detector.update_response(interaction.interaction_id, state.status, state.hypothesis_id, state=state)
+    restored = InteractionDetector.from_snapshot(detector.snapshot())
+    assert restored.active_interactions[0].hypothesis_states[0].evidence_lineage == (lineage,)
+
+
+def test_terminal_hypothesis_cannot_be_reopened_by_later_evidence() -> None:
+    location = LocationRecord("loc-terminal", "opening_range", 100, LocationBand(99, 101), 1,
+                              datetime(2026, 1, 1, 9, 15, tzinfo=UTC), "agg-1")
+    detector = InteractionDetector("1m")
+    interaction = detector.observe(location, _observation(0, 100))
+    assert interaction is not None
+    confirmed = HypothesisState("rejection", "v1", "CONFIRMED", True, "long", ("e1",))
+    detector.update_response(interaction.interaction_id, confirmed.status, confirmed.hypothesis_id, state=confirmed)
+    reopened = HypothesisState("rejection", "v1", "PENDING_RESPONSE", True, "long", ("e1", "e2"))
+    updated = detector.update_response(
+        interaction.interaction_id, reopened.status, reopened.hypothesis_id, state=reopened,
+    )
+    assert updated is not None
+    assert updated.hypothesis_states == (confirmed,)
 
 
 def test_prior_day_role_transition_is_persisted_with_causal_candle() -> None:

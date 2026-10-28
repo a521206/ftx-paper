@@ -34,3 +34,22 @@ def test_admission_preserves_unavailable_gate_reason() -> None:
     assert decision.reason == "evidence_unavailable"
     assert len(decision.predicates) == 8
     assert all(item.status is PredicateStatus.UNAVAILABLE for item in decision.predicates[2:])
+
+
+def test_admission_rejects_stale_setup_and_context_versions() -> None:
+    opportunity = _opportunity()
+    setup = evaluate_admission(
+        opportunity, context_available=True, regime_allowed=True,
+        opening_gap_allowed=True, active_position_allowed=True,
+        setup_version="setup-old", expected_setup_version="setup-new",
+    )
+    assert setup.status is PredicateStatus.FAILED
+    assert setup.reason == "setup_version_mismatch"
+
+    context = evaluate_admission(
+        opportunity, context_available=True, regime_allowed=True,
+        opening_gap_allowed=True, active_position_allowed=True,
+        context_version="context-old", expected_context_version="context-new",
+    )
+    assert context.status is PredicateStatus.FAILED
+    assert context.reason == "context_version_mismatch"

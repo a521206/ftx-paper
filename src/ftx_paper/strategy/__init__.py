@@ -180,12 +180,13 @@ def __getattr__(name: str):
         from .orderflow_location import LocationBand, LocationObservation, LocationRecord, LocationRegistry
         return {"LocationBand": LocationBand, "LocationObservation": LocationObservation,
                 "LocationRecord": LocationRecord, "LocationRegistry": LocationRegistry}[name]
-    if name in {"HypothesisState", "InteractionCandle", "InteractionCloseReason", "InteractionDetector", "InteractionStatus", "LocationInteraction"}:
+    if name in {"EvidenceLineage", "HypothesisState", "InteractionCandle", "InteractionCloseReason", "InteractionDetector", "InteractionStatus", "LocationInteraction"}:
         from .orderflow_interaction import (
-            HypothesisState, InteractionCandle, InteractionCloseReason, InteractionDetector,
+            EvidenceLineage, HypothesisState, InteractionCandle, InteractionCloseReason, InteractionDetector,
             InteractionStatus, LocationInteraction,
         )
         return {
+            "EvidenceLineage": EvidenceLineage,
             "HypothesisState": HypothesisState,
             "InteractionCandle": InteractionCandle,
             "InteractionCloseReason": InteractionCloseReason,

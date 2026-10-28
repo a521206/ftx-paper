@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 from collections.abc import Iterable, Mapping
 import hashlib
@@ -159,6 +159,8 @@ class SetupOpportunity:
     source_interaction_id: str | None = None
     formation_context: ContextVersionRef | None = None
     decision_context: ContextVersionRef | None = None
+    source_instrument: str | None = None
+    source_session_id: str | None = None
 
     @property
     def decision_id(self) -> str:
@@ -231,6 +233,9 @@ class SetupOpportunity:
          template_id: str = "", policy_version: str = "", conflict_group_id: str | None = None,
          context_relation: str | None = None,
          formation_context: ContextVersionRef | None = None,
+         confirmation_ids: tuple[str, ...] = (),
+         source_instrument: str | None = None,
+         source_session_id: str | None = None,
     ) -> "SetupOpportunity":
         seed = (
             f"{interaction_id}|{formed_at.isoformat()}|{direction}|{evidence_ids}|"
@@ -241,6 +246,7 @@ class SetupOpportunity:
             f"setup-{digest}", direction, entry_lower, entry_upper,
             failure_boundary, formed_at, expires_at, evidence_ids,
             context_version=regime_version,
+            confirmation_ids=confirmation_ids,
         )
         return cls(
             f"lifecycle-{digest}", f"response-{interaction_id}:{template_id or 'default'}",
@@ -251,6 +257,60 @@ class SetupOpportunity:
             ),), template_id=template_id, policy_version=policy_version,
             context_relation=context_relation, source_interaction_id=interaction_id,
             formation_context=formation_context, decision_context=formation_context,
+            source_instrument=source_instrument, source_session_id=source_session_id,
+        )
+
+    def promote(
+        self, *, at: datetime, confirmation_evidence: tuple[object, ...],
+        anchor_at: datetime | None = None,
+    ) -> "SetupOpportunity":
+        """Promote a formed hypothesis after the immediate causal 1m sequence."""
+        if self.status is not OpportunityStatus.ACTIVE:
+            raise ValueError("only active opportunities can be promoted")
+        if len(confirmation_evidence) != 5:
+            raise ValueError("promotion requires exactly five 1m confirmation observations")
+        confirmation_anchor = anchor_at or self.setup.formed_at
+        confirmation_ids = tuple(str(getattr(item, "observation_id", "")) for item in confirmation_evidence)
+        observed_at = tuple(getattr(item, "observed_at", None) for item in confirmation_evidence)
+        if (
+            any(not item for item in confirmation_ids)
+            or len(set(confirmation_ids)) != len(confirmation_ids)
+            or any(getattr(item, "timeframe", None) != "1m" for item in confirmation_evidence)
+            or any(
+                self.source_instrument is not None
+                and getattr(item, "instrument", None) != self.source_instrument
+                for item in confirmation_evidence
+            )
+            or any(
+                self.source_session_id is not None
+                and getattr(getattr(item, "context", None), "session_id", None) != self.source_session_id
+                for item in confirmation_evidence
+            )
+            or any(getattr(item, "available_at", at) > at for item in confirmation_evidence)
+            or at > self.setup.expires_at
+            or any(getattr(item, "available_at", at) > self.setup.expires_at for item in confirmation_evidence)
+            or any(not isinstance(item, datetime) or item <= confirmation_anchor for item in observed_at)
+            or any(
+                isinstance(previous, datetime) and isinstance(current, datetime) and current <= previous
+                for previous, current in zip(observed_at, observed_at[1:])
+            )
+            or any(
+                isinstance(previous, datetime) and isinstance(current, datetime)
+                and current - previous != timedelta(minutes=1)
+                for previous, current in zip(observed_at, observed_at[1:])
+            )
+        ):
+            raise ValueError("promotion requires five unique causally available 1m observations after formation")
+        return replace(
+            self,
+            # Confirmation is evidence for an active lifecycle, not a terminal
+            # lifecycle state.  Later 5m timeout and invalidation evidence must
+            # remain able to expire or reject this setup.
+            status=OpportunityStatus.ACTIVE,
+            setup=replace(self.setup, confirmation_ids=confirmation_ids),
+            transitions=(*self.transitions, OpportunityTransition(
+                OpportunityStatus.ACTIVE, at, "promoted", confirmation_ids,
+            )),
         )
 
     def advance_timeout(self, *, timeframe: str, at: datetime, evidence_id: str | None = None) -> "SetupOpportunity":
@@ -336,6 +396,8 @@ class SetupOpportunity:
                 {"context_id": self.decision_context.context_id, "version": self.decision_context.version}
                 if self.decision_context is not None else None
             ),
+            "source_instrument": self.source_instrument,
+            "source_session_id": self.source_session_id,
         }
 
     @classmethod
@@ -421,6 +483,8 @@ class SetupOpportunity:
             str(raw["context_relation"]) if raw.get("context_relation") is not None else None,
             str(raw["source_interaction_id"]) if raw.get("source_interaction_id") is not None else None,
             context_ref(raw.get("formation_context")), context_ref(raw.get("decision_context")),
+            str(raw["source_instrument"]) if raw.get("source_instrument") is not None else None,
+            str(raw["source_session_id"]) if raw.get("source_session_id") is not None else None,
         )
 
 

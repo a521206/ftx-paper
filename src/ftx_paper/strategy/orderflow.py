@@ -33,7 +33,7 @@ from .orderflow_opportunity import (
 from .opportunity_timeout import advance_opportunity_timeout
 from .orderflow_admission import evaluate_admission
 from .orderflow_capture import CaptureMode
-from .orderflow_interaction import HypothesisState, InteractionCloseReason, InteractionDetector, InteractionStatus
+from .orderflow_interaction import EvidenceLineage, HypothesisState, InteractionCloseReason, InteractionDetector, InteractionStatus
 from .orderflow_location import (
     LocationBand, LocationObservation, LocationRecord, LocationRegistry,
     is_diagnostic_location,
@@ -259,10 +259,14 @@ class OrderflowPolicy:
                             and location.band.contains(numeric(item, "low")),
                             item.observation_id, item.observed_at, item.available_at,
                             stable_orderflow_id("location_observation", item.observation_id, location.location_id),
-                            location.location_type,
-                            location.source_observation_id,
-                            timeframe=item.timeframe,
-                            method="vwap_provider",
+                             location.location_type,
+                             location.source_observation_id,
+                             timeframe=item.timeframe,
+                             child_observation_ids=(
+                                 item.context.child_observation_ids
+                                 if item.timeframe == "5m" and item.context is not None else ()
+                             ),
+                             method="vwap_provider",
                             reference_source_aggregate_id=location.source_aggregate_id,
                             reference_source_timeframe=location.timeframe or item.timeframe,
                         )
@@ -737,14 +741,76 @@ class OrderflowPolicy:
             # Advance opportunity timeouts before any response can form a new
             # same-bar candidate.  This keeps lifecycle ordering explicit.
             previous_opportunities = dict(self._opportunities)
+            detector = self._location_detectors[observation.timeframe]
             if observation.timeframe == "5m":
                 for key, item in tuple(self._opportunities.items()):
+                    source_interaction = next(
+                        (
+                            candidate
+                            for candidate in (*detector.active_interactions, *detector.closed_interactions)
+                            if candidate.interaction_id == item.source_interaction_id
+                        ),
+                        None,
+                    )
                     timeout = advance_opportunity_timeout(
-                        item, interaction=None, evidence=(observation,), as_of=observation.available_at,
+                        item, interaction=source_interaction,
+                        evidence=(observation,), as_of=observation.available_at,
                     )
                     if timeout.opportunity is not None:
                         self._opportunities[key] = timeout.opportunity
-            detector = self._location_detectors[observation.timeframe]
+            promotion_cutoff = min(context.as_of, orderflow.cutoff)
+            for key, item in tuple(self._opportunities.items()):
+                if item.status is not OpportunityStatus.ACTIVE or item.setup.confirmation_ids:
+                    continue
+                source_interaction = next(
+                    (
+                        candidate
+                        for candidate in (*detector.active_interactions, *detector.closed_interactions)
+                        if candidate.interaction_id == item.source_interaction_id
+                    ),
+                    None,
+                )
+                if source_interaction is None:
+                    continue
+                current_context = self._context_history.as_of_location(
+                    source_interaction.location_alias, promotion_cutoff,
+                )
+                if (
+                    item.setup.context_version is not None
+                    and (
+                        current_context is None
+                        or current_context.version != item.setup.context_version
+                    )
+                ):
+                    continue
+                source_instrument = item.source_instrument or expected_instrument
+                source_session_id = item.source_session_id or orderflow.session_id
+                if source_instrument is None:
+                    continue
+                formation_context = self._context_history.by_reference(item.formation_context)
+                confirmation_start = (
+                    formation_context.available_at
+                    if formation_context is not None else item.setup.formed_at
+                )
+                expected_times = tuple(
+                    confirmation_start + timedelta(minutes=offset)
+                    for offset in range(1, 6)
+                )
+                evidence = tuple(
+                    candidate for expected_at in expected_times
+                    for candidate in observations
+                    if candidate.timeframe == "1m"
+                    and candidate.instrument == source_instrument
+                    and candidate.context is not None
+                    and candidate.context.session_id == source_session_id
+                    and candidate.observed_at == expected_at
+                    and candidate.available_at <= promotion_cutoff
+                )
+                if len(evidence) == 5:
+                    self._opportunities[key] = item.promote(
+                        at=evidence[-1].available_at, confirmation_evidence=evidence,
+                        anchor_at=confirmation_start,
+                    )
             response_interactions = list(detector.active_interactions)
             response_interactions.extend(
                 item for item in detector.closed_interactions
@@ -873,6 +939,20 @@ class OrderflowPolicy:
                          evaluation.confirmation_available_at if next_status == "CONFIRMED" else None, expected_available_at,
                         reason if next_status == "INVALIDATED" else None,
                         reason if next_status == "EXPIRED" else None,
+                        tuple(
+                            EvidenceLineage(
+                                item.observation_id,
+                                item.source_observation_id or item.observation_id,
+                                item.timeframe,
+                                item.observed_at,
+                                item.available_at,
+                                str(item.context.replay_provenance.get("source_fingerprint"))
+                                if item.context is not None and item.context.replay_provenance.get("source_fingerprint") is not None
+                                else None,
+                            )
+                            for item in response_observations
+                            if item.observation_id in source_observation_ids
+                        ),
                     )
                     updated = self._location_detectors[observation.timeframe].update_response(
                         interaction.interaction_id, next_status, hypothesis_id, state=state,
@@ -957,11 +1037,39 @@ class OrderflowPolicy:
                         policy_version=template.version,
                         conflict_group_id=template.execution_conflict_group,
                         context_relation=relation.value,
-                        formation_context=(
-                            ContextVersionRef(formation_context.context_id, formation_context.version)
-                            if formation_context is not None else None
-                        ),
+                         formation_context=(
+                             ContextVersionRef(formation_context.context_id, formation_context.version)
+                             if formation_context is not None else None
+                         ),
+                         source_instrument=observation.instrument,
+                         source_session_id=(
+                             observation.context.session_id if observation.context is not None else None
+                         ),
+                     )
+                    confirmation_evidence = tuple(
+                        item for item in observations
+                        if item.timeframe == "1m"
+                        and item.instrument == observation.instrument
+                        and item.context is not None
+                        and item.context.session_id == (
+                            observation.context.session_id if observation.context is not None else ""
+                        )
+                        and item.observed_at in tuple(
+                            opportunity.setup.formed_at + timedelta(minutes=offset)
+                            for offset in range(1, 6)
+                        )
+                        and item.available_at <= promotion_cutoff
                     )
+                    if len(confirmation_evidence) == 5:
+                        confirmation_anchor = (
+                            formation_context.available_at
+                            if formation_context is not None else opportunity.setup.formed_at
+                        )
+                        opportunity = opportunity.promote(
+                            at=confirmation_evidence[-1].available_at,
+                            confirmation_evidence=confirmation_evidence,
+                            anchor_at=confirmation_anchor,
+                        )
                     if opportunity.lifecycle_id not in self._opportunities:
                         current_context = formation_context
                         context_relation = relation
@@ -1010,7 +1118,10 @@ class OrderflowPolicy:
                             ),
                             setup_valid=True,
                             direction_matches=direction is not None,
-                            confirmations_available=confirmation_id is not None,
+                            confirmations_available=(
+                                confirmation_id is not None
+                                or bool(opportunity.setup.confirmation_ids)
+                            ),
                             current_at=formed_at,
                             context_version=(
                                 str(current_context.version) if current_context is not None else None

@@ -39,6 +39,16 @@ class InteractionCandle:
 
 
 @dataclass(frozen=True, slots=True)
+class EvidenceLineage:
+    observation_id: str
+    source_observation_id: str
+    timeframe: str
+    observed_at: datetime
+    available_at: datetime
+    replay_fingerprint: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class HypothesisState:
     hypothesis_id: str
     policy_version: str
@@ -51,6 +61,7 @@ class HypothesisState:
     expected_available_at: datetime | None = None
     invalidation_reason: str | None = None
     expiry_reason: str | None = None
+    evidence_lineage: tuple[EvidenceLineage, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.hypothesis_id.strip() or not self.policy_version.strip():
@@ -61,6 +72,8 @@ class HypothesisState:
             raise ValueError("invalid hypothesis direction")
         if len(self.evidence_ids) != len(set(self.evidence_ids)):
             raise ValueError("hypothesis evidence IDs must be unique")
+        if len({item.observation_id for item in self.evidence_lineage}) != len(self.evidence_lineage):
+            raise ValueError("hypothesis evidence lineage IDs must be unique")
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,6 +282,17 @@ class InteractionDetector:
                         "expected_available_at": value.expected_available_at.isoformat() if value.expected_available_at else None,
                         "invalidation_reason": value.invalidation_reason,
                         "expiry_reason": value.expiry_reason,
+                        "evidence_lineage": [
+                            {
+                                "observation_id": item.observation_id,
+                                "source_observation_id": item.source_observation_id,
+                                "timeframe": item.timeframe,
+                                "observed_at": item.observed_at.isoformat(),
+                                "available_at": item.available_at.isoformat(),
+                                "replay_fingerprint": item.replay_fingerprint,
+                            }
+                            for item in value.evidence_lineage
+                        ],
                     }
                     for value in item.hypothesis_states
                 ],
@@ -321,6 +345,18 @@ class InteractionDetector:
                         datetime.fromisoformat(str(value["expected_available_at"])) if value.get("expected_available_at") is not None else None,
                         str(value["invalidation_reason"]) if value.get("invalidation_reason") is not None else None,
                         str(value["expiry_reason"]) if value.get("expiry_reason") is not None else None,
+                        tuple(
+                            EvidenceLineage(
+                                str(item["observation_id"]),
+                                str(item["source_observation_id"]),
+                                str(item["timeframe"]),
+                                datetime.fromisoformat(str(item["observed_at"])),
+                                datetime.fromisoformat(str(item["available_at"])),
+                                str(item["replay_fingerprint"]) if item.get("replay_fingerprint") is not None else None,
+                            )
+                            for item in value.get("evidence_lineage", ())
+                            if isinstance(item, Mapping)
+                        ),
                     )
                 if isinstance(value, (list, tuple)) and len(value) == 2:
                     return HypothesisState(str(value[0]), "response_v1", str(value[1]))
@@ -387,6 +423,10 @@ class InteractionDetector:
             if hypothesis_id is None:
                 return replace(item, response_status=response_status)
             states = {value.hypothesis_id: value for value in item.hypothesis_states}
+            current = states.get(hypothesis_id)
+            if current is not None and current.status in {"CONFIRMED", "REJECTED", "INVALIDATED", "EXPIRED"}:
+                if state is None or state.status != current.status:
+                    return item
             states[hypothesis_id] = state or HypothesisState(hypothesis_id, "response_v1", response_status)
             return replace(item, hypothesis_states=tuple(states[key] for key in sorted(states)))
         for key, interaction in self._active.items():
@@ -421,6 +461,6 @@ class InteractionDetector:
 
 
 __all__ = [
-    "HypothesisState", "InteractionCandle", "InteractionCloseReason", "InteractionDetector",
+    "EvidenceLineage", "HypothesisState", "InteractionCandle", "InteractionCloseReason", "InteractionDetector",
     "InteractionStatus", "LocationInteraction",
 ]

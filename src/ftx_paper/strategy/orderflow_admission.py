@@ -83,6 +83,9 @@ def evaluate_admission(
     context_version: str | None = None,
     context_relation: str | None = None,
     permission_version: str | None = None,
+    setup_version: str | None = None,
+    expected_setup_version: str | None = None,
+    expected_context_version: str | None = None,
     reference_window: str | None = None,
     diagnostic: bool = True,
 ) -> AdmissionDecision:
@@ -98,6 +101,22 @@ def evaluate_admission(
         )
         return AdmissionDecision(opportunity.lifecycle_id, PredicateStatus.FAILED,
                                  predicate.reason or "setup_not_active", (predicate,))
+    if expected_setup_version is not None and setup_version != expected_setup_version:
+        predicate = PredicateResult(
+            "setup_version", PredicateStatus.FAILED, value=False,
+            reason="setup_version_mismatch", evidence_ids=evidence_ids,
+            context_version=context_version, permission_version=permission_version,
+            reference_window=reference_window,
+        )
+        return AdmissionDecision(opportunity.lifecycle_id, PredicateStatus.FAILED, predicate.reason or "setup_version_mismatch", (predicate,))
+    if expected_context_version is not None and context_version != expected_context_version:
+        predicate = PredicateResult(
+            "context_version", PredicateStatus.FAILED, value=False,
+            reason="context_version_mismatch", evidence_ids=evidence_ids,
+            context_version=context_version, permission_version=permission_version,
+            reference_window=reference_window,
+        )
+        return AdmissionDecision(opportunity.lifecycle_id, PredicateStatus.FAILED, predicate.reason or "context_version_mismatch", (predicate,))
     if context_relation is not None and context_relation not in {
         "confirmed", "conflicted", "neutral", "unavailable",
     }:

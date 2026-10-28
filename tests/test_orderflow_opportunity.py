@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from ftx_paper.strategy import OpportunityStatus, SetupOpportunity
 
@@ -85,10 +86,124 @@ def test_snapshot_rejects_inconsistent_transition_history() -> None:
         raise AssertionError("inconsistent snapshot was accepted")
 
     duplicate = opportunity.snapshot()
-    duplicate["transitions"] = [*duplicate["transitions"], duplicate["transitions"][0]]
+    transitions = duplicate["transitions"]
+    assert isinstance(transitions, list)
+    duplicate["transitions"] = [*transitions, transitions[0]]
     try:
         SetupOpportunity.from_snapshot(duplicate)
     except ValueError as exc:
         assert "duplicate transitions" in str(exc)
     else:
         raise AssertionError("duplicate transition history was accepted")
+
+
+def test_promotion_requires_five_unique_confirmation_observations() -> None:
+    opportunity = _opportunity()
+    at = datetime(2026, 1, 1, 9, 25, tzinfo=UTC)
+    evidence = tuple(
+        SimpleNamespace(
+            observation_id=f"one-{index}", timeframe="1m",
+            observed_at=at + timedelta(minutes=index + 1),
+            available_at=at + timedelta(minutes=index + 1),
+        )
+        for index in range(5)
+    )
+    try:
+        opportunity.promote(at=at, confirmation_evidence=evidence[:1])
+    except ValueError as exc:
+        assert "exactly five" in str(exc)
+    else:
+        raise AssertionError("promotion accepted incomplete confirmation")
+
+    promoted = opportunity.promote(
+        at=evidence[-1].available_at, confirmation_evidence=evidence,
+    )
+    assert promoted.status is OpportunityStatus.ACTIVE
+    assert promoted.setup.confirmation_ids == tuple(item.observation_id for item in evidence)
+    assert promoted.transitions[-1].reason == "promoted"
+
+
+def test_promotion_rejects_non_consecutive_or_pre_formation_evidence() -> None:
+    opportunity = _opportunity()
+    formed = opportunity.setup.formed_at
+    evidence = tuple(
+        SimpleNamespace(
+            observation_id=f"bar-{index}", timeframe="1m",
+            observed_at=formed + timedelta(minutes=index),
+            available_at=formed + timedelta(minutes=index),
+        )
+        for index in range(5)
+    )
+    try:
+        opportunity.promote(at=formed + timedelta(minutes=5), confirmation_evidence=evidence)
+    except ValueError as exc:
+        assert "after formation" in str(exc)
+    else:
+        raise AssertionError("promotion accepted pre-formation evidence")
+
+
+def test_promotion_scopes_instrument_session_and_expiry() -> None:
+    formed = datetime(2026, 1, 1, 9, 20, tzinfo=UTC)
+    opportunity = SetupOpportunity.create(
+        interaction_id="interaction-scoped", direction="long", formed_at=formed,
+        expires_at=formed + timedelta(minutes=10), entry_lower=99,
+        entry_upper=100, failure_boundary=98, evidence_ids=("e1",),
+        source_instrument="NIFTYFUT", source_session_id="session-1",
+    )
+
+    def evidence(instrument: str = "NIFTYFUT", session_id: str = "session-1") -> tuple[SimpleNamespace, ...]:
+        return tuple(
+            SimpleNamespace(
+                observation_id=f"scoped-{index}", timeframe="1m", instrument=instrument,
+                observed_at=formed + timedelta(minutes=index + 1),
+                available_at=formed + timedelta(minutes=index + 1),
+                context=SimpleNamespace(session_id=session_id),
+            )
+            for index in range(5)
+        )
+
+    for wrong in (evidence(instrument="OTHER"), evidence(session_id="other-session")):
+        try:
+            opportunity.promote(at=wrong[-1].available_at, confirmation_evidence=wrong)
+        except ValueError as exc:
+            assert "causally available" in str(exc)
+        else:
+            raise AssertionError("promotion accepted out-of-scope evidence")
+
+    late = tuple(
+        SimpleNamespace(
+            observation_id=item.observation_id, timeframe=item.timeframe,
+            instrument=item.instrument,
+            observed_at=item.observed_at + timedelta(minutes=10),
+            available_at=item.available_at + timedelta(minutes=10), context=item.context,
+        )
+        for item in evidence()
+    )
+    try:
+        opportunity.promote(at=late[-1].available_at, confirmation_evidence=late)
+    except ValueError as exc:
+        assert "causally available" in str(exc)
+    else:
+        raise AssertionError("promotion accepted expired evidence")
+
+
+def test_promotion_keeps_lifecycle_active_for_later_timeout() -> None:
+    opportunity = _opportunity()
+    formed = opportunity.setup.formed_at
+    evidence = tuple(
+        SimpleNamespace(
+            observation_id=f"one-{index}", timeframe="1m",
+            observed_at=formed + timedelta(minutes=index + 1),
+            available_at=formed + timedelta(minutes=index + 1),
+        )
+        for index in range(5)
+    )
+    promoted = opportunity.promote(at=evidence[-1].available_at, confirmation_evidence=evidence)
+    assert promoted.status is OpportunityStatus.ACTIVE
+    expired = promoted
+    for index in range(6):
+        expired = expired.advance_timeout(
+            timeframe="5m", at=formed + timedelta(minutes=25 + index),
+            evidence_id=f"5m-{index}",
+        )
+    assert expired.status is OpportunityStatus.EXPIRED

@@ -5,6 +5,7 @@ from ftx_paper.strategy import (
     OrderflowObservation, OrderflowObservationContext, CausalOrderflowProducer,
     VwapLocationProvider, observe_trigger,
 )
+from ftx_paper.strategy.orderflow_trigger import advance_retest
 
 
 UTC = timezone.utc
@@ -143,3 +144,27 @@ def test_diagnostic_trigger_preserves_crossing_without_authorizing_execution() -
     assert result.crossed
     assert not result.eligible
     assert result.ineligible_reason == "diagnostic_only"
+
+
+def test_retest_persists_touch_before_later_confirmation() -> None:
+    observed = datetime(2026, 1, 1, 3, 45, tzinfo=UTC)
+    touch = OrderflowObservation(
+        "touch", "bar-touch", "v1", "1m", "NIFTYFUT", observed,
+        observed + timedelta(minutes=1),
+        {"open": 101.0, "high": 101.5, "low": 99.5, "close": 100.5, "previous_close": 101.0},
+        observed, observed + timedelta(minutes=1),
+        context=OrderflowObservationContext("2026-01-01", "complete", "available", {}, 1),
+    )
+    state = advance_retest(touch, boundary=100.0)
+    assert state.touched and not state.confirmed
+    confirmation = OrderflowObservation(
+        "confirm", "bar-confirm", "v1", "1m", "NIFTYFUT", observed + timedelta(minutes=1),
+        observed + timedelta(minutes=2),
+        {"open": 100.5, "high": 101.0, "low": 100.2, "close": 101.0, "previous_close": 99.5},
+        observed + timedelta(minutes=1), observed + timedelta(minutes=2),
+        context=OrderflowObservationContext("2026-01-01", "complete", "available", {}, 1),
+    )
+    confirmed = advance_retest(confirmation, boundary=100.0, state=state)
+    assert confirmed.confirmed
+    assert confirmed.touch_observation_id == "touch"
+    assert confirmed.confirmation_observation_id == "confirm"
