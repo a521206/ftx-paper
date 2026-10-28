@@ -311,7 +311,8 @@ class InteractionDetector:
             if not contact:
                 return None
             interaction = LocationInteraction(
-                key, self.timeframe, location.location_id, location.alias,
+                f"{key}:{observation.observed_at.isoformat()}",
+                self.timeframe, location.location_id, location.alias,
                 location.price, location.generation, observation.observation_id,
                 observation.observed_at, InteractionStatus.ACTIVE, (candle,),
                 band_lower=location.band.lower, band_upper=location.band.upper,
