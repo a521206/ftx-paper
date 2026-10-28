@@ -136,6 +136,9 @@ class OrderflowPolicy:
         self._opportunities: dict[str, SetupOpportunity] = {}
         self._execution_groups = ExecutionGroupRegistry()
         self._vwap_provider = VwapLocationProvider()
+        self._evaluation_observations: tuple[OrderflowObservation, ...] = ()
+        self._evaluation_observation_ids: frozenset[str] = frozenset()
+        self._evaluation_observation_indices: dict[str, int] = {}
 
     @property
     def execution_mode(self) -> ExecutionMode:
@@ -210,10 +213,19 @@ class OrderflowPolicy:
             self._opportunities.clear()
             self._session_id = orderflow.session_id
 
-        observations = tuple(sorted(
+        incoming_observations = tuple(sorted(
             (*orderflow.observations_for("1m"), *orderflow.observations_for("5m")),
             key=lambda item: (item.available_at, item.timeframe, item.observed_at, item.observation_id),
         ))
+        incoming_ids = frozenset(item.observation_id for item in incoming_observations)
+        if incoming_ids != self._evaluation_observation_ids:
+            self._evaluation_observations = incoming_observations
+            self._evaluation_observation_ids = incoming_ids
+            self._evaluation_observation_indices = {
+                item.observation_id: index
+                for index, item in enumerate(incoming_observations)
+            }
+        observations = self._evaluation_observations
         vwap_locations: tuple[LocationRecord, ...] = ()
         if self.config.vwap_enabled:
             vwap_measurements = self._vwap_provider.publish(
@@ -246,8 +258,13 @@ class OrderflowPolicy:
                     raise ValueError(f"VWAP location requires numeric {name!r} evidence")
                 return value
 
-            observations = tuple(
-                replace(
+            enriched = list(observations)
+            for source_id, locations in locations_by_source.items():
+                index = self._evaluation_observation_indices.get(source_id)
+                if index is None:
+                    continue
+                item = enriched[index]
+                enriched[index] = replace(
                     item,
                     location_observations=item.location_observations + tuple(
                         LocationObservation(
@@ -259,22 +276,22 @@ class OrderflowPolicy:
                             and location.band.contains(numeric(item, "low")),
                             item.observation_id, item.observed_at, item.available_at,
                             stable_orderflow_id("location_observation", item.observation_id, location.location_id),
-                             location.location_type,
-                             location.source_observation_id,
-                             timeframe=item.timeframe,
-                             child_observation_ids=(
-                                 item.context.child_observation_ids
-                                 if item.timeframe == "5m" and item.context is not None else ()
-                             ),
-                             method="vwap_provider",
+                            location.location_type,
+                            location.source_observation_id,
+                            timeframe=item.timeframe,
+                            child_observation_ids=(
+                                item.context.child_observation_ids
+                                if item.timeframe == "5m" and item.context is not None else ()
+                            ),
+                            method="vwap_provider",
                             reference_source_aggregate_id=location.source_aggregate_id,
                             reference_source_timeframe=location.timeframe or item.timeframe,
                         )
-                        for location in locations_by_source.get(item.observation_id, ())
+                        for location in locations
                     ),
                 )
-                for item in observations
-            )
+            observations = tuple(enriched)
+            self._evaluation_observations = observations
         if not observations:
             return (*session_transitions, PolicyDecision({**base, "outcome": "unavailable", "reason": "required_features_unavailable",
                                      "decision_id": _decision_id(
