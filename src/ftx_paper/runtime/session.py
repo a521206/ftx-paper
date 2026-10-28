@@ -487,24 +487,12 @@ class RuntimeSession:
                    "execution_allowed": source == "live"})
         payload.pop("event_type", None)
         decision_event = is_decision_event(event_type, payload)
-        if decision_event:
-            payload["decision_at"] = serialize_datetime(decision_at)
         metadata = (engine or self.engine).strategy_metadata
         if metadata:
             payload.update(strategy_version=metadata.version, config_hash=metadata.config_hash)
+        event_decision_at = decision_at
+        observed_at = available_at = decision_at
         if decision_event:
-            payload["decision_view"] = validate_decision_view(build_decision_view(
-                payload,
-                event_type=event_type,
-                strategy_id=payload.get("strategy_id") if isinstance(payload.get("strategy_id"), str) else None,
-            ))
-        strategy_id = str(payload.get("strategy_id") or payload.get("strategy_name") or "unknown")
-        decision_id = str(payload.get("decision_id") or "")
-        self._event_sequence += 1
-        payload["sequence"] = self._event_sequence
-        idempotency_key = ":".join((strategy_id, session_date, source, event_type, bundle_id, decision_id))
-        self.store.append_event(event_type, deepcopy(payload), idempotency_key, timestamp=timestamp)
-        try:
             provenance = payload.get("evidence", {})
             provenance = provenance.get("provenance", {}) if isinstance(provenance, dict) else {}
 
@@ -518,11 +506,32 @@ class RuntimeSession:
 
             observed_at = _causal_timestamp("observed_at")
             available_at = _causal_timestamp("available_at")
-            if observed_at > available_at or available_at > decision_at:
+            if observed_at > available_at:
+                raise ValueError("decision event timestamps violate observed_at <= available_at <= decision_at")
+            # Completed aggregates may become available after the bundle minute.
+            event_decision_at = max(decision_at, available_at)
+            payload["decision_at"] = serialize_datetime(event_decision_at)
+        if decision_event:
+            payload["decision_view"] = validate_decision_view(build_decision_view(
+                payload,
+                event_type=event_type,
+                strategy_id=payload.get("strategy_id") if isinstance(payload.get("strategy_id"), str) else None,
+            ))
+        strategy_id = str(payload.get("strategy_id") or payload.get("strategy_name") or "unknown")
+        decision_id = str(payload.get("decision_id") or "")
+        self._event_sequence += 1
+        payload["sequence"] = self._event_sequence
+        idempotency_key = ":".join((strategy_id, session_date, source, event_type, bundle_id, decision_id))
+        self.store.append_event(
+            event_type, deepcopy(payload), idempotency_key,
+            timestamp=serialize_datetime(event_decision_at) if decision_event else timestamp,
+        )
+        try:
+            if available_at > event_decision_at:
                 raise ValueError("decision event timestamps violate observed_at <= available_at <= decision_at")
             self.event_bus.publish(RuntimeEvent(
                 event_type=event_type,
-                timestamp=decision_at,
+                timestamp=event_decision_at,
                 payload=deepcopy(payload),
                 event_id=idempotency_key,
                 source=source,
@@ -532,7 +541,7 @@ class RuntimeSession:
                 session_date=session_date,
                 observed_at=observed_at,
                 available_at=available_at,
-                decision_at=decision_at,
+                decision_at=event_decision_at,
                 strategy_version=payload.get("strategy_version") if isinstance(payload.get("strategy_version"), str) else None,
                 config_hash=payload.get("config_hash") if isinstance(payload.get("config_hash"), str) else None,
                 provenance=deepcopy(payload.get("evidence", {})) if isinstance(payload.get("evidence"), dict) else None,

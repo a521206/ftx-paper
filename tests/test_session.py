@@ -473,6 +473,34 @@ def test_live_order_reaches_paper_broker_and_persists_fill(tmp_path):
     assert fill["created_at"] != "2026-01-01T10:20:00+05:30"
 
 
+def test_decision_event_timestamp_advances_to_evidence_availability(tmp_path):
+    store = RuntimeStore(tmp_path)
+    observed_at = "2026-01-01T10:20:00+05:30"
+    available_at = "2026-01-01T10:25:00+05:30"
+
+    class Engine:
+        bars_seen = 0
+        strategy_metadata = None
+
+        def on_bundle(self, bundle):
+            return EngineResult(events=({
+                "event_type": "POLICY_DECISION",
+                "decision_id": "causal-1",
+                "outcome": "accepted",
+                "observed_at": observed_at,
+                "available_at": available_at,
+            },))
+
+    session = RuntimeSession(store, None, [], engine=cast(PaperEngine, Engine()))
+    session._process_bundle(type("Bundle", (), {
+        "bundle_id": "2026-01-01:10:20", "trading_date": "2026-01-01", "minute": "10:20",
+        "required_roles": (), "bars": {},
+    })(), source="live")
+
+    event = next(item for item in store.read_events() if item["event_type"] == "POLICY_DECISION")
+    assert event["payload"]["decision_at"].isoformat() == available_at
+
+
 def test_execution_notification_preserves_order_ownership_metadata(tmp_path):
     store = RuntimeStore(tmp_path)
     instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
