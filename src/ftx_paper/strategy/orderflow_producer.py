@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone, tzinfo
+from bisect import bisect_right
 import math
 
 from ftx_paper.contracts import MarketBar
@@ -66,17 +67,34 @@ class CausalOrderflowProducer:
         self._session_timezone = session_timezone
         self._session_start = datetime.strptime(session_start, "%H:%M").time()
         self._session_end = datetime.strptime(session_end, "%H:%M").time()
+        self._context_bars: tuple[MarketBar, ...] = ()
+        self._context_prefix: tuple[OrderflowObservation, ...] = ()
+        self._context_five_minute: tuple[OrderflowObservation, ...] = ()
+        self._context_processed_windows: set[int] = set()
+        self._context_location_records: dict[str, LocationRecord] = {}
+        self._context_location_generations: dict[str, int] = {}
+
+    def _invalidate_context_cache(self) -> None:
+        self._context_bars = ()
+        self._context_prefix = ()
+        self._context_five_minute = ()
+        self._context_processed_windows.clear()
+        self._context_location_records.clear()
+        self._context_location_generations.clear()
 
     def set_prior_close(self, close: float | None) -> None:
         """Provide the prior-session close when replay starts mid-history."""
         self._prior_close = close
+        self._invalidate_context_cache()
 
     def set_prior_value_bounds(self, high: float | None, low: float | None) -> None:
         self._prior_value_high = high
         self._prior_value_low = low
+        self._invalidate_context_cache()
 
     def set_prior_bars(self, bars: Sequence[MarketBar]) -> None:
         """Provide completed prior-session bars for PD location publication."""
+        self._invalidate_context_cache()
         self._prior_bars = tuple(sorted(
             (item for item in bars
              if item.instrument.instrument_type.upper() in {"FUT", "FUTURE", "FUTURES"}),
@@ -121,6 +139,7 @@ class CausalOrderflowProducer:
             self._last_timestamps.clear()
             self._raw_last_timestamps.clear()
             self._selected_identity = None
+            self._invalidate_context_cache()
         timestamp = bar.timestamp.astimezone(timezone.utc)
         identity = _source_identity(bar)
         if self._selected_identity is None:
@@ -150,26 +169,34 @@ class CausalOrderflowProducer:
         decision_cutoff = datetime.fromisoformat(
             f"{trading_date}T{minute}:00"
         ).replace(tzinfo=self._session_timezone).astimezone(timezone.utc) + timedelta(minutes=1)
-        candidates = [
-            bar for (date, _), bars in self._bars.items()
-            if date == trading_date
-            for bar in bars
-            if self._session_start <= bar.timestamp.astimezone(self._session_timezone).time().replace(second=0, microsecond=0) < self._session_end
-            and bar.timestamp + timedelta(minutes=1) <= decision_cutoff
-        ]
-        if not candidates:
+        selected_identity = self._selected_identity
+        if selected_identity is None:
             return None
-        bars = sorted(candidates, key=lambda item: item.timestamp)
-        stream_identity = _source_identity(bars[-1])
+        source_bars = self._bars.get((trading_date, selected_identity), [])
+        cutoff_index = bisect_right(
+            [bar.timestamp for bar in source_bars],
+            decision_cutoff - timedelta(minutes=1),
+        )
+        bars = source_bars[:cutoff_index]
+        if not bars:
+            return None
+        stream_identity = selected_identity
         instrument = bars[-1].instrument.symbol
-        bars = [bar for bar in bars if _source_identity(bar) == stream_identity]
-        prefix: list[OrderflowObservation] = []
+        cached_count = len(self._context_bars)
+        append_only = (
+            cached_count <= len(bars)
+            and tuple(bars[:cached_count]) == self._context_bars
+        )
+        prefix: list[OrderflowObservation] = (
+            list(self._context_prefix) if append_only else []
+        )
         session_start = datetime.combine(
             datetime.fromisoformat(trading_date).date(), self._session_start,
         ).replace(
             tzinfo=self._session_timezone
         ).astimezone(timezone.utc)
-        for bar_index, bar in enumerate(bars):
+        start_index = len(prefix)
+        for bar_index, bar in enumerate(bars[start_index:], start=start_index):
             boundary_gap = bar_index == 0 and bar.timestamp > session_start
             source_gap = bool(
                 bar_index
@@ -221,9 +248,20 @@ class CausalOrderflowProducer:
                     causal_sequence=1,
                 ),
             ))
-        five_minute: list[OrderflowObservation] = []
-        location_records: dict[str, LocationRecord] = {}
-        location_generations: dict[str, int] = {}
+        self._context_bars = tuple(bars)
+        self._context_prefix = tuple(prefix)
+        five_minute: list[OrderflowObservation] = (
+            list(self._context_five_minute) if append_only else []
+        )
+        location_records = (
+            self._context_location_records if append_only else {}
+        )
+        location_generations = (
+            self._context_location_generations if append_only else {}
+        )
+        processed_windows = (
+            set(self._context_processed_windows) if append_only else set()
+        )
         windows: dict[int, list[OrderflowObservation]] = defaultdict(list)
         for item in prefix:
             if item.interval_start is None:
@@ -232,6 +270,8 @@ class CausalOrderflowProducer:
             if offset >= 0:
                 windows[offset // 5].append(item)
         for window_index, window_children in sorted(windows.items()):
+            if window_index in processed_windows:
+                continue
             children = tuple(sorted(window_children, key=lambda item: item.observed_at))
             if len(children) != 5 or tuple(
                 item.observed_at for item in children
@@ -260,10 +300,7 @@ class CausalOrderflowProducer:
             parent_id = stable_orderflow_id("aggregate", trading_date, stream_identity, "5m", start.isoformat())
             child_ids = tuple(item.observation_id for item in children)
             child_timestamps = {item.observed_at for item in children}
-            source_rows = [
-                bar for bar in bars
-                if bar.timestamp in child_timestamps and _source_identity(bar) == stream_identity
-            ]
+            source_rows = [bar for bar in bars if bar.timestamp in child_timestamps]
             parent_source_fingerprint = source_fingerprint(source_rows)
             child_features = [item.features for item in children]
             total_volume = sum(_numeric_feature(item, "volume") for item in child_features)
@@ -380,7 +417,12 @@ class CausalOrderflowProducer:
                 ),
                 location_observations=tuple(location_observations),
             ))
+            processed_windows.add(window_index)
         observations = (*prefix, *five_minute)
+        self._context_five_minute = tuple(five_minute)
+        self._context_processed_windows = processed_windows
+        self._context_location_records = location_records
+        self._context_location_generations = location_generations
         cutoff = decision_cutoff
         return OrderflowContext(
             trading_date, cutoff, observations,
