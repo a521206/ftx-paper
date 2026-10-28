@@ -128,6 +128,12 @@ class OrderflowObservation:
     def available_by(self, cutoff: datetime) -> bool:
         return self.available_at <= cutoff
 
+    def field_available_at(self, field: str) -> datetime:
+        """Return the earliest causal timestamp for a field on this observation."""
+        if field == "open":
+            return self.observed_at
+        return self.available_at
+
     @property
     def aggregate_id(self) -> str:
         return self.observation_id

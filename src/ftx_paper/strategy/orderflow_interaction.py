@@ -6,6 +6,7 @@ from dataclasses import dataclass, field, replace
 from collections.abc import Mapping
 from datetime import datetime
 from enum import StrEnum
+from typing import cast
 
 from .orderflow_contract import OrderflowObservation
 from .orderflow_location import LocationRecord
@@ -66,6 +67,26 @@ class ProjectionSnapshot:
             raise ValueError("projection child observation IDs must be unique")
         if self.available_at < self.last_observed_at:
             raise ValueError("projection availability is not causal")
+
+
+@dataclass(frozen=True, slots=True)
+class SyntheticScoreSnapshot:
+    """Scores computed once for one causal cumulative projection."""
+
+    context_version: int | None
+    observed_at: datetime
+    available_at: datetime
+    source_observation_ids: tuple[str, ...]
+    long_score: float | None
+    short_score: float | None
+
+    def __post_init__(self) -> None:
+        if self.available_at < self.observed_at:
+            raise ValueError("synthetic score availability is not causal")
+        if not self.source_observation_ids:
+            raise ValueError("synthetic score requires source observations")
+        if len(self.source_observation_ids) != len(set(self.source_observation_ids)):
+            raise ValueError("synthetic score source observation IDs must be unique")
 @dataclass(frozen=True, slots=True)
 class EvidenceLineage:
     observation_id: str
@@ -128,6 +149,8 @@ class LocationInteraction:
     location_type: str = "session_reference"
     reference_provenance: Mapping[str, str] = field(default_factory=dict)
     synthetic_snapshots: tuple[tuple[str, tuple[ProjectionSnapshot, ...]], ...] = ()
+    score_history: tuple[SyntheticScoreSnapshot, ...] = ()
+    source_cursors: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.interaction_id.strip() or not self.location_id.strip():
@@ -175,6 +198,42 @@ def _append_projection(
         synthetic_snapshots=tuple(
             (timeframe, existing[timeframe]) for timeframe in sorted(existing)
         ),
+    )
+
+
+def _append_source_projection(
+    interaction: LocationInteraction,
+    candle: InteractionCandle,
+) -> LocationInteraction:
+    """Advance one timeframe projection without making a contact candle."""
+    existing = dict(interaction.synthetic_snapshots)
+    history = existing.get(candle.timeframe, ())
+    if history and candle.observation_id in history[-1].source_observation_ids:
+        cursors = dict(interaction.source_cursors)
+        cursors[candle.timeframe] = candle.observation_id
+        return replace(interaction, source_cursors=tuple(sorted(cursors.items())))
+    previous = history[-1] if history else None
+    source_ids = (*previous.source_observation_ids, candle.observation_id) if previous else (candle.observation_id,)
+    snapshot = ProjectionSnapshot(
+        timeframe=candle.timeframe,
+        open=previous.open if previous else (candle.open if candle.open is not None else candle.close),
+        high=max(previous.high, candle.high if candle.high is not None else candle.close) if previous else (candle.high if candle.high is not None else candle.close),
+        low=min(previous.low, candle.low if candle.low is not None else candle.close) if previous else (candle.low if candle.low is not None else candle.close),
+        close=candle.close,
+        source_observation_ids=source_ids,
+        child_observation_ids=tuple(dict.fromkeys((*previous.child_observation_ids, *candle.child_observation_ids))) if previous else candle.child_observation_ids,
+        first_observed_at=previous.first_observed_at if previous else candle.observed_at,
+        last_observed_at=candle.observed_at,
+        available_at=max(previous.available_at, candle.available_at) if previous else candle.available_at,
+        context_version=candle.context_version,
+    )
+    existing[candle.timeframe] = (*history, snapshot)
+    cursors = dict(interaction.source_cursors)
+    cursors[candle.timeframe] = candle.observation_id
+    return replace(
+        interaction,
+        synthetic_snapshots=tuple((key, existing[key]) for key in sorted(existing)),
+        source_cursors=tuple(sorted(cursors.items())),
     )
 
 
@@ -297,6 +356,62 @@ class InteractionDetector:
         self._active[key] = advanced
         return advanced
 
+    def advance_projections(
+        self, sources: Mapping[str, tuple[OrderflowObservation, ...]], *, as_of: datetime,
+    ) -> tuple[LocationInteraction, ...]:
+        """Advance active interactions from newly available source observations."""
+        updated: list[LocationInteraction] = []
+        for key, interaction in tuple(self._active.items()):
+            current = interaction
+            cursors = dict(current.source_cursors)
+            for timeframe, observations in sources.items():
+                for observation in sorted(observations, key=lambda item: (item.observed_at, item.available_at, item.observation_id)):
+                    if observation.available_at > as_of or observation.observed_at < current.created_at:
+                        continue
+                    if cursors.get(timeframe) == observation.observation_id:
+                        continue
+                    close = observation.features.get("close")
+                    if not isinstance(close, (int, float)) or isinstance(close, bool):
+                        continue
+                    values = {
+                        name: observation.features.get(name, close)
+                        for name in ("open", "high", "low")
+                    }
+                    if any(not isinstance(value, (int, float)) or isinstance(value, bool) for value in values.values()):
+                        continue
+                    current = _append_source_projection(current, InteractionCandle(
+                        observation.observation_id, timeframe, observation.observed_at,
+                        observation.available_at, float(cast(float, close)),
+                        float(cast(float, values["high"])),
+                        float(cast(float, values["low"])),
+                        float(cast(float, values["open"])),
+                        observation.context.child_observation_ids if observation.context else (),
+                        observation.context.generation if observation.context else None,
+                    ))
+                    cursors = dict(current.source_cursors)
+            if current != interaction:
+                self._active[key] = current
+                updated.append(current)
+        return tuple(updated)
+
+    def record_score(
+        self, interaction_id: str, *, snapshot: ProjectionSnapshot,
+        context_version: int | None, long_score: float | None, short_score: float | None,
+    ) -> LocationInteraction:
+        """Record the first score for each cumulative projection snapshot."""
+        for key, interaction in self._active.items():
+            if interaction.interaction_id != interaction_id:
+                continue
+            if interaction.score_history and interaction.score_history[-1].source_observation_ids == snapshot.source_observation_ids:
+                return interaction
+            updated = replace(interaction, score_history=(*interaction.score_history, SyntheticScoreSnapshot(
+                context_version, snapshot.last_observed_at, snapshot.available_at,
+                snapshot.source_observation_ids, long_score, short_score,
+            )))
+            self._active[key] = updated
+            return updated
+        raise KeyError(interaction_id)
+
     def close_all(self, reason: InteractionCloseReason, at: datetime) -> tuple[LocationInteraction, ...]:
         ended = tuple(
             replace(item, status=InteractionStatus.ENDED, close_reason=reason, closed_at=at)
@@ -338,6 +453,18 @@ class InteractionDetector:
                     ]
                     for timeframe, values in item.synthetic_snapshots
                 },
+                "score_history": [
+                    {
+                        "context_version": score.context_version,
+                        "observed_at": score.observed_at.isoformat(),
+                        "available_at": score.available_at.isoformat(),
+                        "source_observation_ids": list(score.source_observation_ids),
+                        "long_score": score.long_score,
+                        "short_score": score.short_score,
+                    }
+                    for score in item.score_history
+                ],
+                "source_cursors": dict(item.source_cursors),
                 "reference_level": item.reference_level,
                 "reference_generation": item.reference_generation,
                 "source_observation_id": item.source_observation_id,
@@ -487,6 +614,23 @@ class InteractionDetector:
                         int(value["context_version"]) if value.get("context_version") is not None else None,
                     ))
                 projections.append((str(timeframe), tuple(decoded_values)))
+            raw_scores = raw.get("score_history", ())
+            if not isinstance(raw_scores, (list, tuple)):
+                raise ValueError("invalid synthetic score history")
+            scores = tuple(
+                SyntheticScoreSnapshot(
+                    int(value["context_version"]) if value.get("context_version") is not None else None,
+                    datetime.fromisoformat(str(value["observed_at"])),
+                    datetime.fromisoformat(str(value["available_at"])),
+                    tuple(str(item) for item in value.get("source_observation_ids", ())),
+                    float(value["long_score"]) if value.get("long_score") is not None else None,
+                    float(value["short_score"]) if value.get("short_score") is not None else None,
+                )
+                for value in raw_scores if isinstance(value, Mapping)
+            )
+            raw_cursors = raw.get("source_cursors", {})
+            if not isinstance(raw_cursors, Mapping):
+                raise ValueError("invalid interaction source cursors")
             return LocationInteraction(
                 str(raw["interaction_id"]), str(raw["timeframe"]),
                 str(raw["location_id"]), str(raw["location_alias"]),
@@ -506,6 +650,8 @@ class InteractionDetector:
                 str(raw.get("location_type", "session_reference")),
                 dict(raw.get("reference_provenance", {})),
                 tuple(sorted(projections)),
+                scores,
+                tuple(sorted((str(key), str(value)) for key, value in raw_cursors.items())),
             )
 
         active = snapshot.get("active", ())
@@ -584,6 +730,6 @@ class InteractionDetector:
 
 
 __all__ = [
-    "EvidenceLineage", "HypothesisState", "InteractionCandle", "InteractionCloseReason", "InteractionDetector", "ProjectionSnapshot",
+    "EvidenceLineage", "HypothesisState", "InteractionCandle", "InteractionCloseReason", "InteractionDetector", "ProjectionSnapshot", "SyntheticScoreSnapshot",
     "InteractionStatus", "LocationInteraction",
 ]

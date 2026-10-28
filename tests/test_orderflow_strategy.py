@@ -235,6 +235,56 @@ def test_opening_gap_uses_latest_causal_one_minute_observation() -> None:
     assert transition.payload["state"] == "RETURN_TO_VALUE"
 
 
+def test_opening_gap_context_uses_open_availability_not_completed_bar_boundary() -> None:
+    bundle, account = _context()
+    assert bundle.orderflow_context is not None
+    children = list(bundle.orderflow_context.observations_for("1m"))
+    children[0] = replace(
+        children[0],
+        features={"open": 101.0, "previous_close": 100.0, "close": 100.0},
+    )
+    context = replace(
+        bundle.orderflow_context,
+        observations=(bundle.orderflow_context.observations[0], *children),
+        prefixes={"5m": bundle.orderflow_context.observations_for("5m"), "1m": tuple(children)},
+    )
+
+    events = OrderflowStrategy().evaluate(replace(bundle, orderflow_context=context), account)
+
+    context_event = next(
+        event for event in events
+        if event.payload.get("reason") == "opening_gap_context"
+    )
+    assert context_event.payload["observed_at"] == OBSERVED.isoformat()
+    assert context_event.payload["available_at"] == OBSERVED.isoformat()
+    assert context_event.payload["decision_at"] == OBSERVED.isoformat()
+
+
+def test_opening_gap_transition_retains_completed_bar_availability() -> None:
+    bundle, account = _context()
+    assert bundle.orderflow_context is not None
+    children = list(bundle.orderflow_context.observations_for("1m"))
+    children[0] = replace(
+        children[0],
+        features={"open": 101.0, "previous_close": 100.0, "close": 100.0},
+    )
+    context = replace(
+        bundle.orderflow_context,
+        observations=(bundle.orderflow_context.observations[0], *children),
+        prefixes={"5m": bundle.orderflow_context.observations_for("5m"), "1m": tuple(children)},
+    )
+
+    events = OrderflowStrategy().evaluate(replace(bundle, orderflow_context=context), account)
+
+    transition = next(
+        event for event in events
+        if event.payload.get("reason") == "opening_gap_transition"
+    )
+    assert transition.payload["observed_at"] == (OBSERVED + timedelta(minutes=4)).isoformat()
+    assert transition.payload["available_at"] == (OBSERVED + timedelta(minutes=4, seconds=1)).isoformat()
+    assert transition.payload["decision_at"] == transition.payload["available_at"]
+
+
 def test_public_strategy_snapshot_restores_processed_location_lifecycle() -> None:
     bundle, account = _context()
     strategy = OrderflowStrategy()
@@ -244,6 +294,37 @@ def test_public_strategy_snapshot_restores_processed_location_lifecycle() -> Non
 
     assert first[0].payload["interaction_id"] == "session-g1:5m"
     assert restored.evaluate(bundle, account) == ()
+
+
+def test_interaction_projection_advancement_records_causal_score_once() -> None:
+    bundle, account = _context()
+    assert bundle.orderflow_context is not None
+    parent = bundle.orderflow_context.observations_for("5m")[0]
+    scored = replace(
+        parent,
+        features={**parent.features, "long_score": 2.0, "short_score": 1.0},
+    )
+    context = replace(
+        bundle.orderflow_context,
+        observations=(scored, *bundle.orderflow_context.observations[1:]),
+        prefixes={
+            **bundle.orderflow_context.prefixes,
+            "5m": (scored, *bundle.orderflow_context.observations_for("5m")[1:]),
+        },
+    )
+    strategy = OrderflowStrategy()
+    strategy.evaluate(replace(bundle, orderflow_context=context), account)
+    snapshot = strategy.policy.snapshot()
+    detectors = cast(dict[str, object], snapshot["location_detectors"])
+    five_minute = cast(dict[str, object], detectors["5m"])
+    active = cast(list[object], five_minute["active"])
+    interaction = cast(dict[str, object], active[0])
+    scores = cast(list[object], interaction["score_history"])
+    assert len(scores) == 1
+    score = cast(dict[str, object], scores[0])
+    assert score["long_score"] == 2.0
+    assert score["short_score"] == 1.0
+    assert cast(dict[str, str], interaction["source_cursors"])["5m"] == "obs-5m"
 
 
 def test_snapshot_restore_rejects_invalid_location_detector_state() -> None:

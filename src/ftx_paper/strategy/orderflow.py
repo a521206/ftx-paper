@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import hashlib
 import json
-from typing import cast
+from typing import Any, cast
 
 from ftx_paper.domain.decision_context import (
     CapitalSnapshot,
@@ -111,6 +111,11 @@ def _number(observation: OrderflowObservation, name: str) -> float | None:
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
+def opening_gap_context_available_at(observation: OrderflowObservation) -> datetime:
+    """Opening-gap classification only consumes the first bar's open."""
+    return observation.field_available_at("open")
+
+
 def _decision_id(*parts: object) -> str:
     return hashlib.sha256("|".join(str(part) for part in parts).encode()).hexdigest()[:24]
 
@@ -155,7 +160,7 @@ class OrderflowPolicy:
 
     def evaluate(self, bundle: DecisionBundle, context: DecisionContext) -> tuple[PolicyDecision, ...]:
         orderflow = bundle.orderflow_context
-        base = {
+        base: dict[str, Any] = {
             "strategy_id": self.config.name,
             "strategy_name": self.config.name,
             "strategy_version": self.config.version,
@@ -354,14 +359,12 @@ class OrderflowPolicy:
                         reference_id=classified_gap.reference_id,
                     )
                     self._opening_gap_observation_id = first_1m.observation_id
+                    context_available_at = opening_gap_context_available_at(first_1m)
                     results.append(PolicyDecision({
-                        **base,
-                         # The opening-gap fact becomes a decision only when
-                         # the completed 1m evidence is available.  Stamping
-                         # it at observed_at would place `at` before the
-                         # published availability boundary.
-                         "decision_at": first_1m.available_at.isoformat(),
-                        "available_at": first_1m.available_at.isoformat(),
+                         **base,
+                         "observed_at": first_1m.observed_at.isoformat(),
+                         "decision_at": context_available_at.isoformat(),
+                         "available_at": context_available_at.isoformat(),
                         "outcome": "recorded",
                         "decision_stage": "interaction",
                         "reason": "opening_gap_context",
@@ -423,6 +426,7 @@ class OrderflowPolicy:
                 if advanced_gap.status != previous_gap.status:
                     results.append(PolicyDecision({
                         **base,
+                        "observed_at": observation.observed_at.isoformat(),
                          "decision_at": observation.available_at.isoformat(),
                         "available_at": observation.available_at.isoformat(),
                         "outcome": "recorded",
@@ -929,6 +933,32 @@ class OrderflowPolicy:
                          }))
             results.extend(interaction_context_events)
             results.extend(interaction_created_events)
+            # A 5m interaction owns projections from both source timeframes.
+            # Advance them before timeout and response evaluation so every
+            # consumer sees the same causally available cumulative snapshots.
+            if observation.timeframe == "5m":
+                projection_sources = {
+                    timeframe: tuple(
+                        item for item in observations
+                        if item.timeframe == timeframe
+                        and item.available_at <= observation.available_at
+                    )
+                    for timeframe in ("1m", "5m")
+                }
+                detector5 = self._location_detectors["5m"]
+                detector5.advance_projections(projection_sources, as_of=observation.available_at)
+                for candidate in detector5.active_interactions:
+                    snapshots = dict(candidate.synthetic_snapshots).get("5m", ())
+                    if not snapshots:
+                        continue
+                    long_score = _number(observation, "long_score")
+                    short_score = _number(observation, "short_score")
+                    if long_score is not None or short_score is not None:
+                        detector5.record_score(
+                            candidate.interaction_id, snapshot=snapshots[-1],
+                            context_version=observation.context.generation if observation.context else None,
+                            long_score=long_score, short_score=short_score,
+                        )
             # Advance opportunity timeouts before any response can form a new
             # same-bar candidate.  This keeps lifecycle ordering explicit.
             previous_opportunities = dict(self._opportunities)

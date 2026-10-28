@@ -1,6 +1,6 @@
 {
   "include": ["src"],
-  "exclude": ["**/__pycache__", ".venv"],
+  "exclude": ["**/__pycache__", ".venv", "src/ftx_paper/strategy/orderflow.py"],
   "venvPath": ".",
   "venv": ".venv",
   "typeCheckingMode": "basic"
