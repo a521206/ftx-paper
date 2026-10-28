@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from collections.abc import Callable, Mapping, Sequence
 from typing import Generic, TypeVar
 
-from .templates import Direction, ResponseType, TRADE_TEMPLATES, TradeTemplate
+from .templates import Direction, ResponseType, TradeTemplate
 
 T = TypeVar("T")
 
@@ -198,105 +198,25 @@ def evaluate_policy_response(
     max_candles: int,
     cutoff: object,
 ) -> ResponseEvaluation[object] | None:
-    """Adapt Paper observations to the canonical template response contract."""
-    alias = str(getattr(interaction, "location_alias", "")).upper()
-    template = TRADE_TEMPLATES.get(("5m_recovery_breakout", alias))
-    if template is None:
-        return None
-    if not isinstance(cutoff, datetime):
-        return None
-    candidates = tuple(
-        item for item in observations
-        if getattr(item, "timeframe", None) == template.response_timeframe
-        and isinstance(getattr(item, "observed_at", None), datetime)
-        and isinstance(getattr(interaction, "created_at", None), datetime)
-        and getattr(item, "observed_at") >= getattr(interaction, "created_at")
-        and isinstance(getattr(item, "available_at", None), datetime)
-        and getattr(item, "available_at") <= cutoff
-    )[:max_candles]
-    if not candidates:
-        return ResponseEvaluation(None, False, (), None, template.direction)
-    band_lower = getattr(interaction, "band_lower", None)
-    band_upper = getattr(interaction, "band_upper", None)
-    if not isinstance(band_lower, (int, float)) or not isinstance(band_upper, (int, float)):
-        return None
-    spec = build_response_spec(template, band_lower=float(band_lower), band_upper=float(band_upper))
-    result = evaluate_response_window(
-        candidates,
-        to_candle=lambda item: ResponseCandle(
-            float(getattr(item, "features")["open"]),
-            float(getattr(item, "features")["high"]),
-            float(getattr(item, "features")["low"]),
-            float(getattr(item, "features")["close"]),
-        ),
-        spec_for=lambda _item: spec,
-        armed=False,
-        pre_contact_side=getattr(interaction, "pre_contact_side", None),
-    )
-    # Legacy Paper fixtures may omit template cell context.  Preserve causal
-    # evidence while selecting direction from the pre-contact candle only.
-    if result.status is not ResponseOutcomeStatus.CONFIRMED:
-        first_features = getattr(candidates[0], "features", {})
-        previous_close = first_features.get("previous_close") if isinstance(first_features, Mapping) else None
-        reference = getattr(interaction, "reference_level", None)
-        if isinstance(previous_close, (int, float)) and isinstance(reference, (int, float)) and previous_close != reference:
-            inferred = Direction.LONG if previous_close < reference else Direction.SHORT
-            template = replace(template, direction=inferred)
-            spec = build_response_spec(template, band_lower=float(band_lower), band_upper=float(band_upper))
-            result = evaluate_response_window(
-                candidates,
-                to_candle=lambda item: ResponseCandle(
-                    float(getattr(item, "features")["open"]), float(getattr(item, "features")["high"]),
-                    float(getattr(item, "features")["low"]), float(getattr(item, "features")["close"]),
-                ),
-                spec_for=lambda _item: spec,
-                armed=False,
-            )
-    return result
+    """Compatibility shim; orderflow adaptation lives in ``orderflow_response``."""
+    from .orderflow_response import evaluate_policy_response as adapter
+    return adapter(interaction, observations, max_candles=max_candles, cutoff=cutoff)
 
 
 def evaluate_policy_responses(
-    interaction: object, observations: Sequence[object], *, max_candles: int, cutoff: object,
+    interaction: object,
+    observations: Sequence[object],
+    *,
+    max_candles: int,
+    cutoff: object,
     initial_armed: Mapping[str, bool] | None = None,
 ) -> tuple[tuple[TradeTemplate, ResponseEvaluation[object]], ...]:
-    """Evaluate acceptance and rejection hypotheses independently."""
-    alias = str(getattr(interaction, "location_alias", "")).upper()
-    if not isinstance(cutoff, datetime):
-        return ()
-    templates = tuple(
-        template for (family, location), template in TRADE_TEMPLATES.items()
-        if location == alias and family in {"5m_recovery_breakout", "5m_acceptance_breakout"}
+    """Compatibility shim; orderflow adaptation lives in ``orderflow_response``."""
+    from .orderflow_response import evaluate_policy_responses as adapter
+    return adapter(
+        interaction, observations, max_candles=max_candles, cutoff=cutoff,
+        initial_armed=initial_armed,
     )
-    templates = tuple(sorted(templates, key=lambda item: item.response_type.value != "acceptance"))
-    results: list[tuple[TradeTemplate, ResponseEvaluation[object]]] = []
-    for template in templates:
-        created_at = getattr(interaction, "created_at", None)
-        response_timeframe = template.response_timeframe
-        candidates = tuple(
-            item for item in observations
-            if getattr(item, "timeframe", None) == response_timeframe
-            and isinstance(getattr(item, "observed_at", None), datetime)
-            and isinstance(created_at, datetime)
-            and getattr(item, "observed_at") >= created_at
-            and isinstance(getattr(item, "available_at", None), datetime)
-            and getattr(item, "available_at") <= cutoff
-        )[:max_candles]
-        lower, upper = getattr(interaction, "band_lower", None), getattr(interaction, "band_upper", None)
-        if not isinstance(lower, (int, float)) or not isinstance(upper, (int, float)):
-            continue
-        spec = build_response_spec(template, band_lower=float(lower), band_upper=float(upper))
-        evaluation = evaluate_response_window(
-            candidates,
-            to_candle=lambda item: ResponseCandle(
-                float(getattr(item, "features")["open"]), float(getattr(item, "features")["high"]),
-                float(getattr(item, "features")["low"]), float(getattr(item, "features")["close"]),
-            ),
-            spec_for=lambda _item: spec,
-            armed=bool(initial_armed.get(template.template_id, False)) if initial_armed else False,
-            pre_contact_side=getattr(interaction, "pre_contact_side", None),
-        )
-        results.append((template, evaluation))
-    return tuple(results)
 
 
 __all__ = [

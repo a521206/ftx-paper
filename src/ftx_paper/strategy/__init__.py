@@ -88,7 +88,8 @@ def __getattr__(name: str):
         from .templates import Direction, LocationTemplate, OpeningInteractionKind, ResponseType, TradeTemplate, TriggerType
         return {"Direction": Direction, "LocationTemplate": LocationTemplate, "OpeningInteractionKind": OpeningInteractionKind, "ResponseType": ResponseType, "TradeTemplate": TradeTemplate, "TriggerType": TriggerType}[name]
     if name in {"ResponseCandle", "ResponseSpec", "build_response_spec", "evaluate_policy_responses"}:
-        from .response import ResponseCandle, ResponseSpec, build_response_spec, evaluate_policy_responses
+        from .response import ResponseCandle, ResponseSpec, build_response_spec
+        from .orderflow_response import evaluate_policy_responses
         return {"ResponseCandle": ResponseCandle, "ResponseSpec": ResponseSpec, "build_response_spec": build_response_spec, "evaluate_policy_responses": evaluate_policy_responses}[name]
     if name in {"OpportunityContext", "OpportunityOutcome", "OpportunityOutcomeStatus", "opportunity_identity"}:
         from .opportunity import OpportunityContext, OpportunityOutcome, OpportunityOutcomeStatus, opportunity_identity

@@ -37,6 +37,7 @@ def observe_trigger(
     expected_setup_version: str | None = None,
     expected_permission_version: str | None = None,
     next_bar_open_at: str | None = None,
+    armed: bool | None = None,
 ) -> TriggerObservation:
     if trigger_type not in {"diagnostic_touch", "displacement", "retest"}:
         return TriggerObservation(
@@ -58,7 +59,7 @@ def observe_trigger(
         (previous <= boundary < close) or (previous >= boundary > close)
     )
     armed_value = observation.features.get("trigger_armed", observation.features.get("armed"))
-    armed = armed_value is True
+    trigger_armed = armed if armed is not None else armed_value is True
     displacement = observation.features.get("displacement")
     if not isinstance(displacement, (int, float)) or isinstance(displacement, bool):
         displacement = (close - previous) if close is not None and previous is not None else None
@@ -96,7 +97,7 @@ def observe_trigger(
             effective_at=effective_at, expires_at=expires_at,
             setup_version=setup_version, permission_version=permission_version,
         )
-    eligible = crossed and armed and directional_displacement
+    eligible = crossed and trigger_armed and directional_displacement
     available_dt = observation.available_at
     def _parse(value: str | None) -> datetime | None:
         if value is None:
@@ -112,7 +113,7 @@ def observe_trigger(
     ineligible_reason = None
     if not crossed:
         ineligible_reason = "touch_not_crossing" if touched else "no_causal_crossing"
-    elif not armed:
+    elif not trigger_armed:
         ineligible_reason = "not_armed"
     elif not directional_displacement:
         ineligible_reason = "insufficient_displacement"

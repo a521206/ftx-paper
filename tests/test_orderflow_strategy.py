@@ -230,6 +230,34 @@ def test_response_and_admission_use_completed_causal_evidence() -> None:
     assert admission.order is None
 
 
+def test_admission_projection_includes_causal_trigger_eligibility() -> None:
+    bundle, account = _context(response_close=101.0)
+
+    admission = next(
+        event for event in OrderflowStrategy().evaluate(bundle, account)
+        if event.payload.get("decision_stage") == "admission"
+    )
+
+    assert admission.payload["trigger_eligible"] is True
+    trigger = admission.payload["trigger"]
+    assert isinstance(trigger, dict)
+    assert trigger["source_observation_id"] == "obs-5m"
+    assert trigger["effective_at"] is not None
+
+
+def test_trigger_projection_uses_the_response_confirmation_observation() -> None:
+    bundle, account = _context(close=99.5, response_close=101.0)
+
+    admission = next(
+        event for event in OrderflowStrategy().evaluate(bundle, account)
+        if event.payload.get("decision_stage") == "admission"
+    )
+
+    trigger = admission.payload["trigger"]
+    assert isinstance(trigger, dict)
+    assert trigger["source_observation_id"] == "response-obs-5m"
+
+
 def test_orderflow_executable_mode_emits_bounded_futures_entry() -> None:
     bundle, account = _context(response_close=101.0)
     account = replace(account, margin=MarginSnapshot(0.0, 10_000.0, 1_000.0))

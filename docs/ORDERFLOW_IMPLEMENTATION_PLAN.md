@@ -10,9 +10,14 @@ runtime state, and tests. It must not import NiftyZoning, read its runtime state
 or modify its files.
 
 Producer-neutral parity artifacts, normalization, and mismatch reporting remain
-separate deliverables. The paired replay validation required by Phase 9 is part
-of this plan: it compares Paper's diagnostic decisions with its opt-in
-executable projections and validates the resulting simulated lifecycle.
+separate deliverables. Their contract and roadmap are defined in
+`docs/PRODUCER_NEUTRAL_PARITY.md` and
+`docs/PRODUCER_NEUTRAL_PARITY_IMPLEMENTATION_PLAN.md`. The paired replay
+validation required by Phase 9 is part of this plan: it compares Paper's
+diagnostic decisions with its opt-in executable projections and validates the
+resulting simulated lifecycle. Phase 9 paired replay is Paper-internal
+validation; it is not the cross-producer parity verdict. Cross-producer verdicts
+use only the four-layer artifacts and comparator defined by the parity documents.
 
 ## Goals And Guardrails
 
@@ -1024,9 +1029,11 @@ The roadmap is not complete through Phase 10. The following gaps are verified
 against the current Paper source and must be resolved before the corresponding
 phase can be marked complete:
 
-- The causal policy emits trigger observations and lifecycle/status transitions,
-  not the full recorded hypothesis stream. Pending, unavailable, and repeated
-  causal outcomes are under-published.
+- The causal policy now emits trigger observations for formed opportunities and
+  advances opportunity timeout evidence before same-bar response formation. It
+  still emits lifecycle/status transitions rather than the full recorded
+  hypothesis stream; repeated pending and unavailable outcomes remain
+  selectively published.
 - Interaction, response, opportunity, admission, and execution-group state is
   not yet fully independent at the persistence boundary. Hypothesis status is
   serialized, but hypothesis evidence and arming state are not.
@@ -1040,6 +1047,11 @@ phase can be marked complete:
 
 ### Resolved Gaps
 
+- Trigger eligibility is now projected through `orderflow_trigger.py` from the
+  live policy path; executable authorization requires that projection while
+  diagnostic decisions retain the same causal result without creating orders.
+- Opportunity timeout advancement now runs once per completed observation before
+  response and opportunity formation, preserving the required same-bar order.
 - Replay no longer constructs the legacy `market.location.LocationDetector` or
   emits per-bar `trace` records. The legacy trace and events endpoints are
   removed from the API and OpenAPI contract.

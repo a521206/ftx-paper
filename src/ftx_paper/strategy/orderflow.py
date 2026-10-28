@@ -33,7 +33,8 @@ from .orderflow_admission import evaluate_admission
 from .orderflow_capture import CaptureMode
 from .orderflow_interaction import HypothesisState, InteractionCloseReason, InteractionDetector, InteractionStatus
 from .orderflow_location import LocationBand, LocationObservation, LocationRecord, LocationRegistry
-from .response import evaluate_policy_responses
+from .orderflow_response import evaluate_policy_responses
+from .orderflow_trigger import observe_trigger
 from .policy_contract import ExecutionMode, FeatureRequirement, PolicyDecision
 from .protocol import StrategyMetadata
 from .snapshot_envelope import unwrap_snapshot, wrap_snapshot
@@ -383,6 +384,16 @@ class OrderflowPolicy:
                         "available_at": location_observation.available_at.isoformat(),
                         "feature_values": dict(observation.features),
                     }))
+            # Advance opportunity timeouts before any response can form a new
+            # same-bar candidate.  This keeps lifecycle ordering explicit.
+            previous_opportunities = dict(self._opportunities)
+            if observation.timeframe == "5m":
+                for key, item in tuple(self._opportunities.items()):
+                    timeout = advance_opportunity_timeout(
+                        item, interaction=None, evidence=(observation,), as_of=observation.available_at,
+                    )
+                    if timeout.opportunity is not None:
+                        self._opportunities[key] = timeout.opportunity
             for interaction in self._location_detectors[observation.timeframe].active_interactions:
                 if interaction.timeframe != self.config.response_timeframe:
                     continue
@@ -423,7 +434,14 @@ class OrderflowPolicy:
                     if next_status == "PENDING":
                         next_status = "PENDING_RESPONSE"
                     current = next((item for item in interaction.hypothesis_states if item.hypothesis_id == hypothesis_id), None)
-                    if current is not None and tuple(evidence_ids) == current.evidence_ids and next_status == current.status:
+                    if current is not None and (
+                        tuple(evidence_ids) == current.evidence_ids
+                        and next_status == current.status
+                        and evaluation.armed == current.armed
+                        and direction == current.direction
+                        and confirmation_id == current.confirmation_observation_id
+                        and expected_available_at == current.expected_available_at
+                    ):
                         continue
                     state = HypothesisState(
                         hypothesis_id, template.template_id, next_status,
@@ -549,7 +567,38 @@ class OrderflowPolicy:
                             opportunity.lifecycle_id,
                             evidence_ids=evidence_ids,
                         )
-                        accepted = admission.status.value == "PASSED" and claim.accepted
+                        trigger_observation = next(
+                            (
+                                item for item in response_observations
+                                if item.observation_id == confirmation_id
+                            ),
+                            observation,
+                        )
+                        trigger = observe_trigger(
+                            trigger_observation,
+                            boundary=opportunity.setup.failure_boundary,
+                            # Trigger eligibility is a shared diagnostic
+                            # projection; execution mode gates authorization
+                            # below without changing the causal decision.
+                            execution_mode=ExecutionMode.EXECUTABLE.value,
+                            trigger_type=self.config.trigger_type,
+                            effective_at=formed_at.isoformat(),
+                            expires_at=opportunity.setup.expires_at.isoformat(),
+                            setup_version=opportunity.setup.setup_id,
+                            permission_version=(
+                                str(current_context.version) if current_context is not None else None
+                            ),
+                            expected_setup_version=opportunity.setup.setup_id,
+                            expected_permission_version=(
+                                str(current_context.version) if current_context is not None else None
+                            ),
+                            armed=True,
+                        )
+                        accepted = (
+                            admission.status.value == "PASSED"
+                            and claim.accepted
+                            and (self.execution_mode is not ExecutionMode.EXECUTABLE or trigger.eligible)
+                        )
                         order = None
                         if accepted and self.execution_mode is ExecutionMode.EXECUTABLE:
                             instrument = futures.instrument if futures is not None else next(
@@ -593,16 +642,10 @@ class OrderflowPolicy:
                             "admission_status": admission.status.value,
                             "admission_reason": admission.reason,
                             "admission_predicates": [asdict(item) for item in admission.predicates],
-                             "source_observation_ids": list(evidence_ids),
+                            "trigger": asdict(trigger),
+                            "trigger_eligible": trigger.eligible,
+                            "source_observation_ids": list(evidence_ids),
                          }, order=order))
-            previous_opportunities = dict(self._opportunities)
-            if observation.timeframe == "5m":
-                for key, item in tuple(self._opportunities.items()):
-                    timeout = advance_opportunity_timeout(
-                        item, interaction=None, evidence=(observation,), as_of=observation.available_at,
-                    )
-                    if timeout.opportunity is not None:
-                        self._opportunities[key] = timeout.opportunity
             for opportunity_id, opportunity in self._opportunities.items():
                 previous_opportunity = previous_opportunities.get(opportunity_id)
                 if previous_opportunity is None or len(opportunity.transitions) <= len(previous_opportunity.transitions):

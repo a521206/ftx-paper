@@ -7,7 +7,7 @@ from ftx_paper.strategy import (
     OrderflowObservation, OrderflowObservationContext,
     ResponseOutcomeStatus, evaluate_response_window,
 )
-from ftx_paper.strategy.response import evaluate_policy_responses
+from ftx_paper.strategy.orderflow_response import evaluate_policy_responses
 from ftx_paper.strategy.orderflow_contract import FeatureValue
 
 
