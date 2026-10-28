@@ -19,6 +19,7 @@ def test_diagnostic_admission_records_ordered_predicates_without_intent() -> Non
                                   sizing_allowed=True, risk_allowed=True)
 
     assert decision.status is PredicateStatus.PASSED
+    assert decision.diagnostic_intent is not None
     assert decision.intent_id == decision.diagnostic_intent.intent_id
     assert [item.predicate_id for item in decision.predicates] == [
         "context_relation", "regime_permission", "opening_gap_permission", "active_position_gate",
@@ -55,7 +56,7 @@ def test_admission_rejects_stale_setup_and_context_versions() -> None:
     assert context.reason == "context_version_mismatch"
 
 
-def test_executable_admission_uses_same_gates_without_creating_execution_state() -> None:
+def test_executable_policy_keeps_admission_as_diagnostic_projection() -> None:
     decision = evaluate_admission(
         _opportunity(), context_available=True, regime_allowed=True,
         opening_gap_allowed=True, active_position_allowed=True,

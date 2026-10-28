@@ -103,8 +103,8 @@ def evaluate_admission(
             permission_version=permission_version, reference_window=reference_window,
         )
         return AdmissionDecision(opportunity.lifecycle_id, PredicateStatus.FAILED,
-                                 predicate.reason or "setup_not_active", (predicate,),
-                                 decision_at=current_at)
+                                  predicate.reason or "setup_not_active", (predicate,),
+                                  decision_at=current_at)
     if expected_setup_version is not None and setup_version != expected_setup_version:
         predicate = PredicateResult(
             "setup_version", PredicateStatus.FAILED, value=False,

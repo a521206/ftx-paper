@@ -32,6 +32,51 @@ The implementation must:
 6. Keep diagnostic mode non-executable until the complete decision pipeline is
    validated.
 
+### Reference-Fidelity Protocol
+
+This plan is a porting specification, not authorization to invent new Paper
+behavior. Before changing code for any mapped behavior, implementation must
+record a Paper-owned mapping containing every field below:
+
+```text
+Canonical behavior:
+Canonical source symbol or test:
+Paper ownership boundary:
+Existing Paper contract:
+Minimal adaptation:
+Production-path acceptance test:
+Undefined-behavior result:
+```
+
+The mapping is incomplete if any field is missing. In particular:
+
+- No new public field, class, property, enum value, lifecycle transition,
+  authorization state, or fallback value may be introduced without an explicit
+  canonical source or an explicit requirement elsewhere in this plan.
+- Phrases such as "enable", "authorize", "eligible", or "executable" do not
+  define a new state or contract by themselves. Use the existing Paper
+  execution owner and existing types unless the canonical reference defines a
+  distinct contract that must be reproduced.
+- Admission and diagnostic projections must not be promoted into executable
+  intents, authorization, reservations, fills, settlement, or portfolio state.
+  Those transitions remain owned by the existing Paper execution boundary.
+- If the canonical reference does not define a policy, transition, fill rule,
+  accounting result, or serialization field, the Paper result must remain
+  explicitly unavailable with a machine-readable reason. Do not infer neutral,
+  passed, authorized, zero, stale, or equivalent fallback behavior.
+- A test that only invokes a generic helper, substitutes callbacks, or asserts
+  a static phase list cannot establish live/replay integration behavior. Claims
+  about runtime ordering or execution must invoke the relevant production path
+  (`OrderflowPolicy`, `PaperEngine`, `RuntimeSession`, or replay orchestration)
+  and assert observable Paper state or persisted events.
+- Reference code and tests are read-only behavioral evidence. Copying names or
+  structure is not evidence of a contract, and Paper-specific adaptations must
+  preserve the ownership boundaries defined in this plan.
+
+Implementation must stop rather than extend a contract when the mapping cannot
+be completed. Record the gap as unavailable and defer it for an explicit scope
+decision; do not resolve it with a speculative helper or convenience property.
+
 While implementation is in progress, `OrderflowConfig.execution_mode` remains
 diagnostic. Diagnostic processing must create zero executable entries, stops,
 exits, fills, reservations, or portfolio mutations. An explicit opt-in

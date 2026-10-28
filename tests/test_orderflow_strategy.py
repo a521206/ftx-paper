@@ -373,6 +373,36 @@ def test_generation_change_closes_old_interaction_and_opens_new_generation() -> 
     assert observed[-1].payload["interaction_id"] == "session-g2:5m"
 
 
+def test_reference_replacement_is_visible_before_same_timestamp_execution() -> None:
+    strategy = OrderflowStrategy(OrderflowConfig(execution_mode=ExecutionMode.EXECUTABLE))
+    first, account = _context(
+        close=99.5, observation_id="first", generation=1,
+    )
+    strategy.evaluate(first, account)
+
+    replacement, replacement_account = _context(
+        close=99.5, response_close=101.0, observation_id="replacement", generation=2,
+    )
+    events = strategy.evaluate(replacement, replacement_account)
+
+    replacement_index = next(
+        index for index, event in enumerate(events)
+        if event.payload.get("reason") == "REFERENCE_REPLACED"
+    )
+    executable = [event for event in events if event.order is not None]
+
+    assert executable
+    assert all(
+        index > replacement_index
+        for index, event in enumerate(events)
+        if event.order is not None
+    )
+    assert all(
+        event.payload.get("reference_generation") != 1
+        for event in executable
+    )
+
+
 def test_non_contact_location_observation_does_not_start_interaction() -> None:
     bundle, account = _context(contact=False, observation_id="no-contact")
 
