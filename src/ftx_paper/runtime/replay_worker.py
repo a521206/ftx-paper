@@ -20,6 +20,7 @@ from ftx_paper.market.requirements import FeatureRequirement
 from ftx_paper.domain import AccountAggregate, PortfolioState
 from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.runtime.engine import PaperEngine
+from ftx_paper.runtime.decision_turn import DecisionTurn, evaluate_turn
 from ftx_paper.runtime.events import is_decision_event
 from ftx_paper.strategy.orderflow_contract import feature_values_to_dict, stable_orderflow_id
 from ftx_paper.strategy.orderflow_producer import CausalOrderflowProducer
@@ -798,12 +799,14 @@ class ReplayWorker:
                         current_equity = portfolio.equity
                         peak_equity = portfolio.peak_equity
                         max_drawdown = min(max_drawdown, current_equity - peak_equity)
-                try:
-                    result = engine.on_bundle(bundle, context=account.context(as_of=futures_bar.timestamp))
-                except TypeError as exc:
-                    if "context" not in str(exc):
-                        raise
-                    result = engine.on_bundle(bundle)
+                result = evaluate_turn(
+                    engine,
+                    DecisionTurn(
+                        bundle,
+                        "replay",
+                        account.context(as_of=futures_bar.timestamp),
+                    ),
+                )
                 if mode == "replay" and not daily_reset_emitted:
                     ledger_records.append({
                         "event_type": "DAILY_RESET",

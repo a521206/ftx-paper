@@ -28,6 +28,7 @@ from ftx_paper.market.requirements import feature_union
 from ftx_paper.execution.cost import futures_cost
 from ftx_paper.execution.settlement import ExitValidationError, validate_exit_order
 from .engine import MultiStrategyEngine, PaperEngine, StrategyDispatchError
+from .decision_turn import DecisionTurn, evaluate_turn
 from .facades import FeedController, FeedManager, OrderManager, PnlManager, StrategyRunner
 from .event_bus import EventBus
 from ftx_paper.execution import ExecutionService, PaperExecutionCoordinator
@@ -579,19 +580,14 @@ class RuntimeSession:
                                    engine: PaperEngine | MultiStrategyEngine) -> None:
         """Persist a bundle result, with live execution kept behind the source gate."""
         active_engine = engine
-        context = self.account.context() if source == "live" and self.account is not None else None
         decision_at = _bundle_timestamp(bundle.trading_date, bundle.minute)
         timestamp = serialize_datetime(decision_at)
+        context = (
+            self.account.context(as_of=decision_at)
+            if source == "live" and self.account is not None else None
+        )
         try:
-            if context is None:
-                result = active_engine.on_bundle(bundle)
-            else:
-                try:
-                    result = active_engine.on_bundle(bundle, context=context)
-                except TypeError as exc:
-                    if "context" not in str(exc):
-                        raise
-                    result = active_engine.on_bundle(bundle)
+            result = evaluate_turn(active_engine, DecisionTurn(bundle, source, context))
         except StrategyDispatchError as exc:
             self._halt_strategy_runtime()
             self.store.append_event("STRATEGY_ERROR", {
