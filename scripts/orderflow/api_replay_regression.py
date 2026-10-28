@@ -23,6 +23,8 @@ CANONICAL = {
     "setup_candidates": 17,
     "entries_filled": 4,
     "location_interactions": 74,
+    "total_location_interactions": 122,
+    "vwap_interactions": 48,
     "gross_reward_points": 155.2143,
     "achieved_risk_reward": 6.1443,
 }
@@ -133,6 +135,12 @@ def run(base_url: str, *, timeout: float, interval: float) -> int:
         print("Metric lineage:")
         for name, value in lineage.items():
             print(f"- {name}: {value}")
+    print("Location interaction breakdown:")
+    if isinstance(lineage, Mapping):
+        print(f"- canonical_location_interaction_unique_count: {lineage.get('canonical_location_interaction_unique_count')}")
+        print(f"- location_interaction_unique_count: {lineage.get('location_interaction_unique_count')}")
+        print(f"- location_interaction_by_location: {lineage.get('location_interaction_by_location')}")
+        print(f"- location_interaction_by_timeframe: {lineage.get('location_interaction_by_timeframe')}")
     if failures:
         print("Regression details:", file=sys.stderr)
         for failure in failures:

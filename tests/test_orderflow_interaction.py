@@ -39,6 +39,41 @@ def test_interaction_freezes_reference_and_closes_on_departure() -> None:
     assert len(ended.contact_candles) == 2
 
 
+def test_interaction_recreates_after_departure_with_new_creation_candle() -> None:
+    location = LocationRecord("loc-1", "OR_LOW", 100, LocationBand(99, 101), 1,
+                              datetime(2026, 1, 1, 9, 15, tzinfo=UTC), "agg-1")
+    detector = InteractionDetector("1m")
+
+    first = detector.observe(location, _observation(0, 100))
+    ended = detector.observe(location, _observation(1, 103))
+    second = detector.observe(location, _observation(2, 100))
+
+    assert first is not None and ended is not None and second is not None
+    assert ended.status is InteractionStatus.ENDED
+    assert second.status is InteractionStatus.ACTIVE
+    assert second.interaction_id != first.interaction_id
+    assert second.interaction_id.endswith("2026-01-01T09:17:00+00:00")
+
+
+def test_reference_replacement_ends_previous_interaction() -> None:
+    first_location = LocationRecord(
+        "loc-1", "SESSION_HIGH", 100, LocationBand(99, 101), 1,
+        datetime(2026, 1, 1, 9, 15, tzinfo=UTC), "agg-1",
+    )
+    replacement = LocationRecord(
+        "loc-2", "SESSION_HIGH", 105, LocationBand(104, 106), 2,
+        datetime(2026, 1, 1, 9, 16, tzinfo=UTC), "agg-2",
+    )
+    detector = InteractionDetector("1m")
+
+    assert detector.observe(first_location, _observation(0, 100)) is not None
+    created = detector.observe(replacement, _observation(1, 105))
+
+    assert created is not None
+    assert created.location_id == "loc-2"
+    assert detector.closed_interactions[0].close_reason is InteractionCloseReason.REFERENCE_REPLACED
+
+
 def test_interaction_detector_closes_all_for_gap() -> None:
     location = LocationRecord("loc-1", "opening_range", 100, LocationBand(99, 101), 1,
                               datetime(2026, 1, 1, 9, 15, tzinfo=UTC), "agg-1")

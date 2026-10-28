@@ -292,7 +292,7 @@ def test_public_strategy_snapshot_restores_processed_location_lifecycle() -> Non
 
     restored = OrderflowStrategy.from_snapshot(strategy.snapshot())
 
-    assert first[0].payload["interaction_id"] == "session-g1:5m:2026-01-01T10:00:00+00:00"
+    assert first[0].payload["interaction_id"] == "NIFTYFUT:2026-01-01:session_high:5m:2026-01-01T10:00:00+00:00"
     assert restored.evaluate(bundle, account) == ()
 
 
@@ -369,8 +369,8 @@ def test_generation_change_closes_old_interaction_and_opens_new_generation() -> 
     lifecycle = [event for event in events if event.payload.get("reason") == "REFERENCE_REPLACED"]
     observed = [event for event in events if event.payload.get("reason") == "location_interaction_observed"]
     assert lifecycle and observed
-    assert lifecycle[0].payload["interaction_id"] == "session-g1:5m:2026-01-01T10:00:00+00:00"
-    assert observed[-1].payload["interaction_id"] == "session-g2:5m:2026-01-01T10:00:00+00:00"
+    assert lifecycle[0].payload["interaction_id"] == "NIFTYFUT:2026-01-01:session_high:5m:2026-01-01T10:00:00+00:00"
+    assert observed[-1].payload["interaction_id"] == "NIFTYFUT:2026-01-01:session_high:5m:2026-01-01T10:00:00+00:00"
 
 
 def test_reference_replacement_is_visible_before_same_timestamp_execution() -> None:
@@ -594,7 +594,7 @@ def test_gap_closes_active_interaction_without_order() -> None:
     events = strategy.evaluate(gap, gap_context)
 
     closure = next(event for event in events if event.payload.get("reason") == "DATA_GAP")
-    assert closure.payload["interaction_id"] == "session-g1:5m:2026-01-01T10:00:00+00:00"
+    assert closure.payload["interaction_id"] == "NIFTYFUT:2026-01-01:session_high:5m:2026-01-01T10:00:00+00:00"
     assert all(event.order is None for event in events)
 
 

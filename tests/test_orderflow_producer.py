@@ -8,6 +8,7 @@ from ftx_paper.strategy import CausalOrderflowProducer, source_fingerprint
 
 def test_causal_producer_builds_complete_five_minute_context() -> None:
     producer = CausalOrderflowProducer()
+    producer.set_frozen_atr(1.0)
     instrument = Instrument("NIFTYFUT", "NSE", "FUTURES")
     start = datetime(2026, 1, 1, 3, 45, tzinfo=timezone.utc)
     for index in range(5):
@@ -37,6 +38,22 @@ def test_causal_producer_builds_complete_five_minute_context() -> None:
     assert "VWAP" not in by_alias
     assert by_alias["SESSION_HIGH"].location_type == "session_reference"
     assert all("vwap" not in parent.features for parent in context.observations)
+
+
+def test_causal_producer_uses_frozen_atr_for_structural_bands() -> None:
+    producer = CausalOrderflowProducer()
+    producer.set_frozen_atr(10.0)
+    instrument = Instrument("NIFTYFUT", "NSE", "FUTURES")
+    start = datetime(2026, 1, 1, 3, 45, tzinfo=timezone.utc)
+    for index in range(5):
+        producer.ingest(MarketBar(instrument, start + timedelta(minutes=index), 99.0, 102.0, 98.0, 100.0, 10.0))
+
+    context = producer.context("2026-01-01", "09:34")
+
+    assert context is not None
+    location = next(item for item in context.observations_for("5m")[0].location_observations if item.location_alias == "SESSION_HIGH")
+    assert location.band_lower == pytest.approx(101.4)
+    assert location.band_upper == pytest.approx(102.6)
     children = context.observations_for("1m")
     child_locations = tuple(
         item for child in children for item in child.location_observations
@@ -44,6 +61,50 @@ def test_causal_producer_builds_complete_five_minute_context() -> None:
     assert child_locations
     assert all(item.timeframe == "1m" for item in child_locations)
     assert all(item.source_aggregate_id in {child.observation_id for child in children} for item in child_locations)
+
+
+def test_causal_producer_does_not_invent_bands_without_frozen_atr() -> None:
+    producer = CausalOrderflowProducer()
+    instrument = Instrument("NIFTYFUT", "NSE", "FUTURES")
+    start = datetime(2026, 1, 1, 3, 45, tzinfo=timezone.utc)
+    for index in range(5):
+        producer.ingest(MarketBar(instrument, start + timedelta(minutes=index), 99.0, 102.0, 98.0, 100.0, 10.0))
+
+    context = producer.context("2026-01-01", "09:34")
+
+    assert context is not None
+    assert all(not item.location_observations for item in context.observations)
+
+
+def test_causal_producer_does_not_backfill_new_reference_generation() -> None:
+    producer = CausalOrderflowProducer()
+    producer.set_frozen_atr(1.0)
+    instrument = Instrument("NIFTYFUT", "NSE", "FUTURES")
+    start = datetime(2026, 1, 1, 3, 45, tzinfo=timezone.utc)
+    for index in range(10):
+        producer.ingest(MarketBar(
+            instrument, start + timedelta(minutes=index), 99.0,
+            102.0 + index, 98.0, 100.0 + index, 10.0,
+        ))
+
+    context = producer.context("2026-01-01", "09:40")
+
+    assert context is not None
+    children = context.observations_for("1m")
+    first = children[:5]
+    second = children[5:]
+    first_highs = [
+        item for child in first for item in child.location_observations
+        if item.location_alias == "SESSION_HIGH"
+    ]
+    second_highs = [
+        item for child in second for item in child.location_observations
+        if item.location_alias == "SESSION_HIGH"
+    ]
+    assert first_highs
+    assert second_highs
+    assert {item.reference_generation for item in first_highs} == {1}
+    assert {item.reference_generation for item in second_highs} == {2}
 
 
 def test_causal_producer_uses_canonical_source_fingerprint_for_children() -> None:

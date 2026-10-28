@@ -12,6 +12,7 @@ from ftx_paper.infrastructure.sqlite.runtime_store import ProcessAlreadyRunningE
 from ftx_paper.runtime.session import RuntimeSession
 from ftx_paper.runtime.store import RuntimeStore
 from ftx_paper.runtime.replay_worker import ReplayWorker
+from ftx_paper.runtime.parity_artifacts import PARITY_LAYERS, read_parity_artifact
 from ftx_paper.application.runtime_operations import RuntimeOperations
 from ftx_paper.domain.capital import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
 from ftx_paper.runtime.events import (
@@ -87,6 +88,18 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             "error": run.get("error"),
         }), 202
 
+    def parity_artifact_for(run: dict[str, Any]) -> tuple[dict[str, Any] | None, Any]:
+        if run.get("status") not in {"completed", "failed", "cancelled"}:
+            return None, incomplete_replay_response(run)
+        result = run.get("result")
+        artifact = result.get("parity_artifact") if isinstance(result, dict) else None
+        if not isinstance(artifact, dict):
+            return None, (jsonify(error_payload("parity_unavailable", "replay has no parity artifact")), 404)
+        try:
+            return read_parity_artifact(artifact), None
+        except ValueError as exc:
+            return None, (jsonify(error_payload("invalid_parity_artifact", str(exc))), 500)
+
     @app.errorhandler(DecisionTimestampError)
     def invalid_decision_timestamp(error: DecisionTimestampError):
         return jsonify({"error": {"code": "invalid_decision_at", "message": str(error)}}), 422
@@ -158,6 +171,48 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
         if run.get("status") not in {"completed", "failed", "cancelled"}:
             return incomplete_replay_response(run)
         return jsonify(json_safe(run))
+
+    @app.get("/api/v1/replay/<run_id>/parity/manifest")
+    def replay_parity_manifest(run_id: str):
+        run = store.read_replay_run(run_id)
+        if run is None:
+            return jsonify(error_payload("not_found", "replay not found")), 404
+        artifact, error = parity_artifact_for(run)
+        if error is not None:
+            return error
+        assert artifact is not None
+        return jsonify(json_safe(artifact["manifest"]))
+
+    @app.get("/api/v1/replay/<run_id>/parity/<layer>")
+    def replay_parity_layer(run_id: str, layer: str):
+        if layer not in PARITY_LAYERS:
+            return jsonify(error_payload("invalid_layer", f"unsupported parity layer: {layer}")), 400
+        run = store.read_replay_run(run_id)
+        if run is None:
+            return jsonify(error_payload("not_found", "replay not found")), 404
+        artifact, error = parity_artifact_for(run)
+        if error is not None:
+            return error
+        assert artifact is not None
+        try:
+            offset = int(request.args.get("offset", "0"))
+            limit = int(request.args.get("limit", "100"))
+        except ValueError:
+            return jsonify(error_payload("invalid_pagination", "offset and limit must be integers")), 400
+        if offset < 0 or limit < 1 or limit > 1000:
+            return jsonify(error_payload("invalid_pagination", "offset must be non-negative and limit must be between 1 and 1000")), 400
+        records = artifact["layers"][layer]
+        page = records[offset:offset + limit]
+        next_offset = offset + len(page) if offset + len(page) < len(records) else None
+        return jsonify(json_safe({
+            "run_id": run_id,
+            "layer": layer,
+            "offset": offset,
+            "limit": limit,
+            "next_offset": next_offset,
+            "records": page,
+            "manifest": artifact["manifest"]["layers"][layer],
+        }))
 
     @app.get("/api/v1/openapi.json")
     def openapi():

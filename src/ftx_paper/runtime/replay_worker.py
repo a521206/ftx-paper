@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from queue import Empty, Full, Queue
@@ -639,6 +639,9 @@ class ReplayWorker:
             )
             if orderflow_producer is not None:
                 orderflow_producer.set_prior_value_bounds(prior_day_high, prior_day_low)
+                orderflow_producer.set_frozen_atr(
+                    self._prior_daily_atr(date, available_dates),
+                )
                 prior_dates = [item for item in available_dates if item < date]
                 if prior_dates:
                     prior_date = max(prior_dates)
@@ -1694,16 +1697,26 @@ class ReplayWorker:
             for index, event in enumerate(interaction_events)
             if str(event.get("location") or "").upper() in CANONICAL_INTERACTION_LOCATIONS
         }
-        interaction_by_timeframe: dict[str, int] = {}
-        interaction_by_location: dict[str, int] = {}
+        interaction_ids_by_timeframe: dict[str, set[str]] = {}
+        interaction_ids_by_location: dict[str, set[str]] = {}
         for event in interaction_events:
             timeframe = str(event.get("timeframe") or "unknown")
             location = str(event.get("location") or "unknown").upper()
-            interaction_by_timeframe[timeframe] = interaction_by_timeframe.get(timeframe, 0) + 1
-            interaction_by_location[location] = interaction_by_location.get(location, 0) + 1
+            interaction_id = str(event.get("interaction_id") or "")
+            interaction_ids_by_timeframe.setdefault(timeframe, set()).add(interaction_id)
+            interaction_ids_by_location.setdefault(location, set()).add(interaction_id)
+        interaction_by_timeframe = {
+            timeframe: len(ids) for timeframe, ids in interaction_ids_by_timeframe.items()
+        }
+        interaction_by_location = {
+            location: len(ids) for location, ids in interaction_ids_by_location.items()
+        }
+        vwap_interaction_ids = interaction_ids_by_location.get("VWAP", set())
         return {
             "setup_candidates": len(setup_ids),
             "location_interactions": len(structural_interaction_ids),
+            "total_location_interactions": len(all_interaction_ids),
+            "vwap_interactions": len(vwap_interaction_ids),
             "entries_filled": len(futures),
             "gross_reward_points": gross_pnl_rs / NIFTY_LOT_SIZE,
             "achieved_risk_reward": round(sum(risk_reward_values), 5) if risk_reward_values else None,
@@ -1882,6 +1895,46 @@ class ReplayWorker:
 
     def _dates(self) -> list[str]:
         return self.store.read_market_dates()
+
+    def _prior_daily_atr(
+        self, session_date: str, available_dates: list[str],
+    ) -> float | None:
+        """Return the completed-session ATR used for causal location bands."""
+        prior_dates = [item for item in available_dates if item < session_date]
+        daily: list[tuple[float, float, float]] = []
+        for date in prior_dates:
+            source = self._resolve_source(date)
+            bars = self._bars(date, rows=self.store.read_market_bars(date), futures_source=source)
+            futures = [
+                item for item in bars
+                if str(item.instrument.instrument_type).upper() in {"FUT", "FUTURES"}
+                and (source is None or item.instrument.symbol == source.symbol)
+                and (source is None or item.instrument.expiry == source.expiry)
+            ]
+            if not futures:
+                continue
+            futures = sorted(futures, key=lambda item: item.timestamp)
+            local_times = [item.timestamp.astimezone(IST) for item in futures]
+            if len(local_times) != 375 or any(
+                right - left != timedelta(minutes=1)
+                for left, right in zip(local_times, local_times[1:])
+            ):
+                continue
+            high = max(float(item.high) for item in futures)
+            low = min(float(item.low) for item in futures)
+            close = float(futures[-1].close)
+            daily.append((high, low, close))
+        if len(daily) < 14:
+            return None
+        ranges: list[float] = []
+        prior_close: float | None = None
+        for high, low, close in daily:
+            true_range = high - low
+            if prior_close is not None:
+                true_range = max(true_range, abs(high - prior_close), abs(low - prior_close))
+            ranges.append(true_range)
+            prior_close = close
+        return sum(ranges[-14:]) / 14.0
 
     def _prior_day_levels(
         self, session_date: str, available_dates: list[str] | None = None,

@@ -247,6 +247,7 @@ class InteractionDetector:
         self._active: dict[str, LocationInteraction] = {}
         self._closed: list[LocationInteraction] = []
         self._processed_observations: set[str] = set()
+        self._session_first_observed_at: dict[str, datetime] = {}
 
     def observe(
         self,
@@ -260,7 +261,7 @@ class InteractionDetector:
             return None
         processed_id = observation_id or observation.observation_id
         if processed_id in self._processed_observations:
-            return self._active.get(f"{location.location_id}:{self.timeframe}")
+            return self._active.get(f"{location.alias}:{self.timeframe}")
         self._processed_observations.add(processed_id)
         if observation.context is None or observation.context.availability_status != "available":
             return None
@@ -276,25 +277,34 @@ class InteractionDetector:
         ):
             return None
         close_value, open_value, high_value, low_value = float(close), float(open_price), float(high), float(low)
-        key = f"{location.location_id}:{self.timeframe}"
+        session_id = observation.context.session_id if observation.context is not None else ""
+        first_observed_at = self._session_first_observed_at.get(session_id)
+        if first_observed_at is None or observation.observed_at < first_observed_at:
+            self._session_first_observed_at[session_id] = observation.observed_at
+            first_observed_at = observation.observed_at
+        key = f"{location.alias}:{self.timeframe}"
         interaction = self._active.get(key)
-        replacement = next(
-            (item for item in self._active.values()
-             if item.timeframe == self.timeframe and item.location_alias == location.alias
-              and (item.location_id != location.location_id
-                   or item.reference_generation != location.generation
-                   or item.reference_level != location.price
-                   or item.band_lower != location.band.lower
-                   or item.band_upper != location.band.upper)),
-            None,
-        )
-        if replacement is not None:
-            self._active.pop(f"{replacement.location_id}:{replacement.timeframe}", None)
-            self._closed.append(replace(
-                replacement, status=InteractionStatus.ENDED,
+        if interaction is not None and (
+            interaction.location_id != location.location_id
+            or interaction.reference_generation != location.generation
+            or interaction.reference_level != location.price
+            or interaction.band_lower != location.band.lower
+            or interaction.band_upper != location.band.upper
+        ):
+            ended = replace(
+                interaction,
+                status=InteractionStatus.ENDED,
                 close_reason=InteractionCloseReason.REFERENCE_REPLACED,
                 closed_at=observation.available_at,
-            ))
+            )
+            self._active.pop(key, None)
+            self._closed.append(ended)
+            interaction = None
+        if interaction is not None and any(
+            item.observation_id == observation.observation_id
+            for item in interaction.contact_candles
+        ):
+            return interaction
         candle = InteractionCandle(
             observation.observation_id, observation.timeframe,
             observation.observed_at, observation.available_at, close_value, high_value, low_value,
@@ -302,16 +312,30 @@ class InteractionDetector:
             observation.context.child_observation_ids,
             observation.context.generation,
         )
-        contact = (
-            location.band.lower <= high_value and low_value <= location.band.upper
-            if band_contact is None else band_contact
-        )
+        contact = location.band.lower <= high_value and low_value <= location.band.upper if band_contact is None else band_contact
         inside = location.band.contains(close_value)
         if interaction is None:
+            # The opening-range seed defines the reference; its wick is not an
+            # independent OR interaction in the canonical state machine.
+            if (
+                location.alias in {"OR_HIGH", "OR_LOW"}
+                and observation.observed_at == first_observed_at
+                and (
+                    location.source_aggregate_id == observation.source_observation_id
+                    or location.source_aggregate_id.startswith("aggregate:")
+                )
+            ):
+                return None
             if not contact:
                 return None
             interaction = LocationInteraction(
-                f"{key}:{observation.observed_at.isoformat()}",
+                ":".join((
+                    observation.instrument,
+                    observation.context.session_id if observation.context is not None else "",
+                    location.alias,
+                    self.timeframe,
+                    observation.observed_at.isoformat(),
+                )),
                 self.timeframe, location.location_id, location.alias,
                 location.price, location.generation, observation.observation_id,
                 observation.observed_at, InteractionStatus.ACTIVE, (candle,),
@@ -327,21 +351,15 @@ class InteractionDetector:
             self._active[key] = interaction
             return interaction
         if not inside:
-            previous_close = interaction.contact_candles[-1].close
-            crossed = (
-                (previous_close < interaction.reference_level < close_value)
-                or (previous_close > interaction.reference_level > close_value)
+            previous_close = interaction.contact_candles[0].close
+            crossed = ((previous_close < interaction.reference_level < close_value)
+                       or (previous_close > interaction.reference_level > close_value))
+            close_reason = (
+                InteractionCloseReason.CROSS_BAND if crossed
+                else InteractionCloseReason.DEPARTED
+                if previous_close == interaction.reference_level
+                else InteractionCloseReason.SAME_SIDE_DEPARTURE
             )
-            if previous_close == interaction.reference_level:
-                close_reason = InteractionCloseReason.DEPARTED
-            elif crossed:
-                close_reason = InteractionCloseReason.CROSS_BAND
-            elif previous_close <= interaction.reference_level and close_value < interaction.reference_level:
-                close_reason = InteractionCloseReason.SAME_SIDE_DEPARTURE
-            elif previous_close >= interaction.reference_level and close_value > interaction.reference_level:
-                close_reason = InteractionCloseReason.SAME_SIDE_DEPARTURE
-            else:
-                close_reason = InteractionCloseReason.OUTSIDE_BAND_DEPARTURE
             ended = replace(
                 interaction, status=InteractionStatus.ENDED,
                 close_reason=close_reason,
@@ -349,7 +367,7 @@ class InteractionDetector:
                 contact_candles=(*interaction.contact_candles, candle),
             )
             ended = _append_projection(ended, ended.contact_candles)
-            self._active.pop(key)
+            self._active.pop(key, None)
             self._closed.append(ended)
             return ended
         advanced = replace(interaction, contact_candles=(*interaction.contact_candles, candle))
@@ -664,10 +682,10 @@ class InteractionDetector:
             interaction = decode(item)
             if interaction.status is not InteractionStatus.ACTIVE:
                 raise ValueError("active interaction snapshot has terminal status")
-            key = f"{interaction.location_id}:{interaction.timeframe}"
+            key = f"{interaction.location_alias}:{interaction.timeframe}"
             if key in detector._active:
                 raise ValueError("duplicate active interaction snapshot")
-            detector._active[f"{interaction.location_id}:{interaction.timeframe}"] = interaction
+            detector._active[f"{interaction.location_alias}:{interaction.timeframe}"] = interaction
         for item in closed:
             interaction = decode(item)
             if interaction.status is not InteractionStatus.ENDED:

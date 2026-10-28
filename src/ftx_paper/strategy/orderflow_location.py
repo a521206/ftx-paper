@@ -109,6 +109,7 @@ class LocationObservation:
     method: str = ""
     reference_source_aggregate_id: str | None = None
     reference_source_timeframe: str | None = None
+    frozen_atr: float | None = None
 
     def __post_init__(self) -> None:
         if not self.location_id or not self.location_alias or not self.observation_id:
@@ -152,6 +153,7 @@ class LocationObservation:
             "method": self.method,
             "reference_source_aggregate_id": self.reference_source_aggregate_id,
             "reference_source_timeframe": self.reference_source_timeframe,
+            "frozen_atr": self.frozen_atr,
         }
 
 
@@ -195,10 +197,23 @@ class LocationRegistry:
         return max(candidates, key=lambda item: (item.available_at, item.priority, item.generation, item.location_id))
 
     def available(self, cutoff: datetime, *, timeframe: str | None = None) -> tuple[LocationRecord, ...]:
-        return tuple(
-            item for item in self._records
-            if item.available_at <= cutoff and (timeframe is None or item.timeframe == timeframe)
-        )
+        latest: dict[tuple[str, str], LocationRecord] = {}
+        for item in self._records:
+            if item.available_at > cutoff or (timeframe is not None and item.timeframe != timeframe):
+                continue
+            key = (item.alias, item.timeframe)
+            previous = latest.get(key)
+            if previous is None or (item.available_at, item.generation, item.location_id) > (
+                previous.available_at, previous.generation, previous.location_id,
+            ):
+                latest[key] = item
+        return tuple(latest.values())
+
+    def available_as_of(
+        self, cutoff: datetime, *, timeframe: str | None = None,
+    ) -> tuple[LocationRecord, ...]:
+        """Return the canonical latest generation visible at a causal cutoff."""
+        return self.available(cutoff, timeframe=timeframe)
 
     def resolve_owner(
         self, price: float, cutoff: datetime, *, timeframe: str | None = None,

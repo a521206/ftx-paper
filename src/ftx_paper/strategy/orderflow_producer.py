@@ -74,6 +74,7 @@ class CausalOrderflowProducer:
         self._context_processed_windows: set[int] = set()
         self._context_location_records: dict[str, LocationRecord] = {}
         self._context_location_generations: dict[str, int] = {}
+        self._frozen_atr: float | None = None
         self._source_issues: list[dict[str, object]] = []
 
     def _invalidate_context_cache(self) -> None:
@@ -111,6 +112,11 @@ class CausalOrderflowProducer:
             right - left == timedelta(minutes=1)
             for left, right in zip(times, times[1:])
         )
+
+    def set_frozen_atr(self, atr: float | None) -> None:
+        """Provide the completed prior-session ATR for location geometry."""
+        self._frozen_atr = atr if atr is None else float(atr)
+        self._invalidate_context_cache()
 
     def ingest(self, bar: MarketBar) -> None:
         local = bar.timestamp.astimezone(self._session_timezone)
@@ -340,55 +346,72 @@ class CausalOrderflowProducer:
             session_children = [
                 item for item in prefix if item.observed_at <= children[-1].observed_at
             ]
-            ranges = [
-                _numeric_feature(item.features, "high") - _numeric_feature(item.features, "low")
-                for item in session_children
-            ]
-            atr = max(sum(ranges[-20:]) / len(ranges[-20:]), 1e-9)
+            atr = self._frozen_atr
             session_high = max(_numeric_feature(item.features, "high") for item in session_children)
             session_low = min(_numeric_feature(item.features, "low") for item in session_children)
             session_open = [
                 item for item in session_children
                 if item.observed_at < session_start + timedelta(minutes=15)
             ]
-            levels: dict[str, float] = {
+            levels: dict[str, float] = {} if atr is None else {
                 "session_high": session_high,
                 "session_low": session_low,
             }
             if len(session_open) >= 5 and tuple(
                 item.observed_at for item in session_open[:5]
             ) == tuple(session_start + timedelta(minutes=index) for index in range(5)):
-                levels.update({
+                if atr is not None:
+                    levels.update({
                     "or_high": max(_numeric_feature(item.features, "high") for item in session_open[:5]),
                     "or_low": min(_numeric_feature(item.features, "low") for item in session_open[:5]),
-                })
+                    })
             if self._prior_bars and self._prior_complete:
-                levels.update({
+                if atr is not None:
+                    levels.update({
                     "pd_high": max(float(item.high) for item in self._prior_bars),
                     "pd_low": min(float(item.low) for item in self._prior_bars),
-                })
-            location_observations: list[LocationObservation] = []
+                    })
             for alias, level in levels.items():
                 alias = alias.upper()
-                previous = location_records.get(alias)
+                if atr is None:
+                    continue
+                previous = max(
+                    (item for item in location_records.values() if item.alias == alias),
+                    key=lambda item: item.generation,
+                    default=None,
+                )
                 band = LocationBand(level - atr * 0.06, level + atr * 0.06)
-                if (
-                    previous is None
-                    or previous.price != level
-                    or previous.band != band
-                ):
+                if previous is None or previous.price != level or previous.band != band:
                     generation = location_generations.get(alias, 0) + 1
                     location_generations[alias] = generation
                     location_id = stable_orderflow_id(
                         "location", trading_date, stream_identity, alias, generation,
                     )
-                    location_records[alias] = LocationRecord(
+                    location_records[location_id] = LocationRecord(
                         location_id, alias, level, band, generation, end, parent_id,
                         timeframe="5m", source_identity=stream_identity,
                         replaced_location_id=previous.location_id if previous else None,
                         location_type="session_reference",
+                        source_observation_id=parent_id,
+                        frozen_atr=atr,
+                        session_id=trading_date,
+                        calculation_version="orderflow_daily_atr_v1",
                     )
-                record = location_records[alias]
+            location_observations: list[LocationObservation] = []
+            latest_records = {
+                alias: max(
+                    (
+                        item for item in location_records.values()
+                        if item.alias == alias and item.available_at <= end
+                    ),
+                    key=lambda item: item.generation,
+                )
+                for alias in {
+                    item.alias for item in location_records.values()
+                    if item.available_at <= end
+                }
+            }
+            for record in latest_records.values():
                 parent_high = _numeric_feature(parent_features, "high")
                 parent_low = _numeric_feature(parent_features, "low")
                 location_observations.append(LocationObservation(
@@ -404,7 +427,7 @@ class CausalOrderflowProducer:
                     close=_numeric_feature(parent_features, "close"),
                     band_contact=record.band.lower <= parent_high and parent_low <= record.band.upper,
                     source_aggregate_id=parent_id,
-                    observed_at=start,
+                    observed_at=end,
                     available_at=end,
                     observation_id=stable_orderflow_id(
                         "location_observation", parent_id, record.location_id,
@@ -415,6 +438,7 @@ class CausalOrderflowProducer:
                     method="causal_producer",
                     reference_source_aggregate_id=record.source_aggregate_id,
                     reference_source_timeframe=record.timeframe or "5m",
+                    frozen_atr=record.frozen_atr,
                 ))
             # Publish the same structural reference against each complete 1m
             # child that backs this 5m parent.  The child observations are
@@ -424,7 +448,7 @@ class CausalOrderflowProducer:
                 for index, item in enumerate(prefix)
                 if item.observation_id in child_ids
             }
-            for record in location_records.values():
+            for record in latest_records.values():
                 child_locations: list[tuple[str, LocationObservation]] = []
                 for child in children:
                     high = _numeric_feature(child.features, "high")
@@ -436,7 +460,7 @@ class CausalOrderflowProducer:
                         LocationObservation(
                             record.location_id, record.alias, record.generation, record.price,
                             record.band.lower, record.band.upper, open_price, high, low, close,
-                            record.band.contains(close), child.observation_id,
+                            record.band.lower <= high and low <= record.band.upper, child.observation_id,
                             child.observed_at, max(child.available_at, record.available_at),
                             stable_orderflow_id(
                                 "location_observation", child.observation_id, record.location_id,
@@ -445,6 +469,7 @@ class CausalOrderflowProducer:
                             source_observation_id=record.source_observation_id,
                             reference_source_aggregate_id=record.source_aggregate_id,
                             reference_source_timeframe=record.timeframe or "5m",
+                            frozen_atr=record.frozen_atr,
                             timeframe="1m",
                         ),
                     ))

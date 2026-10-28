@@ -226,7 +226,14 @@ class OrderflowPolicy:
             (*orderflow.observations_for("1m"), *orderflow.observations_for("5m")),
             key=lambda item: (item.available_at, item.timeframe, item.observed_at, item.observation_id),
         ))
-        incoming_ids = frozenset(item.observation_id for item in incoming_observations)
+        incoming_ids = frozenset(
+            observation_id
+            for item in incoming_observations
+            for observation_id in (
+                item.observation_id,
+                *(location.observation_id for location in item.location_observations),
+            )
+        )
         if incoming_ids != self._evaluation_observation_ids:
             self._evaluation_observations = incoming_observations
             self._evaluation_observation_ids = incoming_ids
@@ -245,14 +252,17 @@ class OrderflowPolicy:
                 )),
                 cutoff=min(context.as_of, orderflow.cutoff),
             )
-            ranges: list[float] = []
-            for item in observations:
-                if item.timeframe != "5m":
-                    continue
-                high, low = _number(item, "high"), _number(item, "low")
-                if high is not None and low is not None:
-                    ranges.append(high - low)
-            atr = sum(ranges[-20:]) / len(ranges[-20:]) if ranges else None
+            atr = next(
+                (
+                    location.frozen_atr
+                    for item in observations
+                    for location in item.location_observations
+                    if location.location_alias.upper() != "VWAP"
+                    and location.frozen_atr is not None
+                    and location.frozen_atr > 0
+                ),
+                None,
+            )
             vwap_locations = self._location_registry.publish_measurements(
                 vwap_measurements, atr=atr,
                 band_fraction=self._vwap_provider.config.band_atr_fraction,
@@ -397,7 +407,14 @@ class OrderflowPolicy:
             None,
         )
         for observation in observations:
-            if observation.observation_id in self._processed_observation_ids:
+            already_processed = observation.observation_id in self._processed_observation_ids
+            if (
+                already_processed
+                and not any(
+                    location.observation_id not in self._processed_location_observation_ids
+                    for location in observation.location_observations
+                )
+            ):
                 continue
             if observation.timeframe not in self._location_detectors:
                 continue
@@ -517,7 +534,7 @@ class OrderflowPolicy:
                             "available_at": observation.available_at.isoformat(),
                     }))
             gap_status = observation.context.replay_provenance.get("gap_status")
-            if observation.timeframe == "5m":
+            if observation.timeframe == "5m" and not already_processed:
                 self._context_version += 1
                 high = observation.features.get("high")
                 low = observation.features.get("low")
@@ -759,12 +776,13 @@ class OrderflowPolicy:
                             "short_score": short_score,
                             "available_at": observation.available_at.isoformat(),
                         }))
-                # The first 5m OR candle seeds the opening hypothesis in the
-                # canonical lifecycle; it is not an ordinary OR interaction.
-                location_observations = tuple(
-                    item for item in location_observations
-                    if item.location_alias.upper() not in {"OR_HIGH", "OR_LOW"}
-                )
+                if opening_parent:
+                    # The first 5m OR candle seeds the opening hypothesis; it
+                    # is not an ordinary OR interaction.
+                    location_observations = tuple(
+                        item for item in location_observations
+                        if item.location_alias.upper() not in {"OR_HIGH", "OR_LOW"}
+                    )
             self._processed_observation_ids.add(observation.observation_id)
             interaction_context_events: list[PolicyDecision] = []
             interaction_created_events: list[PolicyDecision] = []
@@ -797,10 +815,13 @@ class OrderflowPolicy:
                     LocationBand(location_observation.band_lower, location_observation.band_upper),
                     location_observation.reference_generation,
                     location_observation.available_at,
-                    location_observation.source_aggregate_id,
+                    location_observation.reference_source_aggregate_id
+                    or location_observation.source_aggregate_id,
                     timeframe=observation.timeframe,
                     source_identity=observation.instrument,
                     location_type=location_observation.location_type,
+                    source_observation_id=location_observation.source_observation_id,
+                    frozen_atr=location_observation.frozen_atr,
                 )
                 if not any(item.location_id == location.location_id for item in self._location_registry.records):
                     self._location_registry.publish(location)
