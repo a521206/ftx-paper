@@ -457,6 +457,13 @@ class OrderflowPolicy:
                 and observation.observation_id != self._opening_gap_observation_id
             ):
                 seed = self._opening_seed
+                formation_available_at = seed.get("formation_available_at")
+                if isinstance(formation_available_at, str):
+                    formation_available = datetime.fromisoformat(
+                        formation_available_at.replace("Z", "+00:00")
+                    )
+                    if observation.available_at <= formation_available:
+                        continue
                 raw_boundary = seed.get("reference_level")
                 if not isinstance(raw_boundary, (int, float)) or isinstance(raw_boundary, bool):
                     continue
@@ -742,6 +749,7 @@ class OrderflowPolicy:
                             "reference_generation": seed_location.reference_generation,
                             "source_observation_id": observation.observation_id,
                             "attached_observation_id": None,
+                            "formation_available_at": observation.available_at.isoformat(),
                             "opening_policy": (
                                 "opening_retest"
                                 if (
