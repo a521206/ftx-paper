@@ -110,6 +110,12 @@ are made at each causal boundary using canonical IDs, evidence, timestamps,
 availability, generations, source IDs, and unavailable reasons. VWAP-specific
 templates are absent from all paired fixtures.
 
+Scope and decision-clock equivalence is checked before population comparison.
+Paired replay first aligns source/session bounds, cutoff inclusivity, and
+selected/completed/gap/processed counts, then compares causal phases from source
+through execution. This Paper-internal validation does not replace the
+producer-neutral four-layer artifact comparison.
+
 ## Runtime Shape
 
 The strategy is built as a causal live decision engine around these layers:

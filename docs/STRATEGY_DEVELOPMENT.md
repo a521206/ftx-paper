@@ -89,13 +89,13 @@ Use the existing replay path rather than a strategy-specific simulator:
    fingerprint, provenance, availability, selected contract, and bar coverage.
 2. Run the same session date, sessions, vehicles, capital profile, and strategy
    configuration for each candidate being compared.
-3. Retrieve the completed run from `/api/v1/replay/{run_id}`. Use
-   `/trace` for causal feature and location transitions and `/events` for the
-   full event stream.
+3. Retrieve the completed run from `/api/v1/replay/{run_id}`. Use the persisted
+   parity manifest and bounded layer endpoints for comparison data; producer
+   replay facts remain internal and are not API reporting surfaces.
 4. Compare the generated parity artifacts, not timestamps or run IDs. The
-   artifact separates `p9.decision_records` from `p10.execution` and exits,
-   and includes strategy metadata, configuration hash, input identity, and
-   coverage.
+   artifact contains the four contract layers: `run_scope`, `decision`,
+   `execution_settlement`, and `portfolio_ledger`, with normalized scope,
+   input identity, and coverage.
 
 The comparison must report differences in:
 
