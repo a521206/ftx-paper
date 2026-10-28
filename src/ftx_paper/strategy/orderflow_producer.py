@@ -73,6 +73,7 @@ class CausalOrderflowProducer:
         self._context_processed_windows: set[int] = set()
         self._context_location_records: dict[str, LocationRecord] = {}
         self._context_location_generations: dict[str, int] = {}
+        self._source_issues: list[dict[str, object]] = []
 
     def _invalidate_context_cache(self) -> None:
         self._context_bars = ()
@@ -116,7 +117,23 @@ class CausalOrderflowProducer:
         local_time = local.time().replace(second=0, microsecond=0)
         if bar.instrument.instrument_type.upper() not in {"FUT", "FUTURE", "FUTURES"}:
             return
+        identity = _source_identity(bar)
+        if self._active_date is not None and date > self._active_date:
+            self._source_issues.clear()
+        if self._selected_identity is None:
+            self._selected_identity = identity
+        elif identity != self._selected_identity and date == self._active_date:
+            raise ValueError("orderflow source identity changed within a session")
         if not source_row_is_complete(bar):
+            self._active_date = date
+            timestamp = bar.timestamp.astimezone(timezone.utc)
+            self._source_issues.append({
+                "reason": "incomplete_source_row",
+                "observed_at": timestamp.isoformat(),
+                "available_at": (timestamp + timedelta(minutes=1)).isoformat(),
+                "source_identity": _source_identity(bar),
+                "source_fingerprint": source_fingerprint((bar,)),
+            })
             return
         if local_time < self._session_start or local_time >= self._session_end:
             return
@@ -138,16 +155,18 @@ class CausalOrderflowProducer:
             self._bars.clear()
             self._last_timestamps.clear()
             self._raw_last_timestamps.clear()
-            self._selected_identity = None
+            self._selected_identity = identity
             self._invalidate_context_cache()
         timestamp = bar.timestamp.astimezone(timezone.utc)
-        identity = _source_identity(bar)
-        if self._selected_identity is None:
-            self._selected_identity = identity
-        elif identity != self._selected_identity:
-            raise ValueError("orderflow source identity changed within a session")
         raw_last_timestamp = self._raw_last_timestamps.get(identity)
         if raw_last_timestamp == timestamp:
+            self._source_issues.append({
+                "reason": "duplicate_source_row",
+                "observed_at": timestamp.isoformat(),
+                "available_at": (timestamp + timedelta(minutes=1)).isoformat(),
+                "source_identity": identity,
+                "source_fingerprint": source_fingerprint((bar,)),
+            })
             return
         if raw_last_timestamp is not None and timestamp < raw_last_timestamp:
             raise ValueError("orderflow source bars must be strictly chronological")
@@ -178,8 +197,13 @@ class CausalOrderflowProducer:
             decision_cutoff - timedelta(minutes=1),
         )
         bars = source_bars[:cutoff_index]
-        if not bars:
+        if not bars and not self._source_issues:
             return None
+        if not bars:
+            return OrderflowContext(
+                trading_date, decision_cutoff, (), {"1m": (), "5m": ()},
+                tuple(self._source_issues),
+            )
         stream_identity = selected_identity
         instrument = bars[-1].instrument.symbol
         cached_count = len(self._context_bars)
@@ -427,6 +451,7 @@ class CausalOrderflowProducer:
         return OrderflowContext(
             trading_date, cutoff, observations,
             {"1m": tuple(prefix), "5m": tuple(five_minute)},
+            tuple(self._source_issues),
         )
 
 

@@ -141,6 +141,7 @@ class OrderflowContext:
     cutoff: datetime
     observations: tuple[OrderflowObservation, ...] = ()
     prefixes: Mapping[str, tuple[OrderflowObservation, ...]] = MappingProxyType({})
+    source_issues: tuple[Mapping[str, object], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.session_id.strip():
@@ -166,6 +167,7 @@ class OrderflowContext:
             if any(not observation.available_by(self.cutoff) for observation in values):
                 raise ValueError("orderflow prefix contains unavailable observation")
         object.__setattr__(self, "prefixes", MappingProxyType(normalized))
+        object.__setattr__(self, "source_issues", tuple(dict(issue) for issue in self.source_issues))
 
     def observations_for(self, timeframe: str) -> tuple[OrderflowObservation, ...]:
         return self.prefixes.get(timeframe, ())

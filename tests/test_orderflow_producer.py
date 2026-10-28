@@ -142,3 +142,35 @@ def test_incomplete_source_row_is_not_published_as_one_or_five_minute_evidence()
     assert context is not None
     assert len(context.observations_for("1m")) == 4
     assert context.observations_for("5m") == ()
+    assert [issue["reason"] for issue in context.source_issues] == ["incomplete_source_row"]
+    assert context.source_issues[0]["source_identity"] == "NIFTYFUT|NSE|FUTURES|||"
+
+
+def test_duplicate_source_row_is_retained_as_a_diagnostic_issue() -> None:
+    producer = CausalOrderflowProducer()
+    instrument = Instrument("NIFTYFUT", "NSE", "FUTURES")
+    timestamp = datetime(2026, 1, 1, 3, 45, tzinfo=timezone.utc)
+    bar = MarketBar(instrument, timestamp, 99.0, 102.0, 98.0, 100.0, 10.0)
+
+    producer.ingest(bar)
+    producer.ingest(bar)
+
+    context = producer.context("2026-01-01", "09:15")
+
+    assert context is not None
+    assert context.source_issues[0]["reason"] == "duplicate_source_row"
+
+
+def test_incomplete_only_session_returns_diagnostic_context_without_evidence() -> None:
+    producer = CausalOrderflowProducer()
+    producer.ingest(MarketBar(
+        Instrument("NIFTYFUT", "NSE", "FUTURES"),
+        datetime(2026, 1, 1, 3, 45, tzinfo=timezone.utc),
+        99.0, 102.0, 98.0, 100.0, None,
+    ))
+
+    context = producer.context("2026-01-01", "09:15")
+
+    assert context is not None
+    assert context.observations == ()
+    assert context.source_issues[0]["reason"] == "incomplete_source_row"

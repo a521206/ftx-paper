@@ -53,3 +53,16 @@ def test_admission_rejects_stale_setup_and_context_versions() -> None:
     )
     assert context.status is PredicateStatus.FAILED
     assert context.reason == "context_version_mismatch"
+
+
+def test_executable_admission_uses_same_gates_without_creating_execution_state() -> None:
+    decision = evaluate_admission(
+        _opportunity(), context_available=True, regime_allowed=True,
+        opening_gap_allowed=True, active_position_allowed=True,
+        exposure_allowed=True, allocation_allowed=True,
+        sizing_allowed=True, risk_allowed=True, diagnostic=False,
+    )
+
+    assert decision.status is PredicateStatus.PASSED
+    assert decision.diagnostic_intent is not None
+    assert decision.diagnostic_intent.executable is False

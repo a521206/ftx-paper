@@ -938,6 +938,7 @@ class OrderflowPolicy:
                     "reference_generation": interaction.reference_generation,
                     "response_state": next_status,
                     "template_id": template.template_id,
+                    "hypothesis_state": asdict(state),
                     "response_evidence_ids": list(evidence_ids),
                     "source_observation_ids": list(source_observation_ids),
                     "expected_available_at": expected_available_at.isoformat() if expected_available_at else None,

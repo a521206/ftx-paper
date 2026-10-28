@@ -89,9 +89,12 @@ def evaluate_admission(
     reference_window: str | None = None,
     diagnostic: bool = True,
 ) -> AdmissionDecision:
-    """Apply gates in canonical order; diagnostic mode never creates an intent."""
-    if not diagnostic:
-        raise ValueError("executable orderflow admission is deferred")
+    """Apply gates in canonical order without owning executable mutations.
+
+    The execution owner decides whether a passed projection becomes an order.
+    This helper therefore evaluates executable-mode gates as well as diagnostic
+    gates, while always returning the detached diagnostic projection here.
+    """
     if opportunity.status.value != "ACTIVE":
         predicate = PredicateResult(
             "setup_lifecycle", PredicateStatus.FAILED, value=False,

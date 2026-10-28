@@ -93,7 +93,7 @@ def build_decision_view(
     if diagnostics:
         evidence["diagnostics"] = diagnostics
     state = deepcopy(_mapping(evidence.get("state")))
-    for key in ("response_state", "interaction_state", "generation", "trigger"):
+    for key in ("response_state", "interaction_state", "generation", "trigger", "hypothesis_state"):
         if key in payload and payload[key] is not None:
             state[key] = payload[key]
     if state:

@@ -1137,12 +1137,13 @@ additional responsibilities that must remain visible when assessing parity.
   template registry remain implementation gaps identified in Phase 6. Repeated
   pending/unavailable evaluation is implemented in the live policy but still
   needs persistence-boundary coverage.
-- Paper's live producer still drops incomplete source rows before they become
-  explicit observation issues. Source-selection, incomplete-parent, and
-  candidate-rejection diagnostics therefore remain incomplete on the live path.
-  A skipped or unavailable result is not equivalent to the detailed
-  NiftyZoning diagnostic unless its reason, boundary, lineage, and identity are
-  persisted.
+- Paper's live producer now retains incomplete and duplicate source rows as
+  explicit source issues, including identity, fingerprint, and availability
+  bounds, while keeping them unavailable to aggregation. Source-selection,
+  incomplete-parent, and candidate-rejection diagnostics remain incomplete on
+  the live path. A skipped or unavailable result is not equivalent to the
+  detailed NiftyZoning diagnostic unless its reason, boundary, lineage, and
+  identity are persisted.
 - Paper does not have a direct equivalent of NiftyZoning's single
   `ExecutionEngine` lifecycle owner. This is intentional, but the split across
   `PaperExecutionCoordinator`, `contracts/orders.py`, portfolio state, and
@@ -1219,10 +1220,10 @@ phase can be marked complete:
 - Runtime order handling now passes executable proposals through the existing
   `PaperExecutionCoordinator` before authorization. Denied proposals are
   persisted as explicit `ORDER_DENIED` events instead of disappearing between
-  policy output and execution. The remaining inconsistency is that the public
-  `evaluate_admission(diagnostic=False)` helper still rejects executable mode;
-  executable authorization must be delegated consistently to the existing
-  Paper execution owner.
+  policy output and execution. The public
+  `evaluate_admission(diagnostic=False)` helper now evaluates the same gates
+  without creating execution state; remaining work is predicate metadata and
+  trigger-persistence coverage.
 - Interaction, response, opportunity, admission, and execution-group state is
   not yet fully independent at the persistence boundary. Hypothesis status is
   serialized, but hypothesis evidence and arming state are not.
@@ -1256,6 +1257,9 @@ phase can be marked complete:
   optional volume handling used by existing Paper bars.
 - Legacy source fingerprints and replay fields are no longer adapted into
   canonical parity/replay artifacts; canonical boundaries reject them instead.
+- Live producer diagnostics now retain incomplete and duplicate source rows in
+  the immutable `OrderflowContext` while excluding them from published
+  aggregates. Incomplete-parent and source-candidate diagnostics remain open.
 
 - Trigger eligibility is now projected through `orderflow_trigger.py` from the
   live policy path; executable authorization requires that projection while
@@ -1277,43 +1281,3 @@ foundation, an opt-in Phase 9 execution path, and substantial Phase 10 runtime
 event/reporting behavior. It must not be described as a complete Phase 0-10
 implementation until the remaining admission, live-producer diagnostics,
 persistence, paired-replay, and Paper-owned conformance gaps are verified.
-
-## Consolidated Remaining Todo
-
-This is the authoritative implementation backlog distilled from the phase gaps
-above. Items should be completed in order unless a dependency is explicitly
-listed as independent.
-
-1. **Align executable admission ownership (Phase 8/9).** Remove the standalone
-   `evaluate_admission(diagnostic=False)` rejection, or route executable
-   authorization through the existing Paper execution owner. Preserve the
-   diagnostic boundary and add a regression proving diagnostic and executable
-   projections remain distinct.
-2. **Complete live response policy coverage (Phase 6).** Implement the remaining
-   prior-day and pre-event-context rules, and retain complete per-hypothesis
-   arming, direction, evidence, confirmation, and availability state in detached
-   runtime/event facts.
-3. **Complete opportunity lifecycle orchestration (Phase 7).** Add live retest
-   waiting, supersession, replacement selection, and persistence of denied
-   candidates and execution-group claims.
-4. **Preserve incomplete live source rows diagnostically (Phase 1/2).** Do not
-   silently discard incomplete bars in `CausalOrderflowProducer`; publish an
-   explicit unavailable/issue record with source identity, fingerprint,
-   availability boundary, and lineage while keeping the row out of aggregates.
-5. **Finish opening-gap state transitions (Phase 3/8).** Implement and test
-   candidate, accepted, reclaimed, return-to-value, and expiry transitions from
-   completed evidence, including their admission effects.
-6. **Verify session rollover behavior (Phase 4/5).** Add live regressions for
-   carried and terminated location generations, active interactions at the
-   boundary, and prevention of ended-interaction revival.
-7. **Complete the generic persistence boundary (Phase 10).** Apply the same
-   versioned envelope, deep-detachment, unavailable/rejected distinction,
-   collision-safe idempotency, and deterministic ordering guarantees to the
-   generic event repository and API-facing persistence path.
-8. **Complete paired replay validation (Phase 9).** Compare diagnostic and
-   executable projections at every causal boundary, including management,
-   triggers, duplicate handling, fills, partial fills, exits, reservations,
-   settlement, and ledger results.
-9. **Close conformance coverage and delivery gates (Phases 0-10).** Add focused
-   Paper-owned tests for each item above, run the relevant orderflow suite,
-   Pyright on changed Python files, and Ruff before marking a phase complete.
