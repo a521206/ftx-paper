@@ -61,9 +61,9 @@ def test_replay_summary_exposes_metric_lineage_without_changing_canonical_counts
     events = [
         {"reason": "setup_candidate_formed", "opportunity_id": "setup-1"},
         {"reason": "setup_candidate_formed", "opportunity_id": "setup-1"},
-        {"reason": "location_interaction_observed", "interaction_id": "i-1", "location": "OR_HIGH"},
-        {"reason": "location_interaction_observed", "interaction_id": "i-2", "location": "VWAP"},
-        {"reason": "location_interaction_observed", "interaction_id": "i-3", "location": "vwap"},
+        {"reason": "location_interaction_observed", "interaction_id": "i-1", "location": "OR_HIGH", "timeframe": "5m"},
+        {"reason": "location_interaction_observed", "interaction_id": "i-2", "location": "VWAP", "timeframe": "1m"},
+        {"reason": "location_interaction_observed", "interaction_id": "i-3", "location": "vwap", "timeframe": "5m"},
     ]
     trades = [
         {"vehicle": "futures", "gross_pnl_rs": 100.0, "initial_risk_rs": 50.0},
@@ -74,7 +74,7 @@ def test_replay_summary_exposes_metric_lineage_without_changing_canonical_counts
     summary = ReplayWorker._build_summary(events, trades)
 
     assert summary["setup_candidates"] == 1
-    assert summary["location_interactions"] == 3
+    assert summary["location_interactions"] == 1
     assert summary["entries_filled"] == 2
     assert summary["achieved_risk_reward"] == 2.0
     assert summary["metric_lineage"] == {
@@ -82,6 +82,9 @@ def test_replay_summary_exposes_metric_lineage_without_changing_canonical_counts
         "setup_candidate_unique_count": 1,
         "location_interaction_event_count": 3,
         "location_interaction_unique_count": 3,
+        "canonical_location_interaction_unique_count": 1,
+        "location_interaction_by_timeframe": {"1m": 1, "5m": 2},
+        "location_interaction_by_location": {"OR_HIGH": 1, "VWAP": 2},
         "futures_trade_count": 2,
         "futures_trades_missing_initial_risk": 1,
         "risk_reward_component_count": 1,

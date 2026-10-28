@@ -60,6 +60,11 @@ from ftx_paper.config import (
     SESSION_OPEN_MINUTES,
 )
 
+
+CANONICAL_INTERACTION_LOCATIONS = frozenset({
+    "OR_HIGH", "OR_LOW", "SESSION_HIGH", "SESSION_LOW",
+})
+
 _EXECUTION_EVENT_TYPES = frozenset({
     "ORDER_INTENT", "ORDER_AUTHORIZED", "ORDER_ACK", "FILL",
     "ORDER_UNFILLED", "ORDER_SUPPRESSED", "RISK_REJECTED",
@@ -1681,9 +1686,24 @@ class ReplayWorker:
         all_interaction_ids = reason_identities(
             "location_interaction_observed", identity_fields=("interaction_id",),
         )
+        interaction_events = [
+            event for event in events if event.get("reason") == "location_interaction_observed"
+        ]
+        structural_interaction_ids = {
+            str(event.get("interaction_id") or index)
+            for index, event in enumerate(interaction_events)
+            if str(event.get("location") or "").upper() in CANONICAL_INTERACTION_LOCATIONS
+        }
+        interaction_by_timeframe: dict[str, int] = {}
+        interaction_by_location: dict[str, int] = {}
+        for event in interaction_events:
+            timeframe = str(event.get("timeframe") or "unknown")
+            location = str(event.get("location") or "unknown").upper()
+            interaction_by_timeframe[timeframe] = interaction_by_timeframe.get(timeframe, 0) + 1
+            interaction_by_location[location] = interaction_by_location.get(location, 0) + 1
         return {
             "setup_candidates": len(setup_ids),
-            "location_interactions": len(all_interaction_ids),
+            "location_interactions": len(structural_interaction_ids),
             "entries_filled": len(futures),
             "gross_reward_points": gross_pnl_rs / NIFTY_LOT_SIZE,
             "achieved_risk_reward": round(sum(risk_reward_values), 5) if risk_reward_values else None,
@@ -1696,6 +1716,9 @@ class ReplayWorker:
                     event.get("reason") == "location_interaction_observed" for event in events
                 ),
                 "location_interaction_unique_count": len(all_interaction_ids),
+                "canonical_location_interaction_unique_count": len(structural_interaction_ids),
+                "location_interaction_by_timeframe": dict(sorted(interaction_by_timeframe.items())),
+                "location_interaction_by_location": dict(sorted(interaction_by_location.items())),
                 "futures_trade_count": len(futures),
                 "futures_trades_missing_initial_risk": missing_initial_risk,
                 "risk_reward_component_count": len(risk_reward_values),

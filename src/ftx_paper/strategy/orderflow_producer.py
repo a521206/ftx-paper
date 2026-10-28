@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone, tzinfo
 from bisect import bisect_right
 import math
@@ -415,6 +416,52 @@ class CausalOrderflowProducer:
                     reference_source_aggregate_id=record.source_aggregate_id,
                     reference_source_timeframe=record.timeframe or "5m",
                 ))
+            # Publish the same structural reference against each complete 1m
+            # child that backs this 5m parent.  The child observations are
+            # producer facts; the policy must not synthesize them later.
+            child_indexes = {
+                item.observation_id: index
+                for index, item in enumerate(prefix)
+                if item.observation_id in child_ids
+            }
+            for record in location_records.values():
+                child_locations: list[tuple[str, LocationObservation]] = []
+                for child in children:
+                    high = _numeric_feature(child.features, "high")
+                    low = _numeric_feature(child.features, "low")
+                    close = _numeric_feature(child.features, "close")
+                    open_price = _numeric_feature(child.features, "open")
+                    child_locations.append((
+                        child.observation_id,
+                        LocationObservation(
+                            record.location_id, record.alias, record.generation, record.price,
+                            record.band.lower, record.band.upper, open_price, high, low, close,
+                            record.band.contains(close), child.observation_id,
+                            child.observed_at, max(child.available_at, record.available_at),
+                            stable_orderflow_id(
+                                "location_observation", child.observation_id, record.location_id,
+                            ),
+                            location_type=record.location_type,
+                            source_observation_id=record.source_observation_id,
+                            reference_source_aggregate_id=record.source_aggregate_id,
+                            reference_source_timeframe=record.timeframe or "5m",
+                            timeframe="1m",
+                        ),
+                    ))
+                for child_id, location in child_locations:
+                    index = child_indexes.get(child_id)
+                    if index is None:
+                        continue
+                    child_observation = prefix[index]
+                    if any(
+                        item.observation_id == location.observation_id
+                        for item in child_observation.location_observations
+                    ):
+                        continue
+                    prefix[index] = replace(
+                        child_observation,
+                        location_observations=child_observation.location_observations + (location,),
+                    )
             five_minute.append(OrderflowObservation(
                 observation_id=parent_id,
                 source_observation_id=parent_id,

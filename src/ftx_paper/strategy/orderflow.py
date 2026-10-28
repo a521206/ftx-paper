@@ -675,6 +675,7 @@ class OrderflowPolicy:
                         ),
                         "location": interaction.location_alias,
                         "interaction_id": interaction.interaction_id,
+                        "timeframe": observation.timeframe,
                         "reference_generation": interaction.reference_generation,
                         "interaction_state": InteractionStatus.ENDED.value,
                         "source_observation_ids": [observation.observation_id],
@@ -689,28 +690,6 @@ class OrderflowPolicy:
                 self._admission_suspended = False
                 self._gap_end = None
             location_observations = observation.location_observations
-            if not location_observations and observation.timeframe == "1m":
-                close = _number(observation, "close")
-                high = _number(observation, "high")
-                low = _number(observation, "low")
-                open_price = _number(observation, "open")
-                if None not in (open_price, close, high, low):
-                    assert open_price is not None and close is not None and high is not None and low is not None
-                    location_observations = tuple(
-                        LocationObservation(
-                            record.location_id, record.alias, record.generation, record.price,
-                            record.band.lower, record.band.upper, open_price,
-                            high, low, close, record.band.contains(close),
-                            record.source_aggregate_id, observation.observed_at, observation.available_at,
-                            f"{observation.observation_id}:{record.location_id}",
-                            timeframe="1m",
-                            method="registry_fallback",
-                            reference_source_aggregate_id=record.source_aggregate_id,
-                            reference_source_timeframe=record.timeframe or "1m",
-                        )
-                        for record in self._location_registry.available(observation.available_at)
-                        if not record.timeframe or record.timeframe == "1m"
-                    )
             if observation.timeframe == "5m" and not orderflow.validate_complete_parent(observation):
                 if location_observations:
                     raise ValueError("5m location observation parent is incomplete")
@@ -911,6 +890,7 @@ class OrderflowPolicy:
                         "decision_id": _decision_id("opportunity", interaction.interaction_id, location_key),
                         "location": interaction.location_alias,
                         "interaction_id": interaction.interaction_id,
+                        "timeframe": observation.timeframe,
                         "reference_generation": interaction.reference_generation,
                         "source_observation_ids": [location_key],
                         "observed_at": location_observation.observed_at.isoformat(),

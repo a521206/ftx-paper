@@ -37,6 +37,13 @@ def test_causal_producer_builds_complete_five_minute_context() -> None:
     assert "VWAP" not in by_alias
     assert by_alias["SESSION_HIGH"].location_type == "session_reference"
     assert all("vwap" not in parent.features for parent in context.observations)
+    children = context.observations_for("1m")
+    child_locations = tuple(
+        item for child in children for item in child.location_observations
+    )
+    assert child_locations
+    assert all(item.timeframe == "1m" for item in child_locations)
+    assert all(item.source_aggregate_id in {child.observation_id for child in children} for item in child_locations)
 
 
 def test_causal_producer_uses_canonical_source_fingerprint_for_children() -> None:
