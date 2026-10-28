@@ -171,6 +171,41 @@ def test_producer_published_location_observation_starts_diagnostic_interaction()
     assert event.order is None
 
 
+def test_completed_five_minute_extreme_publishes_before_same_clock_location() -> None:
+    bundle, account = _context()
+    assert bundle.orderflow_context is not None
+    parent = bundle.orderflow_context.observations_for("5m")[0]
+    location = replace(
+        parent.location_observations[0],
+        observation_id="location-obs-1m-g1",
+        timeframe="1m",
+        available_at=parent.available_at,
+    )
+    children = list(bundle.orderflow_context.observations_for("1m"))
+    children[-1] = replace(
+        children[-1],
+        available_at=parent.available_at,
+        location_observations=(location,),
+    )
+    parent = replace(
+        parent,
+        context=replace(
+            parent.context,
+            replay_provenance={"source": "test", "producer": "ftx-paper"},
+        ),
+    )
+    context = replace(
+        bundle.orderflow_context,
+        observations=(*children, parent),
+        prefixes={"5m": (parent,), "1m": tuple(children)},
+    )
+
+    events = OrderflowStrategy().evaluate(replace(bundle, orderflow_context=context), account)
+    reasons = [event.payload.get("reason") for event in events]
+
+    assert reasons.index("session_extreme_registered") < reasons.index("location_interaction_observed")
+
+
 def test_first_five_minute_or_location_does_not_start_ordinary_interaction() -> None:
     bundle, account = _context()
     assert bundle.orderflow_context is not None
