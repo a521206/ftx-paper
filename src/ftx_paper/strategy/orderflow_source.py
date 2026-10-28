@@ -152,8 +152,7 @@ def prepare_replay_input(
     """Select and validate one deterministic futures source for a session.
 
     Rows are never mixed across contracts.  When multiple dated contracts are
-    supplied, the lexicographically earliest contract is selected and every
-    other candidate is retained in metadata as rejected provenance.
+    supplied, callers must explicitly select the source contract.
     """
     requested = normalize_session_date(requested_date)
     if selection_rule not in {"dated_nearest_expiry", "continuous_identity"}:
@@ -221,18 +220,11 @@ def prepare_replay_input(
             raise ValueError(f"requested source contract is ambiguous: {source_contract!r}")
         selected_identity = matching[0]
     else:
-        if selection_rule == "continuous_identity":
-            # A continuous stream is selected by deterministic coverage, not
-            # by silently treating the earliest expiry as the series identity.
-            selected_identity = min(
-                candidates,
-                key=lambda identity: (-sum(1 for row in normalized if _identity(row) == identity), identity),
+        if len(candidates) > 1:
+            raise ValueError(
+                "mixed futures source identities require explicit source_contract"
             )
-        else:
-            selected_identity = min(
-                candidates,
-                key=lambda identity: (candidates[identity].expiry or "9999-99-99", identity),
-            )
+        selected_identity = next(iter(candidates))
     selected = tuple(
         row for row in normalized
         if _identity(row) == selected_identity

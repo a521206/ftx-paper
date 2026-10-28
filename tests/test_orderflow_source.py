@@ -7,7 +7,6 @@ from ftx_paper.contracts import Instrument, MarketBar
 from ftx_paper.strategy import (
     normalize_session_date,
     prepare_replay_input,
-    source_fingerprint,
 )
 
 
@@ -26,17 +25,12 @@ def test_session_date_normalization_uses_ist_for_timestamps() -> None:
         normalize_session_date(datetime(2026, 1, 1))
 
 
-def test_prepare_selects_one_contract_and_retains_rejected_candidates() -> None:
+def test_prepare_rejects_mixed_contracts_without_explicit_selection() -> None:
     selected = [_bar("NIFTY26JAN", index) for index in range(2)]
     rejected = [_bar("NIFTY26FEB", index, expiry="2026-02-26") for index in range(2)]
 
-    replay = prepare_replay_input([*rejected, *selected], "2026-01-01")
-
-    assert replay.replayed
-    assert {bar.instrument.symbol for bar in replay.rows} == {"NIFTY26JAN"}
-    assert replay.metadata.source_contract == "2026-01-29"
-    assert len(replay.metadata.rejected_rollover_candidates) == 1
-    assert replay.metadata.source_fingerprint == source_fingerprint(replay.rows)
+    with pytest.raises(ValueError, match="mixed futures source identities"):
+        prepare_replay_input([*rejected, *selected], "2026-01-01")
 
 
 def test_prepare_allows_explicit_source_contract_selection() -> None:

@@ -21,9 +21,13 @@ from ftx_paper.domain import AccountAggregate, PortfolioState
 from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.runtime.engine import PaperEngine
 from ftx_paper.runtime.decision_turn import DecisionTurn, evaluate_turn
+from ftx_paper.runtime.orderflow_pipeline import ingest_orderflow_bar
 from ftx_paper.runtime.events import is_decision_event
 from ftx_paper.strategy.orderflow_contract import feature_values_to_dict, stable_orderflow_id
+from ftx_paper.strategy.orderflow_observation import observe_market
 from ftx_paper.strategy.orderflow_producer import CausalOrderflowProducer
+from ftx_paper.strategy.orderflow_replay import ReplayMachine
+from ftx_paper.strategy.orderflow_source import prepare_replay_input
 from ftx_paper.runtime.futures_source import FuturesSessionSourceResolver
 from ftx_paper.runtime.parity_artifacts import (
     NORMALIZED_BAR_FINGERPRINT_RECIPE,
@@ -540,6 +544,7 @@ class ReplayWorker:
         max_drawdown = 0.0
         last_portfolio: PortfolioState | None = None
         last_strategy_metadata = None
+        runtime_replay_records: list[dict[str, Any]] = []
         available_dates = self._dates()
         expiry_dates = self.store.read_expiry_dates()
         # This engine/strategy is private to this replay run and never shared
@@ -567,6 +572,19 @@ class ReplayWorker:
             rows = self.store.read_market_bars(date)
             futures_source = self._resolve_source(date)
             bars = self._bars(date, rows=rows, futures_source=futures_source)
+            futures_bars = tuple(
+                bar for bar in bars
+                if str(bar.instrument.instrument_type).upper() in {"FUT", "FUTURES"}
+            )
+            replay_machine = None
+            if futures_bars:
+                replay_input = prepare_replay_input(
+                    futures_bars,
+                    date,
+                    session_partition="09:15-15:30",
+                    source_contract=futures_bars[0].instrument.expiry,
+                )
+                replay_machine = ReplayMachine(observe_market(replay_input))
             prior_day_high, prior_day_low = self._prior_day_levels(date, available_dates)
             # Historical replay databases may not contain the imported expiry
             # calendar. Infer an expiry session from the option bars themselves
@@ -659,13 +677,18 @@ class ReplayWorker:
                 if cancel.is_set():
                     break
                 if orderflow_producer is not None:
-                    # Orderflow observations are sourced from the selected
-                    # futures decision clock.  Feeding option bars here makes
-                    # every decision scan and sort the entire option surface.
-                    if bar.instrument.instrument_type in {"FUT", "FUTURES"}:
-                        orderflow_producer.ingest(bar)
-                feature_service.ingest(bar)
-                bundle = aggregator.ingest(bar)
+                    # The producer ignores supporting instruments while the
+                    # shared pipeline keeps feature and bundle ordering equal
+                    # to live processing.
+                    _, bundle = ingest_orderflow_bar(
+                        bar,
+                        producer=orderflow_producer,
+                        feature_service=feature_service,
+                        aggregator=aggregator,
+                    )
+                else:
+                    feature_service.ingest(bar)
+                    bundle = aggregator.ingest(bar)
                 if bundle is None:
                     continue
                 ready_bundle = bundle
@@ -1066,7 +1089,7 @@ class ReplayWorker:
                     bundle, futures_bar.timestamp, emitted_orderflow_trigger_ids,
                 )
                 all_events.extend(trigger_events)
-                self.lifecycle.run(
+                phase_events = self.lifecycle.run(
                     turn,
                     {
                         ExecutionPhase.REFERENCE_PUBLICATION: lambda _turn: {},
@@ -1080,6 +1103,21 @@ class ReplayWorker:
                         ExecutionPhase.EVENT_RECORDING: record_replay_events,
                     },
                 )
+                if replay_machine is not None and str(futures_bar.instrument.instrument_type).upper() in {"FUT", "FUTURES"}:
+                    replay_machine.process_bar(
+                        futures_bar.timestamp,
+                        available_at=futures_bar.timestamp,
+                        before_state={},
+                        after_state={},
+                        phase_results=tuple({
+                            "phase": event.phase,
+                            "sequence": event.sequence,
+                            "payload": dict(event.payload),
+                        } for event in phase_events),
+                    )
+                    runtime_replay_records.append(
+                        replay_machine.recorder.records[-1].to_dict()
+                    )
                 if mode == "replay" and not daily_reset_emitted:
                     ledger_records.append({
                         "event_type": "DAILY_RESET",
@@ -1581,7 +1619,7 @@ class ReplayWorker:
                 "processed_decision_bars": metadata["processed_decision_bars"],
             },
         }
-        replay_result["replay_records"] = [
+        replay_result["replay_records"] = runtime_replay_records or [
             record.to_dict() for record in detached_replay_records(tuple(all_events), scope=detached_scope)
         ]
         parity_artifact = build_parity_artifact(
@@ -1602,6 +1640,7 @@ class ReplayWorker:
             authoritative_trades=(),
             authoritative_ledger=(),
             parity_artifact=parity_artifact,
+            replay_records=tuple(runtime_replay_records),
         )
         return canonical.to_dict()
 

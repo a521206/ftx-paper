@@ -86,6 +86,8 @@ def test_orderflow_replay_defaults_to_diagnostic_without_execution_mutations(tmp
     assert result["shadow_ledger"] == []
     assert result["execution_scope"] == "shadow"
     assert result["ledger_scope"] == "replay"
+    assert result["replay_records"]
+    assert result["replay_records"][0]["checkpoints"]
     assert not any(str(event.get("values", {}).get("event_type", "")).upper() in {"FILL", "RESERVATION", "SETTLEMENT"}
                    for event in result["events"])
     assert store.read_status() == before_status

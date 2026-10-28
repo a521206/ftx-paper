@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from dataclasses import dataclass, field
 from enum import StrEnum
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 from .orderflow_capture import CaptureMode, ReplayRecord, ReplayRecorder
 from .orderflow_observation import MarketObservation
@@ -25,6 +25,18 @@ class ReplayPhase(StrEnum):
 
 
 CANONICAL_PHASE_ORDER = tuple(ReplayPhase)
+
+_EXECUTION_PHASE_TO_REPLAY_PHASE = {
+    "reference_publication": ReplayPhase.REFERENCE_PUBLICATION,
+    "existing_position_management": ReplayPhase.EXISTING_MANAGEMENT,
+    "permission_and_gap": ReplayPhase.PERMISSION_REFRESH,
+    "interaction_advancement": ReplayPhase.INTERACTIONS,
+    "opportunity_timeout": ReplayPhase.TIMEOUT,
+    "opportunity_formation": ReplayPhase.FORMATION,
+    "proposal_arbitration": ReplayPhase.ARBITRATION,
+    "execution_settlement": ReplayPhase.TRIGGER,
+    "event_recording": ReplayPhase.RECORDING,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,7 +61,11 @@ class OrderflowRuntimeState:
 
 
 class ReplayMachine:
-    """Own one causal recording boundary; it never creates executable orders."""
+    """Own one causal observation and capture boundary.
+
+    Execution remains owned by the runtime execution coordinator. The machine
+    records the phase results that coordinator actually produced.
+    """
 
     def __init__(
         self, observation: MarketObservation,
@@ -76,6 +92,7 @@ class ReplayMachine:
         unavailable: tuple[Mapping[str, object], ...] = (),
         checkpoints: tuple[Mapping[str, object], ...] = (),
         scope: Mapping[str, object] | None = None,
+        phase_results: Sequence[Mapping[str, object]] = (),
     ) -> ReplayBarResult:
         if self._last_timestamp is not None and timestamp <= self._last_timestamp:
             raise ValueError("replay bars must be strictly chronological")
@@ -101,13 +118,20 @@ class ReplayMachine:
         # Suspension gates admission only; completed evidence remains visible
         # for diagnostics and recovery reasoning.
         available_ids = tuple(item.observation_id for item in context.observations)
-        phases = CANONICAL_PHASE_ORDER
+        phases = (
+            tuple(
+                _EXECUTION_PHASE_TO_REPLAY_PHASE[str(item["phase"])]
+                for item in phase_results
+                if str(item.get("phase")) in _EXECUTION_PHASE_TO_REPLAY_PHASE
+            )
+            or CANONICAL_PHASE_ORDER
+        )
         self.state.phase_history.append(phases)
         sequence = len(self.recorder.records) + 1
         self.recorder.record(ReplayRecord(
             sequence, timestamp, available_at or timestamp, before_state, after_state,
             available_ids, decisions, aggregates, predicates, events, transitions, unavailable,
-            checkpoints=checkpoints, scope=scope or {},
+            checkpoints=(*checkpoints, *phase_results), scope=scope or {},
         ))
         self.state.replay_records = list(self.recorder.records)
         self._last_timestamp = timestamp

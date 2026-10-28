@@ -16,7 +16,7 @@ REPLAY_VEHICLES = frozenset({"futures", "synthetic"})
 _RESULT_FIELDS = frozenset({
     "run_id", "schema_version", "execution_scope", "ledger_scope", "summary", "events",
     "shadow_trades", "shadow_ledger", "authoritative_trades", "authoritative_ledger",
-    "parity_artifact",
+    "parity_artifact", "replay_records",
 })
 LEGACY_REPLAY_FIELDS = frozenset({
     "trades", "ledger", "diagnostic_trades", "replay_summary", "canonical_summary",
@@ -203,6 +203,7 @@ class ReplayResult:
     authoritative_trades: tuple[ReplayTrade, ...]
     authoritative_ledger: tuple[ReplayLedgerEntry, ...]
     parity_artifact: Mapping[str, Any] | None
+    replay_records: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         if (self.schema_version != REPLAY_SCHEMA_VERSION or not self.run_id
@@ -211,21 +212,24 @@ class ReplayResult:
             raise ValueError("invalid replay result envelope")
 
     def to_dict(self) -> dict[str, Any]:
-        return {"run_id": self.run_id, "schema_version": self.schema_version,
-                "execution_scope": self.execution_scope, "ledger_scope": self.ledger_scope,
-                "summary": self.summary.to_dict(), "events": [item.to_dict() for item in self.events],
-                "shadow_trades": [item.to_dict() for item in self.shadow_trades],
-                "shadow_ledger": [item.to_dict() for item in self.shadow_ledger],
-                "authoritative_trades": [item.to_dict() for item in self.authoritative_trades],
-                "authoritative_ledger": [item.to_dict() for item in self.authoritative_ledger],
+        payload = {"run_id": self.run_id, "schema_version": self.schema_version,
+                 "execution_scope": self.execution_scope, "ledger_scope": self.ledger_scope,
+                 "summary": self.summary.to_dict(), "events": [item.to_dict() for item in self.events],
+                 "shadow_trades": [item.to_dict() for item in self.shadow_trades],
+                 "shadow_ledger": [item.to_dict() for item in self.shadow_ledger],
+                 "authoritative_trades": [item.to_dict() for item in self.authoritative_trades],
+                 "authoritative_ledger": [item.to_dict() for item in self.authoritative_ledger],
                 "parity_artifact": dict(self.parity_artifact) if self.parity_artifact is not None else None}
+        if self.replay_records:
+            payload["replay_records"] = [dict(item) for item in self.replay_records]
+        return payload
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "ReplayResult":
         unexpected = set(value) - _RESULT_FIELDS
         if unexpected:
             raise ValueError("unsupported replay result fields: " + ", ".join(sorted(unexpected)))
-        missing = _RESULT_FIELDS - set(value)
+        missing = (_RESULT_FIELDS - {"replay_records"}) - set(value)
         if missing:
             raise ValueError("missing replay result fields: " + ", ".join(sorted(missing)))
         def records(name: str, factory: Any) -> tuple[Any, ...]:
@@ -237,11 +241,19 @@ class ReplayResult:
         if not isinstance(raw_events, Sequence) or isinstance(raw_events, (str, bytes)):
             raise ValueError("events must be an array")
         events = tuple(ReplayEvent(**dict(item)) for item in raw_events)
-        return cls(str(value["run_id"]), int(value["schema_version"]), value["execution_scope"],
-                   value["ledger_scope"], ReplaySummary.from_mapping(value["summary"]), events,
-                   records("shadow_trades", ReplayTrade), records("shadow_ledger", ReplayLedgerEntry),
-                   records("authoritative_trades", ReplayTrade), records("authoritative_ledger", ReplayLedgerEntry),
-                   (None if value["parity_artifact"] is None else _mapping(value["parity_artifact"], "parity_artifact")))
+        replay_records = value.get("replay_records", ())
+        if not isinstance(replay_records, Sequence) or isinstance(replay_records, (str, bytes)):
+            raise ValueError("replay_records must be an array")
+        if any(not isinstance(item, Mapping) for item in replay_records):
+            raise ValueError("replay_records must contain objects")
+        return cls(
+            str(value["run_id"]), int(value["schema_version"]), value["execution_scope"],
+            value["ledger_scope"], ReplaySummary.from_mapping(value["summary"]), events,
+            records("shadow_trades", ReplayTrade), records("shadow_ledger", ReplayLedgerEntry),
+            records("authoritative_trades", ReplayTrade), records("authoritative_ledger", ReplayLedgerEntry),
+            (None if value["parity_artifact"] is None else _mapping(value["parity_artifact"], "parity_artifact")),
+            tuple(dict(item) for item in replay_records),
+        )
 
 
 __all__ = ["ExecutionScope", "LedgerScope", "REPLAY_SCHEMA_VERSION", "ReplayEvent", "ReplayLedgerEntry",

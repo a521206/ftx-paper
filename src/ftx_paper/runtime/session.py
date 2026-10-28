@@ -29,6 +29,7 @@ from ftx_paper.execution.cost import futures_cost
 from ftx_paper.execution.settlement import ExitValidationError, validate_exit_order
 from .engine import MultiStrategyEngine, PaperEngine, StrategyDispatchError
 from .decision_turn import DecisionTurn, evaluate_turn
+from .orderflow_pipeline import ingest_orderflow_bar
 from .facades import FeedController, FeedManager, OrderManager, PnlManager, StrategyRunner
 from .event_bus import EventBus
 from ftx_paper.execution import ExecutionService, PaperExecutionCoordinator
@@ -1168,12 +1169,16 @@ class RuntimeSession:
             }, f"bar_closed:{bar_key}", timestamp=bar.timestamp.isoformat())
             if self._aggregator is None:
                 return
-            self._feature_service.ingest(bar)
-            self._orderflow_producer.ingest(bar)
-            expired = self._aggregator.expire(now=time.monotonic())
+            # Keep the live and replay source-to-bundle path identical.
+            expired, bundle = ingest_orderflow_bar(
+                bar,
+                producer=self._orderflow_producer,
+                feature_service=self._feature_service,
+                aggregator=self._aggregator,
+                expire_at=time.monotonic(),
+            )
             for incomplete in expired:
                 self._record_incomplete(incomplete)
-            bundle = self._aggregator.ingest(bar)
             if bundle is not None:
                 strategy = getattr(self.engine, "strategy", None)
                 bundle = self._feature_service.enrich(
