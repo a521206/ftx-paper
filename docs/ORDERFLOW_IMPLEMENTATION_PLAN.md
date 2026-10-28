@@ -93,9 +93,10 @@ that config through the existing strategy factory/runtime composition. The
 default remains `ExecutionMode.DIAGNOSTIC`; no environment or implicit
 eligibility path may switch it on. Enabling the mode authorizes proposals to
 the existing Paper execution owner, but does not authorize broker/live
-execution. The current `OrderflowPolicy` validation that rejects executable
-mode is removed only when Phase 9 implementation begins, after Phases 0-8 are
-validated.
+execution. Executable authorization is available through the strategy/runtime
+path, but the standalone admission helper still rejects `diagnostic=False`.
+That helper must be aligned with the existing Paper execution owner before
+Phase 9 is marked complete.
 
 ### Parity Coverage
 
@@ -482,14 +483,12 @@ Phase 5 conformance tests:
 - `test_closes_for_cross_band_same_side_outside_band_session_gap_and_replacement`
 - `test_duplicate_observation_does_not_duplicate_interaction`
 
-Implementation gaps currently present:
+Remaining implementation work:
 
-- The current detector decides continuation from candle close. The canonical
-  contract is high/low band intersection for each completed candle; close-only
-  continuation can miss wick contacts and create different episodes.
-- `LocationRegistry.next_generation()` exists as a helper but is not wired into
-  the live session-boundary path. Generation carry/termination must be applied
-  by the policy owner, not only tested in isolation.
+- Add live rollover regressions for carried and terminated generations,
+  including interactions that are active at the boundary. The detector already
+  uses completed-candle high/low band intersection, and the policy already owns
+  generation advancement and interaction closure.
 
 ### Phase 6: Response Policies
 
@@ -527,20 +526,15 @@ Phase 6 conformance tests:
 - `test_pre_event_context_is_required_when_policy_disallows_event_close`
 - `test_response_unavailable_is_not_reported_as_neutral_or_confirmed`
 
-Implementation gaps currently present:
+Remaining implementation work:
 
-- Acceptance and rejection templates are evaluated, but the live adapter does
-  not retain per-hypothesis arming, direction, evidence, or confirmation state.
-  It recomputes a bounded prefix with `armed=False`.
-- Observations are filtered at the replay cutoff before evaluation, so delayed
-  evidence can become an empty/pending result instead of explicit `UNAVAILABLE`
-  with its expected availability boundary.
-- Response decisions are emitted only when a hypothesis status changes. The
-  causal contract requires recording each newly available outcome, including
-  repeated pending and contact-unavailable outcomes.
-- Prior-day policy behavior and pre-event-context requirements are not wired
-  through the live orderflow strategy; the generic adapter is not a substitute
-  for location-specific policies.
+- Persist and publish the complete per-hypothesis state, including arming,
+  direction, evidence IDs, confirmation availability, and expected availability
+  boundaries. The live policy already retains this state in memory.
+- Complete location-specific prior-day policies and pre-event-context wiring;
+  the generic response adapter is not a substitute for those policies.
+- Add conformance coverage proving every newly available pending or unavailable
+  outcome is retained at the runtime persistence boundary.
 
 ### Phase 7: Opportunities And Structural Setups
 
@@ -583,17 +577,14 @@ Phase 7 conformance tests:
 - `test_execution_group_claim_denies_duplicate_candidate_with_reason`
 - `test_setup_cannot_outlive_source_interaction_or_context_without_transition`
 
-Implementation gaps currently present:
+Remaining implementation work:
 
-- `SetupOpportunity.create()` derives an execution group from the opportunity
-  digest and does not receive the template's canonical conflict group. Competing
-  hypotheses can claim separate groups instead of being arbitrated together.
-- Opportunity identity does not include response template/policy identity, so
-  acceptance and rejection lifecycles are not fully distinguishable when their
-  other formation fields coincide.
-- The policy forms a setup only after a confirmed response and does not yet model
-  the complete structural lifecycle: context relation, retest waiting,
-  supersession, source invalidation, and explicit denied-candidate persistence.
+- Complete live orchestration for retest waiting, supersession, and replacement
+  selection. The opportunity model already supports these transitions and live
+  source invalidation.
+- Persist denied candidates and execution-group claims as detached diagnostic
+  facts at the runtime event boundary. Canonical template conflict groups and
+  template/policy identity are already part of opportunity construction.
 
 ### Phase 8: Admission, Intent, And Trigger Eligibility
 
@@ -641,10 +632,14 @@ Phase 8 conformance tests:
 - `test_requalification_is_limited_to_allowed_cancellation_reasons`
 - `test_unavailable_gate_does_not_fallback_to_neutral_or_allowed`
 
-### Phase 9: Execution And Accounting (Deferred Opt-In)
+### Phase 9: Opt-In Execution And Accounting
 
-Implement this phase only after Phases 0-8 and their causal regressions are
-validated and executable behavior is explicitly approved.
+The opt-in execution path is implemented through the existing Paper execution
+owner. Diagnostic mode remains the default and remains mutation-free. The shared
+turn contract and exit lifecycle adapters are implemented, while remaining work
+is to make one coordinator invocation own every phase, close the admission-
+boundary inconsistency, and finish paired replay/lifecycle conformance before
+treating the phase as complete.
 
 Required behavior:
 
@@ -1137,11 +1132,14 @@ additional responsibilities that must remain visible when assessing parity.
   projection remain cross-cutting concerns covered by runtime/event and parity
   contracts, not by `OrderflowPolicy` alone.
 - Paper currently has a generic response adapter rather than NiftyZoning's
-  complete `policies/` package. Prior-day behavior, per-hypothesis arming and
-  evidence, repeated pending/unavailable outcomes, and the full response
-  template registry remain implementation gaps identified in Phase 6.
-- Paper's live producer and policy do not yet expose every source-selection,
-  incomplete-parent, and candidate-rejection diagnostic required by the plan.
+  complete `policies/` package. Prior-day behavior, pre-event-context rules,
+  persistence of complete per-hypothesis evidence, and the full response
+  template registry remain implementation gaps identified in Phase 6. Repeated
+  pending/unavailable evaluation is implemented in the live policy but still
+  needs persistence-boundary coverage.
+- Paper's live producer still drops incomplete source rows before they become
+  explicit observation issues. Source-selection, incomplete-parent, and
+  candidate-rejection diagnostics therefore remain incomplete on the live path.
   A skipped or unavailable result is not equivalent to the detailed
   NiftyZoning diagnostic unless its reason, boundary, lineage, and identity are
   persisted.
@@ -1221,17 +1219,24 @@ phase can be marked complete:
 - Runtime order handling now passes executable proposals through the existing
   `PaperExecutionCoordinator` before authorization. Denied proposals are
   persisted as explicit `ORDER_DENIED` events instead of disappearing between
-  policy output and execution.
+  policy output and execution. The remaining inconsistency is that the public
+  `evaluate_admission(diagnostic=False)` helper still rejects executable mode;
+  executable authorization must be delegated consistently to the existing
+  Paper execution owner.
 - Interaction, response, opportunity, admission, and execution-group state is
   not yet fully independent at the persistence boundary. Hypothesis status is
   serialized, but hypothesis evidence and arming state are not.
 - Opening-gap state is currently reduced to `UNAVAILABLE`/`NONE` in the policy
   context update. The planned candidate, accepted, reclaimed, return-to-value,
   and expiry transitions are not implemented in the live path.
-- Location generations and carry policy are available in model helpers but are
-  not integrated with session rollover and interaction termination.
-- Phase 9 remains correctly deferred: diagnostic mode must continue to create no
-  executable intents, reservations, fills, exits, or portfolio mutations.
+- Location generations and carry policy are integrated with the live session
+  rollover path; remaining work is focused regression coverage for carried and
+  terminated interactions at the boundary.
+- Phase 9 is no longer wholly deferred: executable proposals, fills, exits, and
+  settlement are available only through explicit opt-in mode. Diagnostic mode
+  must continue to create no executable intents, reservations, fills, exits, or
+  portfolio mutations. Paired replay and full lifecycle conformance remain
+  required before the phase is complete.
 
 ### Resolved Gaps
 
@@ -1262,11 +1267,53 @@ phase can be marked complete:
   removed from the API and OpenAPI contract.
 - Replay artifacts no longer expose `candidate_trace`; decision projections are
   derived only from the canonical causal decision stream.
-- Phase 10 is still not complete: API-facing projections and the generic event
-  repository need the same persisted-fact envelope guarantees as the runtime
-  store, and the remaining Phase 10 conformance tests are not all implemented.
+- Phase 10 is still not complete: the generic event repository and API-facing
+  persistence path need the same persisted-fact envelope guarantees as the
+  runtime store, and the remaining Phase 10 conformance tests are not all
+  implemented. The API projection and replay reporting paths already exist.
 
-The current implementation therefore provides a substantial Phase 0-5
-foundation and partial Phase 6-8 behavior, but it must not be described as a
-complete Phase 0-10 implementation until these gaps have focused Paper-owned
-conformance tests and verified causal implementations.
+The current implementation therefore provides a substantial Phase 0-8
+foundation, an opt-in Phase 9 execution path, and substantial Phase 10 runtime
+event/reporting behavior. It must not be described as a complete Phase 0-10
+implementation until the remaining admission, live-producer diagnostics,
+persistence, paired-replay, and Paper-owned conformance gaps are verified.
+
+## Consolidated Remaining Todo
+
+This is the authoritative implementation backlog distilled from the phase gaps
+above. Items should be completed in order unless a dependency is explicitly
+listed as independent.
+
+1. **Align executable admission ownership (Phase 8/9).** Remove the standalone
+   `evaluate_admission(diagnostic=False)` rejection, or route executable
+   authorization through the existing Paper execution owner. Preserve the
+   diagnostic boundary and add a regression proving diagnostic and executable
+   projections remain distinct.
+2. **Complete live response policy coverage (Phase 6).** Implement the remaining
+   prior-day and pre-event-context rules, and retain complete per-hypothesis
+   arming, direction, evidence, confirmation, and availability state in detached
+   runtime/event facts.
+3. **Complete opportunity lifecycle orchestration (Phase 7).** Add live retest
+   waiting, supersession, replacement selection, and persistence of denied
+   candidates and execution-group claims.
+4. **Preserve incomplete live source rows diagnostically (Phase 1/2).** Do not
+   silently discard incomplete bars in `CausalOrderflowProducer`; publish an
+   explicit unavailable/issue record with source identity, fingerprint,
+   availability boundary, and lineage while keeping the row out of aggregates.
+5. **Finish opening-gap state transitions (Phase 3/8).** Implement and test
+   candidate, accepted, reclaimed, return-to-value, and expiry transitions from
+   completed evidence, including their admission effects.
+6. **Verify session rollover behavior (Phase 4/5).** Add live regressions for
+   carried and terminated location generations, active interactions at the
+   boundary, and prevention of ended-interaction revival.
+7. **Complete the generic persistence boundary (Phase 10).** Apply the same
+   versioned envelope, deep-detachment, unavailable/rejected distinction,
+   collision-safe idempotency, and deterministic ordering guarantees to the
+   generic event repository and API-facing persistence path.
+8. **Complete paired replay validation (Phase 9).** Compare diagnostic and
+   executable projections at every causal boundary, including management,
+   triggers, duplicate handling, fills, partial fills, exits, reservations,
+   settlement, and ledger results.
+9. **Close conformance coverage and delivery gates (Phases 0-10).** Add focused
+   Paper-owned tests for each item above, run the relevant orderflow suite,
+   Pyright on changed Python files, and Ruff before marking a phase complete.

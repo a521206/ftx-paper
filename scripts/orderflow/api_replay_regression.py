@@ -137,7 +137,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default=os.getenv("FTX_API_URL", "http://127.0.0.1:8501"))
     parser.add_argument("--timeout", type=float, default=300.0)
-    parser.add_argument("--interval", type=float, default=2.0)
+    parser.add_argument("--interval", type=float, default=0.25)
     args = parser.parse_args(argv)
     try:
         return run(args.base_url, timeout=args.timeout, interval=args.interval)
