@@ -926,7 +926,7 @@ class ReplayWorker:
                 for event in all_events[event_start:]:
                     event_type = str(event.get("event_type", "")).upper()
                     if event_type == "EXITDECISION":
-                        parity_records["decisions"].append(dict(event))
+                        parity_records["decision"].append(dict(event))
                     if event_type in _EXECUTION_EVENT_TYPES or event_type in {"EXITDECISION", "EXIT", "CLOSE"}:
                         parity_records["execution_settlement"].append(dict(event))
             # Preserve open positions as mark-to-market/open replay results.

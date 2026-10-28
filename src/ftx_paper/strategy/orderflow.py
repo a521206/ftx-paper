@@ -317,10 +317,36 @@ class OrderflowPolicy:
                 self._context_version += 1
                 high = observation.features.get("high")
                 low = observation.features.get("low")
+                previous_high = self._session_high
+                previous_low = self._session_low
                 if isinstance(high, (int, float)):
                     self._session_high = max(self._session_high or float(high), float(high))
                 if isinstance(low, (int, float)):
                     self._session_low = min(self._session_low or float(low), float(low))
+                for extreme, previous, current in (
+                    ("high", previous_high, self._session_high),
+                    ("low", previous_low, self._session_low),
+                ):
+                    if (
+                        observation.context.replay_provenance.get("producer") != "ftx-paper"
+                        or current is None or current == previous
+                    ):
+                        continue
+                    results.append(PolicyDecision({
+                        **base,
+                        "decision_at": (
+                            (observation.interval_end - timedelta(minutes=1))
+                            if observation.interval_end is not None else observation.observed_at
+                        ).isoformat(),
+                        "available_at": observation.available_at.isoformat(),
+                        "decision_stage": "candidate",
+                        "outcome": "recorded",
+                        "reason": "session_extreme_registered",
+                        "decision_id": _decision_id("session_extreme", extreme, observation.observation_id),
+                        "extreme": extreme,
+                        "value": current,
+                        "source_observation_ids": [observation.observation_id],
+                    }))
                 level_values = {
                     item.location_alias.upper(): item.reference
                     for item in observation.location_observations
@@ -452,6 +478,42 @@ class OrderflowPolicy:
                 )
                 if not any(item.location_id == location.location_id for item in self._location_registry.records):
                     self._location_registry.publish(location)
+                    if observation.context.replay_provenance.get("producer") == "ftx-paper":
+                        lifecycle_values = {
+                            "location": location.alias,
+                            "location_id": location.location_id,
+                            "reference_generation": location.generation,
+                            "reference_level": location.price,
+                            "timeframe": observation.timeframe,
+                            "source_aggregate_id": location.source_aggregate_id,
+                            "source_observation_ids": [location_key],
+                        }
+                        lifecycle_at = (
+                            observation.interval_end - timedelta(minutes=1)
+                            if observation.interval_end is not None else location.available_at
+                        )
+                        results.extend((
+                            PolicyDecision({
+                                **base,
+                                "decision_at": lifecycle_at.isoformat(),
+                                "available_at": location.available_at.isoformat(),
+                                "decision_stage": "interaction",
+                                "outcome": "recorded",
+                                "reason": "interaction_context_published",
+                                "decision_id": _decision_id("interaction_context", location.location_id, location.generation),
+                                **lifecycle_values,
+                            }),
+                            PolicyDecision({
+                                **base,
+                                "decision_at": lifecycle_at.isoformat(),
+                                "available_at": location.available_at.isoformat(),
+                                "decision_stage": "interaction",
+                                "outcome": "recorded",
+                                "reason": "interaction_created",
+                                "decision_id": _decision_id("interaction_created", location.location_id, location.generation),
+                                **lifecycle_values,
+                            }),
+                        ))
                 detector = self._location_detectors[observation.timeframe]
                 closed_before = len(detector.closed_interactions)
                 interaction = detector.observe(
