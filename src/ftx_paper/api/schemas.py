@@ -95,7 +95,7 @@ def openapi_document() -> dict[str, Any]:
                         "session_date": {"type": "string", "format": "date"},
                         "strategy_id": {"type": "string"},
                         "vehicles": {"type": "array", "items": {"type": "string", "enum": ["futures", "synthetic"]}},
-                        "mode": {"type": "string", "enum": ["shadow", "replay"]},
+                        "mode": {"type": "string", "enum": ["replay"]},
                         "include_parity_layers": {"type": "boolean"},
                     },
                 }}}}, "responses": {"202": {"description": "Replay queued"}, "400": {"description": "Invalid request"}}},

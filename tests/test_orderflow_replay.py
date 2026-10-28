@@ -61,7 +61,7 @@ def test_replay_machine_resumes_admission_after_complete_recovery_parent() -> No
     assert not recovered.admission_suspended
 
 
-def test_orderflow_replay_defaults_to_diagnostic_without_execution_mutations(tmp_path) -> None:
+def test_orderflow_replay_is_isolated_from_live_execution_state(tmp_path) -> None:
     bar = MarketBar(
         Instrument("NIFTY26SEP", "NFO", "FUTURES", "2026-09-29"),
         datetime(2026, 9, 29, 3, 45, tzinfo=UTC),
@@ -77,14 +77,14 @@ def test_orderflow_replay_defaults_to_diagnostic_without_execution_mutations(tmp
         "session_date": "2026-09-29",
         "strategy_id": "ftx-paper-orderflow",
         "vehicles": ["futures", "synthetic"],
-        "mode": "shadow",
+        "mode": "replay",
         "include_parity_layers": False,
     })
 
-    assert result["execution_scope"] == "shadow"
+    assert result["execution_scope"] == "replay"
     assert result["shadow_trades"] == []
-    assert result["shadow_ledger"] == []
-    assert result["execution_scope"] == "shadow"
+    assert any(item["event_type"] == "DAILY_RESET" for item in result["shadow_ledger"])
+    assert result["execution_scope"] == "replay"
     assert result["ledger_scope"] == "replay"
     assert result["replay_records"]
     assert result["replay_records"][0]["checkpoints"]

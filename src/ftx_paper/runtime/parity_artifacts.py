@@ -669,7 +669,7 @@ def build_parity_artifact(
         "session_end_cutoff": request.get("session_end_cutoff", "15:30"),
         "decision_clock": request.get("decision_clock", {"start": "inclusive", "end": "exclusive"}),
         "fingerprint_recipe": NORMALIZED_BAR_FINGERPRINT_RECIPE,
-        "execution_scope": str(result.get("execution_scope") or request.get("mode") or "shadow"),
+        "execution_scope": str(result.get("execution_scope") or request.get("mode") or "replay"),
         "ledger_scope": str(result.get("ledger_scope") or "replay"),
         "capture_mode": request.get("capture_mode", metadata.get("capture_mode", "full")),
         "capital_profile": request.get("capital_profile", {"name": "research"}),
@@ -722,7 +722,7 @@ def build_parity_artifact(
         "portfolio_ledger": ledger_records,
     }
     run_id = str(request.get("run_id") or result.get("run_id") or "paper-replay")
-    execution_scope = str(result.get("execution_scope") or request.get("mode") or "shadow")
+    execution_scope = str(result.get("execution_scope") or request.get("mode") or "replay")
     for records in layers.values():
         for record in records:
             record.update({
@@ -806,7 +806,7 @@ def validate_parity_artifact(artifact: Mapping[str, Any]) -> dict[str, Any]:
                 raise ValueError(f"{layer} sequence must be contiguous")
             if record.get("schema_version") != 1 or record.get("run_id") != artifact.get("run_id"):
                 raise ValueError(f"{layer} record scope is invalid")
-            if record.get("execution_scope") not in {"shadow", "replay"} or record.get("ledger_scope") != "replay":
+            if record.get("execution_scope") != "replay" or record.get("ledger_scope") != "replay":
                 raise ValueError(f"{layer} record scope is invalid")
             if not isinstance(record["occurred_at"], str):
                 raise ValueError(f"{layer} record timestamp is required")

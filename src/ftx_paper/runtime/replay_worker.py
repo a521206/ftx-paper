@@ -232,21 +232,7 @@ class ReplayWorker:
     def execute_detached(self, request: dict[str, Any]) -> dict[str, Any]:
         """Run an isolated replay without creating or updating a stored run."""
         request = ReplayRequest.from_mapping(request).to_dict()
-        mode = str(request.get("mode", "shadow")).lower()
-        if mode not in {"shadow", "replay"}:
-            raise ValueError("mode must be 'shadow' or 'replay'")
-        return self._execute({**request, "mode": mode, "run_id": request.get("run_id") or uuid4().hex}, Event())
-
-    def execute_paired(self, request: dict[str, Any]) -> dict[str, Any]:
-        """Run diagnostic and executable projections through the same replay path."""
-        diagnostic = self.execute_detached({**request, "mode": "shadow"})
-        executable = self.execute_detached({**request, "mode": "replay"})
-        comparison = self.compare_paired_replay(diagnostic, executable)
-        return {
-            "diagnostic": diagnostic,
-            "executable": executable,
-            "comparison": comparison,
-        }
+        return self._execute({**request, "run_id": request.get("run_id") or uuid4().hex}, Event())
 
     @staticmethod
     def compare_paired_replay(
@@ -512,12 +498,12 @@ class ReplayWorker:
         emit_rejected_decisions = request.get("emit_rejected_decisions", False)
         if not isinstance(emit_rejected_decisions, bool):
             raise ValueError("emit_rejected_decisions must be a boolean")
-        mode_value = request.get("mode", "shadow")
+        mode_value = request.get("mode", "replay")
         if not isinstance(mode_value, str):
-            raise ValueError("mode must be 'shadow' or 'replay'")
+            raise ValueError("mode must be 'replay'")
         mode = mode_value.lower()
-        if mode not in {"shadow", "replay"}:
-            raise ValueError("mode must be 'shadow' or 'replay'")
+        if mode != "replay":
+            raise ValueError("mode must be 'replay'")
         include_parity_layers = request.get("include_parity_layers", False)
         if not isinstance(include_parity_layers, bool):
             raise ValueError("include_parity_layers must be a boolean")
@@ -726,8 +712,8 @@ class ReplayWorker:
                     )
                     if quote is not None:
                         last_quotes[trade["entry_order_id"]] = quote
-                # Diagnostic mode still advances private exit state for shadow
-                # trade reporting without mutating the authoritative portfolio.
+                # Replay advances private exit state for trade reporting without
+                # mutating the live runtime portfolio.
                 exit_actions: tuple[ExitAction, ...] = ()
                 replay_exit_events: list[Mapping[str, Any]] = []
 
@@ -919,8 +905,6 @@ class ReplayWorker:
 
                 def queue_execution(_turn) -> Mapping[str, Any]:
                     execution_orders.extend(selected)
-                    if mode == "shadow":
-                        return {"executed": 0, "projected": len(execution_orders)}
                     for order in tuple(execution_orders):
                         order_parent_ids[order.client_order_id] = (
                             order.lifecycle_id or order.client_order_id.rsplit(":", 1)[0]
@@ -1173,8 +1157,6 @@ class ReplayWorker:
                     order_parent_ids[order.client_order_id] = (
                         order.lifecycle_id or order.client_order_id.rsplit(":", 1)[0]
                     )
-                    if mode == "shadow":
-                        continue
                     if order.client_order_id not in due_entry_ids:
                         all_events.append({"event_type": "ORDER_INTENT",
                                            "decision_id": order.client_order_id.rsplit(":", 1)[0],

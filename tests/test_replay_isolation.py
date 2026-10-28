@@ -13,7 +13,7 @@ def _request(include_parity_layers: bool = False) -> dict[str, object]:
         "session_date": "2026-09-29",
         "strategy_id": "ftx-paper-orderflow",
         "vehicles": ["futures"],
-        "mode": "shadow",
+        "mode": "replay",
         "include_parity_layers": include_parity_layers,
     }
 
@@ -40,7 +40,7 @@ def _legacy_keys(value):
     return set()
 
 
-def test_shadow_replay_preserves_live_store_and_resets_replay_outputs(tmp_path) -> None:
+def test_replay_preserves_live_store_and_resets_replay_outputs(tmp_path) -> None:
     worker = _worker(tmp_path)
     before_status = worker.store.read_status()
     before_events = worker.store.read_events(1000)
@@ -54,10 +54,11 @@ def test_shadow_replay_preserves_live_store_and_resets_replay_outputs(tmp_path) 
     assert first["authoritative_ledger"] == []
     assert second["shadow_ledger"] == first["shadow_ledger"]
     assert _legacy_keys(first) == set()
+    assert not {"trace", "candidate_trace", "trace_schema_version", "trace_bar_index_base"} & set(first)
     assert first["parity_artifact"] is None
 
 
-def test_shadow_parity_is_opt_in(tmp_path) -> None:
+def test_replay_parity_is_opt_in(tmp_path) -> None:
     result = _worker(tmp_path).execute_detached(_request(include_parity_layers=True))
     assert isinstance(result["parity_artifact"], dict)
     for layer_records in result["parity_artifact"]["layers"].values():

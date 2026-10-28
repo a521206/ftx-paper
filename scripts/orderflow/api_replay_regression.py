@@ -69,7 +69,7 @@ def run(base_url: str, *, timeout: float, interval: float) -> int:
             "session_date": "2026-09-29",
             "strategy_id": "ftx-paper-orderflow",
             "vehicles": ["futures", "synthetic"],
-            "mode": "shadow",
+            "mode": "replay",
             "include_parity_layers": False,
         },
     )

@@ -8,10 +8,10 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Literal, cast
 
 
-ExecutionScope = Literal["shadow", "replay"]
+ExecutionScope = Literal["replay"]
 LedgerScope = Literal["replay"]
 REPLAY_SCHEMA_VERSION = 1
-REPLAY_MODES = frozenset({"shadow", "replay"})
+REPLAY_MODES = frozenset({"replay"})
 REPLAY_VEHICLES = frozenset({"futures", "synthetic"})
 _RESULT_FIELDS = frozenset({
     "run_id", "schema_version", "execution_scope", "ledger_scope", "summary", "events",
@@ -50,7 +50,7 @@ class ReplayScope:
     ledger_scope: LedgerScope = "replay"
 
     def __post_init__(self) -> None:
-        if (not self.run_id or self.execution_scope not in {"shadow", "replay"}
+        if (not self.run_id or self.execution_scope != "replay"
                 or self.ledger_scope != "replay"):
             raise ValueError("invalid replay scope")
 
@@ -64,7 +64,7 @@ class ReplayRequest:
     session_date: str
     strategy_id: str
     vehicles: tuple[str, ...]
-    mode: Literal["shadow", "replay"] = "shadow"
+    mode: Literal["replay"] = "replay"
     include_parity_layers: bool = False
 
     def __post_init__(self) -> None:
@@ -75,7 +75,7 @@ class ReplayRequest:
         if "futures" not in self.vehicles:
             raise ValueError("vehicles must include futures")
         if self.mode not in REPLAY_MODES:
-            raise ValueError("mode must be 'shadow' or 'replay'")
+            raise ValueError("mode must be 'replay'")
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "ReplayRequest":
@@ -86,9 +86,9 @@ class ReplayRequest:
         vehicles = value.get("vehicles")
         if not isinstance(vehicles, (list, tuple)):
             raise ValueError("vehicles must be an array")
-        mode = value.get("mode", "shadow")
+        mode = value.get("mode", "replay")
         if not isinstance(mode, str):
-            raise ValueError("mode must be 'shadow' or 'replay'")
+            raise ValueError("mode must be 'replay'")
         include = value.get("include_parity_layers", False)
         if not isinstance(include, bool):
             raise ValueError("include_parity_layers must be a boolean")
@@ -100,7 +100,7 @@ class ReplayRequest:
             raise ValueError("vehicles must contain strings")
         return cls(session_date, strategy_id,
                    tuple(item.lower() for item in vehicles),
-                   cast(Literal["shadow", "replay"], mode.lower()), include)
+                   cast(Literal["replay"], mode.lower()), include)
 
     def to_dict(self) -> dict[str, Any]:
         return {"session_date": self.session_date, "strategy_id": self.strategy_id,
@@ -178,7 +178,7 @@ class ReplayEvent:
 
     def __post_init__(self) -> None:
         if (self.schema_version != REPLAY_SCHEMA_VERSION or not self.run_id or not self.identity
-                or self.sequence < 0 or self.execution_scope not in {"shadow", "replay"}
+                or self.sequence < 0 or self.execution_scope != "replay"
                 or self.ledger_scope != "replay"):
             raise ValueError("invalid replay event envelope")
         _timestamp(self.occurred_at, "occurred_at")
@@ -207,7 +207,7 @@ class ReplayResult:
 
     def __post_init__(self) -> None:
         if (self.schema_version != REPLAY_SCHEMA_VERSION or not self.run_id
-                or self.execution_scope not in {"shadow", "replay"}
+                or self.execution_scope != "replay"
                 or self.ledger_scope != "replay"):
             raise ValueError("invalid replay result envelope")
 

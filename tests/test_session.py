@@ -98,7 +98,7 @@ def test_replay_worker_stop_cancels_active_job(monkeypatch):
     monkeypatch.setattr(worker, "_execute", execute)
     run_id = worker.submit({
         "session_date": "2026-01-01", "strategy_id": "ftx-paper-orderflow",
-        "vehicles": ["futures"], "mode": "shadow", "include_parity_layers": False,
+        "vehicles": ["futures"], "mode": "replay", "include_parity_layers": False,
     })
     assert started.wait(1)
 

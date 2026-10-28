@@ -1734,7 +1734,7 @@
       }
       replaySelectionInFlight = true;
       try {
-         await get('/api/v1/replay', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({session_date: dateValue, strategy_id: 'ftx-paper-orderflow', vehicles: ['futures', 'synthetic'], mode: 'shadow', include_parity_layers: false})});
+         await get('/api/v1/replay', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({session_date: dateValue, strategy_id: 'ftx-paper-orderflow', vehicles: ['futures', 'synthetic'], mode: 'replay', include_parity_layers: false})});
         flash(`Replay queued for ${replayDateLabel(dateValue)}`);
       } catch (e) {
         flash(e.message);
@@ -2140,7 +2140,7 @@
             const run = latestByDate.get(value);
             return !run || ['failed', 'rejected', 'cancelled'].includes(String(run.status || '').toLowerCase());
           });
-          await Promise.all(missing.map((session_date) => get('/api/v1/replay', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({session_date, strategy_id: selectedStrategy || 'ftx-paper-orderflow', vehicles: ['futures', 'synthetic'], mode: 'shadow', include_parity_layers: false})})));
+          await Promise.all(missing.map((session_date) => get('/api/v1/replay', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({session_date, strategy_id: selectedStrategy || 'ftx-paper-orderflow', vehicles: ['futures', 'synthetic'], mode: 'replay', include_parity_layers: false})})));
           const query = new URLSearchParams({ date: from, date_from: from, date_to: to });
           history.replaceState({}, '', `/replay?${query.toString()}`);
           flash(missing.length ? `${missing.length} missing day${missing.length === 1 ? '' : 's'} queued` : 'Loaded cached replay days');
