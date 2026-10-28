@@ -280,9 +280,38 @@ def test_opening_gap_transition_retains_completed_bar_availability() -> None:
         event for event in events
         if event.payload.get("reason") == "opening_gap_transition"
     )
-    assert transition.payload["observed_at"] == (OBSERVED + timedelta(minutes=4)).isoformat()
-    assert transition.payload["available_at"] == (OBSERVED + timedelta(minutes=4, seconds=1)).isoformat()
+    assert transition.payload["observed_at"] == (OBSERVED + timedelta(minutes=1)).isoformat()
+    assert transition.payload["available_at"] == transition.payload["observed_at"]
     assert transition.payload["decision_at"] == transition.payload["available_at"]
+
+
+def test_opening_gap_transition_uses_earliest_unprocessed_bar() -> None:
+    bundle, account = _context()
+    assert bundle.orderflow_context is not None
+    children = list(bundle.orderflow_context.observations_for("1m"))
+    children[0] = replace(
+        children[0],
+        features={"open": 101.0, "previous_close": 100.0, "close": 100.0},
+    )
+    context = replace(
+        bundle.orderflow_context,
+        observations=(bundle.orderflow_context.observations[0], *children),
+        prefixes={"5m": bundle.orderflow_context.observations_for("5m"), "1m": tuple(children)},
+    )
+    events = OrderflowStrategy().evaluate(replace(bundle, orderflow_context=context), account)
+
+    transition = next(
+        event for event in events
+        if event.payload.get("reason") == "opening_gap_transition"
+    )
+    permission = next(
+        event for event in events
+        if event.payload.get("reason") == "opening_gap_permission"
+    )
+
+    assert transition.payload["available_at"] == transition.payload["observed_at"]
+    assert permission.payload["available_at"] == transition.payload["available_at"]
+    assert permission.payload["outcome"] == "recorded"
 
 
 def test_public_strategy_snapshot_restores_processed_location_lifecycle() -> None:

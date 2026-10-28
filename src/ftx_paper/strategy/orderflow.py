@@ -386,10 +386,13 @@ class OrderflowPolicy:
                     }))
                     self._opening_gap_initialized = True
 
-        latest_1m = max(
+        next_opening_gap_1m = min(
             (
                 item for item in observations
-                if item.timeframe == "1m" and is_causally_available(item)
+                if item.timeframe == "1m"
+                and is_causally_available(item)
+                and item.observation_id != self._opening_gap_observation_id
+                and item.observation_id != self._opening_gap_last_evaluated_id
             ),
             key=lambda item: (item.available_at, item.observed_at, item.observation_id),
             default=None,
@@ -406,7 +409,16 @@ class OrderflowPolicy:
             ),
             None,
         )
-        for observation in observations:
+        ordered_observations = sorted(
+            observations,
+            key=lambda item: (
+                item.available_at,
+                0 if item.timeframe == "5m" else 1,
+                item.observed_at,
+                item.observation_id,
+            ),
+        )
+        for observation in ordered_observations:
             already_processed = observation.observation_id in self._processed_observation_ids
             if (
                 already_processed
@@ -425,10 +437,8 @@ class OrderflowPolicy:
             if (
                 observation.timeframe == "1m"
                 and self._opening_gap_initialized
-                and latest_1m is not None
-                and observation.observation_id == latest_1m.observation_id
-                and observation.observation_id != self._opening_gap_observation_id
-                and observation.observation_id != self._opening_gap_last_evaluated_id
+                and next_opening_gap_1m is not None
+                and observation.observation_id == next_opening_gap_1m.observation_id
             ):
                 self._opening_gap_last_evaluated_id = observation.observation_id
                 advanced_gap = advance_opening_gap(
@@ -441,11 +451,12 @@ class OrderflowPolicy:
                 previous_gap = self._opening_gap_state
                 self._opening_gap_state = advanced_gap
                 if advanced_gap.status != previous_gap.status:
+                    transition_at = observation.observed_at.isoformat()
                     results.append(PolicyDecision({
                         **base,
                         "observed_at": observation.observed_at.isoformat(),
-                         "decision_at": observation.available_at.isoformat(),
-                        "available_at": observation.available_at.isoformat(),
+                        "decision_at": transition_at,
+                        "available_at": transition_at,
                         "outcome": "recorded",
                         "decision_stage": "interaction",
                         "reason": "opening_gap_transition",
@@ -458,9 +469,9 @@ class OrderflowPolicy:
                     }))
                     results.append(PolicyDecision({
                         **base,
-                         "decision_at": observation.available_at.isoformat(),
-                        "available_at": observation.available_at.isoformat(),
-                        "outcome": "accepted",
+                        "decision_at": transition_at,
+                        "available_at": transition_at,
+                        "outcome": "recorded",
                         "decision_stage": "interaction",
                         "reason": "opening_gap_permission",
                         "decision_id": _decision_id("opening_gap_permission", observation.observation_id),
