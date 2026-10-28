@@ -474,7 +474,10 @@ class OrderflowPolicy:
                         interaction_id=interaction.interaction_id,
                         direction=direction,
                         formed_at=formed_at,
-                        expires_at=formed_at + timedelta(minutes=self.config.response_window_candles),
+                        expires_at=formed_at + timedelta(
+                            minutes=self.config.response_window_candles
+                            * (5 if interaction.timeframe == "5m" else 1)
+                        ),
                         entry_lower=interaction.band_lower or interaction.reference_level,
                         entry_upper=interaction.band_upper or interaction.reference_level,
                         failure_boundary=(
