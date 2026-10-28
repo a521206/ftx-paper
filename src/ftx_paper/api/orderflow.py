@@ -67,7 +67,8 @@ def build_orderflow_projection(
     action_name = "Exit / manage position" if str(view.get("event_type", "")).upper() == "EXITDECISION" else (
         "Trade now" if outcome in {"filled"} else
         "Eligible diagnostic candidate" if outcome in {"accepted", "triggered"} else
-        "Wait for confirmation" if str(state.get("response_state", "")).upper() in {"PENDING_RESPONSE", "CONFIRMED"} and outcome == "rejected" else
+        "Wait for confirmation" if str(state.get("response_state", "")).upper() == "PENDING_RESPONSE" and outcome == "rejected" else
+        "Response confirmed (diagnostic only)" if str(state.get("response_state", "")).upper() == "CONFIRMED" and outcome == "rejected" else
         "No trade" if outcome is not None else None
     )
     location_keys: dict[str, dict[str, Any]] = {}
@@ -82,6 +83,7 @@ def build_orderflow_projection(
         location_keys[str(location)] = {
             "name": str(location).replace("_", " ").title(),
             "location": location,
+            "reference_only": str(location).lower() == "vwap_zone",
             "reference": _first(row_provenance.get("reference_level"), _mapping(row_evidence.get("metrics")).get("entry_price")),
             "distance": _first(row_state.get("current_price_distance"), row_provenance.get("distance")),
             "interaction_status": row_state.get("interaction_state"),

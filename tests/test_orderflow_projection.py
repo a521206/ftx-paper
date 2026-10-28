@@ -26,7 +26,22 @@ def test_orderflow_projection_uses_canonical_view_and_hides_raw_in_action():
     assert result["bias"] == "LONG"
     assert result["action"]["name"] == "Wait for confirmation"
     assert result["locations"][0]["response_status"] == "PENDING_RESPONSE"
+    assert result["locations"][0]["reference_only"] is True
     assert result["sequence"][0]["implication"] == "response_pending"
+
+
+def test_orderflow_projection_distinguishes_confirmed_diagnostic_response() -> None:
+    view = _view(
+        evidence={
+            "metrics": {"entry_price": 100},
+            "state": {"response_state": "CONFIRMED"},
+            "provenance": {},
+        },
+    )
+
+    result = build_orderflow_projection([{"decision_view": view}], [], [], [])
+
+    assert result["action"]["name"] == "Response confirmed (diagnostic only)"
 
 
 def test_orderflow_projection_calculates_risk_reward_for_trade_action():
