@@ -21,12 +21,25 @@ from ftx_paper.strategy import (
     OrderflowObservationContext,
     OrderflowStrategy,
 )
-from ftx_paper.strategy.orderflow import OrderflowConfig, OrderflowPolicy
+from ftx_paper.strategy.orderflow import OrderflowConfig, OrderflowPolicy, _setup_score_rejection
 from ftx_paper.strategy.policy_contract import ExecutionMode
 
 
 UTC = timezone.utc
 OBSERVED = datetime(2026, 1, 1, 10, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("direction", "long_score", "short_score", "expected"),
+    [("long", 0.60, 0.54, None), ("long", 0.57, 0.54, "setup_score_mismatch"),
+     ("short", None, 0.54, "setup_scores_unavailable")],
+)
+def test_setup_score_gate_matches_canonical_margin(
+    direction: str, long_score: float | None, short_score: float | None, expected: str | None,
+) -> None:
+    assert _setup_score_rejection(
+        direction=direction, long_score=long_score, short_score=short_score, margin=0.05,
+    ) == expected
 
 
 def _context(

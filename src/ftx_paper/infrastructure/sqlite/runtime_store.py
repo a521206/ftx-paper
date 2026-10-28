@@ -315,9 +315,10 @@ class SqliteRuntimeStore:
                                       PARTITION BY json_extract(request, '$.session_date')
                                       ORDER BY created_at DESC
                                   ) AS rank_for_day
-                           FROM replay_runs
-                           WHERE json_extract(request, '$.session_date') IS NOT NULL
-                             AND json_extract(request, '$.session_date') <> ''
+                            FROM replay_runs
+                            WHERE status IN ('completed', 'failed', 'cancelled', 'rejected')
+                              AND json_extract(request, '$.session_date') IS NOT NULL
+                              AND json_extract(request, '$.session_date') <> ''
                        ) WHERE rank_for_day > 1
                    )
                 """

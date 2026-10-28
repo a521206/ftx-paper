@@ -72,6 +72,7 @@ class OrderflowConfig:
     exit_policy: str = "shared_exit_state_machine"
     feature_set: tuple[str, ...] = ("close", "volume")
     enabled_vehicles: tuple[str, ...] = ("futures",)
+    fill_permission_margin: float | None = 0.05
     execution_mode: ExecutionMode = ExecutionMode.DIAGNOSTIC
     timezone: str = "Asia/Kolkata"
     market_session: tuple[str, str] = ("09:15", "15:30")
@@ -109,6 +110,19 @@ class OrderflowConfig:
 def _number(observation: OrderflowObservation, name: str) -> float | None:
     value = observation.features.get(name)
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _setup_score_rejection(
+    *, direction: str, long_score: float | None, short_score: float | None,
+    margin: float | None,
+) -> str | None:
+    if margin is None or (long_score is None and short_score is None):
+        return None
+    own_score = short_score if direction == "short" else long_score
+    opposing_score = long_score if direction == "short" else short_score
+    if own_score is None or opposing_score is None:
+        return "setup_scores_unavailable"
+    return "setup_score_mismatch" if own_score - opposing_score < margin else None
 
 
 def opening_gap_context_available_at(observation: OrderflowObservation) -> datetime:
@@ -1202,6 +1216,34 @@ class OrderflowPolicy:
                         direction=direction,
                         evidence={"acceptance": acceptance, "evidence_ids": evidence_ids},
                     )
+                    score_context = formation_context
+                    long_score = score_context.long_score if score_context is not None else None
+                    short_score = score_context.short_score if score_context is not None else None
+                    if (
+                        self.config.fill_permission_margin is not None
+                        and (long_score is not None or short_score is not None)
+                    ):
+                        score_rejection = _setup_score_rejection(
+                            direction=direction, long_score=long_score, short_score=short_score,
+                            margin=self.config.fill_permission_margin,
+                        )
+                        if score_rejection is not None:
+                            results.append(PolicyDecision({
+                                **base,
+                                "decision_stage": "candidate",
+                                "outcome": "rejected",
+                                "reason": score_rejection,
+                                "decision_id": _decision_id(
+                                    "setup_score_rejected", interaction.interaction_id, confirmation_id,
+                                ),
+                                "interaction_id": interaction.interaction_id,
+                                "direction": direction,
+                                "long_score": long_score,
+                                "short_score": short_score,
+                                "score_margin": self.config.fill_permission_margin,
+                                "source_observation_ids": list(evidence_ids),
+                            }))
+                            continue
                     opportunity = SetupOpportunity.create(
                         interaction_id=interaction.interaction_id,
                         direction=direction,

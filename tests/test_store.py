@@ -57,6 +57,17 @@ def test_runtime_store_clears_replay_runs_for_requested_date(tmp_path):
     assert [run["run_id"] for run in store.read_replay_runs()] == ["old-jan-6"]
 
 
+def test_runtime_store_compaction_keeps_inflight_replay_runs(tmp_path):
+    store = RuntimeStore(tmp_path)
+    store.create_replay_run("completed-run", {"session_date": "2026-01-05"})
+    store.update_replay_run("completed-run", status="completed", result={"ok": True})
+    store.create_replay_run("queued-run", {"session_date": "2026-01-05"})
+
+    reopened = RuntimeStore(tmp_path)
+
+    assert reopened.read_replay_run("queued-run") is not None
+
+
 def test_runtime_store_waits_for_replay_read_lock(tmp_path):
     store = RuntimeStore(tmp_path)
     store.create_replay_run("locked-run", {"session_date": "2026-01-05"})
