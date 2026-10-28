@@ -31,6 +31,12 @@ from ftx_paper.runtime.parity_artifacts import (
     normalized_bar_fingerprint,
 )
 from ftx_paper.runtime.state import ReplayRuntimeState
+from ftx_paper.execution.lifecycle import (
+    ExecutionLifecycleCoordinator,
+    ExecutionPhase,
+    ExecutionTurn,
+    FunctionLifecycleAdapter,
+)
 from ftx_paper.execution.cost import futures_cost, synthetic_futures_cost
 from ftx_paper.execution import PaperExecutionCoordinator
 from ftx_paper.execution.settlement import ExitValidationError, validate_exit_order
@@ -179,6 +185,7 @@ class ReplayWorker:
         self._cancel: dict[str, Event] = {}
         self._thread: Thread | None = None
         self._stopped = Event()
+        self.lifecycle = ExecutionLifecycleCoordinator()
 
     def _ensure_started(self) -> None:
         with self._lock:
@@ -479,6 +486,7 @@ class ReplayWorker:
                 self._queue.task_done()
 
     def _execute(self, request: dict[str, Any], cancel: Event) -> dict[str, Any]:
+        self.lifecycle = ExecutionLifecycleCoordinator()
         session_date_value = request.get("session_date")
         if not isinstance(session_date_value, str):
             raise ValueError("replay requires session_date as a string")
@@ -647,6 +655,8 @@ class ReplayWorker:
             # consume risk, margin, cooldown, or execution state.
             synthetic_open_trades: list[dict[str, Any]] = []
             last_quotes: dict[str, SyntheticFutureQuote] = {}
+            pending_entries = self.lifecycle.pending_entries
+            pending_entries.clear()
             for bar in bars:
                 if cancel.is_set():
                     break
@@ -660,8 +670,17 @@ class ReplayWorker:
                 bundle = aggregator.ingest(bar)
                 if bundle is None:
                     continue
+                ready_bundle = bundle
                 event_start = len(all_events)
                 futures_bar = bundle.bars[MarketRole.FUTURES]
+                turn = ExecutionTurn(
+                    turn_id=f"{date}:{futures_bar.timestamp.isoformat()}",
+                    observed_at=futures_bar.timestamp.isoformat(),
+                    available_at=futures_bar.timestamp.isoformat(),
+                    decision_at=futures_bar.timestamp.isoformat(),
+                    source="replay",
+                    payload={"bundle_id": bundle.bundle_id},
+                )
                 bundle = feature_service.enrich(
                     bundle,
                     prior_day_high=prior_day_high,
@@ -688,15 +707,16 @@ class ReplayWorker:
                         last_quotes[trade["entry_order_id"]] = quote
                 # Diagnostic mode still advances private exit state for shadow
                 # trade reporting without mutating the authoritative portfolio.
-                exit_actions = cast(tuple[ExitAction, ...], engine.on_closed_bar(futures_bar))
-                for action in exit_actions:
+                exit_actions: tuple[ExitAction, ...] = ()
+                replay_exit_events: list[Mapping[str, Any]] = []
+
+                def execute_exit(action: ExitAction) -> dict[str, Any] | None:
                     try:
                         open_trade = self._matching_trade(open_trades, action.intent)
                     except ExitValidationError as exc:
                         all_events.append({"event_type": "EXECUTION_ERROR", "decision_id": action.intent.client_order_id,
                                            "reason": exc.reason, "source": "replay", "session_date": date})
-                        engine.settle_exit(action.intent.client_order_id, filled=False)
-                        continue
+                        return {"filled": False}
                     exit_quote = synthetic_future_quote(
                         quote_selection_bar, option_bars,
                         symbols=(open_trade["ce_symbol"], open_trade["pe_symbol"]),
@@ -707,8 +727,7 @@ class ReplayWorker:
                         all_events.append({"event_type": "ORDER_UNFILLED", "decision_id": action.intent.client_order_id,
                                            "vehicle": action.intent.vehicle, "timestamp": futures_bar.timestamp.isoformat(),
                                            "source": "replay", "session_date": date, "reason": "missing_synthetic_future_quote"})
-                        engine.settle_exit(action.intent.client_order_id, filled=False)
-                        continue
+                        return {"filled": False}
                     # Futures exits fill at the canonical protective trigger
                     # (including gap handling), not at the bar close.  A
                     # synthetic position uses the same futures trigger time,
@@ -731,7 +750,7 @@ class ReplayWorker:
                         event_type="EXITDECISION",
                         strategy_id=action.intent.strategy_id,
                     ))
-                    all_events.append(exit_event)
+                    replay_exit_events.append(exit_event)
                     all_events.append({"event_type": "ORDER_INTENT", "decision_id": action.intent.client_order_id,
                                        "client_order_id": action.intent.client_order_id,
                                        "vehicle": action.intent.vehicle, "direction": "long" if action.intent.side is OrderSide.SELL else "short",
@@ -774,9 +793,14 @@ class ReplayWorker:
                                 trade=synthetic_trade,
                             )
                     if action.intent.vehicle == "futures":
-                        coordinator.fill(action.intent, price=exit_price,
-                                         timestamp=futures_bar.timestamp.isoformat(),
-                                         cost=_execution_cost(open_trade))
+                        self.lifecycle.apply_fill(
+                            action.intent.client_order_id,
+                            lambda: coordinator.fill(
+                                action.intent, price=exit_price,
+                                timestamp=futures_bar.timestamp.isoformat(),
+                                cost=_execution_cost(open_trade),
+                            ),
+                        )
                     all_events.append({"event_type": "FILL", "decision_id": action.intent.client_order_id,
                                        "client_order_id": action.intent.client_order_id,
                                        "fill_timestamp": futures_bar.timestamp.isoformat(), "price": exit_price,
@@ -786,27 +810,84 @@ class ReplayWorker:
                         event_type="FILLED", client_order_id=action.intent.client_order_id,
                         status="FILLED", quantity=action.intent.quantity,
                         filled_quantity=action.intent.quantity, price=exit_price,
+                        occurred_at=futures_bar.timestamp.isoformat(),
+                        observed_at=futures_bar.timestamp.isoformat(),
+                        available_at=futures_bar.timestamp.isoformat(), source="replay",
                     ))
-                    engine.settle_exit(action.intent.client_order_id, filled=True,
-                                        strategy_id=action.intent.strategy_id)
-                    if realized is not None:
-                        engine.record_exit(strategy_id=action.intent.strategy_id,
-                                           cell=realized.cell.name, reason=action.reason,
-                                           entry_bar=realized.entry_bar, exit_bar=engine.bars_seen,
-                                           date=date, vehicle=action.intent.vehicle,
-                                           direction="long" if action.intent.side.value == "SELL" else "short",
-                                           quantity=action.intent.quantity)
-                        current_equity = portfolio.equity
-                        peak_equity = portfolio.peak_equity
-                        max_drawdown = min(max_drawdown, current_equity - peak_equity)
-                result = evaluate_turn(
-                    engine,
-                    DecisionTurn(
-                        bundle,
-                        "replay",
-                        account.context(as_of=futures_bar.timestamp),
-                    ),
+                    return {"filled": True, "realized": realized}
+
+                def settle_exit(action: ExitAction, filled: bool) -> None:
+                    engine.settle_exit(action.intent.client_order_id, filled=filled,
+                                       strategy_id=action.intent.strategy_id)
+
+                def record_exit(action: ExitAction, result: dict[str, Any] | None) -> None:
+                    realized = result.get("realized") if result is not None else None
+                    if realized is None:
+                        return
+                    engine.record_exit(strategy_id=action.intent.strategy_id,
+                                       cell=realized.cell.name, reason=action.reason,
+                                       entry_bar=realized.entry_bar, exit_bar=engine.bars_seen,
+                                       date=date, vehicle=action.intent.vehicle,
+                                       direction="long" if action.intent.side.value == "SELL" else "short",
+                                       quantity=action.intent.quantity)
+                    nonlocal current_equity, peak_equity, max_drawdown
+                    current_equity = portfolio.equity
+                    peak_equity = portfolio.peak_equity
+                    max_drawdown = min(max_drawdown, current_equity - peak_equity)
+
+                def process_replay_exits(actions: tuple[ExitAction, ...]) -> int:
+                    for action in actions:
+                        result = execute_exit(action)
+                        filled = bool(result and result.get("filled"))
+                        settle_exit(action, filled)
+                        if filled:
+                            record_exit(action, result)
+                    return len(actions)
+
+                def manage_existing(_turn) -> Mapping[str, Any]:
+                    nonlocal exit_actions
+                    exit_actions = cast(tuple[ExitAction, ...], engine.on_closed_bar(futures_bar))
+                    return {"exit_count": process_replay_exits(exit_actions)}
+
+                selected: list[Any] = []
+                execution_orders: list[Any] = []
+                result: Any = None
+                pending_candidates = tuple(pending_entries)
+                pending_entries.clear()
+                candidate_orders: tuple[Any, ...] = ()
+
+                def form_opportunity(_turn) -> Mapping[str, Any]:
+                    nonlocal result
+                    result = evaluate_turn(
+                        engine,
+                        DecisionTurn(
+                            ready_bundle,
+                            "replay",
+                            account.context(as_of=futures_bar.timestamp),
+                        ),
+                    )
+                    return {"proposal_count": len(result.orders)}
+
+                def arbitrate(_turn) -> Mapping[str, Any]:
+                    nonlocal candidate_orders
+                    candidate_orders = pending_candidates + tuple(result.orders)
+                    selected.extend(coordinator.arbitrate(candidate_orders))
+                    return {"accepted": len(selected)}
+
+                def queue_execution(_turn) -> Mapping[str, Any]:
+                    execution_orders.extend(selected)
+                    return {"queued": len(execution_orders)}
+
+                self.lifecycle.run(
+                    turn,
+                    FunctionLifecycleAdapter({
+                        ExecutionPhase.EXISTING_POSITION_MANAGEMENT: manage_existing,
+                        ExecutionPhase.OPPORTUNITY_FORMATION: form_opportunity,
+                        ExecutionPhase.PROPOSAL_ARBITRATION: arbitrate,
+                        ExecutionPhase.EXECUTION_SETTLEMENT: queue_execution,
+                    }),
                 )
+                all_events.extend(replay_exit_events)
                 if mode == "replay" and not daily_reset_emitted:
                     ledger_records.append({
                         "event_type": "DAILY_RESET",
@@ -844,23 +925,51 @@ class ReplayWorker:
                 all_events.extend(result_events)
                 for event in trigger_events:
                     parity_records["decision"].append(dict(event))
-                for order in result.orders:
+                due_entry_ids = {item.client_order_id for item in pending_candidates}
+                selected_orders = tuple(execution_orders)
+                selected_ids = {item.client_order_id for item in selected_orders}
+                for denied in candidate_orders:
+                    if denied.client_order_id in selected_ids:
+                        continue
+                    all_events.append({
+                        "event_type": "ORDER_DENIED",
+                        "decision_id": denied.client_order_id,
+                        "client_order_id": denied.client_order_id,
+                        "strategy_id": denied.strategy_id,
+                        "account_id": denied.account_id,
+                        "reason": coordinator.denied_proposals.get(
+                            denied.client_order_id, "proposal_not_selected",
+                        ),
+                        "decision_at": futures_bar.timestamp.isoformat(),
+                        "source": "replay",
+                        "session_date": date,
+                    })
+                for order in selected_orders:
                     order_parent_ids[order.client_order_id] = (
                         order.lifecycle_id or order.client_order_id.rsplit(":", 1)[0]
                     )
                     if mode == "shadow":
                         continue
-                    all_events.append({"event_type": "ORDER_INTENT",
-                                       "decision_id": order.client_order_id.rsplit(":", 1)[0],
-                                       "client_order_id": order.client_order_id,
-                                       "instrument": order.instrument.symbol,
-                                       "direction": "long" if order.side is OrderSide.BUY else "short",
-                                       "quantity": order.quantity, "cell": order.cell,
-                                       "stop": order.stop_price, "exit_mode": order.exit_mode,
-                                       "entry_bar": order.entry_bar, "decision_at": futures_bar.timestamp.isoformat(),
-                                       "source": "replay",
-                                       "session_date": date})
+                    if order.client_order_id not in due_entry_ids:
+                        all_events.append({"event_type": "ORDER_INTENT",
+                                           "decision_id": order.client_order_id.rsplit(":", 1)[0],
+                                           "client_order_id": order.client_order_id,
+                                           "instrument": order.instrument.symbol,
+                                           "direction": "long" if order.side is OrderSide.BUY else "short",
+                                           "quantity": order.quantity, "cell": order.cell,
+                                           "stop": order.stop_price, "exit_mode": order.exit_mode,
+                                           "entry_bar": order.entry_bar, "decision_at": futures_bar.timestamp.isoformat(),
+                                           "source": "replay",
+                                           "session_date": date})
                     if order.role is OrderRole.ENTRY:
+                        if order.client_order_id not in due_entry_ids:
+                            pending_entries.append(order)
+                            continue
+                        if order.setup_availability is not None and futures_bar.timestamp.isoformat() <= order.setup_availability:
+                            pending_entries.append(order)
+                            continue
+                        entry_bar = futures_bar
+                        entry_timestamp = entry_bar.timestamp.isoformat()
                         if order.vehicle == "futures":
                             try:
                                 account.authorize_and_reserve(order)
@@ -915,7 +1024,7 @@ class ReplayWorker:
                             ledger_records.append({"event_type": "CANCELLATION", "decision_id": order.client_order_id,
                                                    "timestamp": futures_bar.timestamp.isoformat(), "reason": "missing_synthetic_future_quote"})
                             continue
-                        fill_price = entry_quote.price if entry_quote is not None else futures_bar.close
+                        fill_price = entry_quote.price if entry_quote is not None else entry_bar.open
                         for event in reversed(all_events):
                             if event.get("decision_id") == order.client_order_id:
                                 event.update({"vehicle": order.vehicle, "entry_price": fill_price})
@@ -926,28 +1035,36 @@ class ReplayWorker:
                                                   "synthetic_entry_price": entry_quote.price})
                                 break
                         all_events.append({"event_type": "FILL", "decision_id": order.client_order_id,
-                                           "fill_timestamp": futures_bar.timestamp.isoformat(),
+                                            "fill_timestamp": entry_timestamp,
                                            "price": fill_price, "quantity": order.quantity,
                                            "vehicle": order.vehicle, "source": "replay",
                                              "session_date": date})
                         ledger_records.append({"event_type": "FILL", "decision_id": order.client_order_id,
-                                               "timestamp": futures_bar.timestamp.isoformat(),
+                                                "timestamp": entry_timestamp,
                                                "quantity": order.quantity, "price": fill_price})
                         engine.register_entry(order, fill_price=fill_price,
-                                              entry_fill_time=futures_bar.timestamp,
-                                              reference_price=futures_bar.close)
+                                               entry_fill_time=entry_bar.timestamp,
+                                               reference_price=entry_bar.close)
                         if order.vehicle == "futures":
-                            coordinator.fill(order, price=fill_price,
-                                              timestamp=futures_bar.timestamp.isoformat())
+                            self.lifecycle.apply_fill(
+                                order.client_order_id,
+                                lambda: coordinator.fill(
+                                    order, price=fill_price,
+                                    timestamp=entry_timestamp,
+                                ),
+                            )
                         engine.on_execution_event(ExecutionNotification(
                             event_type="FILLED", client_order_id=order.client_order_id,
                             status="FILLED", quantity=order.quantity,
                             filled_quantity=order.quantity, price=fill_price,
+                            occurred_at=entry_timestamp,
+                            observed_at=entry_timestamp,
+                            available_at=entry_timestamp, source="replay",
                         ))
                         open_trades.append({"entry_order_id": order.client_order_id,
                                             "instrument": order.instrument.symbol,
                                             "side": order.side.value, "quantity": order.quantity,
-                                            "entry_timestamp": futures_bar.timestamp.isoformat(),
+                                             "entry_timestamp": entry_timestamp,
                                             "entry_price": fill_price, "vehicle": order.vehicle,
                                             "stop_price": order.stop_price,
                                             "initial_risk_points": abs(fill_price - order.stop_price)
@@ -1025,11 +1142,14 @@ class ReplayWorker:
                             if order.entry_order_id is not None else False
                         )
                         if order.vehicle == "futures":
-                            settlement = coordinator.fill(
-                                order,
-                                price=exit_quote.price if exit_quote is not None else futures_bar.close,
-                                timestamp=futures_bar.timestamp.isoformat(),
-                                cost=_execution_cost(open_trade),
+                            settlement = self.lifecycle.apply_fill(
+                                order.client_order_id,
+                                lambda: coordinator.fill(
+                                    order,
+                                    price=exit_quote.price if exit_quote is not None else futures_bar.close,
+                                    timestamp=futures_bar.timestamp.isoformat(),
+                                    cost=_execution_cost(open_trade),
+                                ),
                             )
                         settlement_values = settlement if isinstance(settlement, Mapping) else {}
                         exit_timestamp = futures_bar.timestamp.isoformat()
@@ -1074,6 +1194,16 @@ class ReplayWorker:
                         parity_records["decision"].append(dict(event))
                     if event_type in _EXECUTION_EVENT_TYPES or event_type in {"EXITDECISION", "EXIT", "CLOSE"}:
                         parity_records["execution_settlement"].append(dict(event))
+            for order in pending_entries:
+                all_events.append({
+                    "event_type": "ORDER_UNFILLED",
+                    "decision_id": order.client_order_id,
+                    "vehicle": order.vehicle,
+                    "timestamp": order.setup_availability or bars[-1].timestamp.isoformat(),
+                    "source": "replay",
+                    "session_date": date,
+                    "reason": "no_next_available_bar",
+                })
             # Preserve open positions as mark-to-market/open replay results.
             shadow_trades.extend({**trade, "status": "open"} for trade in open_trades)
             shadow_trades.extend({**trade, "status": "open"} for trade in synthetic_open_trades)

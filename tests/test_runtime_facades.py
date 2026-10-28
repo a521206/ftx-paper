@@ -61,15 +61,9 @@ def test_strategy_runner_delegates_to_one_engine():
 
     engine = Engine()
     runner = StrategyRunner(engine)
-    bar = MarketBar(
-        Instrument("NIFTYFUT", "NFO", "FUTURES"),
-        datetime(2026, 1, 1, 4, 0, tzinfo=timezone.utc),
-        100, 100, 100, 100,
-    )
     bundle = type("Bundle", (), {"bars": {}, "bundle_id": "bundle", "minute": "04:00"})()
 
     assert runner.evaluate(cast(DecisionBundle, bundle)).events == ({"event_type": "DELEGATED"},)
-    assert runner.on_tick(bar) == ()
 
 
 def test_multi_strategy_engine_dispatches_and_attributes_orders():

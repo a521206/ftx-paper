@@ -347,7 +347,7 @@ class IndependentLiveDecisionEngine:
                     "required_input_availability": {**base["required_input_availability"], "vix": False},
                     "feature_values": {},
                 }),)
-            return (LiveDecision("WARMUP", {**base, "reason": "insufficient_history", "feature_values": {}}),)
+            return (LiveDecision("WARMUP", {**base, "outcome": "recorded", "reason": "insufficient_history", "feature_values": {}}),)
         prior = tuple(self._futures[:-1])
         location_snapshot = (
             self._location_detector.observe(futures)
@@ -363,7 +363,7 @@ class IndependentLiveDecisionEngine:
                     "required_input_availability": {**base["required_input_availability"], "vix": False},
                     "feature_values": {},
                 }),)
-            return (LiveDecision("WARMUP", {**base, "reason": "insufficient_history", "feature_values": {}}),)
+            return (LiveDecision("WARMUP", {**base, "outcome": "recorded", "reason": "insufficient_history", "feature_values": {}}),)
         features = location_snapshot.features
         vwap = features.vwap
         session_high, session_low = features.session_high, features.session_low

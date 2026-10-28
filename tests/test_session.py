@@ -540,7 +540,7 @@ def test_exit_without_entry_identity_is_rejected_before_broker_submission(tmp_pa
         role=OrderRole.EXIT,
     )
 
-    assert not session._execute_paper_order(order, session_date="2026-01-01", timestamp="2026-01-01T10:20:00+05:30")
+    assert not session.execute_order(order, session_date="2026-01-01", timestamp="2026-01-01T10:20:00+05:30")
     error = next(event for event in store.read_events() if event["event_type"] == "EXECUTION_ERROR")
     assert error["payload"]["reason"] == "exit_without_entry_order_id"
     assert not any(event["event_type"] == "ORDER_ACK" for event in store.read_events())
@@ -570,7 +570,7 @@ def test_matched_exit_removes_portfolio_position_after_fill(tmp_path):
         role=OrderRole.EXIT, entry_order_id=entry_id,
     )
 
-    assert session._execute_paper_order(order, session_date="2026-01-01", timestamp="2026-01-01T10:20:00+05:30")
+    assert session.execute_order(order, session_date="2026-01-01", timestamp="2026-01-01T10:20:00+05:30")
     assert entry_id not in session.portfolio.positions
 
 
@@ -582,7 +582,7 @@ def test_exit_quantity_mismatch_is_rejected_without_removing_entry(tmp_path):
         role=OrderRole.EXIT, entry_order_id=entry_id,
     )
 
-    assert not session._execute_paper_order(order, session_date="2026-01-01", timestamp="2026-01-01T10:20:00+05:30")
+    assert not session.execute_order(order, session_date="2026-01-01", timestamp="2026-01-01T10:20:00+05:30")
     assert entry_id in session.portfolio.positions
     error = next(event for event in store.read_events() if event["event_type"] == "EXECUTION_ERROR")
     assert error["payload"]["reason"] == "exit_quantity_mismatch"
@@ -606,7 +606,7 @@ def test_exit_rejects_broker_fill_for_a_different_instrument(tmp_path):
     order = OrderIntent("exit-1", entry_instrument, OrderSide.SELL, 2,
                         role=OrderRole.EXIT, entry_order_id="entry-1")
 
-    assert not session._execute_paper_order(order)
+    assert not session.execute_order(order)
     assert store.read_status()["state"] == "ERROR"
     assert session.portfolio.positions["entry-1"].instrument == entry_instrument.symbol
     assert any(event["payload"]["reason"] == "uncompensated_exit_fill:fill_instrument_mismatch"

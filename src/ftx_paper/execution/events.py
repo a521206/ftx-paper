@@ -20,6 +20,16 @@ class ExecutionNotification:
     source: str | None = None
     strategy_id: str | None = None
     account_id: str | None = None
+    observed_at: str | None = None
+    available_at: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.observed_at is not None and self.available_at is not None:
+            from datetime import datetime
+            observed = datetime.fromisoformat(self.observed_at.replace("Z", "+00:00"))
+            available = datetime.fromisoformat(self.available_at.replace("Z", "+00:00"))
+            if available < observed:
+                raise ValueError("execution notification availability cannot precede observation")
 
 
 __all__ = ["ExecutionNotification"]

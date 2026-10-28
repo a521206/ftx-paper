@@ -22,6 +22,7 @@ class PaperExecutionCoordinator:
         execution_group: str | None = None, max_open_positions: int | None = None,
     ) -> tuple[OrderIntent, ...]:
         """Select one deterministic entry owner before any account mutation."""
+        self._denied.clear()
         candidates = tuple(orders)
         ranked = sorted(
             candidates,

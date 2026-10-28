@@ -144,13 +144,6 @@ class StrategyRunner:
         if callable(handler):
             handler(event)
 
-    def on_tick(self, bar: MarketBar) -> tuple[Any, ...]:
-        return self.engine.on_tick(bar)
-
-    def on_closed_bar(self, bar: MarketBar) -> tuple[Any, ...]:
-        return self.engine.on_closed_bar(bar)
-
-
 class PnlManager:
     """Read-only view over the one canonical portfolio aggregate."""
 

@@ -34,6 +34,12 @@ from .event_bus import EventBus
 from ftx_paper.execution import ExecutionService, PaperExecutionCoordinator
 from .events import is_decision_event, serialize_datetime
 from .state import LiveRuntimeState
+from ftx_paper.execution.lifecycle import (
+    ExecutionLifecycleCoordinator,
+    ExecutionPhase,
+    ExecutionTurn,
+    FunctionLifecycleAdapter,
+)
 
 
 logger = logging.getLogger("ftx-paper")
@@ -44,6 +50,7 @@ class LastExecutionFill(TypedDict):
     fill_timestamp: str
     symbol: str
     quantity: int
+    fill_id: NotRequired[str]
     realized_pnl: NotRequired[float]
 
 if TYPE_CHECKING:
@@ -133,6 +140,7 @@ class RuntimeSession:
         self._last_execution_fill: LastExecutionFill | None = None
         self._feed_lease_id: str | None = None
         self._event_sequence = 0
+        self.lifecycle = ExecutionLifecycleCoordinator()
 
     def _restore_strategy_state(self) -> None:
         """Restore the strategy-owned portfolio and risk state before execution wiring."""
@@ -572,12 +580,18 @@ class RuntimeSession:
             raise
 
     def _process_bundle(self, bundle, *, source: str,
-                        engine: PaperEngine | MultiStrategyEngine | None = None) -> None:
+                        engine: PaperEngine | MultiStrategyEngine | None = None,
+                        existing_handler=None, event_handler=None) -> None:
         active_engine = engine or self.engine
-        self._process_bundle_for_source(bundle, source=source, engine=active_engine)
+        self._process_bundle_for_source(
+            bundle, source=source, engine=active_engine,
+            existing_handler=existing_handler,
+            event_handler=event_handler,
+        )
 
     def _process_bundle_for_source(self, bundle, *, source: str,
-                                   engine: PaperEngine | MultiStrategyEngine) -> None:
+                                   engine: PaperEngine | MultiStrategyEngine,
+                                   existing_handler=None, event_handler=None) -> None:
         """Persist a bundle result, with live execution kept behind the source gate."""
         active_engine = engine
         decision_at = _bundle_timestamp(bundle.trading_date, bundle.minute)
@@ -586,114 +600,160 @@ class RuntimeSession:
             self.account.context(as_of=decision_at)
             if source == "live" and self.account is not None else None
         )
-        try:
-            result = evaluate_turn(active_engine, DecisionTurn(bundle, source, context))
-        except StrategyDispatchError as exc:
-            self._halt_strategy_runtime()
-            self.store.append_event("STRATEGY_ERROR", {
-                "strategy_id": exc.strategy_id,
-                "error_type": type(exc.cause).__name__,
-                "reason": str(exc.cause),
-                "decision_source": source,
-                "session_date": bundle.trading_date,
-                "execution_allowed": source == "live",
-            }, f"strategy_error:{source}:{bundle.bundle_id}:{exc.strategy_id}", timestamp=timestamp)
-            self.store.patch_status({
-                "state": "ERROR", "health_state": "FAILED",
-                "error": str(exc), "failed_strategy_id": exc.strategy_id,
-            })
-            return
-        for event in result.events:
-            self._persist_engine_event(event, source=source, bundle_id=bundle.bundle_id,
-                                        session_date=bundle.trading_date, decision_at=decision_at, timestamp=timestamp,
-                                        engine=active_engine)
-        outcome_types = [str(event.get("event_type", "ENGINE_EVENT")) for event in result.events]
-        self.store.append_event("BUNDLE_COMPLETE", {
-            "bundle_id": bundle.bundle_id, "minute": bundle.minute,
-            "required_roles": [role_to_key(role) for role in bundle.required_roles],
-            "roles_present": [role_to_key(role) for role in bundle.bars],
-            "decision_source": source, "session_date": bundle.trading_date,
-            "execution_allowed": source == "live",
-        }, f"bundle_complete:{source}:{bundle.bundle_id}", timestamp=timestamp)
-        self.store.append_event("STRATEGY_EVALUATION", {
-            "bundle_id": bundle.bundle_id, "minute": bundle.minute, "outcomes": outcome_types,
-            "decision_source": source, "session_date": bundle.trading_date,
-            "execution_allowed": source == "live",
-        }, f"strategy_evaluation:{source}:{bundle.bundle_id}", timestamp=timestamp)
-        orders = result.orders
-        if self.coordinator is not None and orders:
-            selected_orders = self.coordinator.arbitrate(orders)
-            selected_ids = {item.client_order_id for item in selected_orders}
-            for denied in orders:
-                if denied.client_order_id in selected_ids:
-                    continue
-                reason = self.coordinator.denied_proposals[denied.client_order_id]
-                self.store.append_event(
-                    "ORDER_DENIED",
-                    {
-                        "client_order_id": denied.client_order_id,
-                        "strategy_id": denied.strategy_id,
-                        "account_id": denied.account_id,
-                        "role": denied.role.value,
-                        "reason": reason,
+        result_holder: list[Any] = []
+        selected: list[Any] = []
+        orders: tuple[Any, ...] = ()
+
+        def form_opportunity(_turn) -> Mapping[str, Any]:
+            try:
+                result_holder.append(evaluate_turn(active_engine, DecisionTurn(bundle, source, context)))
+            except StrategyDispatchError as exc:
+                self._halt_strategy_runtime()
+                self.store.append_event("STRATEGY_ERROR", {
+                    "strategy_id": exc.strategy_id,
+                    "error_type": type(exc.cause).__name__,
+                    "reason": str(exc.cause),
+                    "decision_source": source,
+                    "session_date": bundle.trading_date,
+                    "execution_allowed": source == "live",
+                }, f"strategy_error:{source}:{bundle.bundle_id}:{exc.strategy_id}", timestamp=timestamp)
+                self.store.patch_status({
+                    "state": "ERROR", "health_state": "FAILED",
+                    "error": str(exc), "failed_strategy_id": exc.strategy_id,
+                })
+                return {"failed": True}
+            return {"proposal_count": len(result_holder[0].orders)}
+
+        def arbitrate(_turn) -> Mapping[str, Any]:
+            nonlocal orders
+            if not result_holder:
+                return {"accepted": 0}
+            orders = tuple(result_holder[0].orders)
+            selected.extend(
+                self.coordinator.arbitrate(orders) if self.coordinator is not None else orders
+            )
+            return {"accepted": len(selected)}
+
+        def execute(_turn) -> Mapping[str, Any]:
+                if not result_holder:
+                    return {"executed": 0}
+                selected_ids = {item.client_order_id for item in selected}
+                for denied in orders:
+                    if denied.client_order_id in selected_ids:
+                        continue
+                    reason = self.coordinator.denied_proposals.get(denied.client_order_id, "proposal_not_selected") if self.coordinator is not None else "proposal_not_selected"
+                    self.store.append_event(
+                        "ORDER_DENIED",
+                        {
+                            "client_order_id": denied.client_order_id,
+                            "strategy_id": denied.strategy_id,
+                            "account_id": denied.account_id,
+                            "role": denied.role.value,
+                            "reason": reason,
+                            "decision_source": source,
+                            "session_date": bundle.trading_date,
+                            "execution_allowed": source == "live",
+                        },
+                        f"order_denied:{source}:{bundle.bundle_id}:{denied.client_order_id}",
+                        timestamp=timestamp,
+                    )
+                for order in selected:
+                    order_decision_id = order.client_order_id.rsplit(":", 1)[0]
+                    if source == "live":
+                        create_order = getattr(self.store, "create_order_lifecycle", None)
+                        if callable(create_order):
+                            create_order(order.client_order_id, {
+                                "client_order_id": order.client_order_id,
+                                "instrument": order.instrument.symbol,
+                                "exchange": order.instrument.exchange,
+                                "side": order.side.value,
+                                "quantity": order.quantity,
+                                "role": order.role.value,
+                                "vehicle": order.vehicle,
+                                "entry_order_id": order.entry_order_id,
+                                "strategy_id": order.strategy_id,
+                                "account_id": order.account_id,
+                            })
+                    self.store.append_event("ORDER_INTENT", {
+                        "decision_id": order_decision_id,
+                        "client_order_id": order.client_order_id,
+                        "instrument": order.instrument.symbol,
+                        "direction": "long" if order.side is OrderSide.BUY else "short",
+                        "quantity": order.quantity,
+                        "cell": order.cell,
+                        "stop": order.stop_price,
+                        "exit_mode": order.exit_mode,
+                        "entry_bar": order.entry_bar,
+                        "decision_at": timestamp,
                         "decision_source": source,
                         "session_date": bundle.trading_date,
                         "execution_allowed": source == "live",
-                    },
-                    f"order_denied:{source}:{bundle.bundle_id}:{denied.client_order_id}",
-                    timestamp=timestamp,
-                )
-            orders = selected_orders
-        for order in orders:
-            order_decision_id = order.client_order_id.rsplit(":", 1)[0]
-            if source == "live":
-                create_order = getattr(self.store, "create_order_lifecycle", None)
-                if callable(create_order):
-                    create_order(
-                        order.client_order_id,
-                        {
+                        "strategy_id": order.strategy_id,
+                        "account_id": order.account_id,
+                    }, f"order_intent:{source}:{bundle.bundle_id}:{order.client_order_id}", timestamp=timestamp)
+                    if source == "replay":
+                        self.store.append_event("ORDER_SUPPRESSED", {
+                            "decision_id": order.client_order_id,
                             "client_order_id": order.client_order_id,
-                            "instrument": order.instrument.symbol,
-                            "exchange": order.instrument.exchange,
-                            "side": order.side.value,
-                            "quantity": order.quantity,
-                            "role": order.role.value,
                             "vehicle": order.vehicle,
-                            "entry_order_id": order.entry_order_id,
-                            "strategy_id": order.strategy_id,
-                            "account_id": order.account_id,
-                        },
-                    )
-            self.store.append_event("ORDER_INTENT", {
-                "decision_id": order_decision_id,
-                "client_order_id": order.client_order_id,
-                "instrument": order.instrument.symbol,
-                "direction": "long" if order.side is OrderSide.BUY else "short",
-                "quantity": order.quantity,
-                "cell": order.cell,
-                "stop": order.stop_price,
-                "exit_mode": order.exit_mode,
-                "entry_bar": order.entry_bar,
-                "decision_at": timestamp,
-                "decision_source": source,
-                "session_date": bundle.trading_date,
-                "execution_allowed": source == "live",
-                "strategy_id": order.strategy_id,
-                "account_id": order.account_id,
-            }, f"order_intent:{source}:{bundle.bundle_id}:{order.client_order_id}", timestamp=timestamp)
-            if source == "replay":
-                self.store.append_event("ORDER_SUPPRESSED", {
-                    "decision_id": order.client_order_id, "client_order_id": order.client_order_id,
-                    "vehicle": order.vehicle,
-                    "decision_source": "replay", "session_date": bundle.trading_date,
-                    "execution_allowed": False, "reason": "startup_recovery",
-                }, f"order_suppressed:{bundle.trading_date}:{order.client_order_id}", timestamp=timestamp)
-            else:
-                futures_bar = bundle.bars.get(MarketRole.FUTURES)
-                self._execute_paper_order(order, session_date=bundle.trading_date, timestamp=timestamp,
-                                           reference_price=futures_bar.close if isinstance(futures_bar, MarketBar) else None)
+                            "decision_source": "replay",
+                            "session_date": bundle.trading_date,
+                            "execution_allowed": False,
+                            "reason": "startup_recovery",
+                        }, f"order_suppressed:{bundle.trading_date}:{order.client_order_id}", timestamp=timestamp)
+                    else:
+                        futures_bar = bundle.bars.get(MarketRole.FUTURES)
+                        self.execute_order(order, session_date=bundle.trading_date,
+                                                   timestamp=timestamp,
+                                                   reference_price=futures_bar.close if isinstance(futures_bar, MarketBar) else None)
+                return {"executed": len(selected)}
 
-    def _execute_paper_order(self, order, *, session_date: str | None = None,
+        def record_events(_turn) -> Mapping[str, Any]:
+            if not result_holder:
+                return {"recorded": 0}
+            result = result_holder[0]
+            for event in result.events:
+                self._persist_engine_event(
+                    event, source=source, bundle_id=bundle.bundle_id,
+                    session_date=bundle.trading_date, decision_at=decision_at,
+                    timestamp=timestamp, engine=active_engine,
+                )
+            outcome_types = [str(event.get("event_type", "ENGINE_EVENT")) for event in result.events]
+            self.store.append_event("BUNDLE_COMPLETE", {
+                "bundle_id": bundle.bundle_id, "minute": bundle.minute,
+                "required_roles": [role_to_key(role) for role in bundle.required_roles],
+                "roles_present": [role_to_key(role) for role in bundle.bars],
+                "decision_source": source, "session_date": bundle.trading_date,
+                "execution_allowed": source == "live",
+            }, f"bundle_complete:{source}:{bundle.bundle_id}", timestamp=timestamp)
+            self.store.append_event("STRATEGY_EVALUATION", {
+                "bundle_id": bundle.bundle_id, "minute": bundle.minute, "outcomes": outcome_types,
+                "decision_source": source, "session_date": bundle.trading_date,
+                "execution_allowed": source == "live",
+            }, f"strategy_evaluation:{source}:{bundle.bundle_id}", timestamp=timestamp)
+            if event_handler is not None:
+                event_handler(_turn)
+            return {"recorded": len(result.events)}
+
+        turn = ExecutionTurn(
+            turn_id=f"{source}:{bundle.bundle_id}",
+            source=source,
+            observed_at=timestamp,
+            available_at=timestamp,
+            decision_at=timestamp,
+            payload={"bundle_id": bundle.bundle_id},
+        )
+        operations = {
+            ExecutionPhase.OPPORTUNITY_FORMATION: form_opportunity,
+            ExecutionPhase.PROPOSAL_ARBITRATION: arbitrate,
+            ExecutionPhase.EXECUTION_SETTLEMENT: execute,
+            ExecutionPhase.EVENT_RECORDING: record_events,
+        }
+        if existing_handler is not None:
+            operations[ExecutionPhase.EXISTING_POSITION_MANAGEMENT] = existing_handler
+        self.lifecycle.run(turn, FunctionLifecycleAdapter(operations))
+
+    def execute_order(self, order, *, session_date: str | None = None,
                              timestamp: str | None = None,
                              reference_price: float | None = None) -> bool:
         self._last_execution_fill = None
@@ -921,6 +981,9 @@ class RuntimeSession:
                 "fill_timestamp": fill.timestamp,
                 "symbol": fill.instrument.symbol,
                 "quantity": fill.quantity,
+                "fill_id": fill.fill_id or fill.event_id or (
+                    f"fill:{fill.client_order_id}:{fill.timestamp}:{fill.quantity}:{fill.price}"
+                ),
             }
             cost = 0.0
             if order.role is OrderRole.EXIT:
@@ -953,12 +1016,18 @@ class RuntimeSession:
                         f"execution_error:register_entry:{order.client_order_id}", timestamp=timestamp)
                     return False
             if order.role is OrderRole.ENTRY and self.coordinator is not None:
+                execution_coordinator = self.coordinator
                 try:
-                    fill_result = self.coordinator.fill(
-                        order, price=execution_price, timestamp=timestamp,
-                        synthetic_entry_prices=None, filled_quantity=fill.quantity,
-                        fill_id=fill.fill_id or fill.event_id or (
+                    fill_result = self.lifecycle.apply_fill(
+                        fill.fill_id or fill.event_id or (
                             f"fill:{fill.client_order_id}:{fill.timestamp}:{fill.quantity}:{fill.price}"
+                        ),
+                        lambda: execution_coordinator.fill(
+                            order, price=execution_price, timestamp=timestamp,
+                            synthetic_entry_prices=None, filled_quantity=fill.quantity,
+                            fill_id=fill.fill_id or fill.event_id or (
+                                f"fill:{fill.client_order_id}:{fill.timestamp}:{fill.quantity}:{fill.price}"
+                            ),
                         ),
                     )
                     if not isinstance(fill_result, PaperPosition):
@@ -1035,6 +1104,8 @@ class RuntimeSession:
                         f"fill:{fill.client_order_id}:{fill.timestamp}:{fill.quantity}:{fill.price}"
                     ),
                     occurred_at=fill.timestamp,
+                    observed_at=timestamp,
+                    available_at=timestamp,
                     source="live",
                     strategy_id=order.strategy_id,
                     account_id=order.account_id,
@@ -1063,7 +1134,11 @@ class RuntimeSession:
             cancel_reservation()
             return False
         if order.role is OrderRole.EXIT and self.coordinator is not None:
-            settlement = self.coordinator.fill(order, price=execution_price, timestamp=timestamp, cost=cost)
+            execution_coordinator = self.coordinator
+            settlement = self.lifecycle.apply_fill(
+                str(self._last_execution_fill.get("fill_id") if self._last_execution_fill else order.client_order_id),
+                lambda: execution_coordinator.fill(order, price=execution_price, timestamp=timestamp, cost=cost),
+            )
             if isinstance(settlement, dict) and self._last_execution_fill is not None:
                 self._last_execution_fill["realized_pnl"] = settlement["net_pnl"]
         self._persist_strategy_state()
@@ -1103,38 +1178,38 @@ class RuntimeSession:
                     prior_day_low=getattr(strategy, "prior_day_low", None),
                     expiry_dates=tuple(str(item) for item in getattr(strategy, "expiry_dates", ())),
                 )
-            # Settle positions carried into this bar before evaluating a new
-            # bundle, matching the deterministic replay ordering.
-            try:
-                exit_actions = self.engine.on_closed_bar(bar)
-            except StrategyDispatchError as exc:
-                self._record_strategy_failure(
-                    exc, timestamp=bar.timestamp.isoformat(),
-                    session_date=bar.timestamp.astimezone(IST).date().isoformat(),
-                )
-                return
-            for action in exit_actions:
-                filled = self._execute_paper_order(
+            def execute_exit(action):
+                return self.execute_order(
                     action.intent,
                     session_date=bar.timestamp.astimezone(IST).date().isoformat(),
                     timestamp=bar.timestamp.isoformat(),
                 )
-                self.engine.settle_exit(action.intent.client_order_id, filled=filled,
-                                        strategy_id=action.intent.strategy_id)
-                if filled and action.cell is not None:
-                    self.engine.record_exit(
-                        strategy_id=action.intent.strategy_id,
-                        cell=action.cell,
-                        reason=action.reason,
-                        entry_bar=action.intent.entry_bar or 0,
-                        exit_bar=self.engine.bars_seen,
-                        date=bar.timestamp.astimezone(IST).date().isoformat(),
-                        vehicle=action.intent.vehicle,
-                        direction="long" if action.intent.side.value == "SELL" else "short",
-                        quantity=action.intent.quantity,
-                    )
-                exit_payload = {
+
+            def settle_exit(action, filled: bool) -> None:
+                self.engine.settle_exit(
+                    action.intent.client_order_id, filled=filled,
+                    strategy_id=action.intent.strategy_id,
+                )
+
+            def record_exit(action, _result) -> None:
+                if action.cell is None:
+                    return
+                self.engine.record_exit(
+                    strategy_id=action.intent.strategy_id,
+                    cell=action.cell,
+                    reason=action.reason,
+                    entry_bar=action.intent.entry_bar or 0,
+                    exit_bar=self.engine.bars_seen,
+                    date=bar.timestamp.astimezone(IST).date().isoformat(),
+                    vehicle=action.intent.vehicle,
+                    direction="long" if action.intent.side.value == "SELL" else "short",
+                    quantity=action.intent.quantity,
+                )
+
+            def record_event(action, _result):
+                return {
                     "decision_id": action.intent.client_order_id,
+                    "strategy_id": action.intent.strategy_id,
                     "vehicle": action.intent.vehicle,
                     "cell": action.cell,
                     "reason": action.reason,
@@ -1156,16 +1231,66 @@ class RuntimeSession:
                     "execution_allowed": True,
                     "outcome": "exit_triggered",
                 }
-                exit_payload["decision_view"] = validate_decision_view(build_decision_view(
-                    exit_payload, event_type="EXITDECISION", strategy_id=action.intent.strategy_id,
-                ))
-                self.store.append_event("EXITDECISION", exit_payload,
-                                        f"exit_decision:{action.intent.client_order_id}", timestamp=bar.timestamp.isoformat())
-            self._refresh_pending_status()
+            exit_events_holder: list[Mapping[str, object]] = []
+
+            def manage_existing(_turn):
+                try:
+                    exit_actions = self.engine.on_closed_bar(bar)
+                except StrategyDispatchError as exc:
+                    self._record_strategy_failure(
+                        exc, timestamp=bar.timestamp.isoformat(),
+                        session_date=bar.timestamp.astimezone(IST).date().isoformat(),
+                    )
+                    return {"failed": True}
+                for action in exit_actions:
+                    result = execute_exit(action)
+                    filled = bool(result)
+                    settle_exit(action, filled)
+                    if filled:
+                        record_exit(action, result)
+                    event = record_event(action, result)
+                    if event is not None:
+                        exit_events_holder.append(event)
+                return {"exit_count": len(exit_actions)}
+
+            def record_exit_events(_turn) -> Mapping[str, object]:
+                for exit_payload in exit_events_holder:
+                    payload = dict(exit_payload)
+                    payload["decision_view"] = validate_decision_view(build_decision_view(
+                        payload, event_type="EXITDECISION",
+                        strategy_id=str(payload.get("strategy_id") or "unknown"),
+                    ))
+                    self.store.append_event(
+                        "EXITDECISION", payload,
+                        f"exit_decision:{payload['decision_id']}",
+                        timestamp=bar.timestamp.isoformat(),
+                    )
+                return {"recorded": len(exit_events_holder)}
+
             if bundle is not None:
                 self.store.patch_status({"last_completed_bundle_minute": bundle.minute,
                                          "last_strategy_evaluation_minute": bundle.minute})
-                self._process_bundle(bundle, source="live")
+                self._process_bundle(
+                    bundle, source="live", existing_handler=manage_existing,
+                    event_handler=record_exit_events,
+                )
+            else:
+                turn = ExecutionTurn(
+                    turn_id=f"live:{bar_key}",
+                    source="live",
+                    observed_at=bar.timestamp.isoformat(),
+                    available_at=bar.timestamp.isoformat(),
+                    decision_at=bar.timestamp.isoformat(),
+                    evidence=(bar,),
+                )
+                self.lifecycle.run(
+                    turn,
+                    FunctionLifecycleAdapter({
+                        ExecutionPhase.EXISTING_POSITION_MANAGEMENT: manage_existing,
+                        ExecutionPhase.EVENT_RECORDING: record_exit_events,
+                    }),
+                )
+            self._refresh_pending_status()
 
     def on_tick(self, bar: MarketBar) -> None:
         """Evaluate protective exits immediately on each live market tick."""
@@ -1174,36 +1299,10 @@ class RuntimeSession:
                 return
             if isinstance(self.broker, PaperBroker):
                 self.broker.update_price(bar.instrument.symbol, bar.close)
-            try:
-                result = self.engine.on_tick(bar)
-            except StrategyDispatchError as exc:
-                self._record_strategy_failure(
-                    exc, timestamp=bar.timestamp.isoformat(),
-                    session_date=bar.timestamp.astimezone(IST).date().isoformat(),
-                )
-                return
-            for action in result:
-                filled = self._execute_paper_order(
-                    action.intent,
-                    session_date=bar.timestamp.astimezone(IST).date().isoformat(),
-                    timestamp=bar.timestamp.isoformat(),
-                )
-                self.engine.settle_exit(action.intent.client_order_id, filled=filled,
-                                        strategy_id=action.intent.strategy_id)
-                if filled and action.cell is not None:
-                    self.engine.record_exit(
-                        strategy_id=action.intent.strategy_id,
-                        cell=action.cell,
-                        reason=action.reason,
-                        entry_bar=action.intent.entry_bar or 0,
-                        exit_bar=self.engine.bars_seen,
-                        date=bar.timestamp.astimezone(IST).date().isoformat(),
-                        vehicle=action.intent.vehicle,
-                        direction="long" if action.intent.side.value == "SELL" else "short",
-                        quantity=action.intent.quantity,
-                    )
-                exit_payload = {
+            def record_tick_exit(action, _result):
+                return {
                     "decision_id": action.intent.client_order_id,
+                    "strategy_id": action.intent.strategy_id,
                     "vehicle": action.intent.vehicle,
                     "cell": action.cell,
                     "reason": action.reason,
@@ -1225,11 +1324,75 @@ class RuntimeSession:
                     "execution_allowed": True,
                     "outcome": "exit_triggered",
                 }
-                exit_payload["decision_view"] = validate_decision_view(build_decision_view(
-                    exit_payload, event_type="EXITDECISION", strategy_id=action.intent.strategy_id,
-                ))
-                self.store.append_event("EXITDECISION", exit_payload,
-                                        f"exit_decision:{action.intent.client_order_id}", timestamp=bar.timestamp.isoformat())
+            def record_tick_exit_state(action, _result):
+                if action.cell is not None:
+                    self.engine.record_exit(
+                        strategy_id=action.intent.strategy_id,
+                        cell=action.cell,
+                        reason=action.reason,
+                        entry_bar=action.intent.entry_bar or 0,
+                        exit_bar=self.engine.bars_seen,
+                        date=bar.timestamp.astimezone(IST).date().isoformat(),
+                        vehicle=action.intent.vehicle,
+                        direction="long" if action.intent.side.value == "SELL" else "short",
+                        quantity=action.intent.quantity,
+                    )
+            tick_events: list[Mapping[str, object]] = []
+
+            def manage_tick(_turn) -> Mapping[str, object]:
+                try:
+                    actions = self.engine.on_tick(bar)
+                except StrategyDispatchError as exc:
+                    self._record_strategy_failure(
+                        exc, timestamp=bar.timestamp.isoformat(),
+                        session_date=bar.timestamp.astimezone(IST).date().isoformat(),
+                    )
+                    return {"failed": True}
+                for action in actions:
+                    filled = self.execute_order(
+                        action.intent,
+                        session_date=bar.timestamp.astimezone(IST).date().isoformat(),
+                        timestamp=bar.timestamp.isoformat(),
+                    )
+                    self.engine.settle_exit(
+                        action.intent.client_order_id, filled=filled,
+                        strategy_id=action.intent.strategy_id,
+                    )
+                    if filled:
+                        record_tick_exit_state(action, None)
+                    tick_event = record_tick_exit(action, None)
+                    if tick_event is not None:
+                        tick_events.append(tick_event)
+                return {"exit_count": len(actions)}
+
+            def record_tick_events(_turn) -> Mapping[str, object]:
+                for exit_payload in tick_events:
+                    payload = dict(exit_payload)
+                    payload["decision_view"] = validate_decision_view(build_decision_view(
+                        payload, event_type="EXITDECISION",
+                        strategy_id=str(payload.get("strategy_id") or "unknown"),
+                    ))
+                    self.store.append_event(
+                        "EXITDECISION", payload,
+                        f"exit_decision:{payload['decision_id']}",
+                        timestamp=bar.timestamp.isoformat(),
+                    )
+                return {"recorded": len(tick_events)}
+
+            self.lifecycle.run(
+                ExecutionTurn(
+                    turn_id=f"live:tick:{bar.instrument.symbol}:{bar.timestamp.isoformat()}",
+                    source="live",
+                    observed_at=bar.timestamp.isoformat(),
+                    available_at=bar.timestamp.isoformat(),
+                    decision_at=bar.timestamp.isoformat(),
+                    evidence=(bar,),
+                ),
+                FunctionLifecycleAdapter({
+                    ExecutionPhase.EXISTING_POSITION_MANAGEMENT: manage_tick,
+                    ExecutionPhase.EVENT_RECORDING: record_tick_events,
+                }),
+            )
 
     def _record_incomplete(self, bundle) -> None:
         payload = {
