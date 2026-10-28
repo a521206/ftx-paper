@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock
 
+import requests
+
 from ftx_paper.broker.xts.client import XTSClient
 
 
@@ -67,4 +69,17 @@ def test_missing_authorization_is_refreshed_once():
     assert client.ohlc(1, 2, "2026-10-26", "2026-10-27")
     refresh.assert_called_once_with()
     assert client.token == "new-token"
+    assert session.get.call_count == 2
+
+
+def test_request_retries_transient_connection_reset():
+    valid = MagicMock(
+        status_code=200,
+        json=lambda: {"type": "success", "result": {"dataResponse": "1|1|2|0|1|10|0"}},
+    )
+    session = MagicMock()
+    session.get.side_effect = [requests.ConnectionError("connection reset"), valid]
+    client = XTSClient(token="token", session=session)
+
+    assert client.ohlc(1, 2, "2026-10-26", "2026-10-27")
     assert session.get.call_count == 2

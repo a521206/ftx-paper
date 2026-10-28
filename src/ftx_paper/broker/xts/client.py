@@ -153,17 +153,29 @@ class XTSClient:
             )
         return False
 
-    def _request(self, method: str, url: str, *, retry: bool = True, **kwargs: Any) -> requests.Response:
+    def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        retry: bool = True,
+        **kwargs: Any,
+    ) -> requests.Response:
         if self.cancel_event is not None and self.cancel_event.is_set():
             raise XTSTransportError("XTS request cancelled")
         state = self.session.snapshot() if self.session is not None else None
         headers = kwargs.pop("headers", self._headers())
         timeout = kwargs.pop("timeout", self.timeout)
+        request = getattr(self._session, method.lower())
         try:
-            request = getattr(self._session, method.lower())
             response = request(url, headers=headers, timeout=timeout, **kwargs)
         except requests.RequestException as exc:
-            raise XTSTransportError(f"XTS {method} request failed") from exc
+            if self.cancel_event is not None and self.cancel_event.is_set():
+                raise XTSTransportError("XTS request cancelled") from exc
+            try:
+                response = request(url, headers=headers, timeout=timeout, **kwargs)
+            except requests.RequestException as retry_exc:
+                raise XTSTransportError(f"XTS {method} request failed") from retry_exc
         if self.cancel_event is not None and self.cancel_event.is_set():
             raise XTSTransportError("XTS request cancelled")
         try:
@@ -174,7 +186,13 @@ class XTSClient:
             if not retry or self.session is None or state is None:
                 raise XTSAuthenticationError("XTS session token is invalid")
             self.session.refresh_if_stale(state.generation)
-            return self._request(method, url, retry=False, headers=self._headers(), **kwargs)
+            return self._request(
+                method,
+                url,
+                retry=False,
+                headers=self._headers(),
+                **kwargs,
+            )
         if response.status_code == 400 and "already subscribed" in response.text.lower():
             return response
         if response.status_code >= 400:
