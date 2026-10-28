@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     )
     from .orderflow_interaction import (
         HypothesisState, InteractionCandle, InteractionCloseReason, InteractionDetector,
-        InteractionStatus, LocationInteraction,
+        InteractionStatus, LocationInteraction, ProjectionSnapshot,
     )
     from .orderflow_opportunity import (
         ExecutionGroupClaim, ExecutionGroupRegistry, OpportunityStatus,
@@ -170,10 +170,10 @@ def __getattr__(name: str):
         from .orderflow_location import LocationBand, LocationObservation, LocationRecord, LocationRegistry
         return {"LocationBand": LocationBand, "LocationObservation": LocationObservation,
                 "LocationRecord": LocationRecord, "LocationRegistry": LocationRegistry}[name]
-    if name in {"EvidenceLineage", "HypothesisState", "InteractionCandle", "InteractionCloseReason", "InteractionDetector", "InteractionStatus", "LocationInteraction"}:
+    if name in {"EvidenceLineage", "HypothesisState", "InteractionCandle", "InteractionCloseReason", "InteractionDetector", "InteractionStatus", "LocationInteraction", "ProjectionSnapshot"}:
         from .orderflow_interaction import (
             EvidenceLineage, HypothesisState, InteractionCandle, InteractionCloseReason, InteractionDetector,
-            InteractionStatus, LocationInteraction,
+            InteractionStatus, LocationInteraction, ProjectionSnapshot,
         )
         return {
             "EvidenceLineage": EvidenceLineage,
@@ -183,6 +183,7 @@ def __getattr__(name: str):
             "InteractionDetector": InteractionDetector,
             "InteractionStatus": InteractionStatus,
             "LocationInteraction": LocationInteraction,
+            "ProjectionSnapshot": ProjectionSnapshot,
         }[name]
     if name in {"ExecutionGroupClaim", "ExecutionGroupRegistry", "OpportunityStatus", "OpportunityTransition", "SetupOpportunity", "StructuralSetup", "advance_timeouts_before_formation"}:
         from .orderflow_opportunity import (
@@ -248,7 +249,7 @@ __all__ = [
     "calculate_session_vwap", "calculate_vwap_stop",
     "derive_vwap_band", "evaluate_vwap_diagnostic_response", "publish_vwap_locations",
     "HypothesisState", "InteractionCandle", "InteractionCloseReason", "InteractionDetector",
-    "InteractionStatus", "LocationInteraction",
+    "InteractionStatus", "LocationInteraction", "ProjectionSnapshot",
     "ExecutionGroupClaim", "ExecutionGroupRegistry", "OpportunityStatus",
     "OpportunityTransition", "SetupOpportunity", "StructuralSetup",
     "AdmissionDecision", "DiagnosticDecisionIntent", "PredicateResult", "PredicateStatus", "evaluate_admission",

@@ -738,7 +738,7 @@ class OrderflowPolicy:
                         "observed_at": location_observation.observed_at.isoformat(),
                          "available_at": location_observation.available_at.isoformat(),
                       "feature_values": feature_values_to_dict(observation.features),
-                      }))
+                       }))
                     if is_diagnostic_location(interaction.location_type):
                         diagnostic = evaluate_vwap_diagnostic_response(
                             interaction, interaction.contact_candles,
@@ -751,8 +751,8 @@ class OrderflowPolicy:
                             "decision_id": _decision_id(
                                 "vwap_diagnostic", interaction.interaction_id, location_key,
                             ),
-                            **diagnostic,
-                        }))
+                             **diagnostic,
+                         }))
             results.extend(interaction_context_events)
             results.extend(interaction_created_events)
             # Advance opportunity timeouts before any response can form a new
@@ -1252,12 +1252,11 @@ class OrderflowPolicy:
 
     def snapshot(self) -> Mapping[str, object]:
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "config": asdict(self.config) | {"execution_mode": self.config.execution_mode.value},
             "session_id": self._session_id,
             "processed_observation_ids": sorted(self._processed_observation_ids),
             "processed_location_observation_ids": sorted(self._processed_location_observation_ids),
-            "location_detector": self._location_detector.snapshot(),
             "location_detectors": {
                 timeframe: detector.snapshot()
                 for timeframe, detector in self._location_detectors.items()
@@ -1275,7 +1274,8 @@ class OrderflowPolicy:
 
     @classmethod
     def from_snapshot(cls, snapshot: Mapping[str, object]) -> "OrderflowPolicy":
-        if snapshot.get("schema_version") != 2:
+        schema_version = snapshot.get("schema_version")
+        if schema_version not in {2, 3}:
             raise ValueError("unsupported orderflow snapshot schema")
         raw_config = snapshot.get("config")
         if not isinstance(raw_config, Mapping):
@@ -1309,24 +1309,25 @@ class OrderflowPolicy:
         ):
             raise ValueError("invalid processed location observation IDs")
         policy._processed_location_observation_ids = set(raw_location_processed)
-        raw_location_detector = snapshot.get("location_detector")
-        if not isinstance(raw_location_detector, Mapping):
-            raise ValueError("invalid orderflow location detector snapshot")
-        policy._location_detector = InteractionDetector.from_snapshot(raw_location_detector)
         raw_detectors = snapshot.get("location_detectors")
-        if isinstance(raw_detectors, Mapping):
-            policy._location_detectors = {
-                str(timeframe): InteractionDetector.from_snapshot(value)
-                for timeframe, value in raw_detectors.items()
-                if isinstance(value, Mapping)
+        if schema_version == 2:
+            legacy_detector = snapshot.get("location_detector")
+            if not isinstance(legacy_detector, Mapping):
+                raise ValueError("invalid legacy orderflow location detector snapshot")
+            raw_detectors = {
+                "1m": InteractionDetector("1m").snapshot(),
+                "5m": legacy_detector,
             }
-            policy._location_detectors.setdefault("5m", policy._location_detector)
-            policy._location_detector = policy._location_detectors["5m"]
-        else:
-            policy._location_detectors = {
-                "1m": InteractionDetector("1m"),
-                "5m": policy._location_detector,
-            }
+        if not isinstance(raw_detectors, Mapping):
+            raise ValueError("invalid orderflow location detector snapshots")
+        if set(raw_detectors) != {"1m", "5m"}:
+            raise ValueError("orderflow location detector timeframes are invalid")
+        if any(not isinstance(value, Mapping) for value in raw_detectors.values()):
+            raise ValueError("invalid orderflow location detector snapshot")
+        policy._location_detectors = {
+            str(timeframe): InteractionDetector.from_snapshot(value)
+            for timeframe, value in raw_detectors.items()
+        }
         policy._location_detector = policy._location_detectors["5m"]
         admission_suspended = snapshot.get("admission_suspended")
         gap_end = snapshot.get("gap_end")

@@ -36,8 +36,36 @@ class InteractionCandle:
     close: float
     high: float | None = None
     low: float | None = None
+    open: float | None = None
+    child_observation_ids: tuple[str, ...] = ()
+    context_version: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ProjectionSnapshot:
+    """Immutable aggregate of the completed interaction candles so far."""
+
+    timeframe: str
+    open: float
+    high: float
+    low: float
+    close: float
+    source_observation_ids: tuple[str, ...]
+    child_observation_ids: tuple[str, ...]
+    first_observed_at: datetime
+    last_observed_at: datetime
+    available_at: datetime
+    context_version: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.timeframe not in {"1m", "5m"}:
+            raise ValueError("projection timeframe must be 1m or 5m")
+        if not self.source_observation_ids or len(self.source_observation_ids) != len(set(self.source_observation_ids)):
+            raise ValueError("projection source observation IDs must be unique")
+        if len(self.child_observation_ids) != len(set(self.child_observation_ids)):
+            raise ValueError("projection child observation IDs must be unique")
+        if self.available_at < self.last_observed_at:
+            raise ValueError("projection availability is not causal")
 @dataclass(frozen=True, slots=True)
 class EvidenceLineage:
     observation_id: str
@@ -99,6 +127,7 @@ class LocationInteraction:
     pd_role_transition_available_at: datetime | None = None
     location_type: str = "session_reference"
     reference_provenance: Mapping[str, str] = field(default_factory=dict)
+    synthetic_snapshots: tuple[tuple[str, tuple[ProjectionSnapshot, ...]], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.interaction_id.strip() or not self.location_id.strip():
@@ -109,6 +138,44 @@ class LocationInteraction:
             raise ValueError("ended interaction requires a close reason")
         if self.response_status not in {"PENDING", "PENDING_RESPONSE", "CONFIRMED", "INVALIDATED", "EXPIRED"}:
             raise ValueError("invalid interaction response status")
+
+
+def _projection_snapshot(candles: tuple[InteractionCandle, ...]) -> ProjectionSnapshot:
+    if not candles:
+        raise ValueError("projection requires at least one candle")
+    candles = tuple(sorted(candles, key=lambda item: (item.observed_at, item.available_at, item.observation_id)))
+    return ProjectionSnapshot(
+        timeframe=candles[0].timeframe,
+        open=candles[0].open if candles[0].open is not None else candles[0].close,
+        high=max(item.high if item.high is not None else item.close for item in candles),
+        low=min(item.low if item.low is not None else item.close for item in candles),
+        close=candles[-1].close,
+        source_observation_ids=tuple(item.observation_id for item in candles),
+        child_observation_ids=tuple(
+            child_id for item in candles for child_id in item.child_observation_ids
+        ),
+        context_version=candles[-1].context_version,
+        first_observed_at=candles[0].observed_at,
+        last_observed_at=candles[-1].observed_at,
+        available_at=max(item.available_at for item in candles),
+    )
+
+
+def _append_projection(
+    interaction: LocationInteraction,
+    candles: tuple[InteractionCandle, ...],
+) -> LocationInteraction:
+    snapshot = _projection_snapshot(candles)
+    existing = dict(interaction.synthetic_snapshots)
+    history = existing.get(snapshot.timeframe, ())
+    if not history or history[-1].source_observation_ids != snapshot.source_observation_ids:
+        existing[snapshot.timeframe] = (*history, snapshot)
+    return replace(
+        interaction,
+        synthetic_snapshots=tuple(
+            (timeframe, existing[timeframe]) for timeframe in sorted(existing)
+        ),
+    )
 
 
 class InteractionDetector:
@@ -139,15 +206,17 @@ class InteractionDetector:
         if observation.context is None or observation.context.availability_status != "available":
             return None
         close = observation.features.get("close")
+        open_price = observation.features.get("open", close)
         high = observation.features.get("high", close)
         low = observation.features.get("low", close)
         if (
             not isinstance(close, (int, float)) or isinstance(close, bool)
+            or not isinstance(open_price, (int, float)) or isinstance(open_price, bool)
             or not isinstance(high, (int, float)) or isinstance(high, bool)
             or not isinstance(low, (int, float)) or isinstance(low, bool)
         ):
             return None
-        close_value, high_value, low_value = float(close), float(high), float(low)
+        close_value, open_value, high_value, low_value = float(close), float(open_price), float(high), float(low)
         key = f"{location.location_id}:{self.timeframe}"
         interaction = self._active.get(key)
         replacement = next(
@@ -170,6 +239,9 @@ class InteractionDetector:
         candle = InteractionCandle(
             observation.observation_id, observation.timeframe,
             observation.observed_at, observation.available_at, close_value, high_value, low_value,
+            open_value,
+            observation.context.child_observation_ids,
+            observation.context.generation,
         )
         contact = (
             location.band.lower <= high_value and low_value <= location.band.upper
@@ -191,6 +263,7 @@ class InteractionDetector:
                     "source_timeframe": location.timeframe or observation.timeframe,
                 },
             )
+            interaction = _append_projection(interaction, interaction.contact_candles)
             self._active[key] = interaction
             return interaction
         if not inside:
@@ -215,10 +288,12 @@ class InteractionDetector:
                 closed_at=observation.available_at,
                 contact_candles=(*interaction.contact_candles, candle),
             )
+            ended = _append_projection(ended, ended.contact_candles)
             self._active.pop(key)
             self._closed.append(ended)
             return ended
         advanced = replace(interaction, contact_candles=(*interaction.contact_candles, candle))
+        advanced = _append_projection(advanced, advanced.contact_candles)
         self._active[key] = advanced
         return advanced
 
@@ -244,6 +319,25 @@ class InteractionDetector:
                 "location_alias": item.location_alias,
                 "location_type": item.location_type,
                 "reference_provenance": dict(item.reference_provenance),
+                "synthetic_snapshots": {
+                    timeframe: [
+                        {
+                            "timeframe": snapshot.timeframe,
+                            "open": snapshot.open,
+                            "high": snapshot.high,
+                            "low": snapshot.low,
+                            "close": snapshot.close,
+                            "source_observation_ids": list(snapshot.source_observation_ids),
+                            "child_observation_ids": list(snapshot.child_observation_ids),
+                            "context_version": snapshot.context_version,
+                            "first_observed_at": snapshot.first_observed_at.isoformat(),
+                            "last_observed_at": snapshot.last_observed_at.isoformat(),
+                            "available_at": snapshot.available_at.isoformat(),
+                        }
+                        for snapshot in values
+                    ]
+                    for timeframe, values in item.synthetic_snapshots
+                },
                 "reference_level": item.reference_level,
                 "reference_generation": item.reference_generation,
                 "source_observation_id": item.source_observation_id,
@@ -256,6 +350,9 @@ class InteractionDetector:
                         "observed_at": candle.observed_at.isoformat(),
                         "available_at": candle.available_at.isoformat(),
                         "close": candle.close,
+                        "open": candle.open,
+                        "child_observation_ids": list(candle.child_observation_ids),
+                        "context_version": candle.context_version,
                         "high": candle.high,
                         "low": candle.low,
                     }
@@ -329,6 +426,9 @@ class InteractionDetector:
                     float(item["close"]),
                     float(item["high"]) if item.get("high") is not None else float(item["close"]),
                     float(item["low"]) if item.get("low") is not None else float(item["close"]),
+                     float(item["open"]) if item.get("open") is not None else None,
+                     tuple(str(value) for value in item.get("child_observation_ids", ())),
+                     int(item["context_version"]) if item.get("context_version") is not None else None,
                 ))
             candles = tuple(candles_list)
             closed_at = raw.get("closed_at")
@@ -365,6 +465,28 @@ class InteractionDetector:
             raw_hypotheses = raw.get("hypothesis_states", ())
             if not isinstance(raw_hypotheses, (list, tuple)):
                 raise ValueError("invalid hypothesis states")
+            raw_projections = raw.get("synthetic_snapshots", {})
+            if not isinstance(raw_projections, Mapping):
+                raise ValueError("invalid synthetic projections")
+            projections: list[tuple[str, tuple[ProjectionSnapshot, ...]]] = []
+            for timeframe, values in raw_projections.items():
+                if not isinstance(values, (list, tuple)):
+                    raise ValueError("invalid synthetic projection snapshots")
+                decoded_values: list[ProjectionSnapshot] = []
+                for value in values:
+                    if not isinstance(value, Mapping):
+                        raise ValueError("synthetic projection snapshot must be an object")
+                    decoded_values.append(ProjectionSnapshot(
+                        str(value["timeframe"]), float(value["open"]), float(value["high"]),
+                        float(value["low"]), float(value["close"]),
+                        tuple(str(item) for item in value.get("source_observation_ids", ())),
+                        tuple(str(item) for item in value.get("child_observation_ids", ())),
+                        datetime.fromisoformat(str(value["first_observed_at"])),
+                        datetime.fromisoformat(str(value["last_observed_at"])),
+                        datetime.fromisoformat(str(value["available_at"])),
+                        int(value["context_version"]) if value.get("context_version") is not None else None,
+                    ))
+                projections.append((str(timeframe), tuple(decoded_values)))
             return LocationInteraction(
                 str(raw["interaction_id"]), str(raw["timeframe"]),
                 str(raw["location_id"]), str(raw["location_alias"]),
@@ -383,6 +505,7 @@ class InteractionDetector:
                 datetime.fromisoformat(str(raw["pd_role_transition_available_at"])) if raw.get("pd_role_transition_available_at") is not None else None,
                 str(raw.get("location_type", "session_reference")),
                 dict(raw.get("reference_provenance", {})),
+                tuple(sorted(projections)),
             )
 
         active = snapshot.get("active", ())
@@ -461,6 +584,6 @@ class InteractionDetector:
 
 
 __all__ = [
-    "EvidenceLineage", "HypothesisState", "InteractionCandle", "InteractionCloseReason", "InteractionDetector",
+    "EvidenceLineage", "HypothesisState", "InteractionCandle", "InteractionCloseReason", "InteractionDetector", "ProjectionSnapshot",
     "InteractionStatus", "LocationInteraction",
 ]

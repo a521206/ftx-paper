@@ -21,7 +21,7 @@ from ftx_paper.strategy import (
     OrderflowObservationContext,
     OrderflowStrategy,
 )
-from ftx_paper.strategy.orderflow import OrderflowConfig
+from ftx_paper.strategy.orderflow import OrderflowConfig, OrderflowPolicy
 from ftx_paper.strategy.policy_contract import ExecutionMode
 
 
@@ -189,10 +189,25 @@ def test_snapshot_restore_rejects_invalid_location_detector_state() -> None:
     snapshot = strategy.snapshot()
     payload = snapshot["payload"]
     assert isinstance(payload, dict)
-    payload["location_detector"] = []
+    payload["location_detectors"]["5m"] = []
 
     with pytest.raises(ValueError, match="detector"):
         OrderflowStrategy.from_snapshot(snapshot)
+
+
+def test_policy_snapshot_migrates_legacy_single_detector_state() -> None:
+    strategy = OrderflowStrategy()
+    bundle, account = _context()
+    strategy.evaluate(bundle, account)
+    current = dict(strategy.policy.snapshot())
+    current["schema_version"] = 2
+    current["location_detector"] = current["location_detectors"]["5m"]
+    del current["location_detectors"]
+
+    restored = OrderflowPolicy.from_snapshot(current)
+
+    assert set(restored._location_detectors) == {"1m", "5m"}
+    assert restored._location_detectors["5m"].active_interactions
 
 
 def test_generation_change_closes_old_interaction_and_opens_new_generation() -> None:

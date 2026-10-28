@@ -2,10 +2,11 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from ftx_paper.strategy import (
+from ftx_paper.strategy.orderflow_contract import OrderflowObservation, OrderflowObservationContext
+from ftx_paper.strategy.orderflow_interaction import (
     EvidenceLineage, HypothesisState, InteractionCloseReason, InteractionDetector, InteractionStatus,
-    LocationBand, LocationObservation, LocationRecord, OrderflowObservation, OrderflowObservationContext,
 )
+from ftx_paper.strategy.orderflow_location import LocationBand, LocationObservation, LocationRecord
 
 
 UTC = timezone.utc
@@ -71,6 +72,48 @@ def test_interaction_detector_deduplicates_by_location_observation() -> None:
     assert detector.observe(first, observation, observation_id="location-1") is not None
     assert detector.observe(second, observation, observation_id="location-2") is not None
     assert len(detector.active_interactions) == 2
+
+
+def test_interaction_freezes_causal_structural_projection_snapshots() -> None:
+    location = LocationRecord("loc-5m", "OR_HIGH", 100, LocationBand(99, 101), 1,
+                              datetime(2026, 1, 1, 9, 15, tzinfo=UTC), "agg-1",
+                              timeframe="5m")
+    detector = InteractionDetector("5m")
+
+    def observation(number: int, close: float) -> OrderflowObservation:
+        start = datetime(2026, 1, 1, 9, 15 + number * 5, tzinfo=UTC)
+        return OrderflowObservation(
+            f"obs-5m-{number}", f"bar-5m-{number}", "v1", "5m", "NIFTYFUT", start,
+            start + timedelta(minutes=5),
+            {"open": close - 1, "high": close + 1, "low": close - 2, "close": close},
+            start, start + timedelta(minutes=5),
+            context=OrderflowObservationContext(
+                "2026-01-01", "complete", "available", {"source": "test"}, 1,
+                tuple(f"child-{number}-{index}" for index in range(5)),
+                tuple(
+                    (start + timedelta(minutes=index), start + timedelta(minutes=index + 1))
+                    for index in range(5)
+                ),
+            ),
+        )
+
+    created = detector.observe(location, observation(0, 100))
+    advanced = detector.observe(location, observation(1, 100.5))
+
+    assert created is not None and advanced is not None
+    snapshots = dict(advanced.synthetic_snapshots)["5m"]
+    assert len(snapshots) == 2
+    assert snapshots[0].source_observation_ids == ("obs-5m-0",)
+    assert snapshots[1].source_observation_ids == ("obs-5m-0", "obs-5m-1")
+    assert snapshots[1].child_observation_ids == (
+        "child-0-0", "child-0-1", "child-0-2", "child-0-3", "child-0-4",
+        "child-1-0", "child-1-1", "child-1-2", "child-1-3", "child-1-4",
+    )
+    assert snapshots[1].context_version == 1
+    assert snapshots[1].open == 99
+    assert snapshots[1].high == 101.5
+    assert snapshots[1].low == 98
+    assert snapshots[1].available_at == observation(1, 100.5).available_at
 
 
 def test_wick_intersection_ends_interaction_when_close_is_outside() -> None:
@@ -143,6 +186,7 @@ def test_hypothesis_snapshot_preserves_observation_lineage() -> None:
     interaction = detector.observe(location, _observation(0, 100))
     assert interaction is not None
     observation = _observation(1, 101)
+    assert observation.source_observation_id is not None
     lineage = EvidenceLineage(
         observation.observation_id, observation.source_observation_id, observation.timeframe,
         observation.observed_at, observation.available_at, "fingerprint-1",
