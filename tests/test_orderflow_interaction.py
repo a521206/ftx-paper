@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -114,6 +115,21 @@ def test_interaction_freezes_causal_structural_projection_snapshots() -> None:
     assert snapshots[1].high == 101.5
     assert snapshots[1].low == 98
     assert snapshots[1].available_at == observation(1, 100.5).available_at
+
+
+def test_projection_processing_is_idempotent_and_round_trips_after_closure() -> None:
+    location = LocationRecord("loc-5m-idempotent", "OR_HIGH", 100, LocationBand(99, 101), 1,
+                              datetime(2026, 1, 1, 9, 15, tzinfo=UTC), "agg-1", timeframe="5m")
+    detector = InteractionDetector("5m")
+    source = replace(_observation(0, 100), timeframe="5m")
+    first = detector.observe(location, source)
+    assert first is not None
+    assert detector.observe(location, source) == first
+    detector.close_all(InteractionCloseReason.DATA_GAP, source.available_at)
+    restored = InteractionDetector.from_snapshot(detector.snapshot())
+    closed = restored.closed_interactions[0]
+    assert closed.close_reason is InteractionCloseReason.DATA_GAP
+    assert dict(closed.synthetic_snapshots)["5m"][0].source_observation_ids == ("obs-0",)
 
 
 def test_wick_intersection_ends_interaction_when_close_is_outside() -> None:

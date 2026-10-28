@@ -152,6 +152,8 @@ class SetupOpportunity:
     evidence_timeframe: str
     timeout_count: int = 0
     timeout_evidence_ids: tuple[str, ...] = ()
+    timeout_counted_source_ids: tuple[str, ...] = ()
+    timeout_counted_snapshot_ids: tuple[str, ...] = ()
     transitions: tuple["OpportunityTransition", ...] = ()
     template_id: str = ""
     policy_version: str = ""
@@ -319,16 +321,19 @@ class SetupOpportunity:
         token = evidence_id or at.isoformat()
         if token in self.timeout_evidence_ids:
             return self
+        source_ids = (*self.timeout_counted_source_ids, token)
         if at >= self.setup.expires_at:
             return replace(
                 self, status=OpportunityStatus.EXPIRED, timeout_count=self.timeout_count + 1,
                 timeout_evidence_ids=(*self.timeout_evidence_ids, token),
+                timeout_counted_source_ids=source_ids,
                 transitions=(*self.transitions, OpportunityTransition(
                     OpportunityStatus.EXPIRED, at, "evidence_timeout", (token,),
                 )),
             )
         return replace(self, timeout_count=self.timeout_count + 1,
-                       timeout_evidence_ids=(*self.timeout_evidence_ids, token))
+                       timeout_evidence_ids=(*self.timeout_evidence_ids, token),
+                       timeout_counted_source_ids=source_ids)
 
     def transition(
         self, status: OpportunityStatus, *, at: datetime, reason: str,
@@ -375,6 +380,8 @@ class SetupOpportunity:
             "evidence_timeframe": self.evidence_timeframe,
             "timeout_count": self.timeout_count,
             "timeout_evidence_ids": list(self.timeout_evidence_ids),
+            "timeout_counted_source_ids": list(self.timeout_counted_source_ids),
+            "timeout_counted_snapshot_ids": list(self.timeout_counted_snapshot_ids),
             "transitions": [
                 {
                     "status": item.status.value,
@@ -465,6 +472,10 @@ class SetupOpportunity:
             raise ValueError("opportunity snapshot contains duplicate timeout evidence")
         if timeout_count < len(timeout_evidence):
             raise ValueError("opportunity timeout count is below timeout evidence count")
+        timeout_sources = strings(raw.get("timeout_counted_source_ids", ()), "timeout_counted_source_ids")
+        timeout_snapshots = strings(raw.get("timeout_counted_snapshot_ids", ()), "timeout_counted_snapshot_ids")
+        if len(set(timeout_sources)) != len(timeout_sources) or len(set(timeout_snapshots)) != len(timeout_snapshots):
+            raise ValueError("opportunity snapshot contains duplicate timeout projection evidence")
         def context_ref(value: object) -> ContextVersionRef | None:
             if value is None:
                 return None
@@ -478,7 +489,7 @@ class SetupOpportunity:
             OpportunityStatus(str(raw["status"])),
             regime_version,
             str(raw["evidence_timeframe"]), timeout_count,
-            timeout_evidence, transitions,
+            timeout_evidence, timeout_sources, timeout_snapshots, transitions,
             str(raw.get("template_id", "")), str(raw.get("policy_version", "")),
             str(raw["context_relation"]) if raw.get("context_relation") is not None else None,
             str(raw["source_interaction_id"]) if raw.get("source_interaction_id") is not None else None,
