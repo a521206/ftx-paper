@@ -987,10 +987,6 @@ class OrderflowPolicy:
             for interaction in response_interactions:
                 if interaction.timeframe != self.config.response_timeframe:
                     continue
-                # Standalone VWAP interactions remain non-opportunity references;
-                # structural acceptance templates may use OR_VWAP stops.
-                if is_diagnostic_location(interaction.location_type):
-                    continue
                 response_observations = tuple(sorted((
                     item for item in observations
                     if item.timeframe == self.config.response_timeframe

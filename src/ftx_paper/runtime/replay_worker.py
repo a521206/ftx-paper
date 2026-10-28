@@ -1655,34 +1655,51 @@ class ReplayWorker:
     def _build_summary(
         events: list[dict[str, Any]], trades: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        def count_reason(
-            reason: str, *, identity_fields: tuple[str, ...], exclude_locations: frozenset[str] = frozenset(),
-        ) -> int:
+        def reason_identities(
+            reason: str, *, identity_fields: tuple[str, ...],
+        ) -> set[str]:
             identities = {
                 str(next((event.get(field) for field in identity_fields if event.get(field) is not None), index))
                 for index, event in enumerate(events)
                 if event.get("reason") == reason
-                and str(event.get("location", "")) not in exclude_locations
             }
-            return len(identities)
+            return identities
 
         futures = [trade for trade in trades if trade.get("vehicle") == "futures"]
         gross_pnl_rs = sum(float(trade.get("gross_pnl_rs") or 0.0) for trade in futures)
         risk_reward_values: list[float] = []
+        missing_initial_risk = 0
         for trade in futures:
             initial_risk_rs = float(trade.get("initial_risk_rs") or 0.0)
             if initial_risk_rs:
                 risk_reward_values.append(float(trade.get("gross_pnl_rs") or 0.0) / initial_risk_rs)
+            else:
+                missing_initial_risk += 1
+        setup_ids = reason_identities(
+            "setup_candidate_formed", identity_fields=("opportunity_id", "setup_id", "decision_id"),
+        )
+        all_interaction_ids = reason_identities(
+            "location_interaction_observed", identity_fields=("interaction_id",),
+        )
         return {
-            "setup_candidates": count_reason(
-                "setup_candidate_formed", identity_fields=("opportunity_id", "setup_id", "decision_id"),
-            ),
-            "location_interactions": count_reason(
-                "location_interaction_observed", identity_fields=("interaction_id",), exclude_locations=frozenset({"VWAP"}),
-            ),
+            "setup_candidates": len(setup_ids),
+            "location_interactions": len(all_interaction_ids),
             "entries_filled": len(futures),
             "gross_reward_points": gross_pnl_rs / NIFTY_LOT_SIZE,
             "achieved_risk_reward": round(sum(risk_reward_values), 5) if risk_reward_values else None,
+            "metric_lineage": {
+                "setup_candidate_event_count": sum(
+                    event.get("reason") == "setup_candidate_formed" for event in events
+                ),
+                "setup_candidate_unique_count": len(setup_ids),
+                "location_interaction_event_count": sum(
+                    event.get("reason") == "location_interaction_observed" for event in events
+                ),
+                "location_interaction_unique_count": len(all_interaction_ids),
+                "futures_trade_count": len(futures),
+                "futures_trades_missing_initial_risk": missing_initial_risk,
+                "risk_reward_component_count": len(risk_reward_values),
+            },
         }
 
     @staticmethod

@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from ftx_paper.contracts.replay import ReplayRequest, ReplayResult
+from ftx_paper.runtime.replay_worker import ReplayWorker
 
 
 def _request() -> dict[str, object]:
@@ -54,3 +55,34 @@ def test_replay_result_rejects_ambiguous_aliases() -> None:
     }
     with pytest.raises(ValueError, match="unsupported replay result fields"):
         ReplayResult.from_mapping(result)
+
+
+def test_replay_summary_exposes_metric_lineage_without_changing_canonical_counts() -> None:
+    events = [
+        {"reason": "setup_candidate_formed", "opportunity_id": "setup-1"},
+        {"reason": "setup_candidate_formed", "opportunity_id": "setup-1"},
+        {"reason": "location_interaction_observed", "interaction_id": "i-1", "location": "OR_HIGH"},
+        {"reason": "location_interaction_observed", "interaction_id": "i-2", "location": "VWAP"},
+        {"reason": "location_interaction_observed", "interaction_id": "i-3", "location": "vwap"},
+    ]
+    trades = [
+        {"vehicle": "futures", "gross_pnl_rs": 100.0, "initial_risk_rs": 50.0},
+        {"vehicle": "futures", "gross_pnl_rs": -25.0},
+        {"vehicle": "synthetic", "gross_pnl_rs": 999.0, "initial_risk_rs": 1.0},
+    ]
+
+    summary = ReplayWorker._build_summary(events, trades)
+
+    assert summary["setup_candidates"] == 1
+    assert summary["location_interactions"] == 3
+    assert summary["entries_filled"] == 2
+    assert summary["achieved_risk_reward"] == 2.0
+    assert summary["metric_lineage"] == {
+        "setup_candidate_event_count": 2,
+        "setup_candidate_unique_count": 1,
+        "location_interaction_event_count": 3,
+        "location_interaction_unique_count": 3,
+        "futures_trade_count": 2,
+        "futures_trades_missing_initial_risk": 1,
+        "risk_reward_component_count": 1,
+    }

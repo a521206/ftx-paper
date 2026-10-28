@@ -68,7 +68,9 @@ def run(base_url: str, *, timeout: float, interval: float) -> int:
         payload={
             "session_date": "2026-09-29",
             "strategy_id": "ftx-paper-orderflow",
-            "vehicles": ["futures", "synthetic"],
+            # The canonical strategy metrics are futures-owned.  Synthetic is a
+            # reporting projection and must not participate in reconciliation.
+            "vehicles": ["futures"],
             "mode": "replay",
             "include_parity_layers": False,
         },
@@ -95,6 +97,7 @@ def run(base_url: str, *, timeout: float, interval: float) -> int:
         raise RuntimeError("completed replay did not include result")
 
     actual = _actual_metrics(result)
+    summary = result.get("summary")
     failures: list[str] = []
     rows: list[list[str]] = []
     for name, expected in CANONICAL.items():
@@ -125,6 +128,11 @@ def run(base_url: str, *, timeout: float, interval: float) -> int:
     print(f"Orderflow replay regression: {outcome}")
     print(f"Run ID: {run_id}")
     print(tabulate(rows, headers=["Metric", "Expected", "Actual", "Delta", "Result"], tablefmt="grid"))
+    lineage = summary.get("metric_lineage") if isinstance(summary, Mapping) else None
+    if isinstance(lineage, Mapping):
+        print("Metric lineage:")
+        for name, value in lineage.items():
+            print(f"- {name}: {value}")
     if failures:
         print("Regression details:", file=sys.stderr)
         for failure in failures:
