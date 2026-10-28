@@ -34,12 +34,17 @@ class PaperExecutionCoordinator:
             ),
         )
         accepted: list[OrderIntent] = []
+        seen_ids: set[str] = set()
         claimed = {
             str(getattr(item, "execution_group_id"))
             for item in self.portfolio.positions.values()
             if getattr(item, "execution_group_id", None) is not None
         }
         for order in ranked:
+            if order.client_order_id in seen_ids:
+                self._denied[order.client_order_id] = "duplicate_proposal"
+                continue
+            seen_ids.add(order.client_order_id)
             group = execution_group or getattr(order, "execution_group_id", None)
             if order.role is not OrderRole.ENTRY:
                 accepted.append(order)

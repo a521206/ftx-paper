@@ -70,6 +70,16 @@ class ExecutionPhaseEvent:
     payload: Mapping[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class PendingExecution:
+    order: Any
+    available_at: str
+    reason: str
+
+    def is_due(self, observed_at: str) -> bool:
+        return _parse(observed_at) > _parse(self.available_at)
+
+
 class ExecutionLifecycleAdapter(Protocol):
     def reference_publication(self, turn: ExecutionTurn) -> Mapping[str, Any]: ...
     def existing_position_management(self, turn: ExecutionTurn) -> Mapping[str, Any]: ...
@@ -82,47 +92,42 @@ class ExecutionLifecycleAdapter(Protocol):
     def event_recording(self, turn: ExecutionTurn) -> Mapping[str, Any]: ...
 
 
-class FunctionLifecycleAdapter:
-    """Bind concrete phase operations for an owner without changing phase order."""
-
-    def __init__(self, operations: Mapping[str, Callable[[ExecutionTurn], Mapping[str, Any] | None]]) -> None:
-        self.operations = operations
-
-    def _run(self, phase: str, turn: ExecutionTurn) -> Mapping[str, Any]:
-        operation = self.operations.get(phase)
-        if operation is None:
-            return {}
-        result = operation(turn)
-        return dict(result) if result is not None else {}
-
-    def reference_publication(self, turn: ExecutionTurn) -> Mapping[str, Any]:
-        return self._run(ExecutionPhase.REFERENCE_PUBLICATION, turn)
-    def existing_position_management(self, turn: ExecutionTurn) -> Mapping[str, Any]:
-        return self._run(ExecutionPhase.EXISTING_POSITION_MANAGEMENT, turn)
-    def permission_and_gap(self, turn: ExecutionTurn) -> Mapping[str, Any]:
-        return self._run(ExecutionPhase.PERMISSION_AND_GAP, turn)
-    def interaction_advancement(self, turn: ExecutionTurn) -> Mapping[str, Any]:
-        return self._run(ExecutionPhase.INTERACTION_ADVANCEMENT, turn)
-    def opportunity_timeout(self, turn: ExecutionTurn) -> Mapping[str, Any]:
-        return self._run(ExecutionPhase.OPPORTUNITY_TIMEOUT, turn)
-    def opportunity_formation(self, turn: ExecutionTurn) -> Mapping[str, Any]:
-        return self._run(ExecutionPhase.OPPORTUNITY_FORMATION, turn)
-    def proposal_arbitration(self, turn: ExecutionTurn) -> Mapping[str, Any]:
-        return self._run(ExecutionPhase.PROPOSAL_ARBITRATION, turn)
-    def execution_settlement(self, turn: ExecutionTurn) -> Mapping[str, Any]:
-        return self._run(ExecutionPhase.EXECUTION_SETTLEMENT, turn)
-    def event_recording(self, turn: ExecutionTurn) -> Mapping[str, Any]:
-        return self._run(ExecutionPhase.EVENT_RECORDING, turn)
-
-
 class ExecutionLifecycleCoordinator:
     """Run one complete turn and retain only coordinator-owned lifecycle state."""
 
     def __init__(self) -> None:
-        self.pending_entries: list[Any] = []
-        self.pending_exits: list[Any] = []
+        self.pending_entries: dict[str, PendingExecution] = {}
+        self.pending_exits: dict[str, PendingExecution] = {}
         self.seen_fill_ids: set[str] = set()
         self.history: list[ExecutionPhaseEvent] = []
+
+    def defer_entry(self, order: Any, *, available_at: str, reason: str) -> None:
+        self._defer(self.pending_entries, order, available_at=available_at, reason=reason)
+
+    def due_entries(self, observed_at: str) -> tuple[Any, ...]:
+        return self._take_due(self.pending_entries, observed_at)
+
+    def defer_exit(self, order: Any, *, available_at: str, reason: str) -> None:
+        self._defer(self.pending_exits, order, available_at=available_at, reason=reason)
+
+    def due_exits(self, observed_at: str) -> tuple[Any, ...]:
+        return self._take_due(self.pending_exits, observed_at)
+
+    @staticmethod
+    def _defer(target: dict[str, PendingExecution], order: Any, *, available_at: str, reason: str) -> None:
+        order_id = str(order.client_order_id)
+        pending = PendingExecution(order, available_at, reason)
+        existing = target.get(order_id)
+        if existing is not None and existing != pending:
+            raise ValueError(f"pending order identity already exists: {order_id}")
+        target[order_id] = pending
+
+    @staticmethod
+    def _take_due(target: dict[str, PendingExecution], observed_at: str) -> tuple[Any, ...]:
+        due = tuple(item.order for item in target.values() if item.is_due(observed_at))
+        for order in due:
+            target.pop(str(order.client_order_id), None)
+        return due
 
     def apply_fill(self, fill_id: str, operation) -> Any:
         """Apply one fill exactly once and retain the idempotency key."""
@@ -132,27 +137,28 @@ class ExecutionLifecycleCoordinator:
         self.seen_fill_ids.add(fill_id)
         return result
 
-    def run(self, turn: ExecutionTurn, adapter: ExecutionLifecycleAdapter) -> tuple[ExecutionPhaseEvent, ...]:
-        operations = (
-            adapter.reference_publication,
-            adapter.existing_position_management,
-            adapter.permission_and_gap,
-            adapter.interaction_advancement,
-            adapter.opportunity_timeout,
-            adapter.opportunity_formation,
-            adapter.proposal_arbitration,
-            adapter.execution_settlement,
-            adapter.event_recording,
-        )
+    def run(
+        self,
+        turn: ExecutionTurn,
+        operations: Mapping[str, Callable[[ExecutionTurn], Mapping[str, Any] | None]],
+    ) -> tuple[ExecutionPhaseEvent, ...]:
+        missing = [phase for phase in EXECUTION_PHASES if phase not in operations]
+        extra = [phase for phase in operations if phase not in EXECUTION_PHASES]
+        if missing or extra:
+            raise ValueError(f"lifecycle operations must explicitly cover all phases; missing={missing}, extra={extra}")
         events: list[ExecutionPhaseEvent] = []
-        for sequence, (phase, operation) in enumerate(zip(EXECUTION_PHASES, operations, strict=True), start=len(self.history)):
+        for sequence, phase in enumerate(EXECUTION_PHASES, start=len(self.history)):
+            operation = operations[phase]
+            if not callable(operation):
+                raise TypeError(f"lifecycle operation {phase!r} is not callable")
+            result = operation(turn)
             events.append(ExecutionPhaseEvent(
                 turn.turn_id, turn.source, phase, sequence,
                 turn.observed_at, turn.available_at, turn.decision_at,
-                dict(operation(turn)),
+                dict(result) if result is not None else {},
             ))
         self.history.extend(events)
         return tuple(events)
 
 
-__all__ = ["EXECUTION_PHASES", "ExecutionPhase", "ExecutionLifecycleAdapter", "FunctionLifecycleAdapter", "ExecutionLifecycleCoordinator", "ExecutionPhaseEvent", "ExecutionTurn"]
+__all__ = ["EXECUTION_PHASES", "ExecutionPhase", "ExecutionLifecycleAdapter", "ExecutionLifecycleCoordinator", "ExecutionPhaseEvent", "ExecutionTurn", "PendingExecution"]

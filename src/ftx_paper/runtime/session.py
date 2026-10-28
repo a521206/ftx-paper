@@ -38,7 +38,6 @@ from ftx_paper.execution.lifecycle import (
     ExecutionLifecycleCoordinator,
     ExecutionPhase,
     ExecutionTurn,
-    FunctionLifecycleAdapter,
 )
 
 
@@ -703,7 +702,7 @@ class RuntimeSession:
                         }, f"order_suppressed:{bundle.trading_date}:{order.client_order_id}", timestamp=timestamp)
                     else:
                         futures_bar = bundle.bars.get(MarketRole.FUTURES)
-                        self.execute_order(order, session_date=bundle.trading_date,
+                        self._settle_live_order(order, session_date=bundle.trading_date,
                                                    timestamp=timestamp,
                                                    reference_price=futures_bar.close if isinstance(futures_bar, MarketBar) else None)
                 return {"executed": len(selected)}
@@ -744,6 +743,11 @@ class RuntimeSession:
             payload={"bundle_id": bundle.bundle_id},
         )
         operations = {
+            ExecutionPhase.REFERENCE_PUBLICATION: lambda _turn: {},
+            ExecutionPhase.EXISTING_POSITION_MANAGEMENT: lambda _turn: {},
+            ExecutionPhase.PERMISSION_AND_GAP: lambda _turn: {},
+            ExecutionPhase.INTERACTION_ADVANCEMENT: lambda _turn: {},
+            ExecutionPhase.OPPORTUNITY_TIMEOUT: lambda _turn: {},
             ExecutionPhase.OPPORTUNITY_FORMATION: form_opportunity,
             ExecutionPhase.PROPOSAL_ARBITRATION: arbitrate,
             ExecutionPhase.EXECUTION_SETTLEMENT: execute,
@@ -751,9 +755,9 @@ class RuntimeSession:
         }
         if existing_handler is not None:
             operations[ExecutionPhase.EXISTING_POSITION_MANAGEMENT] = existing_handler
-        self.lifecycle.run(turn, FunctionLifecycleAdapter(operations))
+        self.lifecycle.run(turn, operations)
 
-    def execute_order(self, order, *, session_date: str | None = None,
+    def _settle_live_order(self, order, *, session_date: str | None = None,
                              timestamp: str | None = None,
                              reference_price: float | None = None) -> bool:
         self._last_execution_fill = None
@@ -1179,7 +1183,7 @@ class RuntimeSession:
                     expiry_dates=tuple(str(item) for item in getattr(strategy, "expiry_dates", ())),
                 )
             def execute_exit(action):
-                return self.execute_order(
+                return self._settle_live_order(
                     action.intent,
                     session_date=bar.timestamp.astimezone(IST).date().isoformat(),
                     timestamp=bar.timestamp.isoformat(),
@@ -1284,11 +1288,17 @@ class RuntimeSession:
                     evidence=(bar,),
                 )
                 self.lifecycle.run(
-                    turn,
-                    FunctionLifecycleAdapter({
+                    turn, {
+                        ExecutionPhase.REFERENCE_PUBLICATION: lambda _turn: {},
+                        ExecutionPhase.PERMISSION_AND_GAP: lambda _turn: {},
+                        ExecutionPhase.INTERACTION_ADVANCEMENT: lambda _turn: {},
+                        ExecutionPhase.OPPORTUNITY_TIMEOUT: lambda _turn: {},
+                        ExecutionPhase.OPPORTUNITY_FORMATION: lambda _turn: {},
+                        ExecutionPhase.PROPOSAL_ARBITRATION: lambda _turn: {},
+                        ExecutionPhase.EXECUTION_SETTLEMENT: lambda _turn: {},
                         ExecutionPhase.EXISTING_POSITION_MANAGEMENT: manage_existing,
                         ExecutionPhase.EVENT_RECORDING: record_exit_events,
-                    }),
+                    },
                 )
             self._refresh_pending_status()
 
@@ -1349,7 +1359,7 @@ class RuntimeSession:
                     )
                     return {"failed": True}
                 for action in actions:
-                    filled = self.execute_order(
+                    filled = self._settle_live_order(
                         action.intent,
                         session_date=bar.timestamp.astimezone(IST).date().isoformat(),
                         timestamp=bar.timestamp.isoformat(),
@@ -1388,10 +1398,17 @@ class RuntimeSession:
                     decision_at=bar.timestamp.isoformat(),
                     evidence=(bar,),
                 ),
-                FunctionLifecycleAdapter({
+                {
+                    ExecutionPhase.REFERENCE_PUBLICATION: lambda _turn: {},
+                    ExecutionPhase.PERMISSION_AND_GAP: lambda _turn: {},
+                    ExecutionPhase.INTERACTION_ADVANCEMENT: lambda _turn: {},
+                    ExecutionPhase.OPPORTUNITY_TIMEOUT: lambda _turn: {},
+                    ExecutionPhase.OPPORTUNITY_FORMATION: lambda _turn: {},
+                    ExecutionPhase.PROPOSAL_ARBITRATION: lambda _turn: {},
+                    ExecutionPhase.EXECUTION_SETTLEMENT: lambda _turn: {},
                     ExecutionPhase.EXISTING_POSITION_MANAGEMENT: manage_tick,
                     ExecutionPhase.EVENT_RECORDING: record_tick_events,
-                }),
+                },
             )
 
     def _record_incomplete(self, bundle) -> None:
