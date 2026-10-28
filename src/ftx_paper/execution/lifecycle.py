@@ -52,8 +52,10 @@ class ExecutionTurn:
 
     def __post_init__(self) -> None:
         observed, available, decision = map(_parse, (self.observed_at, self.available_at, self.decision_at))
-        if observed > available or available > decision:
-            raise ValueError("execution timestamps must satisfy observed_at <= available_at <= decision_at")
+        if observed > available:
+            raise ValueError("execution availability cannot precede observation")
+        if available > decision:
+            raise ValueError("execution decision cannot precede availability")
         if self.source not in {"live", "replay"}:
             raise ValueError("execution source must be live or replay")
 

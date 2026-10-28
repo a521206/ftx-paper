@@ -39,11 +39,19 @@ def test_lifecycle_runs_all_phases_once_in_order() -> None:
     assert seen == list(EXECUTION_PHASES)
 
 
-def test_turn_requires_causal_timestamp_order() -> None:
-    with pytest.raises(ValueError, match="timestamps"):
+def test_turn_rejects_availability_before_observation() -> None:
+    with pytest.raises(ValueError, match="execution availability cannot precede observation"):
         ExecutionTurn(
             "invalid", "replay", "2026-10-28T09:20:00+05:30",
             "2026-10-28T09:19:00+05:30", "2026-10-28T09:19:00+05:30",
+        )
+
+
+def test_turn_rejects_decision_before_availability() -> None:
+    with pytest.raises(ValueError, match="execution decision cannot precede availability"):
+        ExecutionTurn(
+            "invalid", "replay", "2026-10-28T09:15:00+05:30",
+            "2026-10-28T09:20:00+05:30", "2026-10-28T09:19:00+05:30",
         )
 
 

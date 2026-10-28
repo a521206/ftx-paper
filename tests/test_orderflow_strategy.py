@@ -326,6 +326,10 @@ def test_diagnostic_and_executable_projections_share_decisions_but_not_orders() 
     ]
     assert all(item.order is None for item in diagnostic_events)
     assert sum(item.order is not None for item in executable_events) == 1
+    diagnostic_groups = cast(dict[str, object], diagnostic.policy.snapshot()["execution_groups"])
+    executable_groups = cast(dict[str, object], executable.policy.snapshot()["execution_groups"])
+    assert cast(list[object], diagnostic_groups["claims"]) == []
+    assert len(cast(list[object], executable_groups["claims"])) == 1
 
 
 def test_executable_orderflow_does_not_duplicate_entry_on_replay() -> None:

@@ -1086,27 +1086,6 @@ class OrderflowPolicy:
                             "observed_at": formed_at.isoformat(),
                             "available_at": formed_at.isoformat(),
                         }))
-                        claim = self._execution_groups.claim(
-                            opportunity.execution_group_id,
-                            opportunity.lifecycle_id,
-                            evidence_ids=evidence_ids,
-                        )
-                        if not claim.accepted:
-                            results.append(PolicyDecision({
-                                **base,
-                                "decision_stage": "opportunity",
-                                "outcome": "rejected",
-                                "reason": claim.reason,
-                                "decision_id": _decision_id(
-                                    "opportunity_denied", opportunity.lifecycle_id,
-                                    opportunity.execution_group_id, *claim.evidence_ids,
-                                ),
-                                "opportunity_id": opportunity.lifecycle_id,
-                                "setup_id": opportunity.setup.setup_id,
-                                "execution_group_id": opportunity.execution_group_id,
-                                "source_observation_ids": list(claim.evidence_ids),
-                            }))
-                            continue
                         trigger_observation = next(
                             (
                                 item for item in response_observations
@@ -1135,9 +1114,30 @@ class OrderflowPolicy:
                         )
                         accepted = (
                             admission.status.value == "PASSED"
-                            and claim.accepted
                             and (self.execution_mode is not ExecutionMode.EXECUTABLE or trigger.eligible)
                         )
+                        if accepted and self.execution_mode is ExecutionMode.EXECUTABLE:
+                            claim = self._execution_groups.claim(
+                                opportunity.execution_group_id,
+                                opportunity.lifecycle_id,
+                                evidence_ids=evidence_ids,
+                            )
+                            if not claim.accepted:
+                                results.append(PolicyDecision({
+                                    **base,
+                                    "decision_stage": "opportunity",
+                                    "outcome": "rejected",
+                                    "reason": claim.reason,
+                                    "decision_id": _decision_id(
+                                        "opportunity_denied", opportunity.lifecycle_id,
+                                        opportunity.execution_group_id, *claim.evidence_ids,
+                                    ),
+                                    "opportunity_id": opportunity.lifecycle_id,
+                                    "setup_id": opportunity.setup.setup_id,
+                                    "execution_group_id": opportunity.execution_group_id,
+                                    "source_observation_ids": list(claim.evidence_ids),
+                                }))
+                                continue
                         order = None
                         if accepted and self.execution_mode is ExecutionMode.EXECUTABLE:
                             instrument = futures.instrument if futures is not None else next(

@@ -790,8 +790,13 @@ class ReplayWorker:
                                 action.reason, exit_price=synthetic_exit_quote.price,
                                 trade=synthetic_trade,
                             )
+                    settlement = None
                     if action.intent.vehicle == "futures":
-                        self.lifecycle.apply_fill(
+                        had_reservation = (
+                            action.intent.entry_order_id in portfolio.reservations
+                            if action.intent.entry_order_id is not None else False
+                        )
+                        settlement = self.lifecycle.apply_fill(
                             action.intent.client_order_id,
                             lambda: coordinator.fill(
                                 action.intent, price=exit_price,
@@ -799,6 +804,24 @@ class ReplayWorker:
                                 cost=_execution_cost(open_trade),
                             ),
                         )
+                        if isinstance(settlement, Mapping):
+                            ledger_records.append({
+                                "event_type": "EXIT_SETTLEMENT", "kind": "exit_settlement",
+                                "decision_id": action.intent.client_order_id,
+                                "timestamp": futures_bar.timestamp.isoformat(),
+                                "quantity": action.intent.quantity,
+                                "gross_pnl": settlement.get("gross_pnl"),
+                                "costs": settlement.get("costs"),
+                                "net_pnl": settlement.get("net_pnl"),
+                            })
+                            if had_reservation:
+                                ledger_records.append({
+                                    "event_type": "RESERVATION_RELEASE", "kind": "reservation_release",
+                                    "decision_id": action.intent.client_order_id,
+                                    "entry_order_id": action.intent.entry_order_id,
+                                    "timestamp": futures_bar.timestamp.isoformat(),
+                                    "quantity": action.intent.quantity,
+                                })
                     all_events.append({"event_type": "FILL", "decision_id": action.intent.client_order_id,
                                        "client_order_id": action.intent.client_order_id,
                                        "fill_timestamp": futures_bar.timestamp.isoformat(), "price": exit_price,
@@ -927,8 +950,25 @@ class ReplayWorker:
                                  "client_order_id": order.client_order_id, "fill_id": fill_id,
                                  "fill_timestamp": futures_bar.timestamp.isoformat(), "price": fill_price,
                                  "quantity": order.quantity, "vehicle": order.vehicle,
-                                 "source": "replay", "session_date": date},
+                                  "source": "replay", "session_date": date},
                             ))
+                            if order.vehicle == "futures":
+                                ledger_records.extend((
+                                    {"event_type": "RESERVATION", "kind": "reservation",
+                                     "decision_id": order.client_order_id,
+                                     "timestamp": futures_bar.timestamp.isoformat(),
+                                     "quantity": order.quantity, "vehicle": order.vehicle},
+                                    {"event_type": "AUTHORIZATION", "kind": "authorization",
+                                     "decision_id": order.client_order_id,
+                                     "timestamp": futures_bar.timestamp.isoformat(),
+                                     "quantity": order.quantity, "vehicle": order.vehicle},
+                                ))
+                            ledger_records.append({
+                                "event_type": "FILL", "kind": "fill",
+                                "decision_id": order.client_order_id,
+                                "timestamp": futures_bar.timestamp.isoformat(),
+                                "quantity": order.quantity, "price": fill_price,
+                            })
                             engine.on_execution_event(ExecutionNotification(
                                 event_type="FILLED", client_order_id=order.client_order_id,
                                 status="FILLED", quantity=order.quantity, filled_quantity=order.quantity,
@@ -951,6 +991,10 @@ class ReplayWorker:
                                 engine.settle_exit(order.client_order_id, filled=False)
                                 continue
                             exit_price = futures_bar.close
+                            had_reservation = (
+                                order.entry_order_id in portfolio.reservations
+                                if order.entry_order_id is not None else False
+                            )
                             settlement = self.lifecycle.apply_fill(
                                 f"replay-exit:{order.client_order_id}:{futures_bar.timestamp.isoformat()}",
                                 lambda: coordinator.fill(order, price=exit_price,
@@ -973,8 +1017,27 @@ class ReplayWorker:
                                  "client_order_id": order.client_order_id, "fill_timestamp": futures_bar.timestamp.isoformat(),
                                  "price": exit_price, "quantity": order.quantity, "source": "replay", "session_date": date},
                                 {"event_type": "SETTLEMENT", "decision_id": order.client_order_id,
-                                 "timestamp": futures_bar.timestamp.isoformat(), "source": "replay", "session_date": date},
+                                  "timestamp": futures_bar.timestamp.isoformat(), "source": "replay", "session_date": date},
                             ))
+                            if settlement is not None:
+                                settlement_values = settlement if isinstance(settlement, Mapping) else {}
+                                ledger_records.append({
+                                    "event_type": "EXIT_SETTLEMENT", "kind": "exit_settlement",
+                                    "decision_id": order.client_order_id,
+                                    "timestamp": futures_bar.timestamp.isoformat(),
+                                    "quantity": order.quantity,
+                                    "gross_pnl": settlement_values.get("gross_pnl"),
+                                    "costs": settlement_values.get("costs"),
+                                    "net_pnl": settlement_values.get("net_pnl"),
+                                })
+                                if had_reservation:
+                                    ledger_records.append({
+                                        "event_type": "RESERVATION_RELEASE", "kind": "reservation_release",
+                                        "decision_id": order.client_order_id,
+                                        "entry_order_id": order.entry_order_id,
+                                        "timestamp": futures_bar.timestamp.isoformat(),
+                                        "quantity": order.quantity,
+                                    })
                             engine.on_execution_event(ExecutionNotification(
                                 event_type="FILLED", client_order_id=order.client_order_id,
                                 status="FILLED", quantity=order.quantity, filled_quantity=order.quantity,
