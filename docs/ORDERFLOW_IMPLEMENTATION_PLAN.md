@@ -77,6 +77,50 @@ Implementation must stop rather than extend a contract when the mapping cannot
 be completed. Record the gap as unavailable and defer it for an explicit scope
 decision; do not resolve it with a speculative helper or convenience property.
 
+### Minimal Delivery Scope
+
+The implementation is intentionally minimal. A requirement is included in the
+current delivery only when it protects causal correctness, Paper execution
+safety, deterministic replay, or the existing audit/accounting contract.
+
+#### Required Now
+
+- One live path through `RuntimeSession`, `PaperEngine`, `OrderflowPolicy`, and
+  the existing execution owner.
+- One replay path through the existing replay worker and `ReplayMachine`.
+- Completed-evidence availability, source identity, deterministic decisions, and
+  no future-data leakage.
+- Diagnostic mode with zero execution or portfolio mutation.
+- Explicit opt-in executable mode using existing Paper orders, reservations,
+  fills, exits, settlement, and ledger state.
+- Production-path tests for next-available-bar timing, existing-position
+  management, duplicate/idempotent fills, and diagnostic immutability.
+
+#### Required Before Executable Release
+
+- Paired replay checks for decisions, accepted orders, fills, exits, settlement,
+  and ledger results.
+- Reference replacement and permission changes visible before same-timestamp
+  execution.
+- Undefined canonical behavior retained as unavailable rather than inferred.
+
+#### Deferred Unless Required By A Failing Contract
+
+- New generic strategy abstractions or parallel lifecycle owners.
+- Exhaustive intermediate-object IDs or provenance fields that are not persisted,
+  compared, or required for a decision.
+- Generic live reporting envelopes, multi-session aggregation, and presentation
+  projections.
+- Cross-producer parity artifacts and comparator enhancements. Those remain
+  separate deliverables and must not block the Paper live/replay path.
+- Full-capture detail beyond what changes calculations, availability, decisions,
+  execution, or accounting.
+
+Deferred work must not be implemented speculatively. It becomes active only when
+an existing contract, a production failure, or an explicit scope decision
+requires it. When requirements conflict, this minimal scope takes precedence
+over completeness or generality.
+
 While implementation is in progress, `OrderflowConfig.execution_mode` remains
 diagnostic. Diagnostic processing must create zero executable entries, stops,
 exits, fills, reservations, or portfolio mutations. An explicit opt-in
