@@ -25,12 +25,12 @@ def test_session_date_normalization_uses_ist_for_timestamps() -> None:
         normalize_session_date(datetime(2026, 1, 1))
 
 
-def test_prepare_rejects_mixed_contracts_without_explicit_selection() -> None:
+def test_prepare_requires_resolved_contract_selection() -> None:
     selected = [_bar("NIFTY26JAN", index) for index in range(2)]
     rejected = [_bar("NIFTY26FEB", index, expiry="2026-02-26") for index in range(2)]
 
-    with pytest.raises(ValueError, match="mixed futures source identities"):
-        prepare_replay_input([*rejected, *selected], "2026-01-01")
+    with pytest.raises(ValueError, match="source must be resolved"):
+        prepare_replay_input([*selected, *rejected], "2026-01-01")
 
 
 def test_prepare_allows_explicit_source_contract_selection() -> None:
@@ -66,7 +66,9 @@ def test_prepare_ignores_irrelevant_instrument_ordering() -> None:
         datetime(2026, 1, 1, 3, 46, tzinfo=timezone.utc),
         100.0, 101.0, 99.0, 100.0, 10.0,
     )
-    replay = prepare_replay_input([valid, irrelevant, irrelevant], "2026-01-01")
+    replay = prepare_replay_input(
+        [valid, irrelevant, irrelevant], "2026-01-01", replayed_session=True,
+    )
     assert replay.replayed
 
 
@@ -113,3 +115,34 @@ def test_out_of_session_rows_cannot_change_selected_source_validation_or_fingerp
 
     assert with_extra.rows == baseline.rows
     assert with_extra.metadata.source_fingerprint == baseline.metadata.source_fingerprint
+
+
+def test_continuous_input_preserves_resolver_identity() -> None:
+    replay = prepare_replay_input(
+        [_bar("NIFTY26JAN", 0)], "2026-01-01", selection_rule="continuous_identity",
+        source_contract="2026-01-29",
+    )
+
+    assert replay.rows[0].instrument.symbol == "NIFTY26JAN"
+    assert replay.rows[0].instrument.expiry == "2026-01-29"
+
+
+def test_resolver_provenance_keeps_storage_candidates_separate() -> None:
+    replay = prepare_replay_input(
+        [_bar("NIFTY", 0, expiry=None)], "2026-01-01",
+        selection_rule="continuous_identity", replayed_session=True,
+        source_provenance={
+            "storage_identity": {"symbol": "NIFTY26JAN", "expiry": "2026-01-29"},
+            "eligible_contracts": [{"symbol": "NIFTY26JAN", "expiry": "2026-01-29"}],
+            "rejected_contracts": [{
+                "symbol": "NIFTY26FEB", "expiry": "2026-02-26",
+                "reason": "rollover_not_selected",
+            }],
+        },
+    )
+
+    assert replay.metadata.selected_candidates == ("NIFTY|NSE|FUTURES|||",)
+    assert replay.metadata.storage_selected_candidates == ("NIFTY26JAN|2026-01-29",)
+    assert replay.metadata.storage_rejected_candidates == (
+        "NIFTY26FEB|2026-02-26|rollover_not_selected",
+    )

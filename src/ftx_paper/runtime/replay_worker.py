@@ -510,13 +510,10 @@ class ReplayWorker:
                     date,
                     session_partition="09:15-15:30",
                     selection_rule="continuous_identity",
-                    source_fingerprint_value=(
-                        getattr(futures_source, "source_fingerprint", None)
-                        if futures_source is not None else None
-                    ),
                     source_provenance=(
                         futures_source.provenance() if futures_source is not None else None
                     ),
+                    replayed_session=True,
                 )
                 replay_machine = ReplayMachine(
                     observe_market(replay_input),
@@ -1940,6 +1937,15 @@ class ReplayWorker:
                     and str(row.get("expiry", ""))[:10] == futures_source.expiry
                 )
             ]
+        selected_futures_timestamps = [
+            datetime.fromisoformat(str(row["minute"]))
+            for row in loaded_rows
+            if str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
+        ]
+        if any(left >= right for left, right in zip(
+            selected_futures_timestamps, selected_futures_timestamps[1:],
+        )):
+            raise ValueError("futures source rows must be strictly chronological")
         bars = []
         for row in loaded_rows:
             instrument_type = str(row.get("instrument_type", "")).upper()

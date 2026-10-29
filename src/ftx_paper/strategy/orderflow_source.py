@@ -11,7 +11,7 @@ from datetime import date, datetime, time
 import hashlib
 import json
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
 from ftx_paper.config import IST
 from ftx_paper.contracts import MarketBar, normalize_exchange_timestamp
@@ -59,6 +59,9 @@ class OrderflowSourceMetadata:
     discarded_session_dates: tuple[str, ...] = ()
     timestamp_convention: str = "1m label; completed at next minute; Asia/Kolkata"
     rollover_policy_version: str = "dated-nearest-expiry-v1"
+    storage_selected_candidates: tuple[str, ...] = ()
+    storage_eligible_candidates: tuple[str, ...] = ()
+    storage_rejected_candidates: tuple[str, ...] = ()
 
     @property
     def identity(self) -> SourceIdentity:
@@ -141,6 +144,35 @@ def source_fingerprint(rows: Sequence[MarketBar]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _storage_candidates(
+    provenance: Mapping[str, object] | None,
+ ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """Project resolver candidate diagnostics without changing namespaces."""
+    if provenance is None:
+        return (), (), ()
+    raw_eligible = provenance.get("eligible_contracts")
+    eligible: list[str] = []
+    if isinstance(raw_eligible, (tuple, list)):
+        for item in raw_eligible:
+            if isinstance(item, Mapping):
+                eligible.append(f"{item.get('symbol', '')}|{item.get('expiry', '')}")
+    raw_rejected = provenance.get("rejected_contracts")
+    rejected: list[str] = []
+    if isinstance(raw_rejected, (tuple, list)):
+        for item in raw_rejected:
+            if isinstance(item, Mapping) and item.get("symbol"):
+                rejected.append("|".join((
+                    str(item.get("symbol", "")),
+                    str(item.get("expiry", "")),
+                    str(item.get("reason", "")),
+                )))
+    selected = ()
+    storage = provenance.get("storage_identity")
+    if isinstance(storage, Mapping):
+        selected = (f"{storage.get('symbol', '')}|{storage.get('expiry', '')}",)
+    return tuple(sorted(set(selected))), tuple(sorted(set(eligible))), tuple(sorted(set(rejected)))
+
+
 def prepare_replay_input(
     rows: Iterable[MarketBar],
     requested_date: date | datetime | str,
@@ -150,12 +182,10 @@ def prepare_replay_input(
     source_contract: str | None = None,
     underlying: str | None = None,
     selection_rule: str = "dated_nearest_expiry",
+    source_provenance: Mapping[str, object] | None = None,
+    replayed_session: bool = False,
 ) -> OrderflowReplayInput:
-    """Select and validate one deterministic futures source for a session.
-
-    Rows are never mixed across contracts.  When multiple dated contracts are
-    supplied, callers must explicitly select the source contract.
-    """
+    """Validate a resolver-selected futures source for one replay session."""
     requested = normalize_session_date(requested_date)
     if selection_rule not in {"dated_nearest_expiry", "continuous_identity"}:
         raise ValueError("selection_rule must be dated_nearest_expiry or continuous_identity")
@@ -172,8 +202,12 @@ def prepare_replay_input(
     if start >= end:
         raise ValueError("session_partition must be a same-day increasing time range")
     all_rows = tuple(rows)
-    all_dates = tuple(sorted({_session_minute(row.timestamp)[0] for row in all_rows}))
-    normalized = tuple(row for row in all_rows if _session_minute(row.timestamp)[0] == requested)
+    row_info = tuple(
+        (row, _session_minute(row.timestamp), normalize_exchange_timestamp(row.timestamp))
+        for row in all_rows
+    )
+    all_dates = tuple(sorted({session_date for _, (session_date, _), _ in row_info}))
+    normalized = tuple(row for row, (session_date, _), _ in row_info if session_date == requested)
     discarded_dates = tuple(item for item in all_dates if item != requested)
     if vehicle != "futures":
         raise ValueError("orderflow replay currently supports futures only")
@@ -190,20 +224,30 @@ def prepare_replay_input(
         for row in eligible_rows
         if selected_underlying is None or _underlying(row) == selected_underlying
     }
-    # Validate only the selected session window; out-of-session rows are not
-    # part of the source stream used for aggregation or identity validation.
-    for identity in candidates:
-        candidate_rows = [
-            row for row in normalized
-            if _identity(row) == identity
-            and start <= normalize_exchange_timestamp(row.timestamp).astimezone(IST).time().replace(tzinfo=None) < end
-        ]
-        timestamps = [normalize_exchange_timestamp(row.timestamp) for row in candidate_rows]
-        if any(left >= right for left, right in zip(timestamps, timestamps[1:])):
+    # Validate the supplied stream once before selecting a source. This keeps
+    # rejected candidates auditable without allowing malformed rows to affect
+    # the selected replay.
+    previous_timestamps: dict[str, datetime] = {}
+    seen_keys: set[tuple[str, str, str]] = set()
+    validation_rows = (
+        (row, session_minute, timestamp)
+        for row, session_minute, timestamp in row_info
+        if session_minute[0] == requested
+        and selected_underlying is not None
+        and _underlying(row) == selected_underlying
+        and row.instrument.instrument_type.upper() in {"FUTURES", "FUT", "FUTURE"}
+        and start <= timestamp.astimezone(IST).time().replace(tzinfo=None) < end
+    )
+    for row, (session, minute), timestamp in validation_rows:
+        identity = _identity(row)
+        key = (session, minute, identity)
+        previous_timestamp = previous_timestamps.get(identity)
+        if previous_timestamp is not None and timestamp <= previous_timestamp:
             raise ValueError("orderflow source rows must be strictly chronological")
-        minute_keys = [_session_minute(row.timestamp) for row in candidate_rows]
-        if len(minute_keys) != len(set(minute_keys)):
+        if key in seen_keys:
             raise ValueError("orderflow source rows must have unique session minutes")
+        previous_timestamps[identity] = timestamp
+        seen_keys.add(key)
     if not candidates:
         if normalized:
             raise ValueError("requested replay contains no eligible futures source")
@@ -220,24 +264,28 @@ def prepare_replay_input(
         )
         return OrderflowReplayInput(requested, requested, (), metadata, False, (), ())
     if source_contract is not None:
-        matching = [identity for identity, instrument in candidates.items() if instrument.expiry == source_contract]
+        matching = [
+            identity for identity, instrument in candidates.items()
+            if instrument.expiry == source_contract
+            or (instrument.expiry is None and len(candidates) == 1)
+        ]
         if not matching:
             raise ValueError(f"requested source contract is unavailable: {source_contract!r}")
         if len(matching) != 1:
             raise ValueError(f"requested source contract is ambiguous: {source_contract!r}")
         selected_identity = matching[0]
-    else:
-        if len(candidates) > 1:
-            raise ValueError(
-                "mixed futures source identities require explicit source_contract"
-            )
+    elif len(candidates) == 1:
         selected_identity = next(iter(candidates))
+    else:
+        raise ValueError("source must be resolved before replay input preparation")
     selected = tuple(
         row for row in normalized
         if _identity(row) == selected_identity
         and start <= normalize_exchange_timestamp(row.timestamp).astimezone(IST).time().replace(tzinfo=None) < end
     )
+    strategy_identity = _identity(selected[0]) if selected else selected_identity
     rejected = tuple(sorted(identity for identity in candidates if identity != selected_identity))
+    storage_selected, storage_eligible, storage_rejected = _storage_candidates(source_provenance)
     instrument = candidates[selected_identity]
     selected_minutes = [
         normalize_exchange_timestamp(row.timestamp).astimezone(IST).replace(second=0, microsecond=0)
@@ -245,11 +293,15 @@ def prepare_replay_input(
     ]
     expected_minutes = int((datetime.combine(date.min, end) - datetime.combine(date.min, start)).total_seconds() // 60)
     missing_minute_count = max(0, expected_minutes - len(set(selected_minutes)))
+    resolved_source_contract = instrument.expiry
+    if resolved_source_contract is None and source_provenance is not None:
+        raw_expiry = source_provenance.get("source_contract_expiry")
+        resolved_source_contract = str(raw_expiry) if raw_expiry else None
     metadata = OrderflowSourceMetadata(
         source_fingerprint=source_fingerprint(selected), session_date=requested,
         timezone="Asia/Kolkata", session_partition=session_partition,
-        vehicle=vehicle, instrument_identity=selected_identity,
-        source_contract=instrument.expiry, row_count=len(selected), ordered=True,
+        vehicle=vehicle, instrument_identity=strategy_identity,
+        source_contract=resolved_source_contract, row_count=len(selected), ordered=True,
         rejected_rollover_candidates=rejected,
         ordered_unique_minute=len(selected_minutes) == len(set(selected_minutes)),
         missing_minute_count=missing_minute_count,
@@ -257,14 +309,20 @@ def prepare_replay_input(
         eligible_candidates=tuple(sorted(candidates)),
         rejected_candidates=rejected,
         selection_rule=selection_rule,
-        rollover_policy_version=rollover_policy_version,
+        rollover_policy_version=str(
+            (source_provenance or {}).get("rollover_policy_version", rollover_policy_version),
+        ),
         available_session_dates=all_dates,
         discarded_session_dates=discarded_dates,
+        storage_selected_candidates=storage_selected,
+        storage_eligible_candidates=storage_eligible,
+        storage_rejected_candidates=storage_rejected,
     )
-    selected_sessions = (requested,) if candidates else ()
-    replayed_sessions = (requested,) if selected else ()
+    selected_sessions = (requested,) if selected else ()
+    was_replayed = replayed_session and bool(selected)
+    replayed_sessions = (requested,) if was_replayed else ()
     return OrderflowReplayInput(
-        requested, requested, selected, metadata, bool(selected),
+        requested, requested, selected, metadata, was_replayed,
         selected_sessions, replayed_sessions,
     )
 
