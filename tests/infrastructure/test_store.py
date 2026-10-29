@@ -44,12 +44,31 @@ def test_runtime_store_round_trips_market_bars(tmp_path):
     assert store.read_market_dates() == ["2026-01-05"]
 
 
+def test_runtime_store_canonicalizes_index_exchange_and_rejects_bad_vix(tmp_path):
+    store = RuntimeStore(tmp_path)
+    timestamp = datetime(2026, 10, 6, 4, 0, tzinfo=ZoneInfo("UTC"))
+    store.append_market_bars((
+        MarketBar(Instrument("India VIX", "NSE", "INDEX"), timestamp, 13, 14, 12, 13.5),
+        MarketBar(Instrument("India VIX", "NSE_INDEX", "INDEX"), timestamp, 13, 14, 12, 13.5),
+    ), source="fixture")
+
+    rows = store.read_market_bars("2026-10-06")
+    assert len(rows) == 1
+    assert rows[0]["exchange"] == "NSE_INDEX"
+    assert store.read_market_coverage("2026-10-06")["rows"][0]["bars"] == 1
+
+    with pytest.raises(ValueError, match="implausibly high"):
+        store.append_market_bars((
+            MarketBar(Instrument("India VIX", "NSE", "INDEX"), timestamp, 54900, 54900, 54900, 54900),
+        ), source="fixture")
+
+
 def test_runtime_store_keeps_same_minute_contract_bars_separate(tmp_path):
     store = RuntimeStore(tmp_path)
     timestamp = datetime(2026, 9, 29, 4, 0, tzinfo=ZoneInfo("UTC"))
     store.append_market_bars((
-        MarketBar(Instrument("NIFTYFUT", "NFO", "FUTURES", "2026-09-29"), timestamp, 1, 2, 0, 1),
-        MarketBar(Instrument("NIFTYFUT", "NFO", "FUTURES", "2026-10-27"), timestamp, 3, 4, 2, 3),
+            MarketBar(Instrument("NIFTYFUT", "NFO", "FUTURES", "2026-09-29"), timestamp, 1, 2, 0.5, 1),
+            MarketBar(Instrument("NIFTYFUT", "NFO", "FUTURES", "2026-10-27"), timestamp, 3, 4, 2, 3),
     ), source="fixture")
 
     rows = store.read_market_bars("2026-09-29")

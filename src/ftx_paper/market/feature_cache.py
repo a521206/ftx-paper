@@ -24,16 +24,22 @@ if TYPE_CHECKING:
 FEATURE_CALCULATOR_VERSION = "live-features-v1"
 ORDERFLOW_DAILY_ATR_FEATURE_SET = "orderflow_daily_atr_v1"
 ORDERFLOW_DAILY_ATR_CALCULATOR_VERSION = "ftx-paper-orderflow-daily-atr-v1"
+DAILY_ATR_FEATURE_SET = "daily_atr_v1"
+DAILY_ATR_CALCULATOR_VERSION = "ftx-paper-daily-atr-v1"
 
 
-def build_orderflow_daily_atr_snapshot(
+def _build_daily_atr_snapshot(
     session_date: str,
     sessions: Sequence[tuple[str, Sequence[Mapping[str, object]]]],
     *,
     window: int = 14,
+    session_end_minute: str = "15:30",
+    feature_set: str,
+    calculator_version: str,
+    feature_parameters: tuple[tuple[str, str], ...],
     computed_at: datetime | None = None,
 ) -> "FeatureSnapshot":
-    """Build Paper's prior-session ATR artifact from normalized daily bars.
+    """Build one Paper-owned prior-session ATR artifact.
 
     ``sessions`` must contain only complete, already-selected futures sessions
     in chronological order. The target session is excluded by the caller, so
@@ -54,6 +60,13 @@ def build_orderflow_daily_atr_snapshot(
         if not rows:
             raise ValueError("daily ATR sessions must contain bars")
         ordered = sorted(rows, key=lambda row: str(row["minute"]))
+        filtered_rows = [
+            row for row in ordered
+            if str(row["minute"])[11:16] < session_end_minute
+        ]
+        expected_count = _session_minute_count(session_end_minute)
+        if len(filtered_rows) >= expected_count:
+            ordered = filtered_rows
         high = max(_required_bar_number(row, "high") for row in ordered)
         low = min(_required_bar_number(row, "low") for row in ordered)
         close = _required_bar_number(ordered[-1], "close")
@@ -87,15 +100,57 @@ def build_orderflow_daily_atr_snapshot(
             session_date=session_date,
             timeframe="1d",
             cutoff_minute="00:00",
-            feature_set=ORDERFLOW_DAILY_ATR_FEATURE_SET,
-            calculator_version=ORDERFLOW_DAILY_ATR_CALCULATOR_VERSION,
-            parameters=(("series", "continuous"), ("window", str(window))),
+            feature_set=feature_set,
+            calculator_version=calculator_version,
+            parameters=feature_parameters,
             input_fingerprint=digest,
         ),
         values={"atr_14": sum(true_ranges[-window:]) / window},
         source_bar_ids=tuple(source_bar_ids),
         computed_at=computed_at or datetime.now(timezone.utc),
     )
+
+
+def build_daily_atr_snapshot(
+    session_date: str,
+    sessions: Sequence[tuple[str, Sequence[Mapping[str, object]]]],
+    *,
+    window: int = 14,
+    session_end_minute: str = "15:30",
+    computed_at: datetime | None = None,
+) -> "FeatureSnapshot":
+    """Build a full-session daily ATR for a strategy-owned feature set."""
+    return _build_daily_atr_snapshot(
+        session_date, sessions, window=window, session_end_minute=session_end_minute,
+        feature_set=DAILY_ATR_FEATURE_SET,
+        calculator_version=DAILY_ATR_CALCULATOR_VERSION,
+        feature_parameters=(
+            ("series", "continuous"), ("window", str(window)),
+            ("session_end", session_end_minute),
+        ), computed_at=computed_at,
+    )
+
+
+def build_orderflow_daily_atr_snapshot(
+    session_date: str,
+    sessions: Sequence[tuple[str, Sequence[Mapping[str, object]]]],
+    *,
+    window: int = 14,
+    computed_at: datetime | None = None,
+) -> "FeatureSnapshot":
+    """Build the canonical orderflow ATR using the three strategy zones."""
+    return _build_daily_atr_snapshot(
+        session_date, sessions, window=window, session_end_minute="15:00",
+        feature_set=ORDERFLOW_DAILY_ATR_FEATURE_SET,
+        calculator_version=ORDERFLOW_DAILY_ATR_CALCULATOR_VERSION,
+        feature_parameters=(("series", "continuous"), ("window", str(window))),
+        computed_at=computed_at,
+    )
+
+
+def _session_minute_count(session_end_minute: str) -> int:
+    hour, minute = (int(value) for value in session_end_minute.split(":"))
+    return (hour * 60 + minute) - (9 * 60 + 15)
 
 
 def _required_bar_number(row: Mapping[str, object], name: str) -> float:
@@ -410,8 +465,8 @@ def _fingerprint(
 
 
 __all__ = [
-    "FEATURE_CALCULATOR_VERSION", "ORDERFLOW_DAILY_ATR_CALCULATOR_VERSION",
-    "ORDERFLOW_DAILY_ATR_FEATURE_SET", "FeatureCacheKey", "FeatureMemoryCache",
-    "FeatureRepository", "FeatureService", "FeatureSnapshot",
-    "build_orderflow_daily_atr_snapshot",
+    "DAILY_ATR_CALCULATOR_VERSION", "DAILY_ATR_FEATURE_SET", "FEATURE_CALCULATOR_VERSION",
+    "ORDERFLOW_DAILY_ATR_CALCULATOR_VERSION", "ORDERFLOW_DAILY_ATR_FEATURE_SET",
+    "FeatureCacheKey", "FeatureMemoryCache", "FeatureRepository", "FeatureService",
+    "FeatureSnapshot", "build_daily_atr_snapshot", "build_orderflow_daily_atr_snapshot",
 ]

@@ -30,6 +30,23 @@ def market_minute_key(timestamp: datetime) -> tuple[str, str]:
     return normalized.date().isoformat(), normalized.strftime("%H:%M")
 
 
+def canonical_market_exchange(symbol: str, exchange: str) -> str:
+    """Return the stable storage exchange identity for supported index symbols."""
+    if symbol.strip().upper() in {"NIFTY", "NIFTY 50", "INDIA VIX"}:
+        if exchange.strip().upper() in {"NSE", "NSECM", "NSE_INDEX"}:
+            return "NSE_INDEX"
+    return exchange
+
+
+def validate_market_bar(bar: "MarketBar") -> None:
+    """Reject malformed normalized OHLC values before Paper persistence."""
+    prices = (bar.open, bar.high, bar.low, bar.close)
+    if not all(math.isfinite(float(value)) and float(value) >= 0 for value in prices):
+        raise ValueError(f"market bar has invalid prices for {bar.instrument.symbol}")
+    if bar.instrument.symbol.strip().upper() == "INDIA VIX" and max(prices) >= 100:
+        raise ValueError("India VIX market bar price is implausibly high")
+
+
 class OptionType(StrEnum):
     CALL = "CE"
     PUT = "PE"

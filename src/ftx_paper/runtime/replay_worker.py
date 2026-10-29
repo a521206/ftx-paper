@@ -1271,7 +1271,15 @@ class ReplayWorker:
                             ledger_records.append({"event_type": "CANCELLATION", "decision_id": order.client_order_id,
                                                    "timestamp": futures_bar.timestamp.isoformat(), "reason": "missing_synthetic_future_quote"})
                             continue
-                        fill_price = entry_quote.price if entry_quote is not None else entry_bar.open
+                        requested_fill = (
+                            float(order.limit_price)
+                            if order.limit_price is not None else entry_bar.open
+                        )
+                        fill_price = entry_quote.price if entry_quote is not None else (
+                            max(requested_fill, entry_bar.open)
+                            if order.side is OrderSide.BUY
+                            else min(requested_fill, entry_bar.open)
+                        )
                         for event in reversed(all_events):
                             if event.get("decision_id") == order.client_order_id:
                                 event.update({"vehicle": order.vehicle, "entry_price": fill_price})

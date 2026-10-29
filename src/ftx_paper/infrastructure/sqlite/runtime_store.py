@@ -14,7 +14,9 @@ from collections.abc import Iterable, Mapping
 from ftx_paper.config import IST
 from ftx_paper.contracts import (
     MarketBar, MarketRole, OptionRole, OrderLifecycle, OrderLifecycleState, build_decision_view,
+    canonical_market_exchange,
     is_legal_order_transition, validate_decision_view,
+    validate_market_bar,
     role_to_key,
 )
 from ftx_paper.runtime.events import (
@@ -461,10 +463,12 @@ class SqliteRuntimeStore:
         now = self._now()
         rows = []
         for bar in bars:
+            validate_market_bar(bar)
             timestamp = bar.timestamp.astimezone(IST)
             minute = timestamp.replace(second=0, microsecond=0).isoformat()
+            exchange = canonical_market_exchange(bar.instrument.symbol, bar.instrument.exchange)
             rows.append((
-                bar.instrument.symbol, bar.instrument.exchange, minute,
+                bar.instrument.symbol, exchange, minute,
                 bar.open, bar.high, bar.low, bar.close, bar.volume,
                 (bar.open_interest if bar.open_interest is not None else 0.0
                  if str(bar.instrument.instrument_type).upper() in {"FUT", "FUTURES"} else None),
@@ -523,6 +527,33 @@ class SqliteRuntimeStore:
         with self._connect() as connection:
             rows = connection.execute("SELECT date FROM market_dates ORDER BY date").fetchall()
         return [str(row[0]) for row in rows]
+
+    def read_market_coverage(self, session_date: str) -> dict[str, Any]:
+        """Return per-symbol, exchange, and source coverage for one session."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT symbol, exchange, instrument_type, source, COUNT(*) AS bars,
+                       MIN(minute), MAX(minute)
+                FROM market_bars
+                WHERE substr(minute, 1, 10) = ?
+                GROUP BY symbol, exchange, instrument_type, source
+                ORDER BY symbol, exchange, source
+                """,
+                (session_date,),
+            ).fetchall()
+        return {
+            "session_date": session_date,
+            "rows": [
+                {
+                    "symbol": str(row[0]), "exchange": str(row[1]),
+                    "instrument_type": str(row[2]), "source": str(row[3]),
+                    "bars": int(row[4]), "first_minute": str(row[5]),
+                    "last_minute": str(row[6]),
+                }
+                for row in rows
+            ],
+        }
 
     @staticmethod
     def _now() -> str:

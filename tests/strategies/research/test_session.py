@@ -271,7 +271,7 @@ def test_replay_resolves_current_then_prior_source_once(tmp_path):
         MarketBar(
             Instrument("NIFTY26SEPFUT", "NFO", "FUTURES", "2026-09-30"),
             datetime(2026, 9, 28, 4, 0, tzinfo=timezone.utc),
-            100, 23124.1, 22792.9, 105,
+            22800, 23124.1, 22792.9, 22900,
         ),
         MarketBar(
             Instrument("NIFTY01OCTFUT", "NFO", "FUTURES", "2026-10-01"),
@@ -697,7 +697,15 @@ def test_startup_discovers_options_before_backfill_and_feed_subscription(monkeyp
     monkeypatch.setattr(zerodha, "discover_option_surface_contracts", lambda _client, **_kwargs: [option])
     def fake_backfill(_client, instruments, **_kwargs):
         captured["backfill"] = list(instruments)
-        return ()
+        timestamp = datetime(2026, 9, 15, 4, 0, tzinfo=timezone.utc)
+        return tuple(
+            MarketBar(
+                Instrument(str(item["symbol"]), str(item["exchange"]), str(item["instrument_type"]), item.get("expiry")),
+                timestamp, 1, 2, 0, 1,
+            )
+            for item in instruments
+            if item["symbol"] in {"NIFTY26SEPFUT", "INDIA VIX"}
+        )
 
     monkeypatch.setattr(zerodha, "load_startup_backfill", fake_backfill)
     monkeypatch.setattr(zerodha, "create_kite_socket", lambda *_args: object())
@@ -711,6 +719,20 @@ def test_startup_discovers_options_before_backfill_and_feed_subscription(monkeyp
     assert any(item["symbol"] == option["symbol"] for item in captured["backfill"])
     assert 3 in captured["tokens"]
     assert isinstance(session.broker, PaperBroker)
+
+
+def test_startup_backfill_requires_futures_and_vix_inputs():
+    timestamp = datetime(2026, 10, 6, 4, 0, tzinfo=timezone.utc)
+    bars = (MarketBar(Instrument("NIFTY26OCTFUT", "NFO", "FUT", "2026-10-27"), timestamp, 1, 2, 1, 2),)
+
+    with pytest.raises(RuntimeError, match="missing required market roles: INDIA VIX"):
+        session_module._validate_required_backfill(
+            (
+                {"symbol": "NIFTY26OCTFUT", "instrument_type": "FUT", "role": MarketRole.FUTURES},
+                {"symbol": "India VIX", "instrument_type": "INDEX", "role": MarketRole.VIX},
+            ),
+            bars,
+        )
 
 
 def test_live_orderflow_prior_context_uses_latest_complete_prior_session(monkeypatch, tmp_path):

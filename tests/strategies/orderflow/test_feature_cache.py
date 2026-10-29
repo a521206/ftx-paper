@@ -4,7 +4,7 @@ from ftx_paper.contracts import Instrument, MarketBar, MarketRole
 from ftx_paper.market import DecisionBundle, FeatureMemoryCache, FeatureService, LiveFeatureCalculator
 from ftx_paper.market.feature_cache import (
     FeatureCacheKey, FeatureSnapshot, ORDERFLOW_DAILY_ATR_FEATURE_SET,
-    build_orderflow_daily_atr_snapshot, daily_atr_from_snapshot,
+    build_daily_atr_snapshot, build_orderflow_daily_atr_snapshot, daily_atr_from_snapshot,
 )
 from ftx_paper.infrastructure.sqlite.feature_repository import SqliteFeatureRepository
 from ftx_paper.runtime import RuntimeStore
@@ -205,3 +205,43 @@ def test_daily_atr_snapshot_uses_true_range_across_session_closes():
 
     assert snapshot.values["atr_14"] == (4.0 + 13.0 * 7.0) / 14.0
     assert snapshot.key.feature_set == ORDERFLOW_DAILY_ATR_FEATURE_SET
+
+
+def test_daily_atr_snapshot_uses_strategy_zone_cutoff_for_complete_sessions():
+    rows = []
+    for minute_index in range(375):
+        hour, minute = divmod(9 * 60 + 15 + minute_index, 60)
+        rows.append({
+            "minute": f"2026-01-01T{hour:02d}:{minute:02d}:00+05:30",
+            "open": 100.0,
+            "high": 110.0 if minute_index < 345 else 1_000.0,
+            "low": 100.0,
+            "close": 105.0,
+            "volume": 1,
+        })
+
+    snapshot = build_orderflow_daily_atr_snapshot(
+        "2026-01-15", tuple((f"2026-01-{index + 1:02d}", rows) for index in range(14)),
+    )
+
+    assert snapshot.values["atr_14"] == 10.0
+
+
+def test_generic_daily_atr_snapshot_can_use_full_session_window():
+    rows = []
+    for minute_index in range(375):
+        hour, minute = divmod(9 * 60 + 15 + minute_index, 60)
+        rows.append({
+            "minute": f"2026-01-01T{hour:02d}:{minute:02d}:00+05:30",
+            "open": 100.0,
+            "high": 1_000.0 if minute_index >= 345 else 110.0,
+            "low": 100.0,
+            "close": 105.0,
+            "volume": 1,
+        })
+
+    snapshot = build_daily_atr_snapshot(
+        "2026-01-15", tuple((f"2026-01-{index + 1:02d}", rows) for index in range(14)),
+    )
+
+    assert snapshot.values["atr_14"] == 900.0

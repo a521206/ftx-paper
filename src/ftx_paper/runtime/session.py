@@ -48,6 +48,26 @@ from ftx_paper.execution.lifecycle import (
 logger = logging.getLogger("ftx-paper")
 
 
+def _validate_required_backfill(
+    instruments: Sequence[Mapping[str, Any]], bars: Sequence[MarketBar],
+) -> None:
+    """Fail startup when required market roles have no historical input."""
+    available = {bar.instrument.symbol.strip().upper() for bar in bars}
+    required: set[str] = set()
+    for item in instruments:
+        symbol = str(item.get("symbol", "")).strip().upper()
+        raw_role = item.get("role")
+        role = parse_role(raw_role) if isinstance(raw_role, (str, MarketRole, OptionRole)) else None
+        kind = str(item.get("instrument_type", "")).upper()
+        if role is MarketRole.FUTURES or kind in {"FUT", "FUTURES"}:
+            required.add(symbol)
+        elif role is MarketRole.VIX or symbol == "INDIA VIX":
+            required.add(symbol)
+    missing = sorted(symbol for symbol in required if symbol not in available)
+    if missing:
+        raise RuntimeError("historical backfill missing required market roles: " + ", ".join(missing))
+
+
 class LastExecutionFill(TypedDict):
     price: float
     fill_timestamp: str
@@ -408,6 +428,7 @@ class RuntimeSession:
             if self._stop_event.is_set():
                 self._release_feed_lease()
                 return
+            _validate_required_backfill(cast(Sequence[Mapping[str, Any]], resolved), backfill)
             self.store.append_market_bars(backfill, source="historical_backfill")
             for historical_bar in sorted(backfill, key=lambda item: item.timestamp):
                 self._feature_service.ingest(historical_bar)

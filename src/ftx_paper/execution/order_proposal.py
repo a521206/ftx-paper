@@ -26,6 +26,7 @@ def build_entry_order(
     direction = proposal.get("direction")
     lifecycle_id = proposal.get("lifecycle_id")
     stop_price = proposal.get("stop_price")
+    trigger_price = proposal.get("trigger_price")
     if direction not in {"long", "short"}:
         return None
     if not isinstance(lifecycle_id, str) or not lifecycle_id:
@@ -34,6 +35,12 @@ def build_entry_order(
         not isinstance(stop_price, (int, float))
         or isinstance(stop_price, bool)
         or not isfinite(float(stop_price))
+    ):
+        return None
+    if trigger_price is not None and (
+        not isinstance(trigger_price, (int, float))
+        or isinstance(trigger_price, bool)
+        or not isfinite(float(trigger_price))
     ):
         return None
     def string(name: str) -> str | None:
@@ -59,6 +66,7 @@ def build_entry_order(
         instrument=instrument,
         side=OrderSide.BUY if direction == "long" else OrderSide.SELL,
         quantity=quantity,
+        limit_price=float(trigger_price) if trigger_price is not None else None,
         reason="causally_accepted_orderflow_opportunity",
         cell=string("cell"),
         stop_price=float(stop_price),

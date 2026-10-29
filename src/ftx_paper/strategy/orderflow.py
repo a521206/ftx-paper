@@ -847,7 +847,9 @@ class OrderflowPolicy:
         transition_at = getattr(interaction, "pd_role_transition_available_at", None)
         candidates = tuple(
             candidate for candidate in response_observations
-            if transition_at is None or candidate.available_at > transition_at
+            # The role transition candle is causally available evidence and
+            # must remain eligible for the canonical response window.
+            if transition_at is None or candidate.available_at >= transition_at
         )
         events: list[PolicyDecision] = []
         for candidate in candidates:
@@ -913,6 +915,10 @@ class OrderflowPolicy:
             "instrument_type": futures.instrument.instrument_type if futures is not None else None,
             "lifecycle_id": opportunity.lifecycle_id,
             "stop_price": opportunity.setup.failure_boundary,
+            "trigger_price": (
+                opportunity.setup.entry_upper
+                if direction == "long" else opportunity.setup.entry_lower
+            ),
             "stop_policy": template.stop_policy.value,
             "exit_mode": self.config.exit_policy,
             "cell": str(getattr(interaction, "location_alias", "orderflow")).lower(),
@@ -944,14 +950,34 @@ class OrderflowPolicy:
             or not isinstance(upper, (int, float))
         ):
             return ()
+        child_ids = tuple(
+            observation.context.child_observation_ids
+            if observation.context is not None else ()
+        )
+        children = tuple(
+            item for item in orderflow.observations_for("1m")
+            if item.observation_id in child_ids
+        )
+        response_observation = max(
+            children, key=lambda item: item.observed_at, default=observation,
+        )
+        evidence_ids = (
+            str(seed.get("source_observation_id", observation.observation_id)),
+            observation.observation_id,
+        )
         formed_at = observation.available_at
+        self._opening_seed = {
+            **seed,
+            "attached_observation_id": response_observation.observation_id,
+            "opening_interaction_kind": None,
+        }
         opportunity = SetupOpportunity.create(
             interaction_id=str(seed["seed_id"]), direction=direction,
             formed_at=formed_at,
             expires_at=formed_at + timedelta(minutes=self.config.response_window_candles * 5),
             entry_lower=float(lower), entry_upper=float(upper),
             failure_boundary=float(upper if direction == "short" else lower),
-            evidence_ids=(observation.observation_id,), evidence_timeframe="1m",
+            evidence_ids=evidence_ids, evidence_timeframe="5m",
             template_id=template.template_id, policy_version=template.version,
             conflict_group_id=template.execution_conflict_group,
             source_instrument=observation.instrument,
@@ -968,6 +994,7 @@ class OrderflowPolicy:
             "instrument_type": futures.instrument.instrument_type if futures is not None else None,
             "lifecycle_id": opportunity.lifecycle_id,
             "stop_price": opportunity.setup.failure_boundary,
+            "trigger_price": opportunity.setup.entry_upper if direction == "long" else opportunity.setup.entry_lower,
             "stop_policy": template.stop_policy.value,
             "exit_mode": self.config.exit_policy,
             "cell": alias.lower(),
@@ -986,8 +1013,9 @@ class OrderflowPolicy:
                 "interaction_id": str(seed["seed_id"]), "location": alias,
                 "direction": direction, "template_id": template.template_id,
                 "candidate_provenance": "opening_hypothesis",
-                "source_observation_ids": [observation.observation_id],
-                "observed_at": observation.observed_at.isoformat(),
+                "response_evidence_ids": list(evidence_ids),
+                "source_observation_ids": list(evidence_ids),
+                "observed_at": response_observation.observed_at.isoformat(),
                 "available_at": formed_at.isoformat(),
                 "execution_proposal": proposal,
             }),
