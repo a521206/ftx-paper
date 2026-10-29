@@ -40,7 +40,7 @@ from .orderflow_location import (
     is_diagnostic_location,
 )
 from .orderflow_response import evaluate_policy_responses
-from .templates import TradeTemplate
+from .templates import TRADE_TEMPLATES, TradeTemplate
 from .orderflow_scores import score_aggregate
 from .orderflow_vwap import (
     MarketAggregate, VwapLocationProvider, calculate_session_vwap, calculate_vwap_stop,
@@ -260,8 +260,16 @@ class OrderflowPolicy:
                 vwap_measurements, atr=atr,
                 band_fraction=self._vwap_provider.config.band_atr_fraction,
             )
+        first_parent_available = min(
+            (item.available_at for item in observations if item.timeframe == "5m"),
+            default=None,
+        )
         locations_by_source: dict[str, list[LocationRecord]] = {}
         for location in vwap_locations:
+            # Measurements retain the full prefix; interactions start only once
+            # structural context exists, using the current completed candle.
+            if first_parent_available is not None and location.available_at < first_parent_available:
+                continue
             locations_by_source.setdefault(location.source_aggregate_id, []).append(location)
         if locations_by_source:
             def numeric(item: OrderflowObservation, name: str) -> float:
@@ -761,6 +769,10 @@ class OrderflowPolicy:
             parent_context = observation.context
             if parent_context is None or location_observation.child_observation_ids != parent_context.child_observation_ids:
                 raise ValueError("5m location observation lineage does not match parent")
+        # Parent child facts are lineage, not permission to replay historical
+        # candles against a reference published after those candles completed.
+        if location_observation.available_at > observation.available_at:
+            return (), (), ()
         location_key = location_observation.observation_id
         if location_key in self._processed_location_observation_ids:
             return (), (), ()
@@ -1031,7 +1043,7 @@ class OrderflowPolicy:
         observation: OrderflowObservation,
         opportunity: SetupOpportunity,
         template: TradeTemplate,
-        interaction: LocationInteraction,
+        interaction: object,
         context: DecisionContext,
         futures: MarketBar | None,
     ) -> dict[str, object]:
@@ -1046,12 +1058,84 @@ class OrderflowPolicy:
             "stop_price": opportunity.setup.failure_boundary,
             "stop_policy": template.stop_policy.value,
             "exit_mode": self.config.exit_policy,
-            "cell": interaction.location_alias.lower(),
+            "cell": str(getattr(interaction, "location_alias", "orderflow")).lower(),
             "entry_bar": context.as_of.minute,
             "strategy_id": self.config.name,
             "execution_group_id": opportunity.execution_group_id,
             "setup_availability": opportunity.setup.formed_at.isoformat(),
         }
+
+    def _form_opening_candidate(
+        self,
+        observation: OrderflowObservation,
+        seed: Mapping[str, object],
+        orderflow: OrderflowContext,
+        context: DecisionContext,
+        base: Mapping[str, Any],
+        futures: MarketBar | None,
+    ) -> tuple[PolicyDecision, ...]:
+        """Materialize the canonical provisional OR seed as an executable candidate."""
+        direction = str(seed["direction"])
+        alias = str(seed["location"])
+        template = TRADE_TEMPLATES.get(("5m_acceptance_breakout", alias))
+        reference = seed.get("reference_level")
+        lower = seed.get("band_lower", reference)
+        upper = seed.get("band_upper", reference)
+        if (
+            template is None
+            or not isinstance(reference, (int, float))
+            or not isinstance(lower, (int, float))
+            or not isinstance(upper, (int, float))
+        ):
+            return ()
+        formed_at = observation.available_at
+        opportunity = SetupOpportunity.create(
+            interaction_id=str(seed["seed_id"]), direction=direction,
+            formed_at=formed_at,
+            expires_at=formed_at + timedelta(minutes=self.config.response_window_candles * 5),
+            entry_lower=float(lower), entry_upper=float(upper),
+            failure_boundary=float(upper if direction == "short" else lower),
+            evidence_ids=(observation.observation_id,), evidence_timeframe="1m",
+            template_id=template.template_id, policy_version=template.version,
+            conflict_group_id=template.execution_conflict_group,
+            source_instrument=observation.instrument,
+            source_session_id=orderflow.session_id,
+        )
+        if opportunity.lifecycle_id in self._opportunities:
+            return ()
+        self._opportunities[opportunity.lifecycle_id] = opportunity
+        proposal = {
+            "eligible": True,
+            "direction": direction,
+            "instrument": observation.instrument,
+            "exchange": futures.instrument.exchange if futures is not None else None,
+            "instrument_type": futures.instrument.instrument_type if futures is not None else None,
+            "lifecycle_id": opportunity.lifecycle_id,
+            "stop_price": opportunity.setup.failure_boundary,
+            "stop_policy": template.stop_policy.value,
+            "exit_mode": self.config.exit_policy,
+            "cell": alias.lower(),
+            "entry_bar": context.as_of.minute,
+            "strategy_id": self.config.name,
+            "execution_group_id": opportunity.execution_group_id,
+            "setup_availability": formed_at.isoformat(),
+        }
+        return (
+            PolicyDecision({
+                **base, "decision_stage": "opportunity", "outcome": "recorded",
+                "reason": "setup_candidate_formed",
+                "decision_id": _decision_id("candidate", opportunity.lifecycle_id),
+                "opportunity_id": opportunity.lifecycle_id,
+                "setup_id": opportunity.setup.setup_id,
+                "interaction_id": str(seed["seed_id"]), "location": alias,
+                "direction": direction, "template_id": template.template_id,
+                "candidate_provenance": "opening_hypothesis",
+                "source_observation_ids": [observation.observation_id],
+                "observed_at": observation.observed_at.isoformat(),
+                "available_at": formed_at.isoformat(),
+                "execution_proposal": proposal,
+            }),
+    )
 
     def _evaluate_response(
         self,
@@ -1350,9 +1434,15 @@ class OrderflowPolicy:
             if observation.context is None or observation.context.session_id != orderflow.session_id:
                 continue
             opening_seed_events = self._attach_opening_seed(observation, base)
-            if opening_seed_events is None:
-                continue
-            results.extend(opening_seed_events)
+            if opening_seed_events is not None:
+                results.extend(opening_seed_events)
+                if any(
+                    item.payload.get("reason") == "opening_interaction_attached"
+                    for item in opening_seed_events
+                ) and self._opening_seed is not None:
+                    results.extend(self._form_opening_candidate(
+                        observation, self._opening_seed, orderflow, context, base, futures,
+                    ))
             gap_status = observation.context.replay_provenance.get("gap_status")
             context_events, skip_observation = self._advance_context(
                 observation, orderflow, causal_cutoff, already_processed, base,
@@ -1387,6 +1477,8 @@ class OrderflowPolicy:
                         self._opening_seed = {
                             "seed_id": seed_id, "direction": direction, "location": opening_alias,
                             "reference_level": seed_location.reference,
+                            "band_lower": seed_location.band_lower,
+                            "band_upper": seed_location.band_upper,
                             "reference_generation": seed_location.reference_generation,
                             "source_observation_id": observation.observation_id,
                             "attached_observation_id": None,
