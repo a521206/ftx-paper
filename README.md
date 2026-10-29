@@ -50,6 +50,21 @@ Invoke-RestMethod -Method Post http://127.0.0.1:8501/api/v1/replay `
   -Body '{"session_date":"2026-09-29","strategy_id":"ftx-paper-orderflow","vehicles":["futures"]}'
 ```
 
+The same API-owned replay worker can be run from the console without manually
+constructing an HTTP request:
+
+```powershell
+.venv\Scripts\ftx-paper-replay.exe 2026-09-29 `
+  --strategy-id ftx-paper-orderflow `
+  --vehicles futures `
+  --include-parity-layers
+```
+
+The command is a thin client of the loopback API; it does not create a second
+replay implementation or runtime process. Use `--json` to print the complete
+API result. Set `FTX_API_URL` or pass `--base-url` when the API is not on its
+default address.
+
 Runtime databases contain broker/runtime state and historical market bars. Do
 not commit them, copy them into the repository, or share broker credentials.
 

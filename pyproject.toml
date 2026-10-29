@@ -20,6 +20,7 @@ xts = ["websockets>=13", "requests>=2.31"]
 ftx-paper-api = "ftx_paper.cli:api_main"
 ftx-web = "ftx_paper.cli:api_main"
 ftx-paper-ui = "ftx_paper.cli:ui_main"
+ftx-paper-replay = "ftx_paper.replay_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
