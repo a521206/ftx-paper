@@ -96,6 +96,17 @@ def test_decision_diagnostics_exposes_paper_stage_and_reason_counts() -> None:
     assert diagnostics["reason_counts"]["trigger_observation"] == 1
 
 
+def test_decision_diagnostics_prefers_projected_stage_and_outcome() -> None:
+    diagnostics = decision_diagnostics([{
+        "kind": "decision",
+        "stage": "admission",
+        "outcome": "accepted",
+        "values": {"decision_stage": "trigger", "outcome": "rejected", "reason": "kept"},
+    }])
+    assert diagnostics["stage_counts"] == {"admission": 1}
+    assert diagnostics["outcome_counts"] == {"accepted": 1}
+
+
 def test_projection_preserves_decision_lineage_and_excludes_extensions() -> None:
     artifact = build_parity_artifact(
         {"strategy": {}, "bars_seen": 1, "metadata": {"normalized_fingerprint": "fixture"}},
@@ -114,7 +125,8 @@ def test_projection_preserves_decision_lineage_and_excludes_extensions() -> None
     assert record["native_kind"] == "admission"
     assert record["stage"] == "admission"
     assert record["outcome"] == "accepted"
-    assert record["causal_parent_id"] == record["identity"]
+    assert record["causal_parent_id"] is None
+    assert "missing_parent_link:decision:0" in artifact["coverage"]["issues"]
     assert record["evidence"]["references"] == ["bar-1"]
     assert record["producer_extensions"] == {"paper_only": True}
     assert "paper_only" not in record["values"]
@@ -145,6 +157,36 @@ def test_projection_does_not_wrap_producer_identity_into_strict_identity() -> No
     )
     record = artifact["layers"]["decision"][0]
     assert record["identity"] != "producer-local-id"
+
+
+def test_projection_does_not_self_parent_and_reports_missing_parent() -> None:
+    artifact = build_parity_artifact(
+        {"strategy": {}, "bars_seen": 1, "metadata": {"normalized_fingerprint": "fixture"}},
+        request={"session_date": "2026-01-05"},
+        layer_records={"decision": [{
+            "event_type": "POLICY_DECISION", "decision_id": "d1",
+            "causal_parent_id": "missing", "decision_at": "2026-01-05T14:30:00Z",
+            "stage": "admission", "outcome": "accepted",
+        }]},
+    )
+    record = artifact["layers"]["decision"][0]
+    assert record["causal_parent_id"] is None
+    assert "missing_parent_link:decision:0" in artifact["coverage"]["issues"]
+
+
+def test_projection_preserves_source_timing_and_neutral_event_key() -> None:
+    artifact = build_parity_artifact(
+        {"strategy": {}, "bars_seen": 1, "metadata": {"normalized_fingerprint": "fixture"}},
+        request={"session_date": "2026-01-05"},
+        layer_records={"execution_settlement": [{
+            "event_type": "FILL", "observed_at": "2026-01-05T14:30:00+05:30",
+            "available_at": "2026-01-05T14:31:00+05:30", "neutral_event_key": "fill-1",
+        }]},
+    )
+    record = artifact["layers"]["execution_settlement"][0]
+    assert record["observed_at"] == "2026-01-05T14:30:00+05:30"
+    assert record["available_at"] == "2026-01-05T14:31:00+05:30"
+    assert record["neutral_event_key"] == "fill-1"
 
 
 def test_settlement_availability_reflects_projected_settlements() -> None:

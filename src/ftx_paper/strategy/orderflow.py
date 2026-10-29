@@ -51,6 +51,164 @@ from .snapshot_envelope import unwrap_snapshot, wrap_snapshot
 from .exits import ExitAction, ExitStateMachine, PositionState
 
 
+def _instrument_snapshot(instrument: Instrument) -> dict[str, object]:
+    return {
+        "symbol": instrument.symbol,
+        "exchange": instrument.exchange,
+        "instrument_type": instrument.instrument_type,
+        "expiry": instrument.expiry,
+        "strike": instrument.strike,
+        "option_type": instrument.option_type.value if instrument.option_type is not None else None,
+    }
+
+
+def _position_snapshot(position: PositionState) -> dict[str, object]:
+    return {
+        "instrument": _instrument_snapshot(position.instrument),
+        "entry_price": position.entry_price,
+        "stop_price": position.stop_price,
+        "quantity": position.quantity,
+        "side": position.side.value,
+        "stop_policy": position.stop_policy,
+        "cell": position.cell,
+        "exit_mode": position.exit_mode,
+        "entry_fill_time": position.entry_fill_time.isoformat() if position.entry_fill_time else None,
+        "exit_reference_price": position.exit_reference_price,
+        "target_price": position.target_price,
+        "vehicle": position.vehicle,
+        "synthetic_legs": [_instrument_snapshot(item) for item in position.synthetic_legs]
+        if position.synthetic_legs else None,
+        "entry_bar": position.entry_bar,
+        "entry_order_id": position.entry_order_id,
+        "initial_risk_points": position.initial_risk_points,
+        "partial_exit_enabled": position.partial_exit_enabled,
+        "stop_source": position.stop_source,
+        "post_3r_activated": position.post_3r_activated,
+    }
+
+
+def _bar_snapshot(bar: MarketBar) -> dict[str, object]:
+    return {
+        "instrument": _instrument_snapshot(bar.instrument),
+        "timestamp": bar.timestamp.isoformat(),
+        "open": bar.open,
+        "high": bar.high,
+        "low": bar.low,
+        "close": bar.close,
+        "volume": bar.volume,
+        "open_interest": bar.open_interest,
+    }
+
+
+def _bar_from_snapshot(raw: Mapping[str, object]) -> MarketBar:
+    instrument = raw.get("instrument")
+    if not isinstance(instrument, Mapping):
+        raise ValueError("orderflow completed bar instrument is invalid")
+    timestamp = raw.get("timestamp")
+    if not isinstance(timestamp, str):
+        raise ValueError("orderflow completed bar timestamp is invalid")
+    values = {name: raw.get(name) for name in ("open", "high", "low", "close")}
+    if any(not isinstance(value, (int, float)) or isinstance(value, bool) for value in values.values()):
+        raise ValueError("orderflow completed bar prices are invalid")
+    return MarketBar(
+        _instrument_from_snapshot(instrument), datetime.fromisoformat(timestamp),
+        float(values["open"]), float(values["high"]),
+        float(values["low"]), float(values["close"]),
+        float(raw["volume"]) if isinstance(raw.get("volume"), (int, float)) else None,
+        float(raw["open_interest"]) if isinstance(raw.get("open_interest"), (int, float)) else None,
+    )
+
+
+def _exit_action_snapshot(action: ExitAction) -> dict[str, object]:
+    return {
+        "reason": action.reason,
+        "price": action.price,
+        "cell": action.cell,
+        "bars_held": action.bars_held,
+        "mae_bp": action.mae_bp,
+        "mfe_bp": action.mfe_bp,
+        "intent": {
+            "client_order_id": action.intent.client_order_id,
+            "instrument": _instrument_snapshot(action.intent.instrument),
+            "side": action.intent.side.value,
+            "quantity": action.intent.quantity,
+            "role": action.intent.role.value,
+            "reason": action.intent.reason,
+            "entry_order_id": action.intent.entry_order_id,
+            "vehicle": action.intent.vehicle,
+            "exit_mode": action.intent.exit_mode,
+            "synthetic_legs": [_instrument_snapshot(item) for item in action.intent.synthetic_legs]
+            if action.intent.synthetic_legs else None,
+            "entry_bar": action.intent.entry_bar,
+        },
+    }
+
+
+def _instrument_from_snapshot(raw: Mapping[str, object]) -> Instrument:
+    from ftx_paper.contracts import OptionType
+
+    option_type = raw.get("option_type")
+    return Instrument(
+        str(raw["symbol"]), str(raw["exchange"]), str(raw["instrument_type"]),
+        raw.get("expiry") if isinstance(raw.get("expiry"), str) else None,
+        float(raw["strike"]) if isinstance(raw.get("strike"), (int, float)) else None,
+        OptionType(option_type) if isinstance(option_type, str) else None,
+    )
+
+
+def _position_from_snapshot(raw: Mapping[str, object]) -> PositionState:
+    instrument = raw.get("instrument")
+    if not isinstance(instrument, Mapping):
+        raise ValueError("orderflow position instrument is invalid")
+    legs_raw = raw.get("synthetic_legs")
+    legs = None
+    if isinstance(legs_raw, (list, tuple)):
+        if len(legs_raw) != 2 or any(not isinstance(item, Mapping) for item in legs_raw):
+            raise ValueError("orderflow synthetic legs are invalid")
+        legs = (_instrument_from_snapshot(legs_raw[0]), _instrument_from_snapshot(legs_raw[1]))
+    entry_fill_time = raw.get("entry_fill_time")
+    if entry_fill_time is not None and not isinstance(entry_fill_time, str):
+        raise ValueError("orderflow entry fill time is invalid")
+    return PositionState(
+        _instrument_from_snapshot(instrument), float(raw["entry_price"]), float(raw["stop_price"]),
+        int(raw["quantity"]), OrderSide(str(raw["side"])),
+        stop_policy=raw.get("stop_policy") if isinstance(raw.get("stop_policy"), str) else None,
+        cell=raw.get("cell") if isinstance(raw.get("cell"), str) else None,
+        exit_mode=str(raw.get("exit_mode", "signal")),
+        entry_fill_time=datetime.fromisoformat(entry_fill_time) if entry_fill_time else None,
+        exit_reference_price=float(raw["exit_reference_price"]) if isinstance(raw.get("exit_reference_price"), (int, float)) else None,
+        target_price=float(raw["target_price"]) if isinstance(raw.get("target_price"), (int, float)) else None,
+        vehicle=str(raw.get("vehicle", "futures")), synthetic_legs=legs,
+        entry_bar=int(raw["entry_bar"]) if isinstance(raw.get("entry_bar"), int) else None,
+        entry_order_id=raw.get("entry_order_id") if isinstance(raw.get("entry_order_id"), str) else None,
+        initial_risk_points=float(raw["initial_risk_points"]) if isinstance(raw.get("initial_risk_points"), (int, float)) else None,
+        partial_exit_enabled=bool(raw.get("partial_exit_enabled", False)),
+        stop_source=str(raw.get("stop_source", "initial")),
+        post_3r_activated=bool(raw.get("post_3r_activated", False)),
+    )
+
+
+def _exit_action_from_snapshot(raw: Mapping[str, object]) -> ExitAction:
+    intent_raw = raw.get("intent")
+    if not isinstance(intent_raw, Mapping):
+        raise ValueError("orderflow exit intent is invalid")
+    instrument_raw = intent_raw.get("instrument")
+    if not isinstance(instrument_raw, Mapping):
+        raise ValueError("orderflow exit instrument is invalid")
+    intent = OrderIntent(
+        str(intent_raw["client_order_id"]), _instrument_from_snapshot(instrument_raw),
+        OrderSide(str(intent_raw["side"])), int(intent_raw["quantity"]),
+        role=OrderRole(str(intent_raw["role"])), reason=str(intent_raw.get("reason", "")),
+        entry_order_id=intent_raw.get("entry_order_id") if isinstance(intent_raw.get("entry_order_id"), str) else None,
+        vehicle=str(intent_raw.get("vehicle", "futures")), exit_mode=intent_raw.get("exit_mode") if isinstance(intent_raw.get("exit_mode"), str) else None,
+        entry_bar=int(intent_raw["entry_bar"]) if isinstance(intent_raw.get("entry_bar"), int) else None,
+    )
+    return ExitAction(str(raw["reason"]), float(raw["price"]), intent,
+                      raw.get("cell") if isinstance(raw.get("cell"), str) else None,
+                      int(raw.get("bars_held", 0)), float(raw.get("mae_bp", 0.0)),
+                      float(raw.get("mfe_bp", 0.0)))
+
+
 ORDERFLOW_NAME = "ftx-paper-orderflow"
 ORDERFLOW_VERSION = "0.1.0"
 
@@ -1836,8 +1994,9 @@ class OrderflowStrategy:
             if bar.instrument == action.intent.instrument and bar.timestamp > discovered_at:
                 actions.append(action)
                 self._pending_exit_actions.pop(exit_order_id, None)
+        pending_entries = set(self._pending_exits.values())
         for order_id, (position, exits) in tuple(self._decision_positions.items()):
-            if bar.instrument != position.instrument or order_id in self._pending_exits.values():
+            if bar.instrument != position.instrument or order_id in pending_entries:
                 continue
             if position.entry_fill_time is not None and bar.timestamp < position.entry_fill_time:
                 continue
@@ -1924,11 +2083,31 @@ class OrderflowStrategy:
             self._decision_positions.pop(entry_order_id, None)
 
     def snapshot(self) -> Mapping[str, object]:
+        decision_positions = {
+            order_id: {
+                "position": _position_snapshot(position),
+                "exit_state": exits.snapshot(),
+            }
+            for order_id, (position, exits) in self._decision_positions.items()
+        }
+        pending_actions = {
+            order_id: {
+                "action": _exit_action_snapshot(action),
+                "discovered_at": discovered_at.isoformat(),
+            }
+            for order_id, (action, discovered_at) in self._pending_exit_actions.items()
+        }
         return wrap_snapshot(
             strategy_id=ORDERFLOW_NAME,
             metadata={"name": self.metadata.name, "version": self.metadata.version,
                       "config_hash": self.metadata.config_hash},
-            payload=self.policy.snapshot(),
+            payload={
+                **self.policy.snapshot(),
+                "decision_positions": decision_positions,
+                "pending_exits": dict(self._pending_exits),
+                "pending_exit_actions": pending_actions,
+                "completed_bars": [_bar_snapshot(item) for item in self._completed_bars],
+            },
         )
 
     @classmethod
@@ -1938,9 +2117,52 @@ class OrderflowStrategy:
         strategy.policy = OrderflowPolicy.from_snapshot(payload)
         strategy.coordinator = SharedDecisionCoordinator(strategy.policy)
         strategy._decision_positions = {}
-        strategy._pending_exits = {}
+        raw_positions = payload.get("decision_positions", {})
+        if not isinstance(raw_positions, Mapping):
+            raise ValueError("invalid orderflow decision position snapshot")
+        for order_id, raw in raw_positions.items():
+            if not isinstance(order_id, str) or not isinstance(raw, Mapping):
+                raise ValueError("invalid orderflow decision position")
+            position_raw = raw.get("position")
+            exit_raw = raw.get("exit_state")
+            if not isinstance(position_raw, Mapping) or not isinstance(exit_raw, Mapping):
+                raise ValueError("incomplete orderflow decision position")
+            position = _position_from_snapshot(position_raw)
+            if position.entry_order_id != order_id:
+                raise ValueError("orderflow position key does not match entry_order_id")
+            strategy._decision_positions[order_id] = (position, ExitStateMachine.from_snapshot(exit_raw))
+        raw_pending = payload.get("pending_exits", {})
+        if not isinstance(raw_pending, Mapping) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in raw_pending.items()
+        ):
+            raise ValueError("invalid orderflow pending exits")
+        if any(value not in strategy._decision_positions for value in raw_pending.values()):
+            raise ValueError("orderflow pending exit references unknown position")
+        strategy._pending_exits = dict(raw_pending)
+        raw_actions = payload.get("pending_exit_actions", {})
+        if not isinstance(raw_actions, Mapping):
+            raise ValueError("invalid orderflow pending exit actions")
         strategy._pending_exit_actions = {}
-        strategy._completed_bars = []
+        for order_id, raw in raw_actions.items():
+            if not isinstance(order_id, str) or not isinstance(raw, Mapping):
+                raise ValueError("invalid orderflow pending exit action")
+            action_raw = raw.get("action")
+            discovered_at = raw.get("discovered_at")
+            if not isinstance(action_raw, Mapping) or not isinstance(discovered_at, str):
+                raise ValueError("incomplete orderflow pending exit action")
+            if order_id not in strategy._pending_exits:
+                raise ValueError("pending exit action is not pending")
+            strategy._pending_exit_actions[order_id] = (
+                _exit_action_from_snapshot(action_raw), datetime.fromisoformat(discovered_at),
+            )
+        raw_bars = payload.get("completed_bars", ())
+        if not isinstance(raw_bars, (list, tuple)):
+            raise ValueError("invalid orderflow completed bars")
+        strategy._completed_bars = list(
+            _bar_from_snapshot(item) for item in raw_bars
+            if isinstance(item, Mapping)
+        )
         return strategy
 
 

@@ -62,3 +62,16 @@ def test_policy_response_includes_interaction_contact_candle() -> None:
         for _, evaluation in evaluations
     )
     assert any(evaluation.confirmation_observation_id == "obs-0" for _, evaluation in evaluations)
+
+
+def test_policy_response_uses_chronological_candidates_and_preserves_pre_contact_fallback() -> None:
+    interaction = _interaction()
+    assert interaction is not None
+    older = _observation(1, 99, features={"open": 100, "high": 101, "low": 98, "close": 99})
+    newer = _observation(2, 101, features={"open": 100, "high": 102, "low": 99, "close": 101})
+    evaluations = evaluate_policy_responses(
+        interaction, (newer, older), max_candles=1,
+        cutoff=datetime(2026, 1, 1, 9, 30, tzinfo=UTC),
+    )
+    assert evaluations
+    assert all(evaluation.confirmation_observation_id == "obs-1" for _, evaluation in evaluations if evaluation.confirmation_observation_id)

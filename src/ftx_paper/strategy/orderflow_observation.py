@@ -47,6 +47,15 @@ class ObservationIssue:
 
 
 @dataclass(frozen=True, slots=True)
+class SessionBoundary:
+    """A diagnostic boundary between adjacent source sessions."""
+
+    index: int
+    previous_session_date: str
+    next_session_date: str
+
+
+@dataclass(frozen=True, slots=True)
 class MarketObservation:
     """Immutable source observation with all published aggregates and issues."""
 
@@ -56,6 +65,7 @@ class MarketObservation:
     gaps: tuple[ObservationGap, ...]
     boundary: ObservationBoundary
     issues: tuple[ObservationIssue, ...] = ()
+    session_boundaries: tuple[SessionBoundary, ...] = ()
 
     def available(self, cutoff: datetime) -> OrderflowContext:
         prefixes = {
@@ -126,6 +136,12 @@ def observe_market(replay: OrderflowReplayInput) -> MarketObservation:
     else:
         context = OrderflowContext(replay.session_date, datetime.min.replace(tzinfo=timezone.utc))
     issues: list[ObservationIssue] = []
+    session_boundaries: list[SessionBoundary] = []
+    for index in range(1, len(replay.rows)):
+        previous = normalize_exchange_timestamp(replay.rows[index - 1].timestamp).astimezone(IST).date().isoformat()
+        current = normalize_exchange_timestamp(replay.rows[index].timestamp).astimezone(IST).date().isoformat()
+        if previous != current:
+            session_boundaries.append(SessionBoundary(index, previous, current))
     window_start = expected_start
     while window_start < expected_end:
         window_end = min(window_start + timedelta(minutes=5), expected_end)
@@ -181,11 +197,11 @@ def observe_market(replay: OrderflowReplayInput) -> MarketObservation:
     )
     return MarketObservation(
         replay.session_date, replay.metadata.source_fingerprint, context,
-        gaps, boundary, tuple(issues),
+        gaps, boundary, tuple(issues), tuple(session_boundaries),
     )
 
 
 __all__ = [
-    "MarketObservation", "ObservationBoundary", "ObservationGap", "ObservationIssue",
+    "MarketObservation", "ObservationBoundary", "ObservationGap", "ObservationIssue", "SessionBoundary",
     "observe_market", "rows_available_for_observation",
 ]

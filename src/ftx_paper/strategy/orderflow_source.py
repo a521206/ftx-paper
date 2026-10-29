@@ -57,6 +57,8 @@ class OrderflowSourceMetadata:
     selection_rule: str = "dated_nearest_expiry"
     available_session_dates: tuple[str, ...] = ()
     discarded_session_dates: tuple[str, ...] = ()
+    timestamp_convention: str = "1m label; completed at next minute; Asia/Kolkata"
+    rollover_policy_version: str = "dated-nearest-expiry-v1"
 
     @property
     def identity(self) -> SourceIdentity:

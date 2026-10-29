@@ -43,7 +43,26 @@ def _worker(tmp_path):
         )
         for item in FIXTURE["bars"]
     )
-    selected, account = _context(response_close=101.0)
+    selected, account = _context(response_close=FIXTURE["response_close"])
+    assert selected.orderflow_context is not None
+    # The canonical score path needs a directional completed-bar prefix.  Keep
+    # that evidence in the replay fixture instead of weakening the unavailable
+    # score rule in production.
+    scored_observations = tuple(
+        replace(item, features={**item.features, "close": item.features["high"]})
+        for item in selected.orderflow_context.observations
+    )
+    selected = replace(
+        selected,
+        orderflow_context=replace(
+            selected.orderflow_context,
+            observations=scored_observations,
+            prefixes={
+                "5m": tuple(item for item in scored_observations if item.timeframe == "5m"),
+                "1m": tuple(item for item in scored_observations if item.timeframe == "1m"),
+            },
+        ),
+    )
     bundles = tuple(
         replace(
             selected,
@@ -71,7 +90,7 @@ def test_canonical_replay_entry_uses_next_available_bar_and_is_idempotent(tmp_pa
     }
 
     first = worker.execute_detached(request)
-    assert aggregator.calls == 2
+    assert aggregator.calls == 3
     second_worker, _, _, _, _ = _worker(tmp_path / "repeat")
     second = second_worker.execute_detached(request)
 
@@ -85,6 +104,7 @@ def test_canonical_replay_entry_uses_next_available_bar_and_is_idempotent(tmp_pa
     assert len(reservations) == 1
     assert fills[0]["fill_timestamp"] == bars[1].timestamp.isoformat()
     assert fills[0]["price"] == bars[1].open
+    assert fills[0]["fill_timestamp"] != bars[2].timestamp.isoformat()
     assert all(
         event.get("timestamp", event.get("fill_timestamp")) != bars[0].timestamp.isoformat()
         for event in fills + reservations

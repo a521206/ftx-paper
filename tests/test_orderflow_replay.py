@@ -27,6 +27,14 @@ def test_replay_machine_records_available_evidence_last() -> None:
     assert machine.recorder.records[0].observations == result.available_observation_ids
 
 
+def test_replay_machine_uses_requested_capture_mode() -> None:
+    observation = observe_market(prepare_replay_input(_rows(1), "2026-01-01", session_partition="09:15-09:16"))
+    machine = ReplayMachine(observation, capture_mode="summary")
+    machine.process_bar(datetime(2026, 1, 1, 3, 46, tzinfo=UTC), before_state={}, after_state={})
+    assert machine.recorder.capture_mode.value == "summary"
+    assert machine.recorder.records[0].observations == ()
+
+
 def test_replay_machine_rejects_future_or_reversed_bars() -> None:
     observation = observe_market(prepare_replay_input(_rows(1), "2026-01-01", session_partition="09:15-09:16"))
     machine = ReplayMachine(observation)

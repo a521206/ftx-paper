@@ -283,6 +283,8 @@ def advance_opening_gap(
     evidence_id: str,
     timeframe: str = "1m",
     complete: bool = True,
+    acceptance_bars: int = 1,
+    expiry_bars: int = 5,
 ) -> OpeningGapState:
     """Advance a gap only from one completed, causally available candle."""
     if timeframe != "1m" or not complete or close is None or state.status in {"UNAVAILABLE", "NONE", "RECOVERED", "EXPIRED", "RETURN_TO_VALUE"}:
@@ -296,9 +298,9 @@ def advance_opening_gap(
     next_status = state.status
     if recovered:
         next_status = "RETURN_TO_VALUE"
-    elif state.status == "GAP_CANDIDATE":
+    elif state.status == "GAP_CANDIDATE" and completed_bars >= acceptance_bars:
         next_status = "GAP_ACCEPTED"
-    elif completed_bars >= 5:
+    elif completed_bars >= expiry_bars:
         next_status = "EXPIRED"
     return OpeningGapState(
         next_status, state.gap_points, state.reference_price,

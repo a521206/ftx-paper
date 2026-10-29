@@ -124,3 +124,9 @@ def test_empty_aligned_windows_are_retained_as_incomplete_parent_issues() -> Non
         and issue.reason == "incomplete_session_aligned_parent"
         for issue in observation.issues
     )
+
+
+def test_observation_exposes_session_boundary_diagnostics() -> None:
+    assert observe_market(
+        prepare_replay_input(_rows(1), "2026-01-01", session_partition="09:15-09:16")
+    ).session_boundaries == ()

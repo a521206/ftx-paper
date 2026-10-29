@@ -28,6 +28,11 @@ class InteractionCloseReason(StrEnum):
     REFERENCE_REPLACED = "REFERENCE_REPLACED"
 
 
+class InteractionDepartureDirection(StrEnum):
+    SAME_SIDE = "same_side"
+    CROSS_BAND = "cross_band"
+
+
 @dataclass(frozen=True, slots=True)
 class InteractionCandle:
     observation_id: str
@@ -139,6 +144,10 @@ class LocationInteraction:
     contact_candles: tuple[InteractionCandle, ...] = ()
     close_reason: InteractionCloseReason | None = None
     closed_at: datetime | None = None
+    pre_contact_side: str | None = None
+    departure_direction: InteractionDepartureDirection | None = None
+    terminal_close_side: str | None = None
+    terminal_candle_id: str | None = None
     response_status: str = "PENDING_RESPONSE"
     band_lower: float | None = None
     band_upper: float | None = None
@@ -161,6 +170,10 @@ class LocationInteraction:
             raise ValueError("ended interaction requires a close reason")
         if self.response_status not in {"PENDING", "PENDING_RESPONSE", "CONFIRMED", "INVALIDATED", "EXPIRED"}:
             raise ValueError("invalid interaction response status")
+        if self.pre_contact_side not in {None, "ABOVE", "BELOW"}:
+            raise ValueError("invalid pre-contact side")
+        if self.terminal_close_side not in {None, "ABOVE", "INSIDE_BAND", "BELOW"}:
+            raise ValueError("invalid terminal close side")
 
 
 def _projection_snapshot(candles: tuple[InteractionCandle, ...]) -> ProjectionSnapshot:
@@ -235,6 +248,25 @@ def _append_source_projection(
         synthetic_snapshots=tuple((key, existing[key]) for key in sorted(existing)),
         source_cursors=tuple(sorted(cursors.items())),
     )
+
+
+def _close_side(close: float, lower: float, upper: float) -> str:
+    if close < lower:
+        return "BELOW"
+    if close > upper:
+        return "ABOVE"
+    return "INSIDE_BAND"
+
+
+def _pre_contact_side(
+    observation: OrderflowObservation,
+    location: LocationRecord,
+) -> str | None:
+    previous_close = observation.features.get("previous_close")
+    if not isinstance(previous_close, (int, float)) or isinstance(previous_close, bool):
+        return None
+    side = _close_side(float(previous_close), location.band.lower, location.band.upper)
+    return side if side != "INSIDE_BAND" else None
 
 
 class InteractionDetector:
@@ -350,11 +382,14 @@ class InteractionDetector:
                     "source_aggregate_id": location.source_aggregate_id,
                     "source_timeframe": location.timeframe or observation.timeframe,
                 },
+                pre_contact_side=_pre_contact_side(observation, location),
             )
             interaction = _append_projection(interaction, interaction.contact_candles)
             self._active[key] = interaction
             return interaction
         if not inside:
+            assert interaction.band_lower is not None and interaction.band_upper is not None
+            terminal_side = _close_side(close_value, interaction.band_lower, interaction.band_upper)
             previous_close = interaction.contact_candles[0].close
             crossed = ((previous_close < interaction.reference_level < close_value)
                        or (previous_close > interaction.reference_level > close_value))
@@ -364,11 +399,24 @@ class InteractionDetector:
                 if previous_close == interaction.reference_level
                 else InteractionCloseReason.SAME_SIDE_DEPARTURE
             )
+            initial_side = interaction.pre_contact_side
+            if initial_side is None:
+                first_close = interaction.contact_candles[0].close
+                first_side = _close_side(first_close, interaction.band_lower, interaction.band_upper)
+                initial_side = first_side if first_side != "INSIDE_BAND" else None
             ended = replace(
                 interaction, status=InteractionStatus.ENDED,
                 close_reason=close_reason,
                 closed_at=observation.available_at,
                 contact_candles=(*interaction.contact_candles, candle),
+                terminal_close_side=terminal_side,
+                terminal_candle_id=observation.observation_id,
+                departure_direction=(
+                    None if initial_side is None
+                    else InteractionDepartureDirection.SAME_SIDE
+                    if terminal_side == initial_side
+                    else InteractionDepartureDirection.CROSS_BAND
+                ),
             )
             ended = _append_projection(ended, ended.contact_candles)
             self._active.pop(key, None)
@@ -510,6 +558,10 @@ class InteractionDetector:
                 ],
                 "close_reason": item.close_reason.value if item.close_reason else None,
                 "closed_at": item.closed_at.isoformat() if item.closed_at else None,
+                "pre_contact_side": item.pre_contact_side,
+                "departure_direction": item.departure_direction.value if item.departure_direction else None,
+                "terminal_close_side": item.terminal_close_side,
+                "terminal_candle_id": item.terminal_candle_id,
                 "response_status": item.response_status,
                 "band_lower": item.band_lower,
                 "band_upper": item.band_upper,
@@ -663,6 +715,10 @@ class InteractionDetector:
                 InteractionStatus(str(raw["status"])), candles,
                 InteractionCloseReason(str(close_reason)) if close_reason is not None else None,
                 datetime.fromisoformat(str(closed_at)) if closed_at is not None else None,
+                str(raw["pre_contact_side"]) if raw.get("pre_contact_side") is not None else None,
+                InteractionDepartureDirection(str(raw["departure_direction"])) if raw.get("departure_direction") is not None else None,
+                str(raw["terminal_close_side"]) if raw.get("terminal_close_side") is not None else None,
+                str(raw["terminal_candle_id"]) if raw.get("terminal_candle_id") is not None else None,
                 str(raw.get("response_status", "PENDING_RESPONSE")),
                 float(raw["band_lower"]) if raw.get("band_lower") is not None else None,
                 float(raw["band_upper"]) if raw.get("band_upper") is not None else None,

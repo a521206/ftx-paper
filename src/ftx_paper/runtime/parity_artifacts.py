@@ -174,8 +174,8 @@ def _replay_input(metadata: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _timestamp(record: Mapping[str, Any]) -> str:
-    value = (record.get("occurred_at") or record.get("timestamp") or record.get("decision_at")
-             or record.get("fill_timestamp"))
+    value = (record.get("occurred_at") or record.get("observed_at") or record.get("available_at")
+             or record.get("timestamp") or record.get("decision_at") or record.get("fill_timestamp"))
     if value is None:
         raise ValueError("parity records require occurred_at")
     parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
@@ -282,6 +282,9 @@ def _record(record: Mapping[str, Any], *, kind: str, sequence: int,
         "unavailable": list(record.get("unavailable", ())) + [key for key, value in values.items() if value is None],
         "identity_basis": identity_basis,
     }
+    for field in ("observed_at", "available_at", "neutral_event_key", "event_key"):
+        if record.get(field) is not None:
+            projected[field] = _jsonable(record[field])
     if kind == "decision":
         projected["stage"] = _neutral_stage(record)
         projected["outcome"] = _neutral_outcome(record)
@@ -299,9 +302,9 @@ def decision_diagnostics(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]
     for record in records:
         values = record.get("values", record.get("comparable_values", record))
         values = values if isinstance(values, Mapping) else {}
-        stages[str(values.get("decision_stage", "unknown"))] += 1
-        outcomes[str(values.get("outcome", record.get("kind", "unknown")))] += 1
-        reasons[str(values.get("reason") or values.get("reason_code") or "")] += 1
+        stages[str(record.get("stage") or values.get("decision_stage", "unknown"))] += 1
+        outcomes[str(record.get("outcome") or values.get("outcome", record.get("kind", "unknown")))] += 1
+        reasons[str(record.get("reason") or values.get("reason") or values.get("reason_code") or "")] += 1
     return {
         "count": len(records),
         "kind_counts": dict(sorted(kinds.items())),
@@ -593,6 +596,8 @@ def build_parity_artifact(
     projection_issues: list[str] = []
     decisions = []
     local_identities: dict[str, str] = {}
+    decision_parents: list[str | None] = []
+    projected_decisions: list[dict[str, Any]] = []
     for index, event in enumerate(source_decisions):
         local_parent = (
             event.get("causal_parent_id") or event.get("decision_id")
@@ -603,15 +608,20 @@ def build_parity_artifact(
             projected = _record(event, kind="decision", sequence=len(decisions))
         except ValueError as exc:
             raise ValueError(f"decision projection failed at {index}: {exc}") from exc
-        if local_parent is not None:
-            projected["causal_parent_id"] = local_identities.get(
-                str(local_parent), str(projected["identity"]),
-            )
-        decisions.append(projected)
+        projected_decisions.append(projected)
+        decision_parents.append(str(local_parent) if local_parent is not None else None)
         for key in ("decision_id", "candidate_id", "opportunity_id", "lifecycle_id", "setup_id"):
             value = event.get(key)
             if value is not None:
-                local_identities[str(value)] = str(projected["identity"])
+                local_identities.setdefault(str(value), str(projected["identity"]))
+    for index, (projected, local_parent) in enumerate(zip(projected_decisions, decision_parents)):
+        if local_parent is not None:
+            parent = local_identities.get(local_parent)
+            if parent and parent != projected["identity"]:
+                projected["causal_parent_id"] = parent
+            elif not parent:
+                projection_issues.append(f"missing_parent_link:decision:{index}")
+        decisions.append(projected)
     execution_types = {"ORDER_INTENT", "ORDER_AUTHORIZED", "ORDER_ACK", "FILL", "ORDER_UNFILLED", "ORDER_SUPPRESSED", "RISK_REJECTED", "RESERVATION", "AUTHORIZATION", "SUBMISSION", "PENDING_EXIT", "EXIT_FILL", "CANCELLATION", "SETTLEMENT"}
     source_execution = [event for event in layer_records.get("execution_settlement", ())
                         if str(event.get("event_type", "")).upper() in execution_types

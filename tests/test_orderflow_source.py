@@ -93,6 +93,8 @@ def test_prepare_keeps_requested_date_separate_when_no_rows_replay() -> None:
     assert replay.session_date == "2026-01-01"
     assert not replay.replayed
     assert replay.metadata.row_count == 0
+    assert replay.metadata.timestamp_convention.startswith("1m label")
+    assert replay.metadata.rollover_policy_version == "dated-nearest-expiry-v1"
 
 
 def test_prepare_records_discarded_session_dates_without_mixing_state() -> None:

@@ -604,6 +604,47 @@ def test_delayed_exit_is_dispatched_once_until_settlement() -> None:
     )) == ()
 
 
+def test_orderflow_snapshot_restores_exit_state_and_pending_dispatch() -> None:
+    strategy = OrderflowStrategy(OrderflowConfig(execution_mode=ExecutionMode.EXECUTABLE))
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    entry_time = OBSERVED
+    strategy.register_entry(
+        OrderIntent("entry-snapshot", instrument, OrderSide.BUY, 1, stop_price=99.0,
+                    role=OrderRole.ENTRY, cell="OR_HIGH", exit_mode="signal"),
+        fill_price=100.0, entry_fill_time=entry_time,
+    )
+    assert strategy.on_closed_bar(MarketBar(
+        instrument, entry_time + timedelta(minutes=1), 100.0, 101.0, 98.5, 99.0,
+    )) == ()
+    restored = OrderflowStrategy.from_snapshot(strategy.snapshot())
+    assert set(restored._decision_positions) == {"entry-snapshot"}
+    assert len(restored.on_closed_bar(MarketBar(
+        instrument, entry_time + timedelta(minutes=2), 100.0, 101.0, 98.5, 99.0,
+    ))) == 1
+    assert restored.on_closed_bar(MarketBar(
+        instrument, entry_time + timedelta(minutes=3), 100.0, 101.0, 98.5, 99.0,
+    )) == ()
+
+
+def test_orderflow_pending_exit_has_priority_over_new_exit_evaluation() -> None:
+    strategy = OrderflowStrategy(OrderflowConfig(execution_mode=ExecutionMode.EXECUTABLE))
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    entry_time = OBSERVED
+    strategy.register_entry(
+        OrderIntent("entry-priority", instrument, OrderSide.BUY, 1, stop_price=99.0,
+                    role=OrderRole.ENTRY, cell="OR_HIGH", exit_mode="signal"),
+        fill_price=100.0, entry_fill_time=entry_time,
+    )
+    bar = MarketBar(instrument, entry_time + timedelta(minutes=1), 100.0, 101.0, 98.5, 99.0)
+    assert strategy.on_closed_bar(bar) == ()
+    assert len(strategy.on_closed_bar(MarketBar(
+        instrument, entry_time + timedelta(minutes=2), 100.0, 101.0, 98.5, 99.0,
+    ))) == 1
+    assert strategy.on_closed_bar(MarketBar(
+        instrument, entry_time + timedelta(minutes=3), 100.0, 101.0, 98.5, 99.0,
+    )) == ()
+
+
 def test_diagnostic_and_executable_projections_share_decisions_but_not_orders() -> None:
     bundle, account = _context(response_close=101.0)
     executable = OrderflowStrategy(OrderflowConfig(execution_mode=ExecutionMode.EXECUTABLE))

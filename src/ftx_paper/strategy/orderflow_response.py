@@ -79,8 +79,8 @@ def evaluate_policy_response(
     created_at = getattr(interaction, "created_at", None)
     terminal_at = getattr(interaction, "closed_at", None)
     expiry = _template_expiry(created_at, template.expiry_at) if isinstance(created_at, datetime) else None
-    candidates = _after_prior_day_transition(tuple(
-        item for item in observations
+    candidates = _after_prior_day_transition(tuple(sorted(
+        (item for item in observations
         if getattr(item, "timeframe", None) == template.response_timeframe
         and isinstance(getattr(item, "observed_at", None), datetime)
         and isinstance(getattr(interaction, "created_at", None), datetime)
@@ -88,8 +88,9 @@ def evaluate_policy_response(
         and isinstance(getattr(item, "available_at", None), datetime)
         and getattr(item, "available_at") <= cutoff
         and (expiry is None or getattr(item, "available_at") <= expiry)
-        and (not isinstance(terminal_at, datetime) or getattr(item, "observed_at") <= terminal_at)
-    ), interaction)[:max_candles]
+        and (not isinstance(terminal_at, datetime) or getattr(item, "observed_at") <= terminal_at)),
+        key=lambda item: (getattr(item, "observed_at"), getattr(item, "available_at"), getattr(item, "observation_id", "")),
+    )), interaction)[:max_candles]
     if not candidates:
         return GeometryResponseEvaluation(None, False, (), None, template.direction)
     lower, upper = getattr(interaction, "band_lower", None), getattr(interaction, "band_upper", None)
@@ -115,7 +116,10 @@ def evaluate_policy_response(
         reference = getattr(interaction, "reference_level", None)
         if isinstance(previous_close, (int, float)) and isinstance(reference, (int, float)) and previous_close != reference:
             template = replace(template, direction=Direction.LONG if previous_close < reference else Direction.SHORT)
-            result = evaluate(build_response_spec(template, band_lower=float(lower), band_upper=float(upper)))
+            result = evaluate(
+                build_response_spec(template, band_lower=float(lower), band_upper=float(upper)),
+                pre_contact_side=getattr(interaction, "pre_contact_side", None),
+            )
     return result
 
 
@@ -142,8 +146,8 @@ def evaluate_policy_responses(
         created_at = getattr(interaction, "created_at", None)
         terminal_at = getattr(interaction, "closed_at", None)
         expiry = _template_expiry(created_at, template_for_evaluation.expiry_at) if isinstance(created_at, datetime) else None
-        candidates = _after_prior_day_transition(tuple(
-            item for item in observations
+        candidates = _after_prior_day_transition(tuple(sorted(
+            (item for item in observations
             if getattr(item, "timeframe", None) == template_for_evaluation.response_timeframe
             and isinstance(getattr(item, "observed_at", None), datetime)
             and isinstance(created_at, datetime)
@@ -154,8 +158,9 @@ def evaluate_policy_responses(
             and isinstance(getattr(item, "available_at", None), datetime)
             and getattr(item, "available_at") <= cutoff
             and (expiry is None or getattr(item, "available_at") <= expiry)
-            and (not isinstance(terminal_at, datetime) or getattr(item, "observed_at") <= terminal_at)
-        ), interaction)[:max_candles]
+                and (not isinstance(terminal_at, datetime) or getattr(item, "observed_at") <= terminal_at)),
+            key=lambda item: (getattr(item, "observed_at"), getattr(item, "available_at"), getattr(item, "observation_id", "")),
+        )), interaction)[:max_candles]
         lower, upper = getattr(interaction, "band_lower", None), getattr(interaction, "band_upper", None)
         if not isinstance(lower, (int, float)) or not isinstance(upper, (int, float)):
             continue

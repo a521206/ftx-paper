@@ -37,6 +37,22 @@ def test_interaction_freezes_reference_and_closes_on_departure() -> None:
     assert ended.status is InteractionStatus.ENDED
     assert ended.close_reason is InteractionCloseReason.DEPARTED
     assert len(ended.contact_candles) == 2
+    assert ended.terminal_candle_id == "obs-1"
+    assert ended.terminal_close_side == "ABOVE"
+    assert ended.departure_direction is None
+
+
+def test_interaction_snapshot_preserves_lineage_departure_metadata() -> None:
+    location = LocationRecord("loc-1", "opening_range", 100, LocationBand(99, 101), 1,
+                              datetime(2026, 1, 1, 9, 15, tzinfo=UTC), "agg-1")
+    detector = InteractionDetector("1m")
+    detector.observe(location, _observation(0, 100))
+    detector.observe(location, _observation(1, 103))
+    restored = InteractionDetector.from_snapshot(detector.snapshot())
+    interaction = restored.closed_interactions[0]
+    assert interaction.pre_contact_side is None
+    assert interaction.terminal_candle_id == "obs-1"
+    assert interaction.terminal_close_side == "ABOVE"
 
 
 def test_interaction_recreates_after_departure_with_new_creation_candle() -> None:

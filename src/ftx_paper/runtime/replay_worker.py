@@ -311,15 +311,33 @@ class ReplayWorker:
             left, right = projection(diagnostic, name), projection(executable, name)
             if (compare_projections or name.startswith("authoritative_")) and left != right:
                 projection_mismatches.append({"projection": name, "diagnostic": left, "executable": right})
+        diagnostic_projections = {
+            name: projection(diagnostic, name)
+            for name in ("shadow_trades", "shadow_ledger", "authoritative_trades", "authoritative_ledger")
+            if projection(diagnostic, name)
+        }
         result = {
-            "matched": not mismatches and not diagnostic_mutations,
+            "matched": not mismatches and not diagnostic_mutations and not diagnostic_lifecycle and not diagnostic_projections,
             "mismatches": mismatches,
             "diagnostic_mutations": diagnostic_mutations,
         }
-        if lifecycle_mismatches or projection_mismatches:
-            result["lifecycle_mismatches"] = lifecycle_mismatches
-            result["projection_mismatches"] = projection_mismatches
-            result["matched"] = False
+        # Executable lifecycle and accounting facts are intentionally absent
+        # from diagnostic replay. Keep them visible for reporting, but do not
+        # treat their expected presence on only the executable side as a
+        # decision mismatch.
+        if lifecycle_mismatches:
+            result["executable_lifecycle"] = executable_lifecycle
+        if projection_mismatches:
+            result["executable_projections"] = {
+                name: projection(executable, name)
+                for name in ("shadow_trades", "shadow_ledger", "authoritative_trades", "authoritative_ledger")
+                if projection(executable, name)
+            }
+        if diagnostic_lifecycle or diagnostic_projections:
+            result["unexpected_diagnostic_execution"] = {
+                "lifecycle": diagnostic_lifecycle,
+                "projections": diagnostic_projections,
+            }
         return result
 
     def input_manifest(
@@ -577,7 +595,10 @@ class ReplayWorker:
                     session_partition="09:15-15:30",
                     source_contract=futures_bars[0].instrument.expiry,
                 )
-                replay_machine = ReplayMachine(observe_market(replay_input))
+                replay_machine = ReplayMachine(
+                    observe_market(replay_input),
+                    capture_mode=request.get("capture_mode", "full"),
+                )
             prior_day_high, prior_day_low = self._prior_day_levels(date, available_dates)
             # Historical replay databases may not contain the imported expiry
             # calendar. Infer an expiry session from the option bars themselves
