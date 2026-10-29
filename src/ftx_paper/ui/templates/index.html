@@ -334,6 +334,40 @@
       background: var(--md-surface-container);
     }
 
+    .trader-hero {
+      display: grid;
+      grid-template-columns: minmax(240px, 1.5fr) repeat(4, 1fr);
+      gap: 10px;
+      margin: 0 0 16px;
+    }
+
+    .trader-hero > div {
+      padding: 14px;
+      border: 1px solid var(--md-outline-variant);
+      border-radius: 12px;
+      background: var(--md-surface-container-low);
+    }
+
+    .trader-hero .hero-copy {
+      background: var(--md-primary-container);
+      color: var(--md-on-primary-container);
+    }
+
+    .hero-copy h1 { margin: 3px 0 5px; font-size: 24px; line-height: 29px; }
+    .hero-copy p { margin: 0; font-size: 13px; line-height: 19px; }
+    .trader-metric strong { display: block; margin-top: 7px; font-size: 22px; line-height: 26px; }
+    .trader-metric small { display: block; margin-top: 3px; color: var(--md-on-surface-variant); line-height: 17px; }
+    .stage-key { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 16px; }
+    .stage-key .badge { background: var(--md-surface-container); }
+    .stage-key .badge.good { background: var(--md-success-container); }
+    .stage-key .badge.warn { background: var(--md-warning-container); }
+    .decision-stage { display: grid; grid-template-columns: minmax(105px, 0.8fr) repeat(4, 1fr); gap: 5px; margin-top: 12px; }
+    .decision-stage span { padding: 7px 8px; border-radius: 7px; background: var(--md-surface-container); color: var(--md-on-surface-variant); font-size: 11px; text-align: center; }
+    .decision-stage span.current { background: var(--md-primary-container); color: var(--md-on-primary-container); font-weight: 700; }
+    .decision-next { margin: 12px 0 0; padding: 10px 12px; border-left: 3px solid var(--md-primary); background: var(--md-surface); color: var(--md-on-surface-variant); font-size: 13px; line-height: 19px; }
+    .decision-next strong { color: var(--md-on-surface); }
+    .decision-row .decision-context { min-width: 0; }
+
     .toolbar,
     .section-head {
       display: flex;
@@ -921,6 +955,8 @@
       .replay-diagnosis { grid-template-columns: 1fr; }
       .replay-causal-grid { grid-template-columns: 1fr; }
       .performance-grid { grid-template-columns: 1fr; }
+      .trader-hero { grid-template-columns: repeat(2, 1fr); }
+      .trader-hero .hero-copy { grid-column: 1 / -1; }
     }
 
     summary {
@@ -975,6 +1011,8 @@
       .decision-row {
         grid-template-columns: 1fr 1fr;
       }
+
+      .decision-stage { grid-template-columns: repeat(2, 1fr); }
 
       .event-row {
         grid-template-columns: 1fr 1fr;
@@ -1447,6 +1485,25 @@
       document.getElementById('refresh-activity')?.addEventListener('click', refresh);
     }
 
+    function decisionLifecycle(view, payload = {}) {
+      const execution = String(payload.execution_status || view.execution?.status || '').toLowerCase();
+      const risk = String(payload.risk_status || '').toLowerCase();
+      if (execution === 'filled') return { current: 3, label: 'Filled', next: 'Position is open or has been closed by the runtime.', tone: 'good' };
+      if (execution === 'acknowledged') return { current: 2, label: 'Order working', next: 'Paper order is accepted and waiting for a fill.', tone: 'warn' };
+      if (execution === 'unfilled') return { current: 2, label: 'Not filled', next: 'The order was placed but did not receive a fill.', tone: 'warn' };
+      if (execution === 'execution_error') return { current: 2, label: 'Execution error', next: 'The setup was approved, but execution reported an error.', tone: 'bad' };
+      if (risk === 'sizing_rejected') return { current: 0, label: 'Entry blocked', next: 'Risk controls blocked the entry before an order was placed.', tone: 'warn' };
+      const outcome = String(view.outcome || view.display_outcome || '').toLowerCase();
+      if (outcome === 'accepted' || outcome === 'triggered') return { current: 1, label: 'Setup approved', next: 'No order placed yet. The setup passed admission; wait for the entry trigger.', tone: 'good' };
+      if (outcome === 'rejected') return { current: 0, label: 'Setup rejected', next: 'No order placed. Review the reason below.', tone: 'warn' };
+      return { current: 0, label: 'Recorded', next: 'No executable order is associated with this decision.', tone: 'subtle' };
+    }
+
+    function decisionLifecycleMarkup(lifecycle) {
+      const stages = ['Setup', 'Approved', 'Order', 'Fill', 'Position'];
+      return `<div class="decision-stage" aria-label="Trade lifecycle">${stages.map((stage, index) => `<span class="${index <= lifecycle.current ? 'current' : ''}">${index === lifecycle.current ? '● ' : ''}${stage}</span>`).join('')}</div><div class="decision-next"><strong>Next:</strong> ${esc(lifecycle.next)}</div>`;
+    }
+
     function decisions(rows) {
       if (!rows?.length) {
         return '<div class="empty">Awaiting runtime data</div>';
@@ -1478,6 +1535,7 @@
             const outcome = String(view.display_outcome ?? view.outcome ?? 'Recorded');
             const outcomeLabel = String(outcome).replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
             const outcomeTone = ['Accepted', 'Filled', 'Executed'].includes(outcomeLabel) ? 'good' : ['Rejected', 'Cancelled', 'Superseded', 'Unfilled', 'Execution Error', 'Risk Rejected', 'Sizing Rejected'].includes(outcomeLabel) ? 'warn' : 'subtle';
+            const lifecycle = decisionLifecycle(view, raw.payload || {});
             const friendlyLabels = {
               stage: 'Stage', setup: 'Setup', score: 'Score', setup_score: 'Setup score',
               stop_basis: 'Stop basis', stop_bp: 'Stop (bp)', vehicle: 'Instrument', exit_mode: 'Exit mode',
@@ -1510,12 +1568,12 @@
             <summary class="decision-row">
               <span>${date(decisionAt)}</span>
               <span>${esc(view.strategy_id || 'Unattributed')}</span>
-              <span>${esc(context || '—')}</span>
+              <span class="decision-context">${esc(context || '—')}</span>
               <span>${badge(direction || '—', ['long', 'buy', 'bullish'].includes(String(direction || '').toLowerCase()) ? 'good' : ['short', 'sell', 'bearish'].includes(String(direction || '').toLowerCase()) ? 'bad' : 'subtle')}</span>
-              <span>${esc(detail)}</span>
-              <span>${badge(outcomeLabel, outcomeTone)}</span>
+              <span>${esc(lifecycle.label)}<small>${esc(detail)}</small></span>
+              <span>${badge(lifecycle.label, lifecycle.tone || outcomeTone)}</span>
             </summary>
-            <div class="payload"><strong>Decision details</strong><div class="decision-facts">${facts.map(([key, value]) => `<span><strong>${esc(key)}:</strong> ${esc(value)}</span>`).join('') || '<span>No additional details</span>'}</div>${evidence}<strong>Decision ID:</strong> ${esc(view.decision_id || '—')}</div>
+            <div class="payload"><strong>Trade lifecycle</strong>${decisionLifecycleMarkup(lifecycle)}<div class="decision-facts">${facts.map(([key, value]) => `<span><strong>${esc(key)}:</strong> ${esc(value)}</span>`).join('') || '<span>No additional details</span>'}</div>${evidence}<strong>Decision ID:</strong> ${esc(view.decision_id || '—')}</div>
           </details>`; }
         )
         .join('');
@@ -1978,9 +2036,21 @@
         const visibleDecisionRows = decisionRows;
         const summary = data.decisions.summary || {};
         const selectedStats = decisionStats(summary, selectedDecisionSession);
+        const lifecycleRows = visibleDecisionRows.map((row) => decisionLifecycle(row.decision_view || {}, row.payload || {}));
+        const approved = selectedStats.accepted ?? 0;
+        const rejected = selectedStats.rejected ?? 0;
+        const filled = selectedStats.executed ?? 0;
+        const orders = lifecycleRows.filter((item) => item.current >= 2).length;
+        const openPositions = data.positions?.positions?.length || 0;
         body = `<div class="card">
-          <h2>Decision activity · ${esc(data.decisions.date || decisionDate)}</h2>
-          <div class="decision-filters">
+           <div class="trader-hero">
+             <div class="hero-copy"><div class="label">${esc(data.decisions.date || decisionDate)}</div><h1>Trading activity</h1><p>Follow every idea from setup approval to order, fill, and position. Setup approval is not a fill.</p></div>
+             <div class="trader-metric"><div class="label">Setups approved</div><strong>${approved}</strong><small>Entry conditions met</small></div>
+             <div class="trader-metric"><div class="label">Orders placed</div><strong>${orders}</strong><small>Working or completed</small></div>
+             <div class="trader-metric"><div class="label">Fills</div><strong>${filled}</strong><small>Executed in paper runtime</small></div>
+             <div class="trader-metric"><div class="label">Open positions</div><strong>${openPositions}</strong><small>Shared portfolio</small></div>
+           </div>
+           <div class="decision-filters">
             <label class="decision-strategy-control" for="decision-strategy-filter">Strategy
               <select id="decision-strategy-filter" aria-label="Filter decisions by strategy">
                 <option value=""${selectedStrategy ? '' : ' selected'}>All strategies</option>
@@ -2005,19 +2075,20 @@
               })
               .join('')}
           </div>
-          <div class="review-summary">
-            ${[
-              [selectedDecisionSession || 'Today', selectedDecisionSession ? 'selected session' : 'selected day'],
-              [selectedStats.detections, 'detections'],
-              [selectedStats.candidates, 'candidates'],
-              [selectedStats.executed, 'executed'],
-              [selectedStats.accepted, 'accepted'],
-              [selectedStats.rejected, 'rejected'],
-            ].map((x) => `<span class="badge"><strong>${esc(x[0])}</strong> ${x[1]}</span>`).join('')}
-          </div>
-        </div>
-        <div class="card">
-          <div class="section-head"><h2>Recent decisions</h2><span class="label">${data.decisions.has_more ? `Latest ${visibleDecisionRows.length}` : `${visibleDecisionRows.length} recent`}</span></div>
+           <div class="stage-key"><span class="badge good">Setup approved = admission passed</span><span class="badge warn">Order / fill = execution activity</span><span class="badge">${rejected} blocked or rejected</span></div>
+           <div class="review-summary">
+             ${[
+               [selectedDecisionSession || 'Today', selectedDecisionSession ? 'selected session' : 'selected day'],
+               [selectedStats.detections, 'detections'],
+               [selectedStats.candidates, 'candidates'],
+               [approved, 'setups approved'],
+               [orders, 'orders placed'],
+               [filled, 'fills'],
+             ].map((x) => `<span class="badge"><strong>${esc(x[0])}</strong> ${x[1]}</span>`).join('')}
+           </div>
+         </div>
+         <div class="card">
+           <div class="section-head"><div><h2>Setup and execution history</h2><div class="label">Each row shows the current stage and what happens next.</div></div><span class="label">${data.decisions.has_more ? `Latest ${visibleDecisionRows.length}` : `${visibleDecisionRows.length} recent`}</span></div>
           ${decisions(visibleDecisionRows)}
           ${data.decisions.has_more ? '<button id="load-more-decisions" class="secondary">Load older decisions</button>' : ''}
         </div>`;
@@ -2206,14 +2277,14 @@
       refreshInFlight = true;
       void refreshSharedData();
       try {
-        const pageRequests = {
+        const pageRequests = page === 'decisions' ? {
+          decisions: strategyQuery(`/api/v1/decisions?${new URLSearchParams({ date: decisionDate, limit: '50', ...(selectedDecisionSession ? { session: selectedDecisionSession } : {}) }).toString()}`),
+          positions: '/api/v1/positions',
+        } : {
           dashboard: {
             capital: '/api/v1/capital',
             positions: '/api/v1/positions',
             decisions: strategyQuery('/api/v1/decisions'),
-          },
-          decisions: {
-            decisions: strategyQuery(`/api/v1/decisions?${new URLSearchParams({ date: decisionDate, limit: '50', ...(selectedDecisionSession ? { session: selectedDecisionSession } : {}) }).toString()}`),
           },
           positions: { positions: '/api/v1/positions' },
           trades: { trades: strategyQuery('/api/v1/trades') },
