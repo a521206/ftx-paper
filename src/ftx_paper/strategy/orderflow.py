@@ -53,21 +53,15 @@ from .snapshot_envelope import unwrap_snapshot, wrap_snapshot
 from .exits import ExitAction, ExitStateMachine, PositionState
 
 from .orderflow_codec import (
-    bar_from_snapshot as _bar_from_snapshot,  # noqa: F401
-    bar_snapshot as _bar_snapshot,  # noqa: F401
-    exit_action_from_snapshot as _exit_action_from_snapshot,  # noqa: F401
-    exit_action_snapshot as _exit_action_snapshot,  # noqa: F401
-    instrument_from_snapshot as _instrument_from_snapshot,  # noqa: F401
-    instrument_snapshot as _instrument_snapshot,  # noqa: F401
-    position_from_snapshot as _position_from_snapshot,  # noqa: F401
-    position_snapshot as _position_snapshot,  # noqa: F401
+    bar_from_snapshot as _bar_from_snapshot,
+    exit_action_from_snapshot as _exit_action_from_snapshot,
+    position_from_snapshot as _position_from_snapshot,
     policy_snapshot_payload,
     strategy_snapshot_payload,
 )
 from .orderflow_config import ORDERFLOW_NAME, ORDERFLOW_VERSION, OrderflowConfig
 from .orderflow_helpers import (
     decision_id as _decision_id,
-    feature_number as _feature_number,  # noqa: F401
     observation_number as _number,
     opening_gap_context_available_at,
     score_rejection as _score_rejection,
