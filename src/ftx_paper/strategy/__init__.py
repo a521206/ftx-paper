@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     from .research_policy import ResearchPolicyAdapter
     from .snapshot_envelope import unwrap_snapshot, wrap_snapshot
     from .policy_contract import ExecutionMode, PolicyDecision, StrategyPolicy
-    from .templates import Direction, LocationTemplate, OpeningInteractionKind, ResponseType, TradeTemplate, TriggerType
+    from .templates import Direction, ExitExecutionTiming, ExitMode, ExitResponseConfig, LocationTemplate, OpeningInteractionKind, ResponseType, TradeExit, TradeTemplate, TriggerType
     from .response import ResponseCandle, ResponseSpec, build_response_spec
     from .opportunity import OpportunityContext, OpportunityOutcome, OpportunityOutcomeStatus, opportunity_identity
 
@@ -81,9 +81,9 @@ def __getattr__(name: str):
         from .policy_contract import ExecutionMode, FeatureRequirement, PolicyDecision, StrategyPolicy
         return {"ExecutionMode": ExecutionMode, "FeatureRequirement": FeatureRequirement,
                 "PolicyDecision": PolicyDecision, "StrategyPolicy": StrategyPolicy}[name]
-    if name in {"Direction", "LocationTemplate", "OpeningInteractionKind", "ResponseType", "TradeTemplate", "TriggerType"}:
-        from .templates import Direction, LocationTemplate, OpeningInteractionKind, ResponseType, TradeTemplate, TriggerType
-        return {"Direction": Direction, "LocationTemplate": LocationTemplate, "OpeningInteractionKind": OpeningInteractionKind, "ResponseType": ResponseType, "TradeTemplate": TradeTemplate, "TriggerType": TriggerType}[name]
+    if name in {"Direction", "ExitExecutionTiming", "ExitMode", "ExitResponseConfig", "LocationTemplate", "OpeningInteractionKind", "ResponseType", "TradeExit", "TradeTemplate", "TriggerType"}:
+        from .templates import Direction, ExitExecutionTiming, ExitMode, ExitResponseConfig, LocationTemplate, OpeningInteractionKind, ResponseType, TradeExit, TradeTemplate, TriggerType
+        return {"Direction": Direction, "ExitExecutionTiming": ExitExecutionTiming, "ExitMode": ExitMode, "ExitResponseConfig": ExitResponseConfig, "LocationTemplate": LocationTemplate, "OpeningInteractionKind": OpeningInteractionKind, "ResponseType": ResponseType, "TradeExit": TradeExit, "TradeTemplate": TradeTemplate, "TriggerType": TriggerType}[name]
     if name in {"ResponseCandle", "ResponseSpec", "build_response_spec", "evaluate_policy_responses"}:
         from .response import ResponseCandle, ResponseSpec, build_response_spec
         from .orderflow_response import evaluate_policy_responses
@@ -255,7 +255,7 @@ __all__ = [
     "AdmissionDecision", "DiagnosticDecisionIntent", "PredicateResult", "PredicateStatus", "evaluate_admission",
     "CaptureMode", "REPLAY_RECORD_SCHEMA_VERSION", "ReplayRecord", "ReplayRecorder", "validate_replay_scope",
     "CANONICAL_PHASE_ORDER", "OrderflowRuntimeState", "ReplayBarResult", "ReplayMachine", "ReplayPhase",
-    "Direction", "LocationTemplate", "OpeningInteractionKind", "ResponseType", "TradeTemplate", "TriggerType",
+    "Direction", "ExitExecutionTiming", "ExitMode", "ExitResponseConfig", "LocationTemplate", "OpeningInteractionKind", "ResponseType", "TradeExit", "TradeTemplate", "TriggerType",
     "ResponseCandle", "ResponseSpec", "build_response_spec",
     "OpportunityContext", "OpportunityOutcome", "OpportunityOutcomeStatus", "opportunity_identity",
     "ResearchPolicyAdapter",
