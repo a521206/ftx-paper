@@ -230,8 +230,7 @@ def resolve_instruments(
         if not found:
             raise ValueError(f"XTS instrument not found: {exchange_str}:{symbol or underlying}")
 
-        resolved.append(
-            XTSInstrument(
+        instrument = XTSInstrument(
                 instrument_token=int(found["instrument_token"]),
                 segment_id=int(found.get("segment_id", seg_id)),
                 exchange=str(found.get("exchange", master_exchange)),
@@ -245,7 +244,20 @@ def resolve_instruments(
                 lot_size=int(found.get("lot_size", 1)),
                 tick_size=float(found.get("tick_size", 0.05)),
             )
-        )
+        resolved.append(instrument)
+        if (
+            contract_store is not None
+            and str(instrument.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
+            and instrument.get("expiry")
+        ):
+            expiry = str(instrument.get("expiry"))
+            contract_store.record_runtime_contract({
+                "provider": "xts", "exchange": instrument["exchange"],
+                "underlying": str(underlying or "NIFTY").upper().replace(" ", ""),
+                "role": "futures", "tradingsymbol": instrument["tradingsymbol"],
+                "instrument_token": instrument["instrument_token"],
+                "expiry": expiry,
+            })
 
     return resolved
 

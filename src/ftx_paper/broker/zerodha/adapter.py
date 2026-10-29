@@ -147,7 +147,8 @@ def resolve_instruments(
                 raise ValueError("futures instruments require an underlying")
             stored = (
                 contract_store.read_runtime_contract(
-                    exchange=exchange, underlying=underlying, role=role_to_key(role) if role is not None else "futures",
+                    exchange=exchange, underlying=underlying,
+                    role=role_to_key(role) if role is not None else "futures", provider="zerodha",
                 ) if contract_store is not None and underlying else None
             )
             stored_symbol = str(stored.get("tradingsymbol", "")) if stored else ""
@@ -161,6 +162,7 @@ def resolve_instruments(
             if match is not None:
                 if contract_store is not None:
                     contract_store.record_runtime_contract({
+                        "provider": "zerodha",
                         "exchange": exchange, "underlying": underlying,
                          "role": role_to_key(role) if role is not None else "futures", "tradingsymbol": match["tradingsymbol"],
                         "instrument_token": match["instrument_token"],
@@ -326,6 +328,7 @@ def load_startup_backfill(
                 }))
                 if contract_store is not None:
                     contract_store.record_runtime_contract({
+                        "provider": "zerodha",
                         "exchange": "NFO", "underlying": underlying,
                         "role": "futures", "tradingsymbol": str(row["tradingsymbol"]),
                         "instrument_token": int(row["instrument_token"]),
@@ -335,7 +338,7 @@ def load_startup_backfill(
             if contract_store is not None:
                 for underlying in sorted(underlyings):
                     for contract in contract_store.read_runtime_contracts(
-                        exchange="NFO", underlying=underlying, role="futures",
+                        exchange="NFO", underlying=underlying, role="futures", provider="zerodha",
                     ):
                         try:
                             expiry = date.fromisoformat(str(contract["expiry"])[:10])

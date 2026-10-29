@@ -21,7 +21,7 @@ from typing import Any
 from ftx_paper.broker.xts.adapter import XTSInstrument, instrument_expiry_iso, resolve_instruments
 from ftx_paper.broker.xts.auth import XTSAuth
 from ftx_paper.config import IST, PaperConfig
-from ftx_paper.contracts import Instrument, MarketBar
+from ftx_paper.contracts import Instrument, MarketBar, MarketRole
 from ftx_paper.infrastructure.sqlite.runtime_store import SqliteRuntimeStore
 
 
@@ -57,6 +57,39 @@ def _specifications() -> tuple[dict[str, object], ...]:
         {"exchange": "NSECM", "tradingsymbol": "NIFTY 50", "role": "spot"},
         {"exchange": "NSECM", "tradingsymbol": "INDIA VIX", "role": "vix"},
         {"exchange": "NFO", "underlying": "NIFTY", "role": "futures"},
+    )
+
+
+def _stored_futures_instrument(
+    store: SqliteRuntimeStore, session_date: date,
+) -> XTSInstrument:
+    """Resolve the selected historical contract from the XTS token cache."""
+    candidates = {
+        (str(row.get("symbol")), str(row.get("expiry", ""))[:10])
+        for row in store.read_market_bars(session_date.isoformat())
+        if str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
+        and str(row.get("expiry", ""))[:10] >= session_date.isoformat()
+    }
+    if not candidates:
+        raise ValueError(f"no stored futures contract for {session_date.isoformat()}")
+    symbol, expiry = min(candidates, key=lambda item: item[1])
+    cached = next(
+        (
+            row for row in store.read_runtime_contracts(
+                exchange="NFO", underlying="NIFTY", role="futures", provider="xts",
+            )
+            if str(row.get("tradingsymbol")) == symbol
+            and str(row.get("expiry", ""))[:10] == expiry
+        ),
+        None,
+    )
+    if cached is None:
+        raise ValueError(f"no XTS token cached for {symbol} ({expiry})")
+    return XTSInstrument(
+        instrument_token=int(cached["instrument_token"]), segment_id=2,
+        exchange="NFO", symbol=symbol, tradingsymbol=symbol,
+        instrument_type="FUT", role=MarketRole.FUTURES, expiry=expiry,
+        strike=None, name="NIFTY", lot_size=1, tick_size=0.05,
     )
 
 
@@ -126,7 +159,16 @@ def reload_dates(
 ) -> int:
     total = 0
     for session_date in dates:
-        instruments = resolve_instruments(client, _specifications(), as_of=session_date)
+        instruments = resolve_instruments(
+            client, _specifications(), contract_store=store, as_of=session_date,
+        )
+        historical_futures = _stored_futures_instrument(store, session_date)
+        instruments = [
+            historical_futures
+            if str(item.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
+            else item
+            for item in instruments
+        ]
         fetched = tuple(
             bar for item in instruments
             for bar in _bars_for_instrument(client, item, session_date)

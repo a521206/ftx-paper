@@ -261,6 +261,7 @@ class SqliteRuntimeStore:
                 CREATE INDEX IF NOT EXISTS ix_feature_cache_lookup
                     ON feature_cache(session_date, instrument, timeframe, cutoff_minute);
                 CREATE TABLE IF NOT EXISTS runtime_contracts (
+                    provider TEXT NOT NULL DEFAULT 'unknown',
                     exchange TEXT NOT NULL,
                     underlying TEXT NOT NULL,
                     role TEXT NOT NULL,
@@ -268,7 +269,7 @@ class SqliteRuntimeStore:
                     instrument_token INTEGER NOT NULL,
                     expiry TEXT NOT NULL,
                     selected_at TEXT NOT NULL,
-                    PRIMARY KEY (exchange, underlying, role, tradingsymbol)
+                    PRIMARY KEY (provider, exchange, underlying, role, tradingsymbol)
                 );
                 CREATE TABLE IF NOT EXISTS runtime_orders (
                     client_order_id TEXT PRIMARY KEY,
@@ -369,30 +370,33 @@ class SqliteRuntimeStore:
             row = connection.execute("SELECT payload FROM runtime_status WHERE id = 1").fetchone()
         return json.loads(row[0]) if row else {}
 
-    def read_runtime_contract(self, *, exchange: str, underlying: str, role: str) -> dict[str, Any] | None:
+    def read_runtime_contract(self, *, exchange: str, underlying: str, role: str, provider: str | None = None) -> dict[str, Any] | None:
         with self._connect() as connection:
             connection.row_factory = sqlite3.Row
             row = connection.execute(
-                "SELECT exchange, underlying, role, tradingsymbol, instrument_token, expiry, selected_at "
+                "SELECT provider, exchange, underlying, role, tradingsymbol, instrument_token, expiry, selected_at "
                 "FROM runtime_contracts WHERE exchange = ? AND underlying = ? AND role = ? "
-                "ORDER BY expiry, tradingsymbol LIMIT 1",
-                (exchange, underlying, role),
+                + ("AND provider = ? " if provider is not None else "")
+                + "ORDER BY expiry, tradingsymbol LIMIT 1",
+                (exchange, underlying, role) if provider is None else (exchange, underlying, role, provider),
             ).fetchone()
         return dict(row) if row else None
 
-    def read_runtime_contracts(self, *, exchange: str, underlying: str, role: str) -> list[dict[str, Any]]:
+    def read_runtime_contracts(self, *, exchange: str, underlying: str, role: str, provider: str | None = None) -> list[dict[str, Any]]:
         with self._connect() as connection:
             connection.row_factory = sqlite3.Row
             rows = connection.execute(
-                "SELECT exchange, underlying, role, tradingsymbol, instrument_token, expiry, selected_at "
+                "SELECT provider, exchange, underlying, role, tradingsymbol, instrument_token, expiry, selected_at "
                 "FROM runtime_contracts WHERE exchange = ? AND underlying = ? AND role = ? "
-                "ORDER BY expiry, tradingsymbol",
-                (exchange, underlying, role),
+                + ("AND provider = ? " if provider is not None else "")
+                + "ORDER BY expiry, tradingsymbol",
+                (exchange, underlying, role) if provider is None else (exchange, underlying, role, provider),
             ).fetchall()
         return [dict(row) for row in rows]
 
     def record_runtime_contract(self, contract: dict[str, Any]) -> bool:
-        required = ("exchange", "underlying", "role", "tradingsymbol", "instrument_token", "expiry")
+        contract = {**contract, "provider": contract.get("provider", "unknown")}
+        required = ("provider", "exchange", "underlying", "role", "tradingsymbol", "instrument_token", "expiry")
         if any(contract.get(key) in (None, "") for key in required):
             raise ValueError("runtime contract is missing required identity fields")
         selected_at = datetime.now(timezone.utc).isoformat()
@@ -400,8 +404,8 @@ class SqliteRuntimeStore:
         with self._connect() as connection:
             previous = connection.execute(
                 "SELECT tradingsymbol, instrument_token, expiry FROM runtime_contracts "
-                "WHERE exchange = ? AND underlying = ? AND role = ? AND tradingsymbol = ?",
-                (contract["exchange"], contract["underlying"], contract["role"],
+                "WHERE provider = ? AND exchange = ? AND underlying = ? AND role = ? AND tradingsymbol = ?",
+                (contract["provider"], contract["exchange"], contract["underlying"], contract["role"],
                  contract["tradingsymbol"]),
             ).fetchone()
             changed = previous is None or tuple(previous) != (
@@ -409,12 +413,12 @@ class SqliteRuntimeStore:
             )
             connection.execute(
                 "INSERT INTO runtime_contracts "
-                "(exchange, underlying, role, tradingsymbol, instrument_token, expiry, selected_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(exchange, underlying, role, tradingsymbol) DO UPDATE SET "
+                "(provider, exchange, underlying, role, tradingsymbol, instrument_token, expiry, selected_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(provider, exchange, underlying, role, tradingsymbol) DO UPDATE SET "
                 "instrument_token=excluded.instrument_token, "
                 "expiry=excluded.expiry, selected_at=excluded.selected_at",
-                (contract["exchange"], contract["underlying"], contract["role"],
+                (contract["provider"], contract["exchange"], contract["underlying"], contract["role"],
                  contract["tradingsymbol"], int(contract["instrument_token"]), str(contract["expiry"]), selected_at),
             )
             if changed:
@@ -424,7 +428,7 @@ class SqliteRuntimeStore:
                     (
                         "CONTRACT_CHANGED", json.dumps(_json_safe(event_payload, path="contract event")),
                         selected_at,
-                        f"contract:{contract['exchange']}:{contract['underlying']}:{contract['role']}"
+                        f"contract:{contract['provider']}:{contract['exchange']}:{contract['underlying']}:{contract['role']}"
                         f":{contract['tradingsymbol']}:{contract['expiry']}:{selected_at}",
                     ),
                 )

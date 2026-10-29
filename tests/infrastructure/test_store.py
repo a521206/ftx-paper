@@ -343,7 +343,7 @@ def test_runtime_store_creates_contract_key_with_underlying_and_role(tmp_path):
             if row[5]
         ]
 
-    assert primary_key == ["exchange", "underlying", "role", "tradingsymbol"]
+    assert primary_key == ["provider", "exchange", "underlying", "role", "tradingsymbol"]
 
 
 def test_runtime_store_keeps_same_symbol_for_distinct_roles(tmp_path):

@@ -173,6 +173,7 @@ def resolve_instruments(
                     exchange=exchange,
                     underlying=underlying,
                     role=role_to_key(role) if role is not None else "futures",
+                    provider="shoonya",
                 )
                 if contract_store is not None and underlying
                 else None
@@ -201,6 +202,7 @@ def resolve_instruments(
             if match is not None:
                 if contract_store is not None:
                     contract_store.record_runtime_contract({
+                        "provider": "shoonya",
                         "exchange": exchange,
                         "underlying": underlying,
                         "role": role_to_key(role) if role is not None else "futures",
