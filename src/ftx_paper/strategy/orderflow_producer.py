@@ -461,13 +461,17 @@ class CausalOrderflowProducer:
                 alias: max(
                     (
                         item for item in location_records.values()
-                        if item.alias == alias and item.available_at <= end
+                        if item.alias == alias and item.timeframe == "5m"
+                        and (item.alias != "VWAP" or item.source_observation_id is not None)
+                        and item.available_at <= end
                     ),
                     key=lambda item: item.generation,
                 )
                 for alias in {
                     item.alias for item in location_records.values()
-                    if item.available_at <= end
+                    if item.timeframe == "5m"
+                    and (item.alias != "VWAP" or item.source_observation_id is not None)
+                    and item.available_at <= end
                 }
             }
             for record in latest_records.values():
@@ -486,7 +490,9 @@ class CausalOrderflowProducer:
                     close=_numeric_feature(parent_features, "close"),
                     band_contact=record.band.lower <= parent_high and parent_low <= record.band.upper,
                     source_aggregate_id=parent_id,
-                    observed_at=end,
+                    # Canonical location observations are observed at the
+                    # completed source candle, not at its availability time.
+                    observed_at=children[-1].observed_at,
                     available_at=end,
                     observation_id=stable_orderflow_id(
                         "location_observation", parent_id, record.location_id,
@@ -584,6 +590,5 @@ class CausalOrderflowProducer:
             {"1m": tuple(prefix), "5m": tuple(five_minute)},
             tuple(self._source_issues),
         )
-
 
 __all__ = ["CausalOrderflowProducer", "source_row_is_complete"]
