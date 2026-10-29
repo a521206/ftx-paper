@@ -5,8 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
-from typing import Any, cast
+from typing import Any
 
 from ftx_paper.domain.decision_context import (
     CapitalSnapshot,
@@ -15,12 +14,11 @@ from ftx_paper.domain.decision_context import (
     MarginSnapshot,
 )
 from ftx_paper.execution.events import ExecutionNotification
-from ftx_paper.contracts import MarketBar, MarketRole, OrderIntent, OrderSide
-from ftx_paper.config import SESSION_EXIT_DEADLINE_TIME
+from ftx_paper.contracts import MarketBar, MarketRole, OrderIntent
 from ftx_paper.market.bundles import DecisionBundle
 
 from .coordinator import SharedDecisionCoordinator
-from .orderflow_contract import OrderflowContext, OrderflowObservation, feature_values_to_dict, stable_orderflow_id
+from .orderflow_contract import OrderflowContext, OrderflowObservation, feature_values_to_dict
 from .orderflow_context import (
     ContextHistory, MarketContext, ContextVersionRef, OpeningGapState, SessionLevels,
     advance_opening_gap, classify_context_relation, classify_opening_gap,
@@ -30,7 +28,6 @@ from .orderflow_opportunity import (
 )
 from .opportunity_timeout import advance_opportunity_timeout
 from .orderflow_admission import evaluate_admission
-from .orderflow_capture import CaptureMode
 from .orderflow_interaction import (
     EvidenceLineage, HypothesisState, InteractionCloseReason, InteractionDetector,
     InteractionStatus, LocationInteraction,
@@ -41,31 +38,23 @@ from .orderflow_location import (
 )
 from .orderflow_response import evaluate_policy_responses
 from .templates import TRADE_TEMPLATES, TradeTemplate
-from .orderflow_scores import score_aggregate
-from .orderflow_vwap import (
-    MarketAggregate, VwapLocationProvider, calculate_session_vwap, calculate_vwap_stop,
-    evaluate_vwap_diagnostic_response,
-)
+from .orderflow_vwap import evaluate_vwap_diagnostic_response
 from .orderflow_trigger import observe_trigger
 from .policy_contract import ExecutionMode, FeatureRequirement, PolicyDecision
 from .protocol import StrategyMetadata
-from .snapshot_envelope import unwrap_snapshot, wrap_snapshot
-from .exits import ExitAction, ExitStateMachine, PositionState
+from .snapshot_envelope import wrap_snapshot
+from .exits import ExitAction
+from .orderflow_position_manager import OrderflowPositionManager
+from .orderflow_evidence import OrderflowEvidenceAssembler
 
-from .orderflow_codec import (
-    bar_from_snapshot as _bar_from_snapshot,
-    exit_action_from_snapshot as _exit_action_from_snapshot,
-    position_from_snapshot as _position_from_snapshot,
-    policy_snapshot_payload,
-    strategy_snapshot_payload,
-)
+from .orderflow_codec import policy_snapshot_payload, strategy_snapshot_payload
+from .orderflow_snapshot import policy_from_snapshot, strategy_from_snapshot
 from .orderflow_config import ORDERFLOW_NAME, ORDERFLOW_VERSION, OrderflowConfig
 from .orderflow_helpers import (
     decision_id as _decision_id,
     observation_number as _number,
     opening_gap_context_available_at,
     score_rejection as _score_rejection,
-    volume_average as _volume_average,
 )
 
 
@@ -89,11 +78,7 @@ class OrderflowPolicy:
         self._opening_gap_last_evaluated_id: str | None = None
         self._opening_seed: dict[str, object] | None = None
         self._opportunities: dict[str, SetupOpportunity] = {}
-        self._vwap_provider = VwapLocationProvider()
-        self._evaluation_observations: tuple[OrderflowObservation, ...] = ()
-        self._evaluation_observation_ids: frozenset[str] = frozenset()
-        self._evaluation_observation_indices: dict[str, int] = {}
-        self._confirmation_score_cache: dict[str, tuple[float, float] | None] = {}
+        self._evidence = OrderflowEvidenceAssembler(config)
 
     @property
     def execution_mode(self) -> ExecutionMode:
@@ -106,200 +91,23 @@ class OrderflowPolicy:
             for name in self.config.feature_set
         )
 
+    @property
+    def _evaluation_observations(self) -> tuple[OrderflowObservation, ...]:
+        return self._evidence.observations
+
+    @_evaluation_observations.setter
+    def _evaluation_observations(self, value: tuple[OrderflowObservation, ...]) -> None:
+        self._evidence.observations = value
+
     def _confirmation_scores(
         self, observation: OrderflowObservation,
     ) -> tuple[float, float] | None:
-        cached = self._confirmation_score_cache.get(observation.observation_id)
-        if observation.observation_id in self._confirmation_score_cache:
-            return cached
-        atr = next(
-            (item.frozen_atr for item in observation.location_observations
-             if item.frozen_atr is not None and item.frozen_atr > 0),
-            None,
-        )
-        if atr is None:
-            atr = next(
-                (
-                    location.frozen_atr
-                    for item in self._evaluation_observations
-                    if item.observed_at <= observation.observed_at
-                    for location in item.location_observations
-                    if location.frozen_atr is not None and location.frozen_atr > 0
-                ),
-                None,
-            )
-        if atr is None:
-            self._confirmation_score_cache[observation.observation_id] = None
-            return None
-        all_observations = tuple(
-            item for item in self._evaluation_observations
-            if item.available_at <= observation.available_at
-        )
-        children_by_id = {
-            item.observation_id: item for item in all_observations
-        }
-        child_ids = observation.context.child_observation_ids if observation.context else ()
-        children = tuple(
-            children_by_id[item_id] for item_id in child_ids if item_id in children_by_id
-        )
-        if observation.timeframe == "5m" and len(children) != len(child_ids):
-            self._confirmation_score_cache[observation.observation_id] = None
-            return None
-        child_scores: list[tuple[float, float]] = []
-        for child in children:
-            prior = next(
-                (item for item in reversed(all_observations)
-                 if item.timeframe == child.timeframe and item.observed_at < child.observed_at),
-                None,
-            )
-            prior_items = [
-                item for item in all_observations
-                if item.timeframe == child.timeframe and item.observed_at < child.observed_at
-            ][-20:]
-            try:
-                score = score_aggregate(
-                    child.features,
-                    prior.features if prior is not None else None,
-                    atr=atr,
-                    volume_average=_volume_average(prior_items),
-                )
-            except ValueError:
-                self._confirmation_score_cache[observation.observation_id] = None
-                return None
-            if score is None:
-                self._confirmation_score_cache[observation.observation_id] = None
-                return None
-            child_scores.append(score)
-        prior_parent = next(
-            (item for item in reversed(all_observations)
-             if item.timeframe == observation.timeframe
-             and item.observed_at < observation.observed_at),
-            None,
-        )
-        prior_parents = [
-            item for item in all_observations
-            if item.timeframe == observation.timeframe
-            and item.observed_at < observation.observed_at
-        ][-20:]
-        try:
-            scores = score_aggregate(
-                observation.features,
-                prior_parent.features if prior_parent is not None else None,
-                atr=atr,
-                child_scores=tuple(child_scores),
-                volume_average=_volume_average(prior_parents),
-            )
-        except ValueError:
-            self._confirmation_score_cache[observation.observation_id] = None
-            return None
-        self._confirmation_score_cache[observation.observation_id] = scores
-        return scores
+        return self._evidence.confirmation_scores(observation)
 
     def _prepare_observations(
         self, orderflow: OrderflowContext, context: DecisionContext,
     ) -> tuple[OrderflowObservation, ...]:
-        incoming_observations = tuple(sorted(
-            (*orderflow.observations_for("1m"), *orderflow.observations_for("5m")),
-            key=lambda item: (item.available_at, item.timeframe, item.observed_at, item.observation_id),
-        ))
-        incoming_ids = frozenset(
-            observation_id
-            for item in incoming_observations
-            for observation_id in (
-                item.observation_id,
-                *(location.observation_id for location in item.location_observations),
-            )
-        )
-        if incoming_ids != self._evaluation_observation_ids:
-            self._evaluation_observations = incoming_observations
-            self._evaluation_observation_ids = incoming_ids
-            self._confirmation_score_cache.clear()
-            self._evaluation_observation_indices = {
-                item.observation_id: index
-                for index, item in enumerate(incoming_observations)
-            }
-        observations = self._evaluation_observations
-        vwap_locations: tuple[LocationRecord, ...] = ()
-        has_causal_5m = any(
-            item.timeframe == "5m"
-            and item.available_at <= min(context.as_of, orderflow.cutoff)
-            for item in observations
-        )
-        if self.config.vwap_enabled and has_causal_5m:
-            vwap_measurements = self._vwap_provider.publish(
-                cast(tuple[MarketAggregate, ...], tuple(
-                    item for item in observations
-                    if item.context is not None
-                    and item.context.replay_provenance.get("producer") == "ftx-paper"
-                )),
-                cutoff=min(context.as_of, orderflow.cutoff),
-            )
-            atr = next(
-                (
-                    location.frozen_atr
-                    for item in observations
-                    for location in item.location_observations
-                    if location.location_alias.upper() != "VWAP"
-                    and location.frozen_atr is not None
-                    and location.frozen_atr > 0
-                ),
-                None,
-            )
-            vwap_locations = self._location_registry.publish_measurements(
-                vwap_measurements, atr=atr,
-                band_fraction=self._vwap_provider.config.band_atr_fraction,
-            )
-        first_parent_available = min(
-            (item.available_at for item in observations if item.timeframe == "5m"),
-            default=None,
-        )
-        locations_by_source: dict[str, list[LocationRecord]] = {}
-        for location in vwap_locations:
-            if first_parent_available is not None and location.available_at < first_parent_available:
-                continue
-            locations_by_source.setdefault(location.source_aggregate_id, []).append(location)
-        if locations_by_source:
-            def numeric(item: OrderflowObservation, name: str) -> float:
-                value = _number(item, name)
-                if value is None:
-                    raise ValueError(f"VWAP location requires numeric {name!r} evidence")
-                return value
-
-            enriched = list(observations)
-            for source_id, locations in locations_by_source.items():
-                index = self._evaluation_observation_indices.get(source_id)
-                if index is None:
-                    continue
-                item = enriched[index]
-                enriched[index] = replace(
-                    item,
-                    location_observations=item.location_observations + tuple(
-                        LocationObservation(
-                            location.location_id, location.alias, location.generation, location.price,
-                            location.band.lower, location.band.upper,
-                            numeric(item, "open"), numeric(item, "high"),
-                            numeric(item, "low"), numeric(item, "close"),
-                            location.band.contains(numeric(item, "high"))
-                            and location.band.contains(numeric(item, "low")),
-                            item.observation_id, item.observed_at, item.available_at,
-                            stable_orderflow_id("location_observation", item.observation_id, location.location_id),
-                            location.location_type,
-                            location.source_observation_id,
-                            timeframe=item.timeframe,
-                            child_observation_ids=(
-                                item.context.child_observation_ids
-                                if item.timeframe == "5m" and item.context is not None else ()
-                            ),
-                            method="vwap_provider",
-                            reference_source_aggregate_id=location.source_aggregate_id,
-                            reference_source_timeframe=location.timeframe or item.timeframe,
-                        )
-                        for location in locations
-                    ),
-                )
-            observations = tuple(enriched)
-            self._evaluation_observations = observations
-        return observations
+        return self._evidence.prepare(orderflow, context, self._location_registry)
 
     def _reset_session(
         self, orderflow: OrderflowContext, boundary: datetime,
@@ -324,7 +132,7 @@ class OrderflowPolicy:
         self._location_registry.next_generation(at=boundary, carry=self._session_id is not None)
         self._processed_observation_ids.clear()
         self._processed_location_observation_ids.clear()
-        self._confirmation_score_cache.clear()
+        self._evidence.clear_cache()
         self._location_detectors = {timeframe: InteractionDetector(timeframe) for timeframe in ("1m", "5m")}
         self._context_history = ContextHistory()
         if self._session_id is None:
@@ -1515,121 +1323,9 @@ class OrderflowPolicy:
     def snapshot(self) -> Mapping[str, object]:
         return policy_snapshot_payload(self)
 
-    @staticmethod
-    def _config_from_snapshot(snapshot: Mapping[str, object]) -> OrderflowConfig:
-        raw_config = snapshot.get("config")
-        if not isinstance(raw_config, Mapping):
-            raise ValueError("orderflow snapshot config must be an object")
-        values = dict(raw_config)
-        allowed_config = set(OrderflowConfig.__dataclass_fields__)
-        values.setdefault("timezone", "Asia/Kolkata")
-        values.setdefault("market_session", ("09:15", "15:30"))
-        values.setdefault("vehicle", "futures")
-        values.setdefault("replay_mode", "causal")
-        values.setdefault("capture_mode", CaptureMode.FULL)
-        if set(values) != allowed_config:
-            raise ValueError("orderflow snapshot config fields are invalid")
-        values["execution_mode"] = ExecutionMode(values.get("execution_mode", "diagnostic"))
-        values["capture_mode"] = CaptureMode(values.get("capture_mode", CaptureMode.FULL))
-        try:
-            return OrderflowConfig(**values)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("invalid orderflow snapshot config") from exc
-
-    def _restore_snapshot_state(self, snapshot: Mapping[str, object]) -> None:
-        session_id = snapshot.get("session_id")
-        if session_id is not None and not isinstance(session_id, str):
-            raise ValueError("invalid orderflow snapshot session_id")
-        self._session_id = session_id
-
-        raw_processed = snapshot.get("processed_observation_ids", ())
-        if not isinstance(raw_processed, (list, tuple)) or any(not isinstance(item, str) for item in raw_processed):
-            raise ValueError("invalid processed orderflow observation IDs")
-        self._processed_observation_ids = set(raw_processed)
-
-        raw_location_processed = snapshot.get("processed_location_observation_ids")
-        if not isinstance(raw_location_processed, (list, tuple)) or any(
-            not isinstance(item, str) for item in raw_location_processed
-        ):
-            raise ValueError("invalid processed location observation IDs")
-        self._processed_location_observation_ids = set(raw_location_processed)
-
-        raw_detectors = snapshot.get("location_detectors")
-        if not isinstance(raw_detectors, Mapping):
-            raise ValueError("invalid orderflow location detector snapshots")
-        if set(raw_detectors) != {"1m", "5m"}:
-            raise ValueError("orderflow location detector timeframes are invalid")
-        if any(not isinstance(value, Mapping) for value in raw_detectors.values()):
-            raise ValueError("invalid orderflow location detector snapshot")
-        self._location_detectors = {
-            str(timeframe): InteractionDetector.from_snapshot(value)
-            for timeframe, value in raw_detectors.items()
-        }
-
-        admission_suspended = snapshot.get("admission_suspended")
-        gap_end = snapshot.get("gap_end")
-        if "gap_end" not in snapshot or not isinstance(admission_suspended, bool):
-            raise ValueError("invalid orderflow admission suspension state")
-        if gap_end is not None and not isinstance(gap_end, str):
-            raise ValueError("invalid orderflow gap end")
-        self._admission_suspended = admission_suspended
-        self._gap_end = datetime.fromisoformat(gap_end) if gap_end is not None else None
-
-        last_gap_observation = snapshot.get("opening_gap_last_evaluated_id")
-        if last_gap_observation is not None and not isinstance(last_gap_observation, str):
-            raise ValueError("invalid opening gap evaluation observation ID")
-        self._opening_gap_last_evaluated_id = last_gap_observation
-        raw_opening_seed = snapshot.get("opening_seed")
-        if raw_opening_seed is not None and not isinstance(raw_opening_seed, Mapping):
-            raise ValueError("invalid opening seed snapshot")
-        self._opening_seed = dict(raw_opening_seed) if isinstance(raw_opening_seed, Mapping) else None
-
-        raw_context_version = snapshot.get("context_version", 0)
-        if not isinstance(raw_context_version, int) or raw_context_version < 0:
-            raise ValueError("invalid orderflow context version")
-        self._context_version = raw_context_version
-        raw_session_high = snapshot.get("session_high")
-        raw_session_low = snapshot.get("session_low")
-        self._session_high = float(raw_session_high) if isinstance(raw_session_high, (int, float)) else None
-        self._session_low = float(raw_session_low) if isinstance(raw_session_low, (int, float)) else None
-
-        raw_context_history = snapshot.get("context_history")
-        if isinstance(raw_context_history, Mapping):
-            self._context_history = ContextHistory.from_dict(raw_context_history)
-        raw_location_registry = snapshot.get("location_registry")
-        if raw_location_registry is not None:
-            self._location_registry = LocationRegistry.from_dict(raw_location_registry)
-        raw_opportunities = snapshot.get("opportunities")
-        if not isinstance(raw_opportunities, (list, tuple)):
-            raise ValueError("invalid orderflow opportunities")
-        for item in raw_opportunities:
-            if not isinstance(item, Mapping):
-                raise ValueError("invalid orderflow opportunity")
-            opportunity = SetupOpportunity.from_snapshot(item)
-            if opportunity.lifecycle_id in self._opportunities:
-                raise ValueError("duplicate orderflow opportunity ID")
-            self._opportunities[opportunity.lifecycle_id] = opportunity
-
     @classmethod
     def from_snapshot(cls, snapshot: Mapping[str, object]) -> "OrderflowPolicy":
-        schema_version = snapshot.get("schema_version")
-        if schema_version not in {2, 3}:
-            raise ValueError("unsupported orderflow snapshot schema")
-        if schema_version == 2:
-            legacy_detector = snapshot.get("location_detector")
-            if not isinstance(legacy_detector, Mapping):
-                raise ValueError("invalid legacy orderflow location detector snapshot")
-            snapshot = {
-                **snapshot,
-                "schema_version": 3,
-                "location_detectors": {
-                    "1m": InteractionDetector("1m").snapshot(),
-                    "5m": legacy_detector,
-                },
-            }
-        policy = cls(cls._config_from_snapshot(snapshot))
-        policy._restore_snapshot_state(snapshot)
-        return policy
+        return policy_from_snapshot(cls, snapshot)
 
 
 class OrderflowStrategy:
@@ -1638,11 +1334,27 @@ class OrderflowStrategy:
     def __init__(self, config: OrderflowConfig = OrderflowConfig()) -> None:
         self.policy = OrderflowPolicy(config)
         self.coordinator = SharedDecisionCoordinator(self.policy)
-        self._decision_positions: dict[str, tuple[PositionState, ExitStateMachine]] = {}
-        self._pending_exits: dict[str, str] = {}
-        self._pending_exit_actions: dict[str, tuple[ExitAction, datetime]] = {}
-        self._completed_bars: list[MarketBar] = []
-        self._stop_update_evidence: list[dict[str, object]] = []
+        self._position_manager = OrderflowPositionManager(config)
+
+    @property
+    def _decision_positions(self):
+        return self._position_manager.positions
+
+    @property
+    def _pending_exits(self):
+        return self._position_manager.pending_exits
+
+    @property
+    def _pending_exit_actions(self):
+        return self._position_manager.pending_exit_actions
+
+    @property
+    def _completed_bars(self):
+        return self._position_manager.completed_bars
+
+    @property
+    def _stop_update_evidence(self):
+        return self._position_manager.stop_update_evidence
 
     def bind_account_context(self, portfolio: object, capital_context: object) -> None:
         del portfolio, capital_context
@@ -1685,132 +1397,20 @@ class OrderflowStrategy:
     def register_entry(self, order: OrderIntent, *, fill_price: float | None = None,
                        entry_fill_time: datetime | str | None = None,
                        reference_price: float | None = None) -> None:
-        if order.stop_price is None or order.client_order_id in self._decision_positions:
-            return
-        if isinstance(entry_fill_time, str):
-            entry_fill_time = datetime.fromisoformat(entry_fill_time)
-        position = PositionState(
-            order.instrument, fill_price if fill_price is not None else 0.0,
-            order.stop_price, order.quantity, order.side, stop_policy=order.stop_policy,
-            cell=order.cell,
-            exit_mode=order.exit_mode or "signal", entry_fill_time=entry_fill_time,
-            exit_reference_price=reference_price, vehicle=order.vehicle,
-            synthetic_legs=order.synthetic_legs, entry_bar=order.entry_bar,
-            entry_order_id=order.client_order_id,
-            initial_risk_points=abs((fill_price if fill_price is not None else 0.0) - order.stop_price),
+        self._position_manager.register_entry(
+            order, fill_price=fill_price, entry_fill_time=entry_fill_time,
+            reference_price=reference_price,
         )
-        self._decision_positions[order.client_order_id] = (
-            position, ExitStateMachine(close_time=SESSION_EXIT_DEADLINE_TIME),
-        )
-
-    def _release_delayed_actions(self, bar: MarketBar) -> list[ExitAction]:
-        actions: list[ExitAction] = []
-        for exit_order_id, (action, discovered_at) in tuple(self._pending_exit_actions.items()):
-            if bar.instrument == action.intent.instrument and bar.timestamp > discovered_at:
-                actions.append(action)
-                self._pending_exit_actions.pop(exit_order_id, None)
-        return actions
-
-    def _update_vwap_stop(
-        self,
-        order_id: str,
-        position: PositionState,
-        exits: ExitStateMachine,
-        bar: MarketBar,
-    ) -> PositionState:
-        vwap_bars = tuple(item for item in self._completed_bars if item.instrument == bar.instrument)
-        vwap, source_bar = calculate_session_vwap(
-            cast(tuple[MarketAggregate, ...], vwap_bars), cutoff=bar.timestamp,
-            timezone=self.policy.config.timezone, session_start=self.policy.config.market_session[0],
-        )
-        timezone = ZoneInfo(self.policy.config.timezone)
-        local_date = bar.timestamp.astimezone(timezone).date()
-        session_bars = tuple(
-            item for item in vwap_bars
-            if item.timestamp.astimezone(timezone).date() == local_date
-        )[-20:]
-        ranges = [item.high - item.low for item in session_bars if item.high >= item.low]
-        atr = sum(ranges) / len(ranges) if ranges else None
-        result = calculate_vwap_stop(
-            direction="long" if position.side is OrderSide.BUY else "short",
-            entry_price=position.entry_price, vwap=vwap, atr=atr,
-            source_aggregate_id=getattr(source_bar, "aggregate_id", None),
-            source_observation_id=getattr(source_bar, "observation_id", None),
-        )
-        initial_risk = position.initial_risk_points or 0.0
-        favorable = (
-            bar.high - position.entry_price if position.side is OrderSide.BUY
-            else position.entry_price - bar.low
-        )
-        post_3r = position.post_3r_activated or (initial_risk > 0 and favorable >= 3.0 * initial_risk)
-        if post_3r and result.candidate is not None and initial_risk > 0:
-            one_r = (
-                position.entry_price + initial_risk
-                if position.side is OrderSide.BUY else position.entry_price - initial_risk
-            )
-            result = replace(
-                result,
-                candidate=(max(one_r, result.candidate) if position.side is OrderSide.BUY
-                           else min(one_r, result.candidate)),
-            )
-        tightens = result.candidate is not None and (
-            result.candidate > position.stop_price if position.side is OrderSide.BUY
-            else result.candidate < position.stop_price
-        )
-        if tightens:
-            position = replace(
-                position, stop_price=result.candidate, stop_source="vwap",
-                post_3r_activated=post_3r,
-            )
-            self._decision_positions[order_id] = (position, exits)
-        elif post_3r and not position.post_3r_activated:
-            position = replace(position, post_3r_activated=True)
-            self._decision_positions[order_id] = (position, exits)
-        self._stop_update_evidence.append({
-            "event": "stop_updated", "vwap_stop_reference": result.vwap,
-            "active_stop": position.stop_price, "stop_source": position.stop_source,
-            "atr": result.atr, "source_aggregate_id": result.source_aggregate_id,
-            "source_observation_id": result.source_observation_id,
-            "reason": result.reason, "changed": tightens,
-            "observed_at": bar.timestamp.isoformat(),
-        })
-        return position
-
-    def _evaluate_position_bar(
-        self, order_id: str, position: PositionState, exits: ExitStateMachine, bar: MarketBar,
-    ) -> None:
-        if position.stop_policy == "or_vwap":
-            position = self._update_vwap_stop(order_id, position, exits, bar)
-        action = exits.evaluate(
-            position, timestamp=bar.timestamp, high=bar.high, low=bar.low,
-            close=bar.close, open=bar.open, volume=bar.volume,
-            client_order_id=f"exit-{order_id}-{bar.timestamp.isoformat()}",
-        )
-        if action is not None:
-            self._pending_exits[action.intent.client_order_id] = order_id
-            self._pending_exit_actions[action.intent.client_order_id] = action, bar.timestamp
 
     def on_closed_bar(self, bar: MarketBar) -> tuple[ExitAction, ...]:
-        self._completed_bars.append(bar)
-        actions = self._release_delayed_actions(bar)
-        pending_entries = set(self._pending_exits.values())
-        for order_id, (position, exits) in tuple(self._decision_positions.items()):
-            if bar.instrument != position.instrument or order_id in pending_entries:
-                continue
-            if position.entry_fill_time is not None and bar.timestamp < position.entry_fill_time:
-                continue
-            self._evaluate_position_bar(order_id, position, exits, bar)
-        return tuple(actions)
+        return self._position_manager.on_closed_bar(bar)
 
     @property
     def stop_update_evidence(self) -> tuple[Mapping[str, object], ...]:
         return tuple(self._stop_update_evidence)
 
     def settle_exit(self, exit_order_id: str, *, filled: bool, **_kwargs: object) -> None:
-        entry_order_id = self._pending_exits.pop(exit_order_id, None)
-        self._pending_exit_actions.pop(exit_order_id, None)
-        if filled and entry_order_id is not None:
-            self._decision_positions.pop(entry_order_id, None)
+        self._position_manager.settle_exit(exit_order_id, filled=filled)
 
     def snapshot(self) -> Mapping[str, object]:
         return wrap_snapshot(
@@ -1822,58 +1422,8 @@ class OrderflowStrategy:
 
     @classmethod
     def from_snapshot(cls, snapshot: Mapping[str, object], *, capital_profile=None) -> "OrderflowStrategy":
-        _, payload = unwrap_snapshot(snapshot)
-        strategy = cls.__new__(cls)
-        strategy.policy = OrderflowPolicy.from_snapshot(payload)
-        strategy.coordinator = SharedDecisionCoordinator(strategy.policy)
-        strategy._decision_positions = {}
-        raw_positions = payload.get("decision_positions", {})
-        if not isinstance(raw_positions, Mapping):
-            raise ValueError("invalid orderflow decision position snapshot")
-        for order_id, raw in raw_positions.items():
-            if not isinstance(order_id, str) or not isinstance(raw, Mapping):
-                raise ValueError("invalid orderflow decision position")
-            position_raw = raw.get("position")
-            exit_raw = raw.get("exit_state")
-            if not isinstance(position_raw, Mapping) or not isinstance(exit_raw, Mapping):
-                raise ValueError("incomplete orderflow decision position")
-            position = _position_from_snapshot(position_raw)
-            if position.entry_order_id != order_id:
-                raise ValueError("orderflow position key does not match entry_order_id")
-            strategy._decision_positions[order_id] = (position, ExitStateMachine.from_snapshot(exit_raw))
-        raw_pending = payload.get("pending_exits", {})
-        if not isinstance(raw_pending, Mapping) or any(
-            not isinstance(key, str) or not isinstance(value, str)
-            for key, value in raw_pending.items()
-        ):
-            raise ValueError("invalid orderflow pending exits")
-        if any(value not in strategy._decision_positions for value in raw_pending.values()):
-            raise ValueError("orderflow pending exit references unknown position")
-        strategy._pending_exits = dict(raw_pending)
-        raw_actions = payload.get("pending_exit_actions", {})
-        if not isinstance(raw_actions, Mapping):
-            raise ValueError("invalid orderflow pending exit actions")
-        strategy._pending_exit_actions = {}
-        for order_id, raw in raw_actions.items():
-            if not isinstance(order_id, str) or not isinstance(raw, Mapping):
-                raise ValueError("invalid orderflow pending exit action")
-            action_raw = raw.get("action")
-            discovered_at = raw.get("discovered_at")
-            if not isinstance(action_raw, Mapping) or not isinstance(discovered_at, str):
-                raise ValueError("incomplete orderflow pending exit action")
-            if order_id not in strategy._pending_exits:
-                raise ValueError("pending exit action is not pending")
-            strategy._pending_exit_actions[order_id] = (
-                _exit_action_from_snapshot(action_raw), datetime.fromisoformat(discovered_at),
-            )
-        raw_bars = payload.get("completed_bars", ())
-        if not isinstance(raw_bars, (list, tuple)):
-            raise ValueError("invalid orderflow completed bars")
-        strategy._completed_bars = list(
-            _bar_from_snapshot(item) for item in raw_bars
-            if isinstance(item, Mapping)
-        )
-        return strategy
+        del capital_profile
+        return strategy_from_snapshot(cls, snapshot)
 
 
 __all__ = [
