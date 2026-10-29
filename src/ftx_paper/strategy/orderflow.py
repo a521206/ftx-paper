@@ -116,9 +116,11 @@ def _score_rejection(
     *, direction: str, long_score: float | None, short_score: float | None,
     margin: float | None,
 ) -> str | None:
-    """Apply the score margin only when both causal scores are available."""
-    if margin is None or long_score is None or short_score is None:
+    """Apply the canonical permission margin to a complete score pair."""
+    if margin is None:
         return None
+    if long_score is None or short_score is None:
+        return "setup_scores_unavailable"
     own = long_score if direction == "long" else short_score
     opposing = short_score if direction == "long" else long_score
     return "fill_permission_mismatch" if own - opposing < margin else None
@@ -1227,8 +1229,11 @@ class OrderflowPolicy:
                         direction=direction,
                         evidence={"acceptance": acceptance, "evidence_ids": evidence_ids},
                     )
-                    long_score = formation_context.long_score if formation_context is not None else None
-                    short_score = formation_context.short_score if formation_context is not None else None
+                    # Permission uses the confirmation aggregate's local scores,
+                    # matching the canonical replay rather than the older
+                    # formation-context snapshot.
+                    long_score = _number(confirmation_observation, "long_score")
+                    short_score = _number(confirmation_observation, "short_score")
                     score_rejection = _score_rejection(
                         direction=direction,
                         long_score=long_score,
