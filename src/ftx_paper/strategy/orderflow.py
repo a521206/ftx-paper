@@ -99,6 +99,7 @@ class OrderflowPolicy:
         self._evaluation_observations: tuple[OrderflowObservation, ...] = ()
         self._evaluation_observation_ids: frozenset[str] = frozenset()
         self._evaluation_observation_indices: dict[str, int] = {}
+        self._confirmation_score_cache: dict[str, tuple[float, float] | None] = {}
 
     @property
     def execution_mode(self) -> ExecutionMode:
@@ -115,6 +116,9 @@ class OrderflowPolicy:
         self, observation: OrderflowObservation,
     ) -> tuple[float, float] | None:
         """Recompute canonical scores from the confirmation evidence boundary."""
+        cached = self._confirmation_score_cache.get(observation.observation_id)
+        if observation.observation_id in self._confirmation_score_cache:
+            return cached
         atr = next(
             (item.frozen_atr for item in observation.location_observations
              if item.frozen_atr is not None and item.frozen_atr > 0),
@@ -132,6 +136,7 @@ class OrderflowPolicy:
                 None,
             )
         if atr is None:
+            self._confirmation_score_cache[observation.observation_id] = None
             return None
         # Scores may only consume evidence available at the confirmation
         # boundary.  A source row can be observed before it is available, so
@@ -148,6 +153,7 @@ class OrderflowPolicy:
             children_by_id[item_id] for item_id in child_ids if item_id in children_by_id
         )
         if observation.timeframe == "5m" and len(children) != len(child_ids):
+            self._confirmation_score_cache[observation.observation_id] = None
             return None
         child_scores: list[tuple[float, float]] = []
         for child in children:
@@ -168,8 +174,10 @@ class OrderflowPolicy:
                     volume_average=_volume_average(prior_items),
                 )
             except ValueError:
+                self._confirmation_score_cache[observation.observation_id] = None
                 return None
             if score is None:
+                self._confirmation_score_cache[observation.observation_id] = None
                 return None
             child_scores.append(score)
         prior_parent = next(
@@ -184,7 +192,7 @@ class OrderflowPolicy:
             and item.observed_at < observation.observed_at
         ][-20:]
         try:
-            return score_aggregate(
+            scores = score_aggregate(
                 observation.features,
                 prior_parent.features if prior_parent is not None else None,
                 atr=atr,
@@ -192,7 +200,10 @@ class OrderflowPolicy:
                 volume_average=_volume_average(prior_parents),
             )
         except ValueError:
+            self._confirmation_score_cache[observation.observation_id] = None
             return None
+        self._confirmation_score_cache[observation.observation_id] = scores
+        return scores
 
     def _prepare_observations(
         self, orderflow: OrderflowContext, context: DecisionContext,
@@ -213,6 +224,7 @@ class OrderflowPolicy:
         if incoming_ids != self._evaluation_observation_ids:
             self._evaluation_observations = incoming_observations
             self._evaluation_observation_ids = incoming_ids
+            self._confirmation_score_cache.clear()
             self._evaluation_observation_indices = {
                 item.observation_id: index
                 for index, item in enumerate(incoming_observations)
@@ -320,6 +332,7 @@ class OrderflowPolicy:
         self._location_registry.next_generation(at=boundary, carry=self._session_id is not None)
         self._processed_observation_ids.clear()
         self._processed_location_observation_ids.clear()
+        self._confirmation_score_cache.clear()
         self._location_detectors = {timeframe: InteractionDetector(timeframe) for timeframe in ("1m", "5m")}
         self._context_history = ContextHistory()
         if self._session_id is None:
