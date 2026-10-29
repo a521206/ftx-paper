@@ -19,7 +19,8 @@ def _artifact() -> dict:
         "ledger": {"2026-01-05": {"net_pnl_rs": 1.0}},
         "metadata": {"timezone": "UTC", "normalized_fingerprint": "fixture",
                      "selected_source_rows": 1, "filtered_source_rows": 0,
-                     "completed_source_rows": 1, "gap_rows": 0},
+                     "completed_source_rows": 1, "gap_rows": 0,
+                     "orderflow_daily_atr": [{"value": 12.5, "source_fingerprint": "atr-fixture"}]},
     }
     return build_parity_artifact(
         result,
@@ -33,6 +34,9 @@ def test_artifact_uses_only_four_layers() -> None:
     validate_parity_artifact(artifact)
     assert set(artifact["layers"]) == set(PARITY_LAYERS)
     assert "p9" not in artifact and "p10" not in artifact
+    assert artifact["scope"]["orderflow_daily_atr"] == [
+        {"value": 12.5, "source_fingerprint": "atr-fixture"}
+    ]
 
 
 def test_artifact_resequences_restarted_producer_decision_stream() -> None:

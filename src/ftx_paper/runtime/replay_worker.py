@@ -15,6 +15,7 @@ from ftx_paper.contracts.replay import ExecutionScope, LEGACY_REPLAY_FIELDS, Rep
 from ftx_paper.domain.capital import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE, CapitalRuntimeContext
 from ftx_paper.market import (
     AggregatorConfig, Cell, CompletedBarAggregator, FeatureService, InstrumentKey,
+    FeatureSnapshot, ORDERFLOW_DAILY_ATR_FEATURE_SET,
 )
 from ftx_paper.market.requirements import FeatureRequirement
 from ftx_paper.domain import AccountAggregate, PortfolioState
@@ -556,6 +557,7 @@ class ReplayWorker:
         last_portfolio: PortfolioState | None = None
         last_strategy_metadata = None
         runtime_replay_records: list[dict[str, Any]] = []
+        atr_artifacts: list[dict[str, Any]] = []
         available_dates = self._dates()
         expiry_dates = self.store.read_expiry_dates()
         # This engine/strategy is private to this replay run and never shared
@@ -665,9 +667,10 @@ class ReplayWorker:
             )
             if orderflow_producer is not None:
                 orderflow_producer.set_prior_value_bounds(prior_day_high, prior_day_low)
-                orderflow_producer.set_frozen_atr(
-                    self._prior_daily_atr(date, available_dates),
-                )
+                orderflow_producer.set_frozen_atr(self._prior_daily_atr(date, available_dates))
+                atr_artifact = self._orderflow_atr_artifact(date)
+                if atr_artifact is not None:
+                    atr_artifacts.append(atr_artifact)
                 prior_dates = [item for item in available_dates if item < date]
                 if prior_dates:
                     prior_date = max(prior_dates)
@@ -1539,6 +1542,7 @@ class ReplayWorker:
             "incomplete_causal_bars": max(0, int(bars_seen) - int(causal_bars_seen)),
             "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "directional_exposure": directional_exposure,
+            "orderflow_daily_atr": atr_artifacts,
                 "requested_parameters": {
                     "session_date": session_date,
                     "vehicles": list(vehicles),
@@ -1950,6 +1954,32 @@ class ReplayWorker:
         """Read or materialize Paper's prior-session ATR artifact."""
         del available_dates
         return materialize_orderflow_daily_atr(self.store, session_date)
+
+    def _orderflow_atr_artifact(self, session_date: str) -> dict[str, Any] | None:
+        repository_factory = getattr(self.store, "feature_repository", None)
+        if not callable(repository_factory):
+            return None
+        reader = getattr(repository_factory(), "read_feature_snapshot_for_session", None)
+        if not callable(reader):
+            return None
+        snapshot = reader(
+            feature_set=ORDERFLOW_DAILY_ATR_FEATURE_SET,
+            instrument="NIFTY",
+            session_date=session_date,
+        )
+        if not isinstance(snapshot, FeatureSnapshot):
+            return None
+        key = snapshot.key
+        return {
+            "session_date": key.session_date,
+            "value": snapshot.values.get("atr_14"),
+            "feature_set": key.feature_set,
+            "calculator_version": key.calculator_version,
+            "parameters": dict(key.parameters),
+            "source_fingerprint": key.input_fingerprint,
+            "source_bar_count": len(snapshot.source_bar_ids),
+            "availability": snapshot.availability,
+        }
 
     def _prior_day_levels(
         self, session_date: str, available_dates: list[str] | None = None,

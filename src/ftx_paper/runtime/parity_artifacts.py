@@ -721,6 +721,8 @@ def build_parity_artifact(
             "processed_decision_bars": int(metadata.get("processed_decision_bars", result.get("bars_seen", 0))),
         },
     }
+    if metadata.get("orderflow_daily_atr"):
+        scope["orderflow_daily_atr"] = _jsonable(metadata["orderflow_daily_atr"])
     replay_identity = replay_input.get("identity", ())
     input_identity = replay_identity[0] if replay_identity else None
     coverage = _coverage(
