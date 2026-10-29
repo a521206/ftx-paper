@@ -40,6 +40,18 @@ def source_row_is_complete(bar: MarketBar) -> bool:
     )
 
 
+def source_issue_reason(bar: MarketBar) -> str:
+    """Classify an unusable source row without inventing replacement values."""
+    volume = bar.volume
+    if (
+        not isinstance(volume, (int, float))
+        or isinstance(volume, bool)
+        or not math.isfinite(float(volume))
+    ):
+        return "missing_volume"
+    return "incomplete_source_row"
+
+
 def _source_identity(bar: MarketBar) -> str:
     instrument = bar.instrument
     return "|".join((
@@ -137,7 +149,7 @@ class CausalOrderflowProducer:
             self._active_date = date
             timestamp = bar.timestamp.astimezone(timezone.utc)
             self._source_issues.append({
-                "reason": "incomplete_source_row",
+                "reason": source_issue_reason(bar),
                 "observed_at": timestamp.isoformat(),
                 "available_at": (timestamp + timedelta(minutes=1)).isoformat(),
                 "source_identity": _source_identity(bar),
@@ -237,7 +249,7 @@ class CausalOrderflowProducer:
                 and bar.timestamp - bars[bar_index - 1].timestamp > timedelta(minutes=1)
             )
             bar_has_gap = boundary_gap or source_gap
-            volume = float(bar.volume or 0.0)
+            volume = float(cast(float, bar.volume))
             available_at = bar.timestamp + timedelta(minutes=1)
             gap_status = (
                 "boundary_gap" if boundary_gap
@@ -254,6 +266,16 @@ class CausalOrderflowProducer:
                     bars[bar_index - 1].close if bar_index and not bar_has_gap
                     else self._prior_bars[-1].close if bar_index == 0 and self._prior_bars
                     else self._prior_close if bar_index == 0
+                    else None
+                ),
+                "previous_high": (
+                    bars[bar_index - 1].high if bar_index and not bar_has_gap
+                    else self._prior_bars[-1].high if bar_index == 0 and self._prior_bars
+                    else None
+                ),
+                "previous_low": (
+                    bars[bar_index - 1].low if bar_index and not bar_has_gap
+                    else self._prior_bars[-1].low if bar_index == 0 and self._prior_bars
                     else None
                 ),
                 "prior_value_high": self._prior_value_high,
@@ -346,6 +368,11 @@ class CausalOrderflowProducer:
                 and item.context.replay_provenance.get("gap_origin", "none") != "none"
                 for item in children
             )
+            # A complete-looking window containing a boundary or source gap is
+            # not a canonical aggregate. Recovery begins with the next clean
+            # aligned window rather than silently carrying the gap forward.
+            if parent_has_gap:
+                continue
             parent_id = stable_orderflow_id("aggregate", trading_date, stream_identity, "5m", start.isoformat())
             child_ids = tuple(item.observation_id for item in children)
             child_timestamps = {item.observed_at for item in children}
@@ -517,6 +544,10 @@ class CausalOrderflowProducer:
             for record in latest_records.values():
                 child_locations: list[tuple[str, LocationObservation]] = []
                 for child in children:
+                    # A reference published after this child cannot appear in
+                    # the child's as-of location evidence.
+                    if record.available_at > child.available_at:
+                        continue
                     high = _numeric_feature(child.features, "high")
                     low = _numeric_feature(child.features, "low")
                     close = _numeric_feature(child.features, "close")
@@ -527,7 +558,7 @@ class CausalOrderflowProducer:
                             record.location_id, record.alias, record.generation, record.price,
                             record.band.low, record.band.high, open_price, high, low, close,
                             record.band.intersects(high=high, low=low), child.observation_id,
-                            child.observed_at, max(child.available_at, record.available_at),
+                            child.observed_at, child.available_at,
                             stable_orderflow_id(
                                 "location_observation", child.observation_id, record.location_id,
                             ),

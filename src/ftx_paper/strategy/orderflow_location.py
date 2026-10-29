@@ -104,6 +104,8 @@ class LocationObservation:
     reference_source_aggregate_id: str | None = None
     reference_source_timeframe: str | None = None
     frozen_atr: float | None = None
+    close_relation: str | None = None
+    source_fingerprint: str | None = None
 
     def __post_init__(self) -> None:
         if not self.location_id or not self.location_alias or not self.observation_id:
@@ -124,19 +126,31 @@ class LocationObservation:
             raise ValueError(
                 f"VWAP observation {self.observation_id!r} requires a source observation ID"
             )
+        relation = (
+            "BELOW" if self.close < self.band_lower
+            else "ABOVE" if self.close > self.band_upper
+            else "INSIDE_BAND"
+        )
+        if self.close_relation is not None and self.close_relation != relation:
+            raise ValueError("location observation close relation does not match close")
+        object.__setattr__(self, "close_relation", relation)
 
     def to_dict(self) -> dict[str, object]:
         return {
+            "location": self.location_alias,
             "location_id": self.location_id,
             "location_alias": self.location_alias,
             "reference_generation": self.reference_generation,
             "reference": self.reference,
+            "band_low": self.band_lower,
+            "band_high": self.band_upper,
             "band_lower": self.band_lower,
             "band_upper": self.band_upper,
             "open": self.open,
             "high": self.high,
             "low": self.low,
             "close": self.close,
+            "close_relation": self.close_relation,
             "band_contact": self.band_contact,
             "source_aggregate_id": self.source_aggregate_id,
             "observed_at": self.observed_at.isoformat(),
@@ -150,6 +164,7 @@ class LocationObservation:
             "reference_source_aggregate_id": self.reference_source_aggregate_id,
             "reference_source_timeframe": self.reference_source_timeframe,
             "frozen_atr": self.frozen_atr,
+            "source_fingerprint": self.source_fingerprint,
         }
 
 

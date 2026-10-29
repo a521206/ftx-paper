@@ -681,6 +681,7 @@ class OrderflowPolicy:
         interaction = detector.observe(
             location,
             observation,
+            band_contact=location_observation.band_contact,
             observation_id=location_key,
             projection_sources=projection_sources,
         )

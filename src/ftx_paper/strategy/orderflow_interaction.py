@@ -268,11 +268,24 @@ def _pre_contact_side(
     observation: OrderflowObservation,
     location: LocationRecord,
 ) -> str | None:
-    previous_close = observation.features.get("previous_close")
-    if not isinstance(previous_close, (int, float)) or isinstance(previous_close, bool):
-        return None
-    side = _close_side(float(previous_close), location.band.low, location.band.high)
-    return side if side != "INSIDE_BAND" else None
+    previous_high = observation.features.get("previous_high")
+    previous_low = observation.features.get("previous_low")
+    if (
+        not isinstance(previous_high, (int, float))
+        or isinstance(previous_high, bool)
+        or not isinstance(previous_low, (int, float))
+        or isinstance(previous_low, bool)
+    ):
+        previous_close = observation.features.get("previous_close")
+        if not isinstance(previous_close, (int, float)) or isinstance(previous_close, bool):
+            return None
+        side = _close_side(float(previous_close), location.band.low, location.band.high)
+        return side if side != "INSIDE_BAND" else None
+    if float(previous_low) > location.band.high:
+        return "ABOVE"
+    if float(previous_high) < location.band.low:
+        return "BELOW"
+    return None
 
 
 def _active_key(alias: str, timeframe: str) -> str:

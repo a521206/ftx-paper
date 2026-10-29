@@ -10,7 +10,7 @@ from ftx_paper.contracts import MarketBar, normalize_exchange_timestamp
 from ftx_paper.config import IST
 
 from .orderflow_contract import OrderflowContext, OrderflowObservation
-from .orderflow_producer import CausalOrderflowProducer, source_row_is_complete
+from .orderflow_producer import CausalOrderflowProducer, source_issue_reason, source_row_is_complete
 from .orderflow_source import OrderflowReplayInput
 
 
@@ -167,19 +167,26 @@ def observe_market(replay: OrderflowReplayInput) -> MarketObservation:
             timestamp = normalize_exchange_timestamp(row.timestamp)
             issues.append(ObservationIssue(
                 "1m", timestamp, timestamp + timedelta(minutes=1),
-                "incomplete_source_row", (timestamp,),
+                source_issue_reason(row), (timestamp,),
             ))
     # Preserve the canonical fingerprint of the selected input rows through
     # every aggregate; derived child hashes are not a substitute for lineage.
     if replay.metadata.source_fingerprint:
         observations = tuple(
-            replace(item, context=replace(
-                item.context,
-                replay_provenance={
-                    **dict(item.context.replay_provenance),
-                    "source_fingerprint": replay.metadata.source_fingerprint,
-                },
-            )) if item.context is not None else item
+            replace(
+                item,
+                context=replace(
+                    item.context,
+                    replay_provenance={
+                        **dict(item.context.replay_provenance),
+                        "source_fingerprint": replay.metadata.source_fingerprint,
+                    },
+                ),
+                location_observations=tuple(
+                    replace(location, source_fingerprint=replay.metadata.source_fingerprint)
+                    for location in item.location_observations
+                ),
+            ) if item.context is not None else item
             for item in context.observations
         )
         context = OrderflowContext(

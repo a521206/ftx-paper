@@ -86,6 +86,11 @@ def test_parent_lineage_exactly_covers_children_and_selected_source() -> None:
         (item.interval_start, item.interval_end) for item in children
     )
     assert parent.context.replay_provenance["source_fingerprint"] == replay.metadata.source_fingerprint
+    assert all(
+        location.source_fingerprint == replay.metadata.source_fingerprint
+        for observation in observation.context.observations
+        for location in observation.location_observations
+    )
     assert parent.interval_start == children[0].interval_start
     assert parent.interval_end == children[-1].interval_end
 

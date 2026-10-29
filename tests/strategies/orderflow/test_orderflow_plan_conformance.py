@@ -47,7 +47,7 @@ def test_incomplete_parent_is_diagnosed_without_publishing_children_or_parent() 
     assert len(observation.context.observations_for("1m")) == 4
     assert observation.context.observations_for("5m") == ()
     assert observation.issues[0].reason == "incomplete_session_aligned_parent"
-    assert any(issue.reason == "incomplete_source_row" for issue in observation.issues)
+    assert any(issue.reason == "missing_volume" for issue in observation.issues)
     assert observation.issues[0].observed_child_times == (
         datetime(2026, 1, 1, 3, 45, tzinfo=UTC),
         datetime(2026, 1, 1, 3, 46, tzinfo=UTC),

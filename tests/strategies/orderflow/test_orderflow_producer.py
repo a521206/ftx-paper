@@ -34,6 +34,14 @@ def test_causal_producer_builds_complete_five_minute_context() -> None:
     assert parent.location_observations
     assert all(item.available_at == parent.available_at for item in parent.location_observations)
     assert all(item.observed_at == start + timedelta(minutes=4) for item in parent.location_observations)
+    assert all(
+        item.close_relation == (
+            "ABOVE" if item.close > item.band_upper
+            else "BELOW" if item.close < item.band_lower
+            else "INSIDE_BAND"
+        )
+        for item in parent.location_observations
+    )
     assert all(item.source_aggregate_id == parent.observation_id for item in parent.location_observations)
     by_alias = {item.location_alias: item for item in parent.location_observations}
     assert "VWAP" not in by_alias
@@ -85,6 +93,7 @@ def test_causal_producer_uses_frozen_atr_for_structural_bands() -> None:
     assert child_locations
     assert all(item.timeframe == "1m" for item in child_locations)
     assert all(item.source_aggregate_id in {child.observation_id for child in children} for item in child_locations)
+    assert all(item.available_at <= children[-1].available_at for item in child_locations)
 
 
 def test_causal_producer_does_not_invent_bands_without_frozen_atr() -> None:
@@ -234,7 +243,7 @@ def test_incomplete_source_row_is_not_published_as_one_or_five_minute_evidence()
     assert context is not None
     assert len(context.observations_for("1m")) == 4
     assert context.observations_for("5m") == ()
-    assert [issue["reason"] for issue in context.source_issues] == ["incomplete_source_row"]
+    assert [issue["reason"] for issue in context.source_issues] == ["missing_volume"]
     assert context.source_issues[0]["source_identity"] == "NIFTYFUT|NSE|FUTURES|||"
 
 
@@ -265,4 +274,4 @@ def test_incomplete_only_session_returns_diagnostic_context_without_evidence() -
 
     assert context is not None
     assert context.observations == ()
-    assert context.source_issues[0]["reason"] == "incomplete_source_row"
+    assert context.source_issues[0]["reason"] == "missing_volume"
