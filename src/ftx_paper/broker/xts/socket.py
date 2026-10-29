@@ -305,7 +305,11 @@ class AsyncXTSSocket:
                         try:
                             callback(quote)
                         except Exception as cb_exc:
-                            logger.error("Error in XTS message callback: %s", cb_exc)
+                            logger.exception(
+                                "Error in XTS message callback: %s; quote=%r",
+                                cb_exc,
+                                quote,
+                            )
                 continue
 
             text = msg.strip()
@@ -376,7 +380,11 @@ class AsyncXTSSocket:
                         try:
                             callback(quote)
                         except Exception as cb_exc:
-                            logger.error("Error in XTS message callback: %s", cb_exc)
+                            logger.exception(
+                                "Error in XTS message callback: %s; quote=%r",
+                                cb_exc,
+                                quote,
+                            )
 
     async def _ping_loop(self, ws: Any) -> None:
         """Send periodic Engine.IO ping '2' every 25 seconds."""
