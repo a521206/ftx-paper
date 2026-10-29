@@ -181,6 +181,8 @@ class OrderflowEvidenceAssembler:
         )
         locations_by_source: dict[str, list[LocationRecord]] = {}
         for location in vwap_locations:
+            if location.source_observation_id is None:
+                continue
             if first_parent_available is not None and location.available_at < first_parent_available:
                 continue
             locations_by_source.setdefault(location.source_aggregate_id, []).append(location)
@@ -197,6 +199,9 @@ class OrderflowEvidenceAssembler:
                 if index is None:
                     continue
                 item = enriched[index]
+                existing_location_ids = {
+                    location.observation_id for location in item.location_observations
+                }
                 enriched[index] = replace(
                     item,
                     location_observations=item.location_observations + tuple(
@@ -221,6 +226,9 @@ class OrderflowEvidenceAssembler:
                             reference_source_timeframe=location.timeframe or item.timeframe,
                         )
                         for location in locations
+                        if stable_orderflow_id(
+                            "location_observation", item.observation_id, location.location_id,
+                        ) not in existing_location_ids
                     ),
                 )
             observations = tuple(enriched)

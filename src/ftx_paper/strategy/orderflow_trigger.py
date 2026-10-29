@@ -51,6 +51,7 @@ def observe_trigger(
         return TriggerObservation(
             False, False, None, observation.observation_id,
             observation.observed_at.isoformat(), observation.available_at.isoformat(),
+            reason=f"unsupported_trigger:{trigger_type}",
             ineligible_reason=f"unsupported_trigger:{trigger_type}",
             effective_at=effective_at, expires_at=expires_at,
             setup_version=setup_version, permission_version=permission_version,
@@ -169,7 +170,7 @@ def observe_trigger(
         source_observation_id=observation.observation_id,
         observed_at=observation.observed_at.isoformat(),
         available_at=observation.available_at.isoformat(),
-        reason=("boundary_crossed" if crossed else "boundary_touched" if touched else f"unsupported_trigger:{trigger_type}"),
+        reason=("boundary_crossed" if crossed else "boundary_touched" if touched else "no_causal_crossing"),
         ineligible_reason=ineligible_reason,
         effective_at=effective_at, expires_at=expires_at,
         setup_version=setup_version, permission_version=permission_version,

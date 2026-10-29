@@ -132,7 +132,7 @@ def evaluate_admission(
         ("context_relation", relation_allowed),
         ("opening_gap_permission", opening_gap_allowed),
     ]
-    if evaluate_portfolio_gates:
+    if evaluate_portfolio_gates or active_position_allowed is not None:
         checks.append(("active_position_gate", active_position_allowed))
     optional_checks = (
         ("exposure_gate", exposure_allowed), ("allocation_gate", allocation_allowed),

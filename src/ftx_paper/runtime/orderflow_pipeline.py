@@ -7,6 +7,7 @@ from typing import Any
 from ftx_paper.contracts import MarketBar
 from ftx_paper.market import CompletedBarAggregator, FeatureService
 from ftx_paper.strategy.orderflow_producer import CausalOrderflowProducer
+from .futures_source import virtual_continuous_bar
 
 
 def ingest_orderflow_bar(
@@ -23,12 +24,13 @@ def ingest_orderflow_bar(
     execution are environment-specific), but source observation, feature, and
     decision-bundle construction must be identical.
     """
-    producer.ingest(bar)
-    feature_service.ingest(bar)
+    strategy_bar = virtual_continuous_bar(bar)
+    producer.ingest(strategy_bar)
+    feature_service.ingest(strategy_bar)
     expired: tuple[Any, ...] = ()
     if expire_at is not None:
         expired = tuple(aggregator.expire(now=expire_at))
-    return expired, aggregator.ingest(bar)
+    return expired, aggregator.ingest(strategy_bar)
 
 
 __all__ = ["ingest_orderflow_bar"]

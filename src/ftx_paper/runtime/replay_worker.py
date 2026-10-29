@@ -29,7 +29,7 @@ from ftx_paper.strategy.orderflow_producer import CausalOrderflowProducer
 from ftx_paper.strategy.orderflow_replay import ReplayMachine
 from ftx_paper.strategy.orderflow_source import prepare_replay_input
 from ftx_paper.runtime.futures_source import (
-    FuturesSessionSourceResolver, materialize_orderflow_daily_atr,
+    FuturesSessionSourceResolver, materialize_orderflow_daily_atr, virtual_continuous_bar,
 )
 from ftx_paper.runtime.parity_artifacts import (
     NORMALIZED_BAR_FINGERPRINT_RECIPE,
@@ -582,7 +582,10 @@ class ReplayWorker:
             })
             rows = self.store.read_market_bars(date)
             futures_source = self._resolve_source(date)
-            bars = self._bars(date, rows=rows, futures_source=futures_source)
+            bars = tuple(
+                virtual_continuous_bar(bar)
+                for bar in self._bars(date, rows=rows, futures_source=futures_source)
+            )
             futures_bars = tuple(
                 bar for bar in bars
                 if str(bar.instrument.instrument_type).upper() in {"FUT", "FUTURES"}
@@ -593,7 +596,7 @@ class ReplayWorker:
                     futures_bars,
                     date,
                     session_partition="09:15-15:30",
-                    source_contract=futures_bars[0].instrument.expiry,
+                    selection_rule="continuous_identity",
                 )
                 replay_machine = ReplayMachine(
                     observe_market(replay_input),
@@ -1987,7 +1990,7 @@ class ReplayWorker:
                 or (
                     futures_source is not None
                     and str(row.get("symbol")) == futures_source.symbol
-                    and str(row.get("expiry"))[:10] == futures_source.expiry
+                    and str(row.get("expiry", ""))[:10] == futures_source.expiry
                 )
             ]
         bars = []
@@ -2000,14 +2003,21 @@ class ReplayWorker:
             minute_of_day = local_timestamp.hour * 60 + local_timestamp.minute
             if not SESSION_OPEN_MINUTES <= minute_of_day < SESSION_DATA_END_MINUTES:
                 continue
-            bars.append(MarketBar(
+            is_selected_futures = (
+                futures_source is not None
+                and instrument_type in {"FUT", "FUTURES"}
+                and str(row.get("symbol")) == futures_source.symbol
+                and str(row.get("expiry", ""))[:10] == futures_source.expiry
+            )
+            raw_bar = MarketBar(
                 instrument=Instrument(symbol=str(row["symbol"]), exchange=str(row["exchange"]),
                                       instrument_type=instrument_type, expiry=row.get("expiry"),
                                       strike=row.get("strike")),
                 timestamp=timestamp,
                 open=float(row["open"]), high=float(row["high"]), low=float(row["low"]), close=float(row["close"]),
                 volume=row.get("volume"), open_interest=row.get("open_interest"),
-            ))
+            )
+            bars.append(virtual_continuous_bar(raw_bar) if is_selected_futures else raw_bar)
         # The futures bar is the decision clock and is emitted immediately by
         # the aggregator. Ingest same-minute supporting bars first so spot,
         # VIX, and option inputs are available in that completed bundle.

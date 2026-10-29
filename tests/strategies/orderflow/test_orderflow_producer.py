@@ -33,6 +33,7 @@ def test_causal_producer_builds_complete_five_minute_context() -> None:
     assert parent.context.replay_provenance["source_fingerprint"]
     assert parent.location_observations
     assert all(item.available_at == parent.available_at for item in parent.location_observations)
+    assert all(item.observed_at == start + timedelta(minutes=4) for item in parent.location_observations)
     assert all(item.source_aggregate_id == parent.observation_id for item in parent.location_observations)
     by_alias = {item.location_alias: item for item in parent.location_observations}
     assert "VWAP" not in by_alias

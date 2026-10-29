@@ -77,8 +77,13 @@ class OrderflowPolicy:
         self._opening_gap_observation_id: str | None = None
         self._opening_gap_last_evaluated_id: str | None = None
         self._opening_seed: dict[str, object] | None = None
+        self._active_position = False
         self._opportunities: dict[str, SetupOpportunity] = {}
+        self._pending_triggers: dict[str, dict[str, object]] = {}
         self._evidence = OrderflowEvidenceAssembler(config)
+
+    def set_active_position(self, active: bool) -> None:
+        self._active_position = active
 
     @property
     def execution_mode(self) -> ExecutionMode:
@@ -148,6 +153,7 @@ class OrderflowPolicy:
         self._opening_gap_last_evaluated_id = None
         self._opening_seed = None
         self._opportunities.clear()
+        self._pending_triggers.clear()
         self._session_id = orderflow.session_id
         return transitions
 
@@ -747,6 +753,84 @@ class OrderflowPolicy:
                 }))
         return tuple(events)
 
+    def _advance_pending_triggers(
+        self, observation: OrderflowObservation, context: DecisionContext,
+        base: Mapping[str, Any], futures: MarketBar | None,
+    ) -> tuple[PolicyDecision, ...]:
+        if observation.timeframe != "1m":
+            return ()
+        events: list[PolicyDecision] = []
+        for lifecycle_id, pending in tuple(self._pending_triggers.items()):
+            opportunity = self._opportunities.get(lifecycle_id)
+            template = pending.get("template")
+            interaction = pending.get("interaction")
+            if (
+                opportunity is None or opportunity.status is not OpportunityStatus.ACTIVE
+                or not isinstance(template, TradeTemplate)
+                or not isinstance(interaction, LocationInteraction)
+            ):
+                self._pending_triggers.pop(lifecycle_id, None)
+                continue
+            trigger = observe_trigger(
+                observation,
+                boundary=(opportunity.setup.entry_upper if str(pending["direction"]) == "long"
+                          else opportunity.setup.entry_lower),
+                execution_mode=ExecutionMode.EXECUTABLE.value,
+                trigger_type=template.trigger_type.value,
+                effective_at=opportunity.setup.formed_at.isoformat(),
+                expires_at=opportunity.setup.expires_at.isoformat(),
+                setup_version=opportunity.setup.setup_id, armed=True,
+            )
+            if not trigger.eligible:
+                continue
+            direction = str(pending["direction"])
+            admission = evaluate_admission(
+                opportunity, context_available=observation.context is not None,
+                opening_gap_allowed=not self._admission_suspended,
+                active_position_allowed=(
+                    not self._active_position
+                    or interaction.location_alias not in {"SESSION_LOW", "SESSION_HIGH"}
+                ),
+                direction_matches=True, confirmations_available=True,
+                current_at=observation.available_at,
+                context_relation=opportunity.context_relation,
+                evidence_ids=(observation.observation_id,),
+                evaluate_portfolio_gates=False,
+            )
+            proposal = self._execution_proposal(
+                accepted=admission.status.value == "PASSED", direction=direction,
+                observation=observation, opportunity=opportunity,
+                template=template, interaction=interaction, context=context, futures=futures,
+            )
+            common = {
+                **base, "opportunity_id": lifecycle_id,
+                "setup_id": opportunity.setup.setup_id,
+                "interaction_id": interaction.interaction_id,
+                "location": interaction.location_alias, "direction": direction,
+                "source_observation_ids": [observation.observation_id],
+            }
+            events.extend((
+                PolicyDecision({
+                    **common, "decision_stage": "trigger", "outcome": "accepted",
+                    "reason": trigger.reason,
+                    "decision_id": _decision_id("trigger", lifecycle_id, observation.observation_id),
+                    "trigger": asdict(trigger), "observed_at": trigger.observed_at,
+                    "available_at": trigger.available_at,
+                }),
+                PolicyDecision({
+                    **common, "decision_stage": "admission",
+                    "outcome": "accepted" if admission.status.value == "PASSED" else "rejected",
+                    "reason": "orderflow_admission", "admission_reason": admission.reason,
+                    "decision_id": admission.decision_id,
+                    "admission_predicates": [asdict(item) for item in admission.predicates],
+                    "trigger": asdict(trigger), "trigger_eligible": True,
+                    "execution_proposal": proposal, "observed_at": trigger.observed_at,
+                    "available_at": trigger.available_at,
+                }),
+            ))
+            self._pending_triggers.pop(lifecycle_id, None)
+        return tuple(events)
+
     def _advance_prior_day_role(
         self,
         interaction: LocationInteraction,
@@ -1074,7 +1158,8 @@ class OrderflowPolicy:
             return ()
         current_context = formation_context
         trigger_observation = next((item for item in response_observations if item.observation_id == confirmation_id), observation)
-        trigger = observe_trigger(trigger_observation, boundary=opportunity.setup.failure_boundary,
+        trigger = observe_trigger(trigger_observation,
+            boundary=(opportunity.setup.entry_upper if direction == "long" else opportunity.setup.entry_lower),
             execution_mode=ExecutionMode.EXECUTABLE.value, trigger_type=template.trigger_type.value,
             effective_at=formed_at.isoformat(), expires_at=opportunity.setup.expires_at.isoformat(),
             setup_version=opportunity.setup.setup_id, permission_version=str(current_context.version) if current_context else None,
@@ -1085,12 +1170,22 @@ class OrderflowPolicy:
             opening_gap_allowed=(current_context is not None and current_context.opening_gap.status != "UNAVAILABLE" and
                 (current_context.opening_gap.status not in {"UP", "DOWN"} or
                  (direction == "long" and (current_context.opening_gap.gap_points or 0) >= 0) or
-                 (direction == "short" and (current_context.opening_gap.gap_points or 0) <= 0)) and not self._admission_suspended),
+                 (direction == "short" and (current_context.opening_gap.gap_points or 0) <= 0))
+                and not self._admission_suspended),
             direction_matches=True, confirmations_available=confirmation_id is not None,
             current_at=formed_at, context_version=str(current_context.version) if current_context else None,
-            context_relation=relation.value, evidence_ids=evidence_ids, evaluate_portfolio_gates=False)
+            context_relation=relation.value, evidence_ids=evidence_ids,
+            active_position_allowed=(
+                not self._active_position
+                or interaction.location_alias not in {"SESSION_LOW", "SESSION_HIGH"}
+            ),
+            evaluate_portfolio_gates=False)
         self._opportunities[opportunity.lifecycle_id] = opportunity
         accepted = admission.status.value == "PASSED"
+        if accepted and not trigger.eligible:
+            self._pending_triggers[opportunity.lifecycle_id] = {
+                "direction": direction, "template": template, "interaction": interaction,
+            }
         proposal = self._execution_proposal(
             accepted=accepted and trigger.eligible,
             direction=direction, observation=observation,
@@ -1200,6 +1295,7 @@ class OrderflowPolicy:
             results.extend(self._advance_opening_gap(observation, next_opening_gap_1m, base))
             if observation.context is None or observation.context.session_id != orderflow.session_id:
                 continue
+            results.extend(self._advance_pending_triggers(observation, context, base, futures))
             opening_seed_events = self._attach_opening_seed(observation, base)
             if opening_seed_events is not None:
                 results.extend(opening_seed_events)
@@ -1318,6 +1414,32 @@ class OrderflowPolicy:
         return tuple(results)
 
     def on_execution_event(self, event: ExecutionNotification) -> None:
+        if event.event_type != "FILLED" or event.status != "FILLED":
+            return None
+        prefix = "orderflow-entry:"
+        if not event.client_order_id.startswith(prefix):
+            return None
+        winner_id = event.client_order_id[len(prefix):]
+        winner = self._opportunities.get(winner_id)
+        if winner is None:
+            return None
+        try:
+            at = datetime.fromisoformat(
+                (event.occurred_at or event.available_at or "").replace("Z", "+00:00")
+            )
+        except ValueError:
+            return None
+        evidence_id = event.event_id or event.client_order_id
+        for lifecycle_id, opportunity in tuple(self._opportunities.items()):
+            if (
+                lifecycle_id != winner_id
+                and opportunity.status is OpportunityStatus.ACTIVE
+                and opportunity.execution_group_id == winner.execution_group_id
+            ):
+                self._opportunities[lifecycle_id] = opportunity.transition(
+                    OpportunityStatus.INVALIDATED, at=at,
+                    reason="execution_group_claimed", evidence_ids=(evidence_id,),
+                )
         return None
 
     def snapshot(self) -> Mapping[str, object]:
@@ -1359,6 +1481,9 @@ class OrderflowStrategy:
     def bind_account_context(self, portfolio: object, capital_context: object) -> None:
         del portfolio, capital_context
 
+    def set_active_position(self, active: bool) -> None:
+        self.policy._active_position = active
+
     @property
     def metadata(self) -> StrategyMetadata:
         return StrategyMetadata(self.policy.config.name, self.policy.config.version, self.policy.config.config_hash)
@@ -1376,7 +1501,7 @@ class OrderflowStrategy:
             margin=MarginSnapshot(0.0, 0.0, 0.0),
             exposure=ExposureSnapshot(0.0, 0),
         )
-        return self.coordinator.evaluate(bundle, context)
+        return self.evaluate(bundle, context)
 
     @staticmethod
     def _fallback_cutoff(bundle: DecisionBundle):
@@ -1389,6 +1514,7 @@ class OrderflowStrategy:
         return parsed
 
     def evaluate(self, bundle: DecisionBundle, context: DecisionContext):
+        self.policy.set_active_position(context.exposure.open_positions > 0)
         return self.coordinator.evaluate(bundle, context)
 
     def on_execution_event(self, event: ExecutionNotification) -> None:
@@ -1401,6 +1527,8 @@ class OrderflowStrategy:
             order, fill_price=fill_price, entry_fill_time=entry_fill_time,
             reference_price=reference_price,
         )
+        if order.client_order_id in self._position_manager.positions:
+            self.policy.set_active_position(True)
 
     def on_closed_bar(self, bar: MarketBar) -> tuple[ExitAction, ...]:
         return self._position_manager.on_closed_bar(bar)
@@ -1411,6 +1539,8 @@ class OrderflowStrategy:
 
     def settle_exit(self, exit_order_id: str, *, filled: bool, **_kwargs: object) -> None:
         self._position_manager.settle_exit(exit_order_id, filled=filled)
+        if filled and not self._position_manager.positions:
+            self.policy.set_active_position(False)
 
     def snapshot(self) -> Mapping[str, object]:
         return wrap_snapshot(

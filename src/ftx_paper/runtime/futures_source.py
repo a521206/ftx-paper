@@ -11,7 +11,8 @@ from typing import Any, cast
 
 from ftx_paper.config import IST, SESSION_DATA_END_MINUTES, SESSION_OPEN_MINUTES
 from ftx_paper.contracts import (
-    FuturesContract, SELECTION_POLICY_VERSION, parse_expiry, select_front_futures_contract,
+    FuturesContract, Instrument, MarketBar, SELECTION_POLICY_VERSION, parse_expiry,
+    select_front_futures_contract,
 )
 from ftx_paper.market.feature_cache import (
     ORDERFLOW_DAILY_ATR_FEATURE_SET,
@@ -23,9 +24,10 @@ from ftx_paper.market.feature_cache import (
 
 @dataclass(frozen=True, slots=True)
 class SessionSourceIdentity:
-    """Identity of the dated monthly futures contract selected for a session."""
+    """Identity of the storage contract selected for one session."""
 
     symbol: str
+    exchange: str
     instrument_type: str
     expiry: str
     policy_version: str
@@ -33,7 +35,7 @@ class SessionSourceIdentity:
 
 @dataclass(frozen=True, slots=True)
 class FuturesSessionSource:
-    """One dated futures contract materialized for one replay session."""
+    """One selected storage session projected into the strategy source layer."""
 
     session_date: str
     identity: SessionSourceIdentity
@@ -57,6 +59,8 @@ class FuturesSessionSource:
         return self.identity.policy_version
 
     def provenance(self) -> dict[str, Any]:
+        minutes = [str(row.get("minute", ""))[11:16] for row in self.bars]
+        expected_minutes = SESSION_DATA_END_MINUTES - SESSION_OPEN_MINUTES
         canonical_rows = [
             {
                 "time": str(row["minute"])[11:16],
@@ -78,11 +82,25 @@ class FuturesSessionSource:
         ).hexdigest()
         return {
             "session_date": self.session_date,
+            # Preserve storage identity while exposing the canonical strategy
+            # fingerprint derived from the virtual continuous view.
             "instrument_type": "FUT_CONTINUOUS",
             "selected_symbol": "NIFTY",
             "selected_expiry": "",
+            "normalized_series": "I",
+            "storage_identity": {
+                "symbol": self.symbol, "exchange": self.identity.exchange,
+                "instrument_type": self.identity.instrument_type, "expiry": self.expiry,
+            },
+            "strategy_identity": {
+                "symbol": "NIFTY", "series": "I", "contract_type": "CONTINUOUS",
+                "expiry": "",
+            },
             "rollover_policy_version": self.rollover_policy_version,
+            "timestamp_convention": "1m label; completed at next minute; Asia/Kolkata",
             "source_bar_count": self.source_bar_count,
+            "ordered_unique_minutes": len(minutes) == len(set(minutes)) and minutes == sorted(minutes),
+            "missing_minute_count": max(0, expected_minutes - len(set(minutes))),
             "source_fingerprint": canonical_fingerprint,
             "source_contract_symbol": self.symbol,
             "source_contract_expiry": self.expiry,
@@ -93,7 +111,7 @@ class FuturesSessionSource:
 
 
 class FuturesSessionSourceResolver:
-    """Resolve one unexpired dated contract per session without mixing rows."""
+    """Resolve one deterministic storage contract for the virtual source."""
 
     def __init__(self, store: Any) -> None:
         self.store = store
@@ -138,10 +156,10 @@ class FuturesSessionSourceResolver:
         )
         if not selected_rows:
             return None
-        ordered = tuple(sorted(selected_rows, key=lambda row: str(row["minute"])))
-        timestamps = [str(row["minute"]) for row in ordered]
+        timestamps = [str(row["minute"]) for row in selected_rows]
         if len(set(timestamps)) != len(timestamps) or timestamps != sorted(timestamps):
             return None
+        ordered = selected_rows
         if any(
             str(row.get("symbol")) != selected_symbol
             or str(row.get("expiry", ""))[:10] != selected_expiry.isoformat()
@@ -151,6 +169,7 @@ class FuturesSessionSourceResolver:
             return None
         identity = SessionSourceIdentity(
             symbol=selected_symbol,
+            exchange=str(ordered[0].get("exchange", "")),
             instrument_type="FUT",
             expiry=selected_expiry.isoformat(),
             policy_version=SELECTION_POLICY_VERSION,
@@ -197,15 +216,32 @@ class FuturesSessionSourceResolver:
         except (KeyError, ValueError):
             return False
         # The canonical replay treats the data-end minute as the exclusive
-        # completion boundary: 09:15 through 15:29 yields 375 bars.
+        # completion boundary.
         return SESSION_OPEN_MINUTES <= minute < SESSION_DATA_END_MINUTES
+
+
+def virtual_continuous_bar(bar: MarketBar) -> MarketBar:
+    """Expose a dated futures bar through the canonical strategy identity."""
+    if bar.instrument.instrument_type.upper() not in {"FUT", "FUTURE", "FUTURES"}:
+        return bar
+    if bar.instrument.symbol == "NIFTY" and bar.instrument.expiry is None:
+        return bar
+    return MarketBar(
+        instrument=Instrument(
+            symbol="NIFTY", exchange=bar.instrument.exchange,
+            instrument_type="FUT", expiry=None,
+        ),
+        timestamp=bar.timestamp, open=bar.open, high=bar.high,
+        low=bar.low, close=bar.close, volume=bar.volume,
+        open_interest=bar.open_interest,
+    )
 
 
 def materialize_orderflow_daily_atr(store: Any, session_date: str) -> float | None:
     """Materialize and return the causal ATR needed by a live session.
 
-    The current session is excluded.  Historical bars remain Paper-owned and
-    are resolved with the same dated-contract policy used by replay.
+    The current session is excluded. Historical bars remain Paper-owned and
+    are resolved with the same source policy used by replay.
     """
     repository_factory = getattr(store, "feature_repository", None)
     dates_reader = getattr(store, "read_market_dates", None)
@@ -244,17 +280,16 @@ def materialize_orderflow_daily_atr(store: Any, session_date: str) -> float | No
 
 
 def _complete_daily_session(rows: Sequence[Mapping[str, object]]) -> bool:
-    if len(rows) != 375:
+    if not rows:
         return False
     minutes = [str(row.get("minute", ""))[11:16] for row in rows]
-    expected = [
-        f"{9 + (15 + index) // 60:02d}:{(15 + index) % 60:02d}"
-        for index in range(375)
-    ]
+    expected = []
+    for minute in range(SESSION_OPEN_MINUTES, SESSION_DATA_END_MINUTES):
+        expected.append(f"{minute // 60:02d}:{minute % 60:02d}")
     return minutes == expected
 
 
 __all__ = [
     "FuturesSessionSource", "FuturesSessionSourceResolver", "SessionSourceIdentity",
-    "materialize_orderflow_daily_atr",
+    "materialize_orderflow_daily_atr", "virtual_continuous_bar",
 ]

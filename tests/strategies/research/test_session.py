@@ -48,12 +48,12 @@ def test_replay_and_runtime_share_paper_engine_bundle_path(monkeypatch, tmp_path
 
     monkeypatch.setattr(PaperEngine, "on_bundle", record_bundle)
     bar = MarketBar(
-        Instrument("NIFTY26JANFUT", "NFO", "FUTURES", "2026-01-29"),
+        Instrument("NIFTY", "NFO", "FUT", None),
         datetime(2026, 1, 1, 4, 50, tzinfo=timezone.utc),
         100, 102, 99, 101,
     )
     aggregator = CompletedBarAggregator(
-        {("NFO", "NIFTY26JANFUT"): MarketRole.FUTURES},
+            {("NFO", "NIFTY"): MarketRole.FUTURES},
         required_roles=(MarketRole.FUTURES,), deadline_seconds=0,
     )
     bundle = aggregator.ingest(bar)
@@ -170,7 +170,7 @@ def test_replay_bars_use_rollover_selected_futures_contract(tmp_path):
         bar for bar in ReplayWorker(store)._bars("2026-09-29")
         if str(bar.instrument.instrument_type).upper() in {"FUT", "FUTURES"}
     ]
-    assert {bar.instrument.symbol for bar in futures} == {"NIFTY26SEPFUT"}
+    assert {bar.instrument.symbol for bar in futures} == {"NIFTY"}
 
 
 def test_replay_rollover_selects_september_through_expiry_session(tmp_path):
@@ -185,9 +185,9 @@ def test_replay_rollover_selects_september_through_expiry_session(tmp_path):
     store.append_market_bars(bars, source="fixture")
     worker = ReplayWorker(store)
 
-    assert worker.input_manifest("2026-09-28")["futures_source"]["selected_expiry"] == ""
-    assert worker.input_manifest("2026-09-29")["futures_source"]["selected_expiry"] == ""
-    assert worker.input_manifest("2026-09-30")["futures_source"]["selected_expiry"] == ""
+    assert worker.input_manifest("2026-09-28")["futures_source"]["source_contract_expiry"] == "2026-09-29"
+    assert worker.input_manifest("2026-09-29")["futures_source"]["source_contract_expiry"] == "2026-09-29"
+    assert worker.input_manifest("2026-09-30")["futures_source"]["source_contract_expiry"] == "2026-10-27"
 
 
 def test_replay_manifest_marks_missing_option_input_unavailable(tmp_path):
@@ -295,7 +295,7 @@ def test_replay_resolves_current_then_prior_source_once(tmp_path):
     levels = worker._prior_day_levels("2026-09-29")
     manifest = worker.input_manifest("2026-09-29")
 
-    assert {bar.instrument.symbol for bar in bars} == {"NIFTY01OCTFUT"}
+    assert {bar.instrument.symbol for bar in bars} == {"NIFTY"}
     assert levels == (23124.1, 22792.9)
     assert manifest["provenance"]["current"]["selected_symbol"] == "NIFTY"
     assert manifest["selected_source_rows"] == 1
@@ -348,7 +348,7 @@ def test_closed_bar_is_processed_under_session_lifecycle(tmp_path):
     store = RuntimeStore(tmp_path)
     session = RuntimeSession(store, None, [], engine=PaperEngine())
     session._aggregator = CompletedBarAggregator(
-        {("NFO", "NIFTY26JANFUT"): MarketRole.FUTURES},
+        {("NFO", "NIFTY"): MarketRole.FUTURES},
         required_roles=(MarketRole.FUTURES,), deadline_seconds=0,
     )
     session.feed = Feed(session.on_closed_bar)
@@ -403,7 +403,7 @@ def test_incomplete_bundle_is_diagnosed_without_advancing_completion(tmp_path):
     store = RuntimeStore(tmp_path)
     session = RuntimeSession(store, None, [], engine=PaperEngine())
     session._aggregator = CompletedBarAggregator({
-        ("NFO", "NIFTY26JANFUT"): MarketRole.FUTURES,
+            ("NFO", "NIFTY"): MarketRole.FUTURES,
         ("NSE", "INDIA VIX"): MarketRole.VIX,
     }, deadline_seconds=0)
     store.write_status({"state": "RUNNING"})

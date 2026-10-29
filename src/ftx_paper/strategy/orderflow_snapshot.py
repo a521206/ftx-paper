@@ -184,6 +184,7 @@ def strategy_from_snapshot(
     if any(value not in strategy._position_manager.positions for value in raw_pending.values()):
         raise ValueError("orderflow pending exit references unknown position")
     strategy._position_manager.pending_exits = dict(raw_pending)
+    strategy.policy.set_active_position(bool(strategy._position_manager.positions))
 
     raw_actions = payload.get("pending_exit_actions", {})
     if not isinstance(raw_actions, Mapping):

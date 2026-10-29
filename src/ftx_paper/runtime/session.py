@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, NotRequired, TypedDict, cast
 
 from ftx_paper.broker import Broker, Fill, PaperBroker
-from ftx_paper.config import IST
+from ftx_paper.config import IST, SESSION_DATA_END_MINUTES, SESSION_OPEN_MINUTES
 from ftx_paper.domain.capital import CapitalRuntimeContext, ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
 from ftx_paper.domain.portfolio import PaperPosition, PortfolioState
 from ftx_paper.contracts import (
@@ -35,7 +35,9 @@ from .event_bus import EventBus
 from ftx_paper.execution import ExecutionService, PaperExecutionCoordinator
 from .events import is_decision_event, serialize_datetime
 from .state import LiveRuntimeState
-from .futures_source import FuturesSessionSourceResolver, materialize_orderflow_daily_atr
+from .futures_source import (
+    FuturesSessionSourceResolver, materialize_orderflow_daily_atr, virtual_continuous_bar,
+)
 from ftx_paper.execution.lifecycle import (
     ExecutionLifecycleCoordinator,
     ExecutionPhase,
@@ -180,8 +182,8 @@ class RuntimeSession:
                 continue
             minutes = [str(row["minute"])[11:16] for row in candidate.bars]
             expected = [
-                f"{9 + (15 + index) // 60:02d}:{(15 + index) % 60:02d}"
-                for index in range(375)
+                f"{minute // 60:02d}:{minute % 60:02d}"
+                for minute in range(SESSION_OPEN_MINUTES, SESSION_DATA_END_MINUTES)
             ]
             if minutes == expected:
                 source = candidate
@@ -190,7 +192,7 @@ class RuntimeSession:
             return
         rows = source.bars
         prior_bars = tuple(
-            MarketBar(
+            virtual_continuous_bar(MarketBar(
                 instrument=Instrument(
                     symbol=str(row["symbol"]),
                     exchange=str(row["exchange"]),
@@ -198,13 +200,10 @@ class RuntimeSession:
                     expiry=str(row.get("expiry")) if row.get("expiry") is not None else None,
                 ),
                 timestamp=datetime.fromisoformat(str(row["minute"])),
-                open=float(row["open"]),
-                high=float(row["high"]),
-                low=float(row["low"]),
-                close=float(row["close"]),
-                volume=row.get("volume"),
-                open_interest=row.get("open_interest"),
-            )
+                open=float(row["open"]), high=float(row["high"]),
+                low=float(row["low"]), close=float(row["close"]),
+                volume=row.get("volume"), open_interest=row.get("open_interest"),
+            ))
             for row in rows
         )
         self._orderflow_producer.set_prior_bars(prior_bars)
@@ -373,6 +372,13 @@ class RuntimeSession:
                 == "ftx-paper-orderflow"
                 for item in instances
             )
+            futures_keys = [
+                key for key, role in role_map.items() if role is MarketRole.FUTURES
+            ]
+            for key in futures_keys:
+                exchange = key.exchange if isinstance(key, InstrumentKey) else key[0]
+                role_map.pop(key, None)
+                role_map[InstrumentKey(str(exchange), "NIFTY")] = MarketRole.FUTURES
             self._aggregator = CompletedBarAggregator(
                 role_map,
                 AggregatorConfig(

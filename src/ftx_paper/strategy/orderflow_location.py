@@ -127,7 +127,9 @@ class LocationObservation:
         if self.timeframe == "5m" and len(self.child_observation_ids) != 5:
             raise ValueError("5m location observations require exactly five child observations")
         if self.location_alias.upper() == "VWAP" and not self.source_observation_id:
-            raise ValueError("VWAP observations require a source observation ID")
+            raise ValueError(
+                f"VWAP observation {self.observation_id!r} requires a source observation ID"
+            )
 
     def to_dict(self) -> dict[str, object]:
         return {

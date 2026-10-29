@@ -159,6 +159,10 @@ def prepare_replay_input(
     requested = normalize_session_date(requested_date)
     if selection_rule not in {"dated_nearest_expiry", "continuous_identity"}:
         raise ValueError("selection_rule must be dated_nearest_expiry or continuous_identity")
+    rollover_policy_version = (
+        "continuous-source-v1"
+        if selection_rule == "continuous_identity" else "dated-nearest-expiry-v1"
+    )
     try:
         start_raw, end_raw = session_partition.split("-", maxsplit=1)
         start = time.fromisoformat(start_raw)
@@ -210,6 +214,7 @@ def prepare_replay_input(
             row_count=0, ordered=True,
             selected_candidates=(), eligible_candidates=(), rejected_candidates=(),
             selection_rule=selection_rule,
+            rollover_policy_version=rollover_policy_version,
             available_session_dates=all_dates,
             discarded_session_dates=discarded_dates,
         )
@@ -252,6 +257,7 @@ def prepare_replay_input(
         eligible_candidates=tuple(sorted(candidates)),
         rejected_candidates=rejected,
         selection_rule=selection_rule,
+        rollover_policy_version=rollover_policy_version,
         available_session_dates=all_dates,
         discarded_session_dates=discarded_dates,
     )

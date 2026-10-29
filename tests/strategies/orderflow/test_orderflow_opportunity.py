@@ -1,7 +1,9 @@
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.strategy import OpportunityStatus, SetupOpportunity
+from ftx_paper.strategy.orderflow import OrderflowPolicy
 
 
 UTC = timezone.utc
@@ -14,6 +16,30 @@ def _opportunity():
         expires_at=formed + timedelta(minutes=15), entry_lower=99,
         entry_upper=100, failure_boundary=98, evidence_ids=("e1",),
     )
+
+
+def test_filled_execution_group_invalidates_unfilled_siblings() -> None:
+    formed = datetime(2026, 1, 1, 9, 20, tzinfo=UTC)
+    winner = SetupOpportunity.create(
+        interaction_id="winner", direction="long", formed_at=formed,
+        expires_at=formed + timedelta(minutes=15), entry_lower=99,
+        entry_upper=100, failure_boundary=98, evidence_ids=("e1",),
+        conflict_group_id="execution:shared",
+    )
+    sibling = SetupOpportunity.create(
+        interaction_id="sibling", direction="short", formed_at=formed,
+        expires_at=formed + timedelta(minutes=15), entry_lower=99,
+        entry_upper=100, failure_boundary=101, evidence_ids=("e2",),
+        conflict_group_id="execution:shared",
+    )
+    policy = object.__new__(OrderflowPolicy)
+    policy._opportunities = {winner.lifecycle_id: winner, sibling.lifecycle_id: sibling}
+    policy.on_execution_event(ExecutionNotification(
+        "FILLED", f"orderflow-entry:{winner.lifecycle_id}", "FILLED",
+        event_id="fill-1", occurred_at="2026-01-01T09:25:00+00:00",
+    ))
+    assert policy._opportunities[sibling.lifecycle_id].status is OpportunityStatus.INVALIDATED
+    assert policy._opportunities[sibling.lifecycle_id].transitions[-1].reason == "execution_group_claimed"
 
 
 def test_opportunity_timeout_counts_only_configured_timeframe() -> None:
