@@ -222,9 +222,6 @@ class SqliteRuntimeStore:
                     ingested_at TEXT NOT NULL,
                     PRIMARY KEY (symbol, exchange, minute, expiry)
                 );
-                CREATE TABLE IF NOT EXISTS market_dates (
-                    date TEXT PRIMARY KEY
-                );
                 CREATE INDEX IF NOT EXISTS ix_market_bars_session_minute
                     ON market_bars(substr(minute, 1, 10), minute, exchange, symbol);
                 CREATE INDEX IF NOT EXISTS ix_runtime_events_event_type
@@ -500,10 +497,6 @@ class SqliteRuntimeStore:
                 rows,
             )
             connection.executemany(
-                "INSERT OR IGNORE INTO market_dates(date) VALUES (?)",
-                ((session_date,) for session_date in {row[2][:10] for row in rows}),
-            )
-            connection.executemany(
                 "INSERT OR IGNORE INTO expiry_dates(date, source, copied_at) VALUES (?, ?, ?)",
                 (
                     (str(row[10])[:10], source, now)
@@ -529,9 +522,12 @@ class SqliteRuntimeStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def read_market_dates(self) -> list[str]:
+    def read_dates(self) -> list[str]:
         with self._connect() as connection:
-            rows = connection.execute("SELECT date FROM market_dates ORDER BY date").fetchall()
+            rows = connection.execute(
+                "SELECT DISTINCT substr(minute, 1, 10) AS date "
+                "FROM market_bars ORDER BY date"
+            ).fetchall()
         return [str(row[0]) for row in rows]
 
     def read_market_coverage(self, session_date: str) -> dict[str, Any]:

@@ -244,8 +244,7 @@ def materialize_orderflow_daily_atr(store: Any, session_date: str) -> float | No
     are resolved with the same source policy used by replay.
     """
     repository_factory = getattr(store, "feature_repository", None)
-    dates_reader = getattr(store, "read_market_dates", None)
-    if not callable(repository_factory) or not callable(dates_reader):
+    if not callable(repository_factory):
         return None
     repository = repository_factory()
     reader = getattr(repository, "read_feature_snapshot_for_session", None)
@@ -264,7 +263,7 @@ def materialize_orderflow_daily_atr(store: Any, session_date: str) -> float | No
     )
     resolver = FuturesSessionSourceResolver(store)
     completed: list[tuple[str, Sequence[Mapping[str, object]]]] = []
-    available_dates = cast(Sequence[object], dates_reader())
+    available_dates = cast(Sequence[object], store.read_dates())
     for prior_date in sorted(str(value) for value in available_dates if str(value) < session_date):
         source = resolver.resolve(prior_date)
         if source is None or not _complete_daily_session(source.bars):

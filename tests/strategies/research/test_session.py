@@ -151,6 +151,13 @@ def test_replay_prior_day_levels_use_selected_session_source(tmp_path):
     assert worker._prior_day_levels("2026-01-02") == (110.0, 90.0)
 
 
+def test_replay_prior_day_levels_respect_explicit_empty_date_source(tmp_path, monkeypatch):
+    worker = ReplayWorker(RuntimeStore(tmp_path))
+    monkeypatch.setattr(worker, "_dates", lambda: pytest.fail("unexpected date-source fallback"))
+
+    assert worker._prior_day_levels("2026-01-02", available_dates=[]) == (None, None)
+
+
 def test_replay_bars_use_rollover_selected_futures_contract(tmp_path):
     store = RuntimeStore(tmp_path / "replay-contract")
     store.append_market_bars((
@@ -748,7 +755,7 @@ def test_live_orderflow_prior_context_uses_latest_complete_prior_session(monkeyp
         def read_status(self):
             return {}
 
-        def read_market_dates(self):
+        def read_dates(self):
             return ("2026-09-13", "2026-09-14")
 
     class Resolver:

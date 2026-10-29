@@ -1996,7 +1996,7 @@ class ReplayWorker:
         return TradeSettlement(parsed_cell, entry_bar, len(trades), net_pnl)
 
     def _dates(self) -> list[str]:
-        return self.store.read_market_dates()
+        return self.store.read_dates()
 
     def _prior_daily_atr(
         self, session_date: str, available_dates: list[str],
@@ -2041,7 +2041,7 @@ class ReplayWorker:
         for positions and risk, but their feature context must retain this
         causal cross-date input.
         """
-        dates = sorted(available_dates or self._dates())
+        dates = sorted(self._dates() if available_dates is None else available_dates)
         prior = [value for value in dates if value < session_date]
         if not prior:
             return None, None

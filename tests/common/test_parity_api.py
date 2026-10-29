@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from ftx_paper.api.app import create_app
 from ftx_paper.runtime.parity_artifacts import build_parity_artifact
 from ftx_paper.runtime.store import RuntimeStore
@@ -66,3 +68,33 @@ def test_legacy_event_routes_are_not_exposed(tmp_path) -> None:
     assert openapi.status_code == 200
     paths = openapi.get_json()["paths"]
     assert "/api/v1/events" not in paths
+
+
+def test_historical_date_cannot_start_live_runtime(tmp_path) -> None:
+    class Operations:
+        started = False
+
+        def request_start(self):
+            self.started = True
+
+        def request_stop(self):
+            pass
+
+        def request_restart(self):
+            self.started = True
+
+    operations = Operations()
+    app = create_app(
+        RuntimeStore(tmp_path),
+        session=SimpleNamespace(strategy_status=lambda: ()),
+        replay_worker=object(),
+        runtime_operations=operations,
+    )
+
+    response = app.test_client().post(
+        "/api/v1/runtime/start", json={"session_date": "2026-09-29"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"]["code"] == "historical_session_requires_replay"
+    assert not operations.started

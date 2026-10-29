@@ -146,7 +146,7 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             parsed_date = datetime.strptime(requested_date, "%Y-%m-%d").date().isoformat()
         except ValueError:
             return jsonify(error_payload("invalid_date", "session_date must be YYYY-MM-DD")), 400
-        if parsed_date != requested_date or parsed_date not in store.read_market_dates():
+        if parsed_date != requested_date or parsed_date not in store.read_dates():
             return jsonify(error_payload("no_data", "no market data for session_date")), 404
         if replay_request.strategy_id == "ftx-paper-orderflow":
             coverage = store.read_market_coverage(parsed_date)
@@ -423,6 +423,12 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
         action = actions.get(command)
         if action is None:
             return jsonify({"error": {"code": "unknown_command", "message": command}}), 404
+        payload = request.get_json(silent=True)
+        if command in {"start", "restart"} and isinstance(payload, dict) and "session_date" in payload:
+            return jsonify(error_payload(
+                "historical_session_requires_replay",
+                "Historical sessions must use POST /api/v1/replay; runtime start is for the live feed.",
+            )), 400
         if command in {"start", "restart"} and active_auth is not None and active_auth.access_token() is None:
             login_url = getattr(active_auth, "login_url", lambda: None)()
             provider = getattr(active_auth, "provider", "broker")

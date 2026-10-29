@@ -190,10 +190,7 @@ class RuntimeSession:
 
     def _initialize_orderflow_prior_context(self, session_date: str) -> None:
         """Warm the live producer from the latest complete stored futures session."""
-        dates_reader = getattr(self.store, "read_market_dates", None)
-        if not callable(dates_reader):
-            return
-        available_dates = cast(Iterable[object], dates_reader())
+        available_dates = cast(Iterable[object], self.store.read_dates())
         prior_dates = sorted(str(value) for value in available_dates if str(value) < session_date)
         source = None
         for prior_date in reversed(prior_dates):

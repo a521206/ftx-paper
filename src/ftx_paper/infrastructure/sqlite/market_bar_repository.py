@@ -7,4 +7,10 @@ class SqliteMarketBarRepository:
         self._connection = connection
 
     def read_dates(self):
-        return tuple(row[0] for row in self._connection.execute("SELECT date FROM market_dates ORDER BY date"))
+        return tuple(
+            row[0]
+            for row in self._connection.execute(
+                "SELECT DISTINCT substr(minute, 1, 10) AS date "
+                "FROM market_bars ORDER BY date"
+            )
+        )

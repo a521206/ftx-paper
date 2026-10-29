@@ -41,7 +41,7 @@ def test_runtime_store_round_trips_market_bars(tmp_path):
         "expiry": "2026-01-29", "strike": 18000.0, "option_type": "CE",
         "source": "historical_backfill", "ingested_at": rows[0]["ingested_at"],
     }]
-    assert store.read_market_dates() == ["2026-01-05"]
+    assert store.read_dates() == ["2026-01-05"]
 
 
 def test_runtime_store_canonicalizes_index_exchange_and_rejects_bad_vix(tmp_path):
