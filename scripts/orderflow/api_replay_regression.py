@@ -74,7 +74,7 @@ def run(base_url: str, *, timeout: float, interval: float) -> int:
             # reporting projection and must not participate in reconciliation.
             "vehicles": ["futures"],
             "mode": "replay",
-            "include_parity_layers": False,
+            "include_parity_layers": True,
         },
     )
     run_id = queued.get("run_id")
@@ -141,6 +141,12 @@ def run(base_url: str, *, timeout: float, interval: float) -> int:
         print(f"- location_interaction_unique_count: {lineage.get('location_interaction_unique_count')}")
         print(f"- location_interaction_by_location: {lineage.get('location_interaction_by_location')}")
         print(f"- location_interaction_by_timeframe: {lineage.get('location_interaction_by_timeframe')}")
+    parity = result.get("parity_artifact")
+    if isinstance(parity, Mapping):
+        print(f"First divergent stage: {parity.get('first_divergent_stage')}")
+        layers = parity.get("layers")
+        if isinstance(layers, Mapping):
+            print(f"Parity layers: {', '.join(str(item) for item in layers)}")
     if failures:
         print("Regression details:", file=sys.stderr)
         for failure in failures:

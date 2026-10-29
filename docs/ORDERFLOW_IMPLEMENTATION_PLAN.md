@@ -327,6 +327,38 @@ producer, shared coordinator, and policy calls; the policy must preserve its
 orderflow lifecycle sub-order without adopting replay-only input loading,
 replay clocks, or replay ownership.
 
+### Refactor Ownership Boundaries
+
+Refactor `src/ftx_paper/strategy/orderflow.py` in place. The ownership rules in
+the preceding sections and the causal order below are authoritative; the
+canonical NiftyZoning split must not become a second Paper state machine or
+execution owner.
+
+Safe extractions are limited to configuration, snapshot codecs, pure causal
+scoring/evidence/ID helpers, and pure event-payload builders. Extracted helpers
+must receive causal inputs explicitly and return typed decisions or projections;
+they must not load replay rows, advance a second clock, persist events, or
+mutate portfolio or execution state. `ReplayMachine` remains replay-only.
+
+Refactor acceptance must continue to exercise the production path and this
+causal order:
+
+```text
+producer evidence
+  -> context and permission projections
+  -> existing-position management
+  -> interaction and response advancement
+  -> opportunity expiry and formation
+  -> strategy admission and trigger projection
+  -> shared execution authorization and accounting
+  -> runtime persistence/reporting
+```
+
+Do not add public lifecycle state, fallback values, or compatibility fields
+without completing the reference-fidelity protocol. If an extracted boundary
+cannot prove its evidence or ownership, retain an explicit `unavailable`
+result and defer the change.
+
 ## Causal Per-Bar Contract
 
 Every completed live bar follows this causal order across the existing runtime

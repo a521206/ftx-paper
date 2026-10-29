@@ -1807,6 +1807,18 @@ class ReplayWorker:
         )
         entry_ist = entry_at.astimezone(IST)
         exit_ist = exit_at.astimezone(IST) if exit_at else None
+        stop_price = float(trade["stop_price"]) if trade.get("stop_price") is not None else None
+        initial_risk_points = (
+            float(trade["initial_risk_points"])
+            if trade.get("initial_risk_points") is not None
+            else abs(float(trade["entry_price"]) - stop_price) if stop_price is not None else None
+        )
+        initial_risk_rs = (
+            float(trade["initial_risk_rs"])
+            if trade.get("initial_risk_rs") is not None
+            else initial_risk_points * NIFTY_LOT_SIZE * float(trade.get("quantity", 0.0))
+            if initial_risk_points is not None else None
+        )
         entry_minutes = entry_ist.hour * 60 + entry_ist.minute - SESSION_OPEN_MINUTES
         return {
             "status": str(trade.get("status", "open")),
@@ -1819,11 +1831,9 @@ class ReplayWorker:
             "exit_time": exit_ist.strftime("%H:%M") if exit_ist else "",
             "quantity": float(trade.get("quantity", 0.0)),
             "entry_price": float(trade["entry_price"]),
-            "stop_price": float(trade["stop_price"]) if trade.get("stop_price") is not None else None,
-            "initial_risk_points": float(trade["initial_risk_points"])
-            if trade.get("initial_risk_points") is not None else None,
-            "initial_risk_rs": float(trade["initial_risk_rs"])
-            if trade.get("initial_risk_rs") is not None else None,
+            "stop_price": stop_price,
+            "initial_risk_points": initial_risk_points,
+            "initial_risk_rs": initial_risk_rs,
             "exit_price": float(trade["exit_price"]) if trade.get("exit_price") is not None else None,
             "gross_pnl_rs": float(trade["gross_pnl_rs"]) if trade.get("gross_pnl_rs") is not None else None,
             "cost_rs": float(trade["cost_rs"]) if trade.get("cost_rs") is not None else None,

@@ -44,6 +44,9 @@ def observe_trigger(
     next_bar_open_at: str | None = None,
     armed: bool | None = None,
 ) -> TriggerObservation:
+    trigger_type = (
+        trigger_type.value if isinstance(trigger_type, TriggerType) else str(trigger_type)
+    )
     if trigger_type not in {item.value for item in TriggerType} | {"retest"}:
         return TriggerObservation(
             False, False, None, observation.observation_id,

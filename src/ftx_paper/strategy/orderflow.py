@@ -110,12 +110,24 @@ def _bar_from_snapshot(raw: Mapping[str, object]) -> MarketBar:
     values = tuple(raw.get(name) for name in ("open", "high", "low", "close"))
     if any(not isinstance(value, (int, float)) or isinstance(value, bool) for value in values):
         raise ValueError("orderflow completed bar prices are invalid")
-    open_price, high_price, low_price, close_price = (float(value) for value in values)
+    numeric_values = cast(tuple[int | float, int | float, int | float, int | float], values)
+    open_price, high_price, low_price, close_price = (float(value) for value in numeric_values)
+    volume_value = raw.get("volume")
+    volume = (
+        float(volume_value)
+        if isinstance(volume_value, (int, float)) and not isinstance(volume_value, bool)
+        else None
+    )
+    open_interest_value = raw.get("open_interest")
+    open_interest = (
+        float(open_interest_value)
+        if isinstance(open_interest_value, (int, float)) and not isinstance(open_interest_value, bool)
+        else None
+    )
     return MarketBar(
         _instrument_from_snapshot(instrument), datetime.fromisoformat(timestamp),
         open_price, high_price, low_price, close_price,
-        float(raw["volume"]) if isinstance(raw.get("volume"), (int, float)) else None,
-        float(raw["open_interest"]) if isinstance(raw.get("open_interest"), (int, float)) else None,
+        volume, open_interest,
     )
 
 
@@ -148,10 +160,16 @@ def _instrument_from_snapshot(raw: Mapping[str, object]) -> Instrument:
     from ftx_paper.contracts import OptionType
 
     option_type = raw.get("option_type")
+    strike_value = raw.get("strike")
+    strike = (
+        float(strike_value)
+        if isinstance(strike_value, (int, float)) and not isinstance(strike_value, bool)
+        else None
+    )
     return Instrument(
         str(raw["symbol"]), str(raw["exchange"]), str(raw["instrument_type"]),
         raw.get("expiry") if isinstance(raw.get("expiry"), str) else None,
-        float(raw["strike"]) if isinstance(raw.get("strike"), (int, float)) else None,
+        strike,
         OptionType(option_type) if isinstance(option_type, str) else None,
     )
 
@@ -169,19 +187,51 @@ def _position_from_snapshot(raw: Mapping[str, object]) -> PositionState:
     entry_fill_time = raw.get("entry_fill_time")
     if entry_fill_time is not None and not isinstance(entry_fill_time, str):
         raise ValueError("orderflow entry fill time is invalid")
+    entry_price_value = raw.get("entry_price")
+    stop_price_value = raw.get("stop_price")
+    if (
+        not isinstance(entry_price_value, (int, float))
+        or isinstance(entry_price_value, bool)
+        or not isinstance(stop_price_value, (int, float))
+        or isinstance(stop_price_value, bool)
+    ):
+        raise ValueError("orderflow position prices are invalid")
+    entry_price = float(entry_price_value)
+    stop_price = float(stop_price_value)
+    quantity_value = raw.get("quantity")
+    if not isinstance(quantity_value, int) or isinstance(quantity_value, bool):
+        raise ValueError("orderflow position quantity is invalid")
+    exit_reference_value = raw.get("exit_reference_price")
+    exit_reference_price = (
+        float(exit_reference_value)
+        if isinstance(exit_reference_value, (int, float)) and not isinstance(exit_reference_value, bool)
+        else None
+    )
+    target_value = raw.get("target_price")
+    target_price = (
+        float(target_value)
+        if isinstance(target_value, (int, float)) and not isinstance(target_value, bool)
+        else None
+    )
+    initial_risk_value = raw.get("initial_risk_points")
+    initial_risk_points = (
+        float(initial_risk_value)
+        if isinstance(initial_risk_value, (int, float)) and not isinstance(initial_risk_value, bool)
+        else None
+    )
     return PositionState(
-        _instrument_from_snapshot(instrument), float(raw["entry_price"]), float(raw["stop_price"]),
-        int(raw["quantity"]), OrderSide(str(raw["side"])),
+        _instrument_from_snapshot(instrument), entry_price, stop_price,
+        quantity_value, OrderSide(str(raw["side"])),
         stop_policy=raw.get("stop_policy") if isinstance(raw.get("stop_policy"), str) else None,
         cell=raw.get("cell") if isinstance(raw.get("cell"), str) else None,
         exit_mode=str(raw.get("exit_mode", "signal")),
         entry_fill_time=datetime.fromisoformat(entry_fill_time) if entry_fill_time else None,
-        exit_reference_price=float(raw["exit_reference_price"]) if isinstance(raw.get("exit_reference_price"), (int, float)) else None,
-        target_price=float(raw["target_price"]) if isinstance(raw.get("target_price"), (int, float)) else None,
+        exit_reference_price=exit_reference_price,
+        target_price=target_price,
         vehicle=str(raw.get("vehicle", "futures")), synthetic_legs=legs,
         entry_bar=int(raw["entry_bar"]) if isinstance(raw.get("entry_bar"), int) else None,
         entry_order_id=raw.get("entry_order_id") if isinstance(raw.get("entry_order_id"), str) else None,
-        initial_risk_points=float(raw["initial_risk_points"]) if isinstance(raw.get("initial_risk_points"), (int, float)) else None,
+        initial_risk_points=initial_risk_points,
         partial_exit_enabled=bool(raw.get("partial_exit_enabled", False)),
         stop_source=str(raw.get("stop_source", "initial")),
         post_3r_activated=bool(raw.get("post_3r_activated", False)),
