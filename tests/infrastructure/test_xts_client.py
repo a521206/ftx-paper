@@ -83,3 +83,28 @@ def test_request_retries_transient_connection_reset():
 
     assert client.ohlc(1, 2, "2026-10-26", "2026-10-27")
     assert session.get.call_count == 2
+
+
+def test_ohlc_normalizes_xts_exchange_wall_clock_epoch_to_ist():
+    response = MagicMock(
+        status_code=200,
+        json=lambda: {
+            "type": "success",
+            "result": {
+                "dataResponse": (
+                    "1793178959|1|2|0|1|10|0,"
+                    "1793201399|1|2|0|1|10|0"
+                ),
+            },
+        },
+    )
+    session = MagicMock()
+    session.get.return_value = response
+    client = XTSClient(token="token", session=session)
+
+    bars = client.ohlc(1, 26000, "2026-10-28 09:15:00", "2026-10-28 15:30:00")
+
+    assert [bar["time"] for bar in bars] == [
+        "2026-10-28T09:15:59+05:30",
+        "2026-10-28T15:29:59+05:30",
+    ]

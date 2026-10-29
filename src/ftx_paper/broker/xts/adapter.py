@@ -6,7 +6,7 @@ import logging
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any, NotRequired, TypedDict
 from zoneinfo import ZoneInfo
 
@@ -28,6 +28,8 @@ from .protocol import exchange_code_for_segment, normalize_segment
 from .exceptions import XTSAuthenticationError, XTSTransportError
 
 IST = ZoneInfo("Asia/Kolkata")
+HISTORICAL_REQUEST_START = time(9, 0)
+HISTORICAL_REQUEST_END = time(15, 30)
 logger = logging.getLogger(__name__)
 
 
@@ -155,19 +157,33 @@ def resolve_instruments(
         else:
             sym_clean = str(symbol).strip().upper().replace(" ", "")
             for r in rows:
-                candidate = " ".join(
-                    str(r.get(key) or "") for key in ("tradingsymbol", "symbol", "name")
-                ).strip().upper().replace(" ", "")
-                if sym_clean in candidate or (
-                    sym_clean == "INDIAVIX" and "INDIA" in candidate and "VIX" in candidate
+                candidates = tuple(
+                    str(r.get(key) or "").strip().upper().replace(" ", "")
+                    for key in ("tradingsymbol", "symbol", "name")
+                )
+                if sym_clean in candidates or (
+                    sym_clean == "INDIAVIX"
+                    and any("INDIA" in candidate and "VIX" in candidate for candidate in candidates)
                 ):
                     found = r
                     break
 
-            if not found and sym_clean == "INDIAVIX":
+            index_names = {
+                "NIFTY": "NIFTY 50",
+                "NIFTY50": "NIFTY 50",
+                "INDIAVIX": "INDIA VIX",
+            }
+            if not found and sym_clean in index_names:
                 try:
                     index_list = client.index_list(seg_id)
-                    entry = next((value for value in index_list if value.upper().startswith("INDIA VIX_")), None)
+                    target = index_names[sym_clean]
+                    entry = next(
+                        (
+                            value for value in index_list
+                            if value.rsplit("_", 1)[0].strip().upper() == target
+                        ),
+                        None,
+                    )
                     if entry is not None:
                         index_name, token = entry.rsplit("_", 1)
                         found = {
@@ -185,12 +201,13 @@ def resolve_instruments(
                 try:
                     search_results = client.search(str(symbol))
                     for r in search_results:
-                        candidate = " ".join(
-                            str(r.get(key) or "")
+                        candidates = tuple(
+                            str(r.get(key) or "").strip().upper().replace(" ", "")
                             for key in ("DisplayName", "TradingSymbol", "Description", "Name")
-                        ).strip().upper().replace(" ", "")
-                        if sym_clean in candidate or (
-                            sym_clean == "INDIAVIX" and "INDIA" in candidate and "VIX" in candidate
+                        )
+                        if sym_clean in candidates or (
+                            sym_clean == "INDIAVIX"
+                            and any("INDIA" in candidate and "VIX" in candidate for candidate in candidates)
                         ):
                             seg = normalize_segment(r.get("ExchangeSegment", seg_id))
                             found = {
@@ -380,27 +397,33 @@ def load_startup_backfill(
 
         seg = item.get("segment_id", 1)
         token = item["instrument_token"]
+        seen_item_timestamps: set[datetime] = set()
 
-        try:
-            rows = client.ohlc(
-                seg,
-                token,
-                start,
-                end,
-                compression=60,
-            )
-        except XTSAuthenticationError as exc:
-            raise XTSAuthenticationError("XTS authentication expired during historical warmup") from exc
-        except XTSTransportError as exc:
-            if stop_event is not None and stop_event.is_set() and "cancelled" in str(exc).lower():
+        rows: list[dict[str, Any]] = []
+        window_start = start
+        while window_start < end:
+            if stop_event is not None and stop_event.is_set():
                 return tuple(bars)
-            logger.warning("XTS OHLC historical warmup failed for %s (%s): %s", item["symbol"], token, exc)
-            rows = []
-        except Exception as exc:
-            logger.warning("XTS OHLC historical warmup failed for %s (%s): %s", item["symbol"], token, exc)
-            rows = []
+            window_end = min(window_start + timedelta(days=1), end)
+            try:
+                rows.extend(client.ohlc(
+                    seg,
+                    token,
+                    datetime.combine(window_start, HISTORICAL_REQUEST_START, tzinfo=IST),
+                    datetime.combine(window_end, HISTORICAL_REQUEST_END, tzinfo=IST),
+                    compression=60,
+                ) or ())
+            except XTSAuthenticationError as exc:
+                raise XTSAuthenticationError("XTS authentication expired during historical warmup") from exc
+            except XTSTransportError as exc:
+                if stop_event is not None and stop_event.is_set() and "cancelled" in str(exc).lower():
+                    return tuple(bars)
+                logger.warning("XTS OHLC historical warmup failed for %s (%s): %s", item["symbol"], token, exc)
+            except Exception as exc:
+                logger.warning("XTS OHLC historical warmup failed for %s (%s): %s", item["symbol"], token, exc)
+            window_start = window_end
 
-        for row in rows or ():
+        for row in rows:
             raw_time = row.get("time") or row.get("timestamp")
             if raw_time is None:
                 continue
@@ -417,6 +440,9 @@ def load_startup_backfill(
                         parsed = normalize_exchange_timestamp(raw_str)
                     except ValueError:
                         continue
+            if parsed in seen_item_timestamps:
+                continue
+            seen_item_timestamps.add(parsed)
 
             expiry = instrument_expiry_iso(item.get("expiry")) if instrument_type in {"FUT", "CE", "PE"} else None
             raw_strike = item.get("strike")

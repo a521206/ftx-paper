@@ -126,6 +126,19 @@ def test_resolve_instruments_uses_index_list_for_vix():
     assert resolved[0]["symbol"] == "INDIA VIX"
 
 
+def test_resolve_instruments_uses_index_list_for_nifty():
+    class IndexClient(MockXTSClient):
+        def index_list(self, exchange_segment):
+            return ["NIFTY 50_26000", "INDIA VIX_26002"]
+
+    resolved = resolve_instruments(IndexClient([]), [{
+        "exchange": "NSECM", "tradingsymbol": "NIFTY 50", "role": "spot",
+    }])
+
+    assert resolved[0]["instrument_token"] == 26000
+    assert resolved[0]["symbol"] == "NIFTY 50"
+
+
 def test_load_startup_backfill_keeps_vix_prices_unchanged():
     class VIXClient(MockXTSClient):
         def ohlc(self, segment, token, start, end, compression=60):

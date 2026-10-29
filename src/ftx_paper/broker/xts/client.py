@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from collections.abc import Callable
 from typing import Any
@@ -19,6 +19,17 @@ from .session import XTSMarketDataSession
 
 IST = ZoneInfo("Asia/Kolkata")
 logger = logging.getLogger(__name__)
+
+
+def _parse_xts_ohlc_timestamp(raw_ts: str) -> datetime:
+    """Parse XTS OHLC timestamps, whose epoch encodes the exchange wall clock."""
+    if raw_ts.isdigit():
+        # XTS documents this field as epoch seconds, but the returned value is
+        # the NSE wall-clock reading encoded without the IST offset. Treat the
+        # UTC fields as wall-clock components and attach IST exactly once.
+        utc_fields = datetime.fromtimestamp(int(raw_ts), tz=UTC).replace(tzinfo=None)
+        return utc_fields.replace(tzinfo=IST)
+    return datetime.strptime(raw_ts, "%Y-%m-%d %H:%M:%S").replace(tzinfo=IST)
 
 def _format_xts_datetime(dt: datetime | date | str) -> str:
     """Format datetime as 'mmm dd yyyy HHMMSS' expected by XTS OHLC API."""
@@ -302,12 +313,7 @@ class XTSClient:
                 continue
             try:
                 raw_ts = parts[0].strip()
-                # Check if epoch seconds
-                if raw_ts.isdigit():
-                    sec = int(raw_ts)
-                    dt = datetime.fromtimestamp(sec, tz=IST)
-                else:
-                    dt = datetime.strptime(raw_ts, "%Y-%m-%d %H:%M:%S").replace(tzinfo=IST)
+                dt = _parse_xts_ohlc_timestamp(raw_ts)
                 
                 open_p = float(parts[1])
                 high_p = float(parts[2])
