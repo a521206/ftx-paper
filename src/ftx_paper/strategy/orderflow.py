@@ -1396,6 +1396,12 @@ class OrderflowPolicy:
                             "long_score": long_score, "short_score": short_score,
                             "available_at": observation.available_at.isoformat(),
                         }))
+                        # Form the canonical opening lifecycle at the
+                        # completed 5m parent. Later 1m opening evidence is
+                        # attached to this lifecycle rather than creating it.
+                        results.extend(self._form_opening_candidate(
+                            observation, self._opening_seed, orderflow, context, base, futures,
+                        ))
                 location_observations = tuple(item for item in location_observations
                                               if item.location_alias.upper() not in {"OR_HIGH", "OR_LOW"})
             self._processed_observation_ids.add(observation.observation_id)
