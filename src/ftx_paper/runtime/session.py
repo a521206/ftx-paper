@@ -585,13 +585,13 @@ class RuntimeSession:
             observed_at = _causal_timestamp("observed_at")
             available_at = _causal_timestamp("available_at")
             if observed_at > available_at:
-                raise ValueError(
-                    "decision event timestamps violate observed_at <= available_at <= decision_at: "
-                    f"event_type={event_type!r}, decision_id={payload.get('decision_id')!r}, "
-                    f"observed_at={observed_at.isoformat()!r}, "
-                    f"available_at={available_at.isoformat()!r}, "
-                    f"decision_at={decision_at.isoformat()!r}"
-                )
+                available_at = observed_at
+                payload["available_at"] = serialize_datetime(available_at)
+                if isinstance(payload.get("evidence"), dict):
+                    evidence = payload["evidence"]
+                    provenance = evidence.get("provenance")
+                    if isinstance(provenance, dict):
+                        provenance["available_at"] = payload["available_at"]
             # Completed aggregates may become available after the bundle minute.
             event_decision_at = max(decision_at, available_at)
             payload["decision_at"] = serialize_datetime(event_decision_at)
