@@ -107,13 +107,13 @@ def _bar_from_snapshot(raw: Mapping[str, object]) -> MarketBar:
     timestamp = raw.get("timestamp")
     if not isinstance(timestamp, str):
         raise ValueError("orderflow completed bar timestamp is invalid")
-    values = {name: raw.get(name) for name in ("open", "high", "low", "close")}
-    if any(not isinstance(value, (int, float)) or isinstance(value, bool) for value in values.values()):
+    values = tuple(raw.get(name) for name in ("open", "high", "low", "close"))
+    if any(not isinstance(value, (int, float)) or isinstance(value, bool) for value in values):
         raise ValueError("orderflow completed bar prices are invalid")
+    open_price, high_price, low_price, close_price = (float(value) for value in values)
     return MarketBar(
         _instrument_from_snapshot(instrument), datetime.fromisoformat(timestamp),
-        float(values["open"]), float(values["high"]),
-        float(values["low"]), float(values["close"]),
+        open_price, high_price, low_price, close_price,
         float(raw["volume"]) if isinstance(raw.get("volume"), (int, float)) else None,
         float(raw["open_interest"]) if isinstance(raw.get("open_interest"), (int, float)) else None,
     )
