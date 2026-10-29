@@ -1276,8 +1276,15 @@ class OrderflowPolicy:
         results: list[PolicyDecision] = []
         ordered_observations = sorted(
             observations,
-            key=lambda item: (0 if item.timeframe == "5m" else 1, item.available_at,
-                              item.observed_at, item.observation_id),
+            # Causal availability is the primary clock.  Do not process all
+            # completed parents ahead of earlier one-minute evidence; that
+            # makes a later aggregate appear to be the first causal context.
+            key=lambda item: (
+                item.available_at,
+                0 if item.timeframe == "5m" else 1,
+                item.observed_at,
+                item.observation_id,
+            ),
         )
         for observation in ordered_observations:
             already_processed = observation.observation_id in self._processed_observation_ids

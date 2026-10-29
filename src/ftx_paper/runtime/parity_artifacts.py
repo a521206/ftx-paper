@@ -234,6 +234,11 @@ def _record(record: Mapping[str, Any], *, kind: str, sequence: int,
         raise ValueError("legacy replay fields are not accepted: " + ", ".join(sorted(legacy)))
     values = record.get("comparable_values", record.get("values", record))
     values = dict(values) if isinstance(values, Mapping) else {}
+    # Producer-neutral records own the stream position.  Legacy replay
+    # envelopes may carry a restarted sequence inside ``values``; retaining it
+    # would wrap producer-local ordering into the parity payload.
+    values.pop("sequence", None)
+    values.pop("stream_sequence", None)
     if "comparable_values" not in record and "values" not in record:
         values = {key: value for key, value in values.items() if key not in {
             "event_type", "decision_id", "client_order_id", "producer_local_id",

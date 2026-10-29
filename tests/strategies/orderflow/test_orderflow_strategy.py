@@ -278,6 +278,34 @@ def test_completed_five_minute_extreme_publishes_before_same_clock_location() ->
     assert reasons.index("session_extreme_registered") < reasons.index("location_interaction_observed")
 
 
+def test_earlier_one_minute_evidence_advances_before_later_parent(monkeypatch) -> None:
+    bundle, account = _context()
+    assert bundle.orderflow_context is not None
+    parent = bundle.orderflow_context.observations_for("5m")[0]
+    children = bundle.orderflow_context.observations_for("1m")
+    context = replace(
+        bundle.orderflow_context,
+        observations=(*children, parent),
+        prefixes={"5m": (parent,), "1m": children},
+    )
+    policy = OrderflowStrategy().policy
+    order: list[tuple[str, str]] = []
+    original_advance = policy._advance_context
+
+    def record_advance(observation, orderflow, causal_cutoff, already_processed, base):
+        order.append(("context", observation.observation_id))
+        return original_advance(
+            observation, orderflow, causal_cutoff, already_processed, base,
+        )
+
+    monkeypatch.setattr(policy, "_advance_context", record_advance)
+    policy.evaluate(replace(bundle, orderflow_context=context), account)
+
+    assert order.index(("context", children[0].observation_id)) < order.index(
+        ("context", parent.observation_id),
+    )
+
+
 def test_future_five_minute_parent_cannot_register_session_extreme() -> None:
     bundle, account = _context()
     assert bundle.orderflow_context is not None

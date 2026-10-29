@@ -55,6 +55,26 @@ def test_artifact_resequences_restarted_producer_decision_stream() -> None:
     assert parity_layer_records(artifact, "decision")[0]["sequence"] == 0
 
 
+def test_artifact_does_not_wrap_nested_legacy_sequence() -> None:
+    artifact = build_parity_artifact(
+        {"strategy": {"name": "paper", "version": "v1"}, "bars_seen": 2,
+         "events": [], "metadata": {"normalized_fingerprint": "fixture"}},
+        request={"session_date": "2026-01-05"},
+        layer_records={"decision": [
+            {"event_type": "POLICY_DECISION", "decision_id": "d1",
+             "timestamp": "2026-01-05T09:15:00Z", "stage": "interaction",
+             "outcome": "observed", "values": {"sequence": 0, "reason": "first"}},
+            {"event_type": "POLICY_DECISION", "decision_id": "d2",
+             "timestamp": "2026-01-05T09:20:00Z", "stage": "candidate",
+             "outcome": "observed", "values": {"sequence": 0, "reason": "second"}},
+        ], "execution_settlement": []},
+    )
+
+    validate_parity_artifact(artifact)
+    assert [item["sequence"] for item in artifact["layers"]["decision"]] == [0, 1]
+    assert all("sequence" not in item["values"] for item in artifact["layers"]["decision"])
+
+
 def test_manifest_comparison_detects_first_layer_difference() -> None:
     left = _artifact()
     right = _artifact()
