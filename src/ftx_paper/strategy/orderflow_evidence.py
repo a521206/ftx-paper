@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime
 from typing import TYPE_CHECKING, cast
 
 from ftx_paper.domain.decision_context import DecisionContext
 
 from .orderflow_contract import OrderflowContext, OrderflowObservation, stable_orderflow_id
 from .orderflow_helpers import observation_number, volume_average
-from .orderflow_location import LocationObservation, LocationRecord, LocationRegistry
+from .orderflow_location import LocationObservation, LocationRecord, LocationRegistry, is_diagnostic_location
 from .orderflow_scores import score_aggregate
 from .orderflow_vwap import MarketAggregate, VwapLocationProvider
 
@@ -34,54 +35,45 @@ class OrderflowEvidenceAssembler:
         cached = self._confirmation_score_cache.get(observation.observation_id)
         if observation.observation_id in self._confirmation_score_cache:
             return cached
-        atr = next(
-            (item.frozen_atr for item in observation.location_observations
-             if item.frozen_atr is not None and item.frozen_atr > 0),
-            None,
-        )
-        if atr is None:
-            atr = next(
-                (
-                    location.frozen_atr
-                    for item in self.observations
-                    if item.observed_at <= observation.observed_at
-                    for location in item.location_observations
-                    if location.frozen_atr is not None and location.frozen_atr > 0
-                ),
-                None,
-            )
+        atr = observation.context.frozen_atr if observation.context is not None else None
         if atr is None:
             self._confirmation_score_cache[observation.observation_id] = None
             return None
+        session_id = observation.context.session_id if observation.context else None
         all_observations = tuple(
             item for item in self.observations
             if item.available_at <= observation.available_at
+            and (
+                session_id is None
+                or item.context is not None and item.context.session_id == session_id
+            )
         )
-        children_by_id = {item.observation_id: item for item in all_observations}
-        child_ids = observation.context.child_observation_ids if observation.context else ()
-        children = tuple(
-            children_by_id[item_id] for item_id in child_ids if item_id in children_by_id
+
+        def prior_items(item: OrderflowObservation) -> list[OrderflowObservation]:
+            return [
+                candidate for candidate in all_observations
+                if candidate.timeframe == item.timeframe
+                and self._interval_end(candidate) < item.observed_at
+            ][-20:]
+
+        children = (
+            tuple(
+                item for item in all_observations
+                if item.timeframe == "1m"
+                and self._interval_end(item) <= observation.available_at
+            )[-2:]
+            if observation.timeframe == "5m" else ()
         )
-        if observation.timeframe == "5m" and len(children) != len(child_ids):
-            self._confirmation_score_cache[observation.observation_id] = None
-            return None
         child_scores: list[tuple[float, float]] = []
         for child in children:
-            prior = next(
-                (item for item in reversed(all_observations)
-                 if item.timeframe == child.timeframe and item.observed_at < child.observed_at),
-                None,
-            )
-            prior_items = [
-                item for item in all_observations
-                if item.timeframe == child.timeframe and item.observed_at < child.observed_at
-            ][-20:]
+            history = prior_items(child)
+            prior = history[-1] if history else None
             try:
                 score = score_aggregate(
                     child.features,
                     prior.features if prior is not None else None,
                     atr=atr,
-                    volume_average=volume_average(prior_items),
+                    volume_average=volume_average(history),
                 )
             except ValueError:
                 self._confirmation_score_cache[observation.observation_id] = None
@@ -90,17 +82,8 @@ class OrderflowEvidenceAssembler:
                 self._confirmation_score_cache[observation.observation_id] = None
                 return None
             child_scores.append(score)
-        prior_parent = next(
-            (item for item in reversed(all_observations)
-             if item.timeframe == observation.timeframe
-             and item.observed_at < observation.observed_at),
-            None,
-        )
-        prior_parents = [
-            item for item in all_observations
-            if item.timeframe == observation.timeframe
-            and item.observed_at < observation.observed_at
-        ][-20:]
+        prior_parents = prior_items(observation)
+        prior_parent = prior_parents[-1] if prior_parents else None
         try:
             scores = score_aggregate(
                 observation.features,
@@ -114,6 +97,10 @@ class OrderflowEvidenceAssembler:
             return None
         self._confirmation_score_cache[observation.observation_id] = scores
         return scores
+
+    @staticmethod
+    def _interval_end(observation: OrderflowObservation) -> datetime:
+        return observation.interval_end or observation.observed_at
 
     def clear_cache(self) -> None:
         self._confirmation_score_cache.clear()
@@ -156,7 +143,10 @@ class OrderflowEvidenceAssembler:
                 cast(tuple[MarketAggregate, ...], tuple(
                     item for item in observations
                     if item.context is not None
-                    and item.context.replay_provenance.get("producer") == "ftx-paper"
+                    and (
+                        item.timeframe != "5m"
+                        or len(item.context.child_observation_ids) == 5
+                    )
                 )),
                 cutoff=min(context.as_of, orderflow.cutoff),
             )
@@ -171,7 +161,9 @@ class OrderflowEvidenceAssembler:
                 ),
                 None,
             )
-            vwap_locations = location_registry.publish_measurements(
+            from .orderflow_vwap import publish_vwap_locations
+            vwap_locations = publish_vwap_locations(
+                location_registry,
                 vwap_measurements, atr=atr,
                 band_fraction=self.vwap_provider.config.band_atr_fraction,
             )
@@ -181,7 +173,7 @@ class OrderflowEvidenceAssembler:
         )
         locations_by_source: dict[str, list[LocationRecord]] = {}
         for location in vwap_locations:
-            if location.source_observation_id is None:
+            if location.source_observation_id is None or location.source_aggregate_id is None:
                 continue
             if first_parent_available is not None and location.available_at < first_parent_available:
                 continue
@@ -207,14 +199,15 @@ class OrderflowEvidenceAssembler:
                     location_observations=item.location_observations + tuple(
                         LocationObservation(
                             location.location_id, location.alias, location.generation, location.price,
-                            location.band.lower, location.band.upper,
+                            location.band.low, location.band.high,
                             numeric(item, "open"), numeric(item, "high"),
                             numeric(item, "low"), numeric(item, "close"),
-                            location.band.contains(numeric(item, "high"))
-                            and location.band.contains(numeric(item, "low")),
+                            location.band.intersects(
+                                high=numeric(item, "high"), low=numeric(item, "low"),
+                            ),
                             item.observation_id, item.observed_at, item.available_at,
                             stable_orderflow_id("location_observation", item.observation_id, location.location_id),
-                            location.location_type,
+                            "diagnostic_reference" if is_diagnostic_location(location.alias) else "session_reference",
                             location.source_observation_id,
                             timeframe=item.timeframe,
                             child_observation_ids=(

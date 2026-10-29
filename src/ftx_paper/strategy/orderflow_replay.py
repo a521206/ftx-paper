@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from collections.abc import Mapping, Sequence
 
@@ -18,9 +18,8 @@ class ReplayPhase(StrEnum):
     INTERACTIONS = "interactions"
     TIMEOUT = "timeout"
     FORMATION = "formation"
-    ADMISSION = "admission"
-    TRIGGER = "trigger"
     ARBITRATION = "arbitration"
+    TRIGGER = "trigger"
     RECORDING = "recording"
 
 
@@ -45,7 +44,6 @@ class ReplayBarResult:
     timestamp: datetime
     available_observation_ids: tuple[str, ...]
     phases: tuple[ReplayPhase, ...]
-    admission_suspended: bool = False
 
 
 @dataclass(slots=True)
@@ -72,13 +70,12 @@ class ReplayMachine:
         self.recorder = ReplayRecorder(capture_mode)
         self.state = OrderflowRuntimeState(context=observation.context)
         self._last_timestamp: datetime | None = None
-        self._admission_suspended = False
 
     def process_bar(
         self,
         timestamp: datetime,
         *,
-        available_at: datetime | None = None,
+        available_at: datetime,
         before_state: Mapping[str, object],
         after_state: Mapping[str, object],
         decisions: tuple[str, ...] = (),
@@ -95,44 +92,38 @@ class ReplayMachine:
             raise ValueError("replay bars must be strictly chronological")
         if timestamp.tzinfo is None or timestamp.utcoffset() is None:
             raise ValueError("replay bar timestamps must be timezone-aware")
-        if available_at is not None and (available_at.tzinfo is None or available_at.utcoffset() is None):
+        if available_at.tzinfo is None or available_at.utcoffset() is None:
             raise ValueError("replay availability timestamps must be timezone-aware")
-        if available_at is not None and available_at < timestamp:
+        if available_at < timestamp:
             raise ValueError("replay availability cannot precede the decision timestamp")
         context = self.observation.available(timestamp)
-        if any(gap.start <= timestamp for gap in self.observation.gaps):
-            self._admission_suspended = True
-        recovery = tuple(
-            item for item in context.observations_for("5m")
-            if item.available_at <= timestamp
-            and item.context is not None
-            and item.context.replay_provenance.get("gap_status") == "none"
-            and any(gap.end <= item.available_at for gap in self.observation.gaps)
-        )
-        if recovery:
-            self._admission_suspended = False
-        admission_suspended = self._admission_suspended
-        # Suspension gates admission only; completed evidence remains visible
-        # for diagnostics and recovery reasoning.
         available_ids = tuple(item.observation_id for item in context.observations)
-        phases = (
-            tuple(
-                _EXECUTION_PHASE_TO_REPLAY_PHASE[str(item["phase"])]
-                for item in phase_results
-                if str(item.get("phase")) in _EXECUTION_PHASE_TO_REPLAY_PHASE
-            )
-            or CANONICAL_PHASE_ORDER
+        captured_aggregates = aggregates or tuple(
+            asdict(item) for item in context.observations
         )
+        captured_unavailable = unavailable or tuple(
+            dict(issue) for issue in context.source_issues
+        )
+        phases = tuple(
+            _EXECUTION_PHASE_TO_REPLAY_PHASE[str(item.get("phase"))]
+            for item in phase_results
+            if str(item.get("phase")) in _EXECUTION_PHASE_TO_REPLAY_PHASE
+        )
+        if phases != CANONICAL_PHASE_ORDER:
+            raise ValueError(
+                "replay phases must exactly match canonical causal order"
+            )
         self.state.phase_history.append(phases)
         sequence = len(self.recorder.records) + 1
         self.recorder.record(ReplayRecord(
-            sequence, timestamp, available_at or timestamp, before_state, after_state,
-            available_ids, decisions, aggregates, predicates, events, transitions, unavailable,
+            sequence, timestamp, available_at, before_state, after_state,
+            available_ids, decisions, captured_aggregates, predicates, events, transitions,
+            captured_unavailable,
             checkpoints=(*checkpoints, *phase_results), scope=scope or {},
         ))
         self.state.replay_records = list(self.recorder.records)
         self._last_timestamp = timestamp
-        return ReplayBarResult(sequence, timestamp, available_ids, phases, admission_suspended)
+        return ReplayBarResult(sequence, timestamp, available_ids, phases)
 
 
 __all__ = [

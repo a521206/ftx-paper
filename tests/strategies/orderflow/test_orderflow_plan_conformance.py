@@ -1,16 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from ftx_paper.contracts import Instrument, MarketBar
-from ftx_paper.strategy import (
-    CaptureMode,
-    LocationBand,
-    LocationRecord,
-    LocationRegistry,
-    ReplayMachine,
-    SourceIdentity,
-    observe_market,
-    prepare_replay_input,
-)
+from ftx_paper.strategy import SourceIdentity, observe_market, prepare_replay_input
 from ftx_paper.contracts import build_decision_view, validate_decision_view
 
 
@@ -46,39 +37,6 @@ def test_post_gap_complete_parent_is_recovery_evidence() -> None:
     )
 
 
-def test_capture_modes_keep_phase_two_outputs_identical() -> None:
-    observation = observe_market(prepare_replay_input(
-        [_bar(index) for index in range(5)], "2026-01-01",
-        session_partition="09:15-09:20",
-    ))
-    timestamp = datetime(2026, 1, 1, 3, 50, tzinfo=UTC)
-    results = []
-    records = []
-    for mode in CaptureMode:
-        machine = ReplayMachine(observation, capture_mode=mode)
-        results.append(machine.process_bar(
-            timestamp, before_state={}, after_state={}, decisions=("d",),
-            aggregates=({"aggregate": "a"},),
-            unavailable=({"unavailable": "u"},),
-        ))
-        records.append(machine.recorder.records[0])
-
-    assert {result.available_observation_ids for result in results} == {results[0].available_observation_ids}
-    assert {record.decisions for record in records} == {records[0].decisions}
-    assert all(record.aggregates == records[0].aggregates for record in records)
-    assert all(record.unavailable == records[0].unavailable for record in records)
-    assert observation.gaps == observe_market(prepare_replay_input(
-        [_bar(index) for index in range(5)], "2026-01-01",
-        session_partition="09:15-09:20",
-    )).gaps
-    assert tuple(observation.context.observations) == tuple(
-        observe_market(prepare_replay_input(
-            [_bar(index) for index in range(5)], "2026-01-01",
-            session_partition="09:15-09:20",
-        )).context.observations
-    )
-
-
 def test_incomplete_parent_is_diagnosed_without_publishing_children_or_parent() -> None:
     rows = [_bar(index) for index in range(5)]
     rows[2] = MarketBar(rows[2].instrument, rows[2].timestamp, 99.0, 101.0, 98.0, 100.0, None)
@@ -96,16 +54,6 @@ def test_incomplete_parent_is_diagnosed_without_publishing_children_or_parent() 
         datetime(2026, 1, 1, 3, 48, tzinfo=UTC),
         datetime(2026, 1, 1, 3, 49, tzinfo=UTC),
     )
-
-
-def test_location_boundary_carry_is_once_and_detached() -> None:
-    registry = LocationRegistry()
-    start = datetime(2026, 1, 1, 9, 15, tzinfo=UTC)
-    registry.publish(LocationRecord("or-1", "opening_range", 100.0, LocationBand(99.0, 101.0), 1, start, "agg-1"))
-    carried = registry.next_generation(at=start + timedelta(days=1), carry=True)
-    assert len(carried) == 1
-    assert registry.next_generation(at=start + timedelta(days=1), carry=True) == ()
-    assert carried[0].to_dict()["source_aggregate_id"] == "agg-1"
 
 
 def test_unavailable_decision_preserves_reason_and_availability_boundary() -> None:

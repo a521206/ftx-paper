@@ -696,6 +696,39 @@ class ReplayWorker:
             synthetic_open_trades: list[dict[str, Any]] = []
             last_quotes: dict[str, SyntheticFutureQuote] = {}
             self.lifecycle.pending_entries.clear()
+
+            next_available_at = {
+                item.timestamp: (
+                    futures_bars[index + 1].timestamp
+                    if index + 1 < len(futures_bars) else item.timestamp
+                )
+                for index, item in enumerate(futures_bars)
+            }
+
+            def replay_state_snapshot() -> dict[str, Any]:
+                strategy_snapshot = getattr(engine.strategy, "snapshot", None)
+                raw_strategy_state = strategy_snapshot() if callable(strategy_snapshot) else {}
+
+                def scrub_legacy_fields(value: Any) -> Any:
+                    if isinstance(value, Mapping):
+                        return {
+                            key: scrub_legacy_fields(item)
+                            for key, item in value.items()
+                            if key != "execution_mode"
+                        }
+                    if isinstance(value, list):
+                        return [scrub_legacy_fields(item) for item in value]
+                    return value
+
+                strategy_state = scrub_legacy_fields(raw_strategy_state)
+                if not isinstance(strategy_state, Mapping):
+                    strategy_state = {}
+                return {
+                    "engine": {"bars_seen": engine.bars_seen},
+                    "portfolio": portfolio.snapshot(),
+                    "strategy": strategy_state,
+                }
+
             for bar in bars:
                 if cancel.is_set():
                     break
@@ -717,11 +750,16 @@ class ReplayWorker:
                 ready_bundle = bundle
                 event_start = len(all_events)
                 futures_bar = bundle.bars[MarketRole.FUTURES]
+                before_state = replay_state_snapshot()
                 turn = ExecutionTurn(
                     turn_id=f"{date}:{futures_bar.timestamp.isoformat()}",
                     observed_at=futures_bar.timestamp.isoformat(),
-                    available_at=futures_bar.timestamp.isoformat(),
-                    decision_at=futures_bar.timestamp.isoformat(),
+                    available_at=next_available_at.get(
+                        futures_bar.timestamp, futures_bar.timestamp,
+                    ).isoformat(),
+                    decision_at=next_available_at.get(
+                        futures_bar.timestamp, futures_bar.timestamp,
+                    ).isoformat(),
                     source="replay",
                     payload={"bundle_id": bundle.bundle_id},
                 )
@@ -1127,9 +1165,19 @@ class ReplayWorker:
                 if replay_machine is not None and str(futures_bar.instrument.instrument_type).upper() in {"FUT", "FUTURES"}:
                     replay_machine.process_bar(
                         futures_bar.timestamp,
-                        available_at=futures_bar.timestamp,
-                        before_state={},
-                        after_state={},
+                        available_at=next_available_at.get(
+                            futures_bar.timestamp, futures_bar.timestamp,
+                        ),
+                        before_state=before_state,
+                        after_state=replay_state_snapshot(),
+                        decisions=tuple(
+                            str(event.get("decision_id"))
+                            for event in all_events[event_start:]
+                            if event.get("decision_id") is not None
+                        ),
+                        events=tuple(
+                            dict(event) for event in all_events[event_start:]
+                        ),
                         phase_results=tuple({
                             "phase": event.phase,
                             "sequence": event.sequence,

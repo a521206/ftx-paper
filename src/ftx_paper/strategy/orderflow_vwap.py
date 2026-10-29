@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
@@ -35,10 +35,9 @@ class MarketAggregate(Protocol):
 class VwapCalculationConfig:
     calculation_version: str = "typical_price_volume_v1"
     band_atr_fraction: float = 0.06
-    recovery_bars: int = 5
 
     def __post_init__(self) -> None:
-        if not self.calculation_version.strip() or self.recovery_bars < 1:
+        if not self.calculation_version.strip():
             raise ValueError("invalid VWAP calculation configuration")
         if self.band_atr_fraction < 0:
             raise ValueError("VWAP band fraction cannot be negative")
@@ -62,9 +61,6 @@ class _VwapState:
     measurements: list[VwapMeasurement] = field(default_factory=list)
     cumulative_volume: float = 0.0
     cumulative_value: float = 0.0
-    unavailable: bool = False
-    last: datetime | None = None
-    recovery: list[MarketAggregate] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,16 +149,18 @@ class VwapLocationProvider:
         *,
         cutoff: datetime,
     ) -> tuple[VwapMeasurement, ...]:
-        by_timeframe: dict[str, list[MarketAggregate]] = {}
+        by_timeframe: dict[tuple[str, str], list[MarketAggregate]] = {}
         for aggregate in aggregates:
             if aggregate.available_at <= cutoff and aggregate.context is not None:
-                by_timeframe.setdefault(aggregate.timeframe, []).append(aggregate)
+                key = (aggregate.timeframe, aggregate.context.session_id)
+                by_timeframe.setdefault(key, []).append(aggregate)
 
         measurements: list[VwapMeasurement] = []
-        for timeframe, values in by_timeframe.items():
+        for (timeframe, session_id), values in by_timeframe.items():
             ordered = sorted(values, key=lambda item: (item.observed_at, item.observation_id))
             aggregate_ids = tuple(item.aggregate_id for item in ordered)
-            state = self._states.setdefault(timeframe, _VwapState())
+            state_key = f"{timeframe}:{session_id}"
+            state = self._states.setdefault(state_key, _VwapState())
             cached_ids = state.aggregate_ids
             append_only = (
                 len(cached_ids) <= len(aggregate_ids)
@@ -170,59 +168,32 @@ class VwapLocationProvider:
             )
             if not append_only:
                 state = _VwapState()
-                self._states[timeframe] = state
+                self._states[state_key] = state
             start_index = len(state.aggregate_ids) if append_only else 0
             state.aggregate_ids = aggregate_ids
-            interval = timedelta(minutes=5 if timeframe == "5m" else 1)
             for aggregate in ordered[start_index:]:
-                provenance_gap = aggregate.context is not None and aggregate.context.replay_provenance.get(
-                    "gap_status", "none",
-                ) != "none"
-                gap = provenance_gap or (state.last is not None and aggregate.observed_at - state.last != interval)
-                if gap:
-                    state.unavailable = True
-                    state.cumulative_volume = state.cumulative_value = 0.0
-                    state.recovery.clear()
-                state.recovery.append(aggregate)
-                if state.unavailable:
-                    if len(state.recovery) < self.config.recovery_bars:
-                        state.last = aggregate.observed_at
-                        continue
-                    if any(
-                        right.observed_at - left.observed_at != interval
-                        for left, right in zip(
-                            state.recovery[-self.config.recovery_bars:-1],
-                            state.recovery[-self.config.recovery_bars + 1:],
-                        )
-                    ):
-                        state.last = aggregate.observed_at
-                        continue
-                    state.unavailable = False
-                    state.cumulative_volume = state.cumulative_value = 0.0
                 high = _number(aggregate, "high")
                 low = _number(aggregate, "low")
                 close = _number(aggregate, "close")
                 volume = _number(aggregate, "volume")
-                if None in (high, low, close, volume) or volume is None or volume <= 0:
-                    state.unavailable = True
-                    state.cumulative_volume = state.cumulative_value = 0.0
-                    state.last = aggregate.observed_at
+                if None in (high, low, close, volume):
                     continue
-                assert high is not None and low is not None and close is not None
+                assert high is not None and low is not None and close is not None and volume is not None
+                volume = max(0.0, volume)
                 state.cumulative_volume += volume
                 state.cumulative_value += ((high + low + close) / 3.0) * volume
                 state.measurements.append(VwapMeasurement(
-                    timeframe, aggregate.context.session_id if aggregate.context is not None else "",
+                    timeframe, session_id,
                     aggregate.aggregate_id,
                     stable_orderflow_id(
-                        "vwap_measurement", timeframe,
-                        aggregate.context.session_id if aggregate.context is not None else "",
+                        "vwap_measurement", timeframe, session_id,
                         aggregate.aggregate_id, self.config.calculation_version,
                     ),
                     aggregate.observed_at, aggregate.available_at,
-                    state.cumulative_value / state.cumulative_volume, self.config.calculation_version,
+                    state.cumulative_value / state.cumulative_volume
+                    if state.cumulative_volume else (high + low + close) / 3.0,
+                    self.config.calculation_version,
                 ))
-                state.last = aggregate.observed_at
             measurements.extend(state.measurements)
         return tuple(sorted(measurements, key=lambda item: (item.available_at, item.timeframe, item.source_aggregate_id)))
 
@@ -246,7 +217,7 @@ def publish_vwap_locations(
         return ()
     records: list[LocationRecord] = []
     generations: dict[str, int] = {}
-    existing = getattr(registry, "records", ())
+    existing = tuple(getattr(registry, "records", {}).values())
     existing_keys = {
         (item.source_aggregate_id, item.timeframe)
         for item in existing
@@ -263,18 +234,20 @@ def publish_vwap_locations(
         generation = generations.get(key, 0) + 1
         generations[key] = generation
         record = LocationRecord(
-            stable_orderflow_id("location", measurement.session_id, measurement.timeframe, "VWAP", generation),
-            "VWAP", measurement.value,
-            derive_vwap_band(measurement.value, atr, fraction=band_fraction), generation,
-            measurement.available_at, measurement.source_aggregate_id,
-            timeframe=measurement.timeframe,
-            location_type="diagnostic_reference",
+            location_id=stable_orderflow_id("location", measurement.session_id, measurement.timeframe, "VWAP", generation),
+            alias="VWAP", price=measurement.value,
+            source_session=measurement.session_id,
+            created_at=measurement.available_at,
+            available_at=measurement.available_at,
+            stream_id=getattr(registry, "stream_id", measurement.session_id),
+            band=derive_vwap_band(measurement.value, atr, fraction=band_fraction),
+            generation=generation, frozen_atr=float(atr),
+            source_aggregate_id=measurement.source_aggregate_id,
             source_observation_id=measurement.source_observation_id,
-            frozen_atr=float(atr),
-            session_id=measurement.session_id,
-            calculation_version=measurement.calculation_version,
+            timeframe=measurement.timeframe,
+            source_method=measurement.calculation_version,
         )
-        registry.publish(record)
+        registry.register(record)
         existing_keys.add((measurement.source_aggregate_id, measurement.timeframe))
         records.append(record)
     return tuple(records)

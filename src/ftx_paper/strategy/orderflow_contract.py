@@ -68,6 +68,7 @@ class OrderflowObservationContext:
     availability_status: str
     replay_provenance: Mapping[str, str]
     generation: int | None = None
+    frozen_atr: float | None = None
     child_observation_ids: tuple[str, ...] = ()
     child_intervals: tuple[tuple[datetime, datetime], ...] = ()
     coverage_status: str | None = None

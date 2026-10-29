@@ -38,14 +38,14 @@ def test_vwap_locations_require_frozen_atr_and_preserve_measurement_provenance()
     measurement = VwapMeasurement(
         "5m", "2026-01-01", "aggregate-1", "measurement-1", now, now, 100.0, "v1",
     )
-    assert publish_vwap_locations(LocationRegistry(), (measurement,), atr=None) == ()
-    registry = LocationRegistry()
+    assert publish_vwap_locations(LocationRegistry("orderflow"), (measurement,), atr=None) == ()
+    registry = LocationRegistry("orderflow")
     records = publish_vwap_locations(registry, (measurement,), atr=2.0)
     assert records[0].source_observation_id == "measurement-1"
-    assert records[0].band.lower < records[0].price < records[0].band.upper
+    assert records[0].band.low < records[0].price < records[0].band.high
     assert records[0].frozen_atr == 2.0
-    assert records[0].session_id == "2026-01-01"
-    assert records[0].calculation_version == "v1"
+    assert records[0].source_session == "2026-01-01"
+    assert records[0].source_method == "v1"
 
 
 def test_session_vwap_is_causal_typical_price_volume_weighted_and_resets_by_timezone() -> None:

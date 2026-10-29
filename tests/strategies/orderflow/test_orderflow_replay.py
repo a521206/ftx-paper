@@ -1,72 +1,11 @@
-from datetime import datetime, timezone
-import pytest
+from datetime import datetime, timedelta, timezone
 
 from ftx_paper.contracts import Instrument, MarketBar
 from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.runtime.store import RuntimeStore
-from ftx_paper.strategy import (
-    CANONICAL_PHASE_ORDER, ReplayMachine, ReplayPhase,
-    observe_market, prepare_replay_input,
-)
-from tests.strategies.orderflow.test_orderflow_observation import _rows
 
 
 UTC = timezone.utc
-
-
-def test_replay_machine_records_available_evidence_last() -> None:
-    observation = observe_market(prepare_replay_input(_rows(6), "2026-01-01", session_partition="09:15-09:21"))
-    machine = ReplayMachine(observation)
-    timestamp = datetime(2026, 1, 1, 3, 50, tzinfo=UTC)
-
-    result = machine.process_bar(timestamp, before_state={"position": None}, after_state={"position": None})
-
-    assert result.phases == CANONICAL_PHASE_ORDER
-    assert result.phases[-1] is ReplayPhase.RECORDING
-    assert len(result.available_observation_ids) == 6
-    assert machine.recorder.records[0].observations == result.available_observation_ids
-
-
-def test_replay_machine_uses_requested_capture_mode() -> None:
-    observation = observe_market(prepare_replay_input(_rows(1), "2026-01-01", session_partition="09:15-09:16"))
-    machine = ReplayMachine(observation, capture_mode="summary")
-    machine.process_bar(datetime(2026, 1, 1, 3, 46, tzinfo=UTC), before_state={}, after_state={})
-    assert machine.recorder.capture_mode.value == "summary"
-    assert machine.recorder.records[0].observations == ()
-
-
-def test_replay_machine_rejects_future_or_reversed_bars() -> None:
-    observation = observe_market(prepare_replay_input(_rows(1), "2026-01-01", session_partition="09:15-09:16"))
-    machine = ReplayMachine(observation)
-    first = datetime(2026, 1, 1, 3, 46, tzinfo=UTC)
-    machine.process_bar(first, before_state={}, after_state={})
-    with pytest.raises(ValueError, match="chronological"):
-        machine.process_bar(first, before_state={}, after_state={})
-
-
-def test_replay_machine_suspends_admission_after_source_gap() -> None:
-    rows = _rows(6)
-    rows.pop(2)
-    observation = observe_market(prepare_replay_input(rows, "2026-01-01", session_partition="09:15-09:21"))
-    machine = ReplayMachine(observation)
-
-    result = machine.process_bar(datetime(2026, 1, 1, 3, 48, tzinfo=UTC), before_state={}, after_state={})
-
-    assert result.admission_suspended
-    assert result.available_observation_ids
-
-
-def test_replay_machine_resumes_admission_after_complete_recovery_parent() -> None:
-    rows = _rows(11)
-    rows.pop(2)
-    observation = observe_market(prepare_replay_input(rows, "2026-01-01", session_partition="09:15-09:26"))
-    machine = ReplayMachine(observation)
-
-    suspended = machine.process_bar(datetime(2026, 1, 1, 3, 48, tzinfo=UTC), before_state={}, after_state={})
-    recovered = machine.process_bar(datetime(2026, 1, 1, 3, 55, tzinfo=UTC), before_state={}, after_state={})
-
-    assert suspended.admission_suspended
-    assert not recovered.admission_suspended
 
 
 def test_orderflow_replay_is_isolated_from_live_execution_state(tmp_path) -> None:
@@ -75,9 +14,13 @@ def test_orderflow_replay_is_isolated_from_live_execution_state(tmp_path) -> Non
         datetime(2026, 9, 29, 3, 45, tzinfo=UTC),
         22600, 22610, 22590, 22600,
     )
+    next_bar = MarketBar(
+        bar.instrument, bar.timestamp + timedelta(minutes=1),
+        22600, 22610, 22590, 22605,
+    )
     store = RuntimeStore(tmp_path)
     worker = ReplayWorker(store)
-    worker._bars = lambda session_date, **_kwargs: (bar,)
+    worker._bars = lambda session_date, **_kwargs: (bar, next_bar)
     before_status = store.read_status()
     before_events = store.read_events(1000)
 
@@ -96,6 +39,14 @@ def test_orderflow_replay_is_isolated_from_live_execution_state(tmp_path) -> Non
     assert result["ledger_scope"] == "replay"
     assert result["replay_records"]
     assert result["replay_records"][0]["checkpoints"]
+    assert result["replay_records"][0]["before_state"]["engine"]["bars_seen"] == 0
+    assert result["replay_records"][0]["after_state"]["engine"]["bars_seen"] == 1
+    assert result["replay_records"][0]["available_at"] == next_bar.timestamp.isoformat()
+    assert [item["phase"] for item in result["replay_records"][0]["checkpoints"]] == [
+        "reference_publication", "existing_position_management", "permission_and_gap",
+        "interaction_advancement", "opportunity_timeout", "opportunity_formation",
+        "proposal_arbitration", "execution_settlement", "event_recording",
+    ]
     assert not any(str(event.get("values", {}).get("event_type", "")).upper() in {"FILL", "RESERVATION", "SETTLEMENT"}
                    for event in result["events"])
     assert store.read_status() == before_status

@@ -17,7 +17,7 @@ from .orderflow_contract import (
     OrderflowContext, OrderflowObservation, OrderflowObservationContext,
     stable_orderflow_id,
 )
-from .orderflow_location import LocationBand, LocationObservation, LocationRecord
+from .orderflow_location import LocationBand, LocationObservation, LocationRecord, is_diagnostic_location
 from .orderflow_source import source_fingerprint
 from .orderflow_scores import score_aggregate
 
@@ -291,6 +291,7 @@ class CausalOrderflowProducer:
                         "gap_origin": "boundary_gap" if boundary_gap else "source_gap" if source_gap else "none",
                         "source_fingerprint": source_fingerprint((bar,)),
                     }, generation=1,
+                    frozen_atr=self._frozen_atr,
                     causal_sequence=1,
                 ),
             )
@@ -363,10 +364,10 @@ class CausalOrderflowProducer:
             }
             prior_parent = next(
                 (item for item in reversed(five_minute)
-                 if item.observed_at < start), None,
+                 if item.interval_end is not None and item.interval_end < start), None,
             )
             child_scores_list: list[tuple[float, float]] = []
-            for child in children:
+            for child in children[-2:]:
                 prior_child = next(
                     (item for item in reversed(prefix)
                      if item.observed_at < child.observed_at),
@@ -447,14 +448,14 @@ class CausalOrderflowProducer:
                         "location", trading_date, stream_identity, alias, generation,
                     )
                     location_records[location_id] = LocationRecord(
-                        location_id, alias, level, band, generation, end, parent_id,
-                        timeframe="5m", source_identity=stream_identity,
-                        replaced_location_id=previous.location_id if previous else None,
-                        location_type="session_reference",
+                        location_id=location_id, alias=alias, price=level,
+                        source_session=trading_date, created_at=end, available_at=end,
+                        stream_id=stream_identity, band=band, generation=generation,
+                        parent_extreme_generation=previous.generation if previous else None,
+                        source_aggregate_id=parent_id,
+                        timeframe="5m", source_method="orderflow_daily_atr_v1",
                         source_observation_id=parent_id,
                         frozen_atr=atr,
-                        session_id=trading_date,
-                        calculation_version="orderflow_daily_atr_v1",
                     )
             location_observations: list[LocationObservation] = []
             latest_records = {
@@ -482,13 +483,13 @@ class CausalOrderflowProducer:
                     location_alias=record.alias,
                     reference_generation=record.generation,
                     reference=record.price,
-                    band_lower=record.band.lower,
-                    band_upper=record.band.upper,
+                    band_lower=record.band.low,
+                    band_upper=record.band.high,
                     open=_numeric_feature(parent_features, "open"),
                     high=parent_high,
                     low=parent_low,
                     close=_numeric_feature(parent_features, "close"),
-                    band_contact=record.band.lower <= parent_high and parent_low <= record.band.upper,
+                    band_contact=record.band.intersects(high=parent_high, low=parent_low),
                     source_aggregate_id=parent_id,
                     # Canonical location observations are observed at the
                     # completed source candle, not at its availability time.
@@ -497,7 +498,7 @@ class CausalOrderflowProducer:
                     observation_id=stable_orderflow_id(
                         "location_observation", parent_id, record.location_id,
                     ),
-                    location_type=record.location_type,
+                    location_type="diagnostic_reference" if is_diagnostic_location(record.alias) else "session_reference",
                     timeframe="5m",
                     child_observation_ids=child_ids,
                     method="causal_producer",
@@ -524,13 +525,13 @@ class CausalOrderflowProducer:
                         child.observation_id,
                         LocationObservation(
                             record.location_id, record.alias, record.generation, record.price,
-                            record.band.lower, record.band.upper, open_price, high, low, close,
-                            record.band.lower <= high and low <= record.band.upper, child.observation_id,
+                            record.band.low, record.band.high, open_price, high, low, close,
+                            record.band.intersects(high=high, low=low), child.observation_id,
                             child.observed_at, max(child.available_at, record.available_at),
                             stable_orderflow_id(
                                 "location_observation", child.observation_id, record.location_id,
                             ),
-                            location_type=record.location_type,
+                            location_type="diagnostic_reference" if is_diagnostic_location(record.alias) else "session_reference",
                             source_observation_id=record.source_observation_id,
                             reference_source_aggregate_id=record.source_aggregate_id,
                             reference_source_timeframe=record.timeframe or "5m",
@@ -572,6 +573,7 @@ class CausalOrderflowProducer:
                         "gap_status": "source_gap" if parent_has_gap else "none",
                         "source_fingerprint": parent_source_fingerprint,
                     }, generation=1,
+                    frozen_atr=atr,
                     child_observation_ids=child_ids,
                     child_intervals=child_intervals,
                     causal_sequence=1,

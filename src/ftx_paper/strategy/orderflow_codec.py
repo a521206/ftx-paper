@@ -71,7 +71,10 @@ def policy_snapshot_payload(policy: _PolicySnapshotSource) -> dict[str, object]:
             timeframe: detector.snapshot() for timeframe, detector in policy._location_detectors.items()
         },
         "context_history": policy._context_history.to_dict(),
-        "location_registry": [item.to_dict() for item in policy._location_registry.records],
+        "location_registry": [
+            {**asdict(item), "band": asdict(item.band)}
+            for item in policy._location_registry.records.values()
+        ],
         "context_version": policy._context_version,
         "session_high": policy._session_high,
         "session_low": policy._session_low,

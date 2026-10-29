@@ -109,7 +109,9 @@ def restore_policy_state(policy: OrderflowPolicy, snapshot: Mapping[str, object]
         policy._context_history = ContextHistory.from_dict(raw_context_history)
     raw_location_registry = snapshot.get("location_registry")
     if raw_location_registry is not None:
-        policy._location_registry = LocationRegistry.from_dict(raw_location_registry)
+        policy._location_registry = LocationRegistry.from_dict(
+            raw_location_registry, stream_id=policy._location_registry.stream_id,
+        )
     raw_opportunities = snapshot.get("opportunities")
     if not isinstance(raw_opportunities, (list, tuple)):
         raise ValueError("invalid orderflow opportunities")

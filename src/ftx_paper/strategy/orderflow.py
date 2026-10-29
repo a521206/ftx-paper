@@ -66,7 +66,7 @@ class OrderflowPolicy:
         self._processed_location_observation_ids: set[str] = set()
         self._location_detectors = {timeframe: InteractionDetector(timeframe) for timeframe in ("1m", "5m")}
         self._context_history = ContextHistory()
-        self._location_registry = LocationRegistry()
+        self._location_registry = LocationRegistry("orderflow")
         self._context_version = 0
         self._session_high: float | None = None
         self._session_low: float | None = None
@@ -133,15 +133,13 @@ class OrderflowPolicy:
             for detector in self._location_detectors.values()
             for item in detector.close_all(InteractionCloseReason.SESSION_END, boundary)
         ]
-        self._location_registry.remove_diagnostic_locations()
-        self._location_registry.next_generation(at=boundary, carry=self._session_id is not None)
         self._processed_observation_ids.clear()
         self._processed_location_observation_ids.clear()
         self._evidence.clear_cache()
         self._location_detectors = {timeframe: InteractionDetector(timeframe) for timeframe in ("1m", "5m")}
         self._context_history = ContextHistory()
         if self._session_id is None:
-            self._location_registry = LocationRegistry()
+            self._location_registry = LocationRegistry("orderflow")
         self._context_version = 0
         self._session_high = None
         self._session_low = None
@@ -350,7 +348,7 @@ class OrderflowPolicy:
         level_values = {
             item.location_alias.upper(): item.reference
             for item in observation.location_observations
-            if not is_diagnostic_location(item.location_type)
+            if not is_diagnostic_location(item.location_alias)
         }
         opening_gap = classify_opening_gap(
             opening_price=_number(observation, "open"),
@@ -632,21 +630,25 @@ class OrderflowPolicy:
             return (), (), ()
         self._processed_location_observation_ids.add(location_key)
         location = LocationRecord(
-            location_observation.location_id, location_observation.location_alias,
-            location_observation.reference,
-            LocationBand(location_observation.band_lower, location_observation.band_upper),
-            location_observation.reference_generation, location_observation.available_at,
-            location_observation.reference_source_aggregate_id or location_observation.source_aggregate_id,
-            timeframe=observation.timeframe, source_identity=observation.instrument,
-            location_type=location_observation.location_type,
+            location_id=location_observation.location_id,
+            alias=location_observation.location_alias,
+            price=location_observation.reference,
+            source_session=observation.context.session_id if observation.context else "",
+            created_at=location_observation.observed_at,
+            available_at=location_observation.available_at,
+            stream_id="orderflow",
+            band=LocationBand(location_observation.band_lower, location_observation.band_upper),
+            generation=location_observation.reference_generation,
+            source_aggregate_id=location_observation.reference_source_aggregate_id or location_observation.source_aggregate_id,
+            timeframe=observation.timeframe,
             source_observation_id=location_observation.source_observation_id,
             frozen_atr=location_observation.frozen_atr,
         )
         context_events: list[PolicyDecision] = []
         created_events: list[PolicyDecision] = []
         lifecycle_events: list[PolicyDecision] = []
-        if not any(item.location_id == location.location_id for item in self._location_registry.records):
-            self._location_registry.publish(location)
+        if location.location_id not in self._location_registry.records:
+            self._location_registry.register(location)
             if observation.context is not None and observation.context.replay_provenance.get("producer") == "ftx-paper":
                 lifecycle_values = {
                     "location": location.alias, "location_id": location.location_id,
@@ -716,7 +718,7 @@ class OrderflowPolicy:
                 "available_at": location_observation.available_at.isoformat(),
                 "feature_values": feature_values_to_dict(observation.features),
             }))
-            if is_diagnostic_location(interaction.location_type):
+            if is_diagnostic_location(interaction.location_alias):
                 diagnostic = evaluate_vwap_diagnostic_response(interaction, interaction.contact_candles)
                 lifecycle_events.append(PolicyDecision({
                     **base, "decision_stage": "interaction", "outcome": "recorded",
@@ -1485,7 +1487,7 @@ class OrderflowPolicy:
             interaction_created_events: list[PolicyDecision] = []
             for location_observation in sorted(
                 location_observations,
-                key=lambda item: (is_diagnostic_location(item.location_type), item.location_alias),
+                key=lambda item: (is_diagnostic_location(item.location_alias), item.location_alias),
             ):
                 context_events, created_events, lifecycle_events = self._process_location_observation(
                     observation, location_observation, base,

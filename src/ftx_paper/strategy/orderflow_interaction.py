@@ -9,7 +9,7 @@ from enum import StrEnum
 from typing import cast
 
 from .orderflow_contract import OrderflowObservation
-from .orderflow_location import LocationRecord
+from .orderflow_location import LocationRecord, is_diagnostic_location
 
 
 class InteractionStatus(StrEnum):
@@ -271,7 +271,7 @@ def _pre_contact_side(
     previous_close = observation.features.get("previous_close")
     if not isinstance(previous_close, (int, float)) or isinstance(previous_close, bool):
         return None
-    side = _close_side(float(previous_close), location.band.lower, location.band.upper)
+    side = _close_side(float(previous_close), location.band.low, location.band.high)
     return side if side != "INSIDE_BAND" else None
 
 
@@ -413,11 +413,11 @@ class InteractionDetector:
             observation.context.child_observation_ids,
             observation.context.generation,
         )
-        contact = location.band.lower <= high_value and low_value <= location.band.upper if band_contact is None else band_contact
+        contact = location.band.intersects(high=high_value, low=low_value) if band_contact is None else band_contact
         inside = (
             interaction.band_lower <= close_value <= interaction.band_upper
             if interaction is not None and interaction.band_lower is not None and interaction.band_upper is not None
-            else location.band.contains(close_value)
+            else location.band.low <= close_value <= location.band.high
         )
         if interaction is None:
             # The opening-range seed defines the reference; its wick is not an
@@ -443,11 +443,11 @@ class InteractionDetector:
                 location.price, location.generation, observation.observation_id,
                 observation.observed_at, InteractionStatus.ACTIVE, (candle,),
                 atr=location.frozen_atr,
-                band_lower=location.band.lower, band_upper=location.band.upper,
-                location_type=location.location_type,
+                band_lower=location.band.low, band_upper=location.band.high,
+                location_type="diagnostic_reference" if is_diagnostic_location(location.alias) else "session_reference",
                 reference_provenance={
                     "source_observation_id": location.source_observation_id or observation.observation_id,
-                    "source_aggregate_id": location.source_aggregate_id,
+                    "source_aggregate_id": location.source_aggregate_id or observation.observation_id,
                     "source_timeframe": location.timeframe or observation.timeframe,
                 },
                 pre_contact_side=_pre_contact_side(observation, location),

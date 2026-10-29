@@ -4,28 +4,38 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from .orderflow_vwap import VwapMeasurement
+from enum import StrEnum
+from typing import Any, Iterable
 
 
-def is_diagnostic_location(location_type: str) -> bool:
+def is_diagnostic_location(alias: str) -> bool:
     """Return whether a location is evidence-only, never an executable setup."""
-    return location_type == "diagnostic_reference"
+    return alias.upper() == "VWAP"
 
 
 @dataclass(frozen=True, slots=True)
 class LocationBand:
-    lower: float
-    upper: float
+    low: float
+    high: float
 
     def __post_init__(self) -> None:
-        if self.lower > self.upper:
-            raise ValueError("location band bounds are inverted")
+        if self.low > self.high:
+            raise ValueError("location band low must not exceed high")
 
-    def contains(self, price: float) -> bool:
-        return self.lower <= price <= self.upper
+    def intersects(self, *, high: float, low: float) -> bool:
+        return low <= self.high and high >= self.low
+
+    @property
+    def center(self) -> float:
+        return (self.low + self.high) / 2.0
+
+
+class LocationStatus(StrEnum):
+    ACTIVE = "active"
+    TESTED = "tested"
+    ACCEPTED_THROUGH = "accepted-through"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,55 +43,39 @@ class LocationRecord:
     location_id: str
     alias: str
     price: float
-    band: LocationBand
-    generation: int
+    source_session: str
+    created_at: datetime
     available_at: datetime
-    source_aggregate_id: str
-    priority: int = 0
-    timeframe: str = ""
-    replaced_location_id: str | None = None
-    location_type: str = "session_reference"
-    owner: str = "orderflow"
-    aliases: tuple[str, ...] = ()
-    source_identity: str | None = None
-    source_observation_id: str | None = None
+    stream_id: str
+    band: LocationBand
+    generation: int = 1
+    status: str = "active"
     frozen_atr: float | None = None
-    session_id: str | None = None
-    calculation_version: str | None = None
+    parent_extreme_generation: int | None = None
+    source_aggregate_id: str | None = None
+    source_observation_id: str | None = None
+    timeframe: str = ""
+    source_method: str | None = None
 
     def __post_init__(self) -> None:
-        if not self.location_id.strip() or not self.alias.strip():
-            raise ValueError("location identity is required")
-        if self.generation < 1 or not self.source_aggregate_id.strip():
-            raise ValueError("location generation and source identity are required")
-        if not self.band.contains(self.price):
-            raise ValueError("location price must lie within its band")
+        for field_name in ("created_at", "available_at"):
+            value = getattr(self, field_name)
+            if isinstance(value, str):
+                value = datetime.fromisoformat(value)
+                object.__setattr__(self, field_name, value)
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError(f"location {field_name} must be timezone-aware")
 
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "location_id": self.location_id,
-            "alias": self.alias,
-            "aliases": self.aliases,
-            "price": self.price,
-            "band": {"lower": self.band.lower, "upper": self.band.upper},
-            "generation": self.generation,
-            "available_at": self.available_at.isoformat(),
-            "source_aggregate_id": self.source_aggregate_id,
-            "source_identity": self.source_identity,
-            "priority": self.priority,
-            "timeframe": self.timeframe,
-            "location_type": self.location_type,
-            "owner": self.owner,
-            "replaced_location_id": self.replaced_location_id,
-            "source_observation_id": self.source_observation_id,
-            "frozen_atr": self.frozen_atr,
-            "session_id": self.session_id,
-            "calculation_version": self.calculation_version,
-        }
+    @property
+    def band_low(self) -> float:
+        return self.band.low
 
-    def matches(self, alias: str) -> bool:
-        return alias == self.alias or alias in self.aliases
+    @property
+    def band_high(self) -> float:
+        return self.band.high
 
+    def with_status(self, status: str | LocationStatus) -> "LocationRecord":
+        return replace(self, status=LocationStatus(status).value)
 
 @dataclass(frozen=True, slots=True)
 class LocationObservation:
@@ -162,128 +156,169 @@ class LocationObservation:
 class LocationRegistry:
     """Append-only registry; replacement never mutates an earlier record."""
 
-    def __init__(self) -> None:
-        self._records: list[LocationRecord] = []
-        self._boundaries: set[datetime] = set()
+    def __init__(self, stream_id: str) -> None:
+        if not stream_id.strip():
+            raise ValueError("location stream identity is required")
+        self.stream_id = stream_id
+        self.records: dict[str, LocationRecord] = {}
+        self.aliases: dict[str, str] = {}
 
-    def publish(self, record: LocationRecord) -> None:
-        if any(item.location_id == record.location_id for item in self._records):
-            raise ValueError("location ID already published")
-        if record.replaced_location_id is None:
-            previous = self.resolve_as_of(record.alias, record.available_at, timeframe=record.timeframe)
-            if previous is not None and previous.location_id != record.location_id:
-                record = replace(record, replaced_location_id=previous.location_id)
-        self._records.append(record)
-        self._records.sort(key=lambda item: (item.available_at, -item.priority, item.location_id))
+    def register(self, record: LocationRecord) -> None:
+        if record.stream_id != self.stream_id:
+            raise ValueError("location stream identity does not match registry")
+        self.records[record.location_id] = record
+        self.aliases[record.alias] = record.location_id
 
-    def publish_measurements(
-        self, measurements: tuple[VwapMeasurement, ...], *, atr: float | None = None,
-        band_fraction: float = 0.06,
-    ) -> tuple[LocationRecord, ...]:
-        """Publish provider-owned measurements without interpreting them."""
-        from .orderflow_vwap import publish_vwap_locations
-        return publish_vwap_locations(self, measurements, atr=atr, band_fraction=band_fraction)
+    def update_status(self, location_id: str, status: str | LocationStatus) -> LocationRecord:
+        record = self.records.get(location_id)
+        if record is None:
+            raise KeyError(location_id)
+        updated = record.with_status(status)
+        self.records[location_id] = updated
+        return updated
 
-    def remove_diagnostic_locations(self) -> None:
-        """Keep diagnostic references session-scoped while retaining structure."""
-        self._records = [item for item in self._records if item.location_type != "diagnostic_reference"]
+    def _register_level(
+        self, alias: str, price: float, available_at: datetime, source_session: str,
+        *, frozen_atr: float | None = None, source_aggregate_id: str | None = None,
+    ) -> LocationRecord:
+        if frozen_atr is None:
+            raise ValueError("location bands require a frozen ATR")
+        previous = self.resolve_as_of(alias, available_at)
+        generation = max(
+            (record.generation for record in self.records.values() if record.alias == alias),
+            default=0,
+        ) + 1
+        band = LocationBand(
+            float(price) - 0.06 * frozen_atr,
+            float(price) + 0.06 * frozen_atr,
+        )
+        record = LocationRecord(
+            location_id=f"{alias}:{source_session}:{generation}", alias=alias, price=float(price),
+            source_session=source_session, created_at=available_at, available_at=available_at,
+            stream_id=self.stream_id, band=band, generation=generation, frozen_atr=frozen_atr,
+            parent_extreme_generation=previous.generation if previous is not None else None,
+            source_aggregate_id=source_aggregate_id,
+        )
+        self.register(record)
+        return record
 
-    def resolve_as_of(self, alias: str, cutoff: datetime, *, timeframe: str | None = None) -> LocationRecord | None:
-        candidates = [
-            item for item in self._records
-            if item.matches(alias) and item.available_at <= cutoff
-            and (timeframe is None or item.timeframe == timeframe)
-        ]
-        if not candidates:
-            return None
-        return max(candidates, key=lambda item: (item.available_at, item.priority, item.generation, item.location_id))
-
-    def available(self, cutoff: datetime, *, timeframe: str | None = None) -> tuple[LocationRecord, ...]:
-        latest: dict[tuple[str, str], LocationRecord] = {}
-        for item in self._records:
-            if item.available_at > cutoff or (timeframe is not None and item.timeframe != timeframe):
-                continue
-            key = (item.alias, item.timeframe)
-            previous = latest.get(key)
-            if previous is None or (item.available_at, item.generation, item.location_id) > (
-                previous.available_at, previous.generation, previous.location_id,
-            ):
-                latest[key] = item
-        return tuple(latest.values())
-
-    def available_as_of(
-        self, cutoff: datetime, *, timeframe: str | None = None,
-    ) -> tuple[LocationRecord, ...]:
-        """Return the canonical latest generation visible at a causal cutoff."""
-        return self.available(cutoff, timeframe=timeframe)
-
-    def resolve_owner(
-        self, price: float, cutoff: datetime, *, timeframe: str | None = None,
-    ) -> LocationRecord | None:
-        """Resolve the canonical owner when multiple available bands overlap."""
-        candidates = [
-            item for item in self.available(cutoff, timeframe=timeframe)
-            if item.band.contains(price)
-        ]
-        return max(
-            candidates,
-            key=lambda item: (item.priority, item.generation, item.available_at, item.location_id),
-            default=None,
+    def register_opening_range(
+        self, or_low: float, or_high: float, available_at: datetime, *,
+        source_session: str = "current", atr: float | None = None,
+    ) -> tuple[LocationRecord, LocationRecord]:
+        return (
+            self._register_level("OR_LOW", or_low, available_at, source_session, frozen_atr=atr),
+            self._register_level("OR_HIGH", or_high, available_at, source_session, frozen_atr=atr),
         )
 
-    @property
-    def records(self) -> tuple[LocationRecord, ...]:
-        return tuple(self._records)
+    def register_prior_day_extremes(
+        self, pd_low: float, pd_high: float, available_at: datetime, *,
+        source_session: str = "prior", atr: float | None = None,
+    ) -> tuple[LocationRecord, LocationRecord]:
+        return (
+            self._register_level("PD_LOW", pd_low, available_at, source_session, frozen_atr=atr),
+            self._register_level("PD_HIGH", pd_high, available_at, source_session, frozen_atr=atr),
+        )
+
+    def publish_session_extrema(
+        self, aggregates: Iterable[Any], *, session_date: str, atr: float | None = None,
+    ) -> tuple[tuple[LocationRecord, LocationRecord | None], ...]:
+        current = [item for item in aggregates if getattr(item, "session_date") == session_date]
+        current = [
+            item for item in current
+            if getattr(item, "timeframe") == "5m"
+            and getattr(item, "available_at") >= getattr(item, "end_time")
+        ]
+        if not current:
+            return ()
+        high = max(current, key=lambda item: getattr(item, "high"))
+        low = min(current, key=lambda item: getattr(item, "low"))
+        published: list[tuple[LocationRecord, LocationRecord | None]] = []
+        for alias, aggregate, price in (("SESSION_HIGH", high, high.high), ("SESSION_LOW", low, low.low)):
+            aggregate_available_at = aggregate.available_at
+            previous = self.resolve_as_of(alias, aggregate_available_at)
+            if previous is not None and price == previous.price:
+                continue
+            record = self._register_level(
+                alias, price, aggregate_available_at, session_date,
+                frozen_atr=atr, source_aggregate_id=aggregate.time,
+            )
+            published.append((record, previous))
+        return tuple(published)
+
+    def publish_vwap(
+        self, *, value: float, available_at: datetime, source_session: str,
+        source_aggregate_id: str, source_observation_id: str, timeframe: str,
+        atr: float, source_method: str | None = None,
+    ) -> LocationRecord:
+        if timeframe not in {"1m", "5m"}:
+            raise ValueError("VWAP records require a 1m or 5m timeframe")
+        previous = max(
+            (record for record in self.records.values() if record.alias == "VWAP" and record.timeframe == timeframe),
+            key=lambda record: record.generation, default=None,
+        )
+        generation = previous.generation + 1 if previous is not None else 1
+        width = 0.06 * atr
+        record = LocationRecord(
+            location_id=f"VWAP:{source_session}:{timeframe}:{generation}", alias="VWAP", price=float(value),
+            source_session=source_session, created_at=available_at, available_at=available_at,
+            stream_id=self.stream_id, band=LocationBand(float(value) - width, float(value) + width),
+            generation=generation, frozen_atr=atr, source_aggregate_id=source_aggregate_id,
+            source_observation_id=source_observation_id, timeframe=timeframe, source_method=source_method,
+        )
+        self.register(record)
+        return record
+
+    def resolve_as_of(self, alias: str, available_at: datetime, *, timeframe: str | None = None) -> LocationRecord | None:
+        candidates = [
+            record for record in self.records.values()
+            if record.alias == alias and record.available_at <= available_at
+            and (timeframe is None or record.timeframe == timeframe)
+        ]
+        return max(candidates, key=lambda item: (item.available_at, item.generation), default=None)
+
+    def resolve(self, alias_or_id: str) -> LocationRecord | None:
+        return self.records.get(self.aliases.get(alias_or_id, alias_or_id))
+
+    def available_as_of(self, available_at: datetime) -> tuple[LocationRecord, ...]:
+        latest: dict[tuple[str, str], LocationRecord] = {}
+        for record in self.records.values():
+            if record.status != LocationStatus.ACTIVE.value or record.available_at > available_at:
+                continue
+            key = (record.alias, record.timeframe)
+            previous = latest.get(key)
+            if previous is None or (record.available_at, record.generation) > (
+                previous.available_at, previous.generation,
+            ):
+                latest[key] = record
+        return tuple(latest.values())
 
     @classmethod
-    def from_dict(cls, raw: object) -> "LocationRegistry":
+    def from_dict(cls, raw: object, *, stream_id: str) -> "LocationRegistry":
         if not isinstance(raw, (list, tuple)):
             raise ValueError("location registry snapshot must be a sequence")
-        registry = cls()
+        registry = cls(stream_id)
         for item in raw:
             if not isinstance(item, dict):
                 raise ValueError("location registry record must be an object")
             band = item.get("band")
             if not isinstance(band, dict):
                 raise ValueError("location registry band must be an object")
-            registry.publish(LocationRecord(
+            registry.register(LocationRecord(
                 str(item["location_id"]), str(item["alias"]), float(item["price"]),
-                LocationBand(float(band["lower"]), float(band["upper"])), int(item["generation"]),
-                datetime.fromisoformat(str(item["available_at"])), str(item["source_aggregate_id"]),
-                int(item.get("priority", 0)), str(item.get("timeframe", "")),
-                str(item["replaced_location_id"]) if item.get("replaced_location_id") is not None else None,
-                str(item.get("location_type", "session_reference")), str(item.get("owner", "orderflow")),
-                tuple(str(value) for value in item.get("aliases", ())),
-                str(item["source_identity"]) if item.get("source_identity") is not None else None,
-                str(item["source_observation_id"]) if item.get("source_observation_id") is not None else None,
+                str(item["source_session"]), datetime.fromisoformat(str(item["created_at"])),
+                datetime.fromisoformat(str(item["available_at"])), str(item["stream_id"]),
+                LocationBand(float(band["low"]), float(band["high"])), int(item["generation"]),
+                str(item.get("status", LocationStatus.ACTIVE.value)),
                 float(item["frozen_atr"]) if item.get("frozen_atr") is not None else None,
-                str(item["session_id"]) if item.get("session_id") is not None else None,
-                str(item["calculation_version"]) if item.get("calculation_version") is not None else None,
+                int(item["parent_extreme_generation"]) if item.get("parent_extreme_generation") is not None else None,
+                str(item["source_aggregate_id"]) if item.get("source_aggregate_id") is not None else None,
+                str(item["source_observation_id"]) if item.get("source_observation_id") is not None else None,
+                str(item.get("timeframe", "")),
+                str(item["source_method"]) if item.get("source_method") is not None else None,
             ))
         return registry
 
-    def next_generation(
-        self, *, at: datetime, carry: bool = False,
-    ) -> tuple[LocationRecord, ...]:
-        """Apply a session boundary once and return carried references."""
-        if not carry:
-            return ()
-        if at in self._boundaries:
-            return ()
-        self._boundaries.add(at)
-        current = [item for item in self.available(at)]
-        carried: list[LocationRecord] = []
-        for item in current:
-            carried.append(replace(
-                item,
-                location_id=f"{item.location_id}:g{item.generation + 1}",
-                generation=item.generation + 1,
-                available_at=at,
-                replaced_location_id=item.location_id,
-            ))
-        for item in carried:
-            self.publish(item)
-        return tuple(carried)
 
 
 __all__ = [

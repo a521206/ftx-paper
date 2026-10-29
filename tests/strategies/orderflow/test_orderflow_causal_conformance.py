@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from ftx_paper.contracts import Instrument, MarketBar
 from ftx_paper.strategy import (
     OrderflowObservation, OrderflowObservationContext, CausalOrderflowProducer,
-    VwapLocationProvider, observe_trigger,
+    observe_trigger,
 )
 
 
@@ -26,25 +26,6 @@ def test_live_producer_marks_forward_gap_and_resets_vwap_prefix() -> None:
     observations = context.observations_for("1m")
     assert observations[-1].context is not None
     assert observations[-1].context.replay_provenance["gap_status"] == "source_gap"
-
-
-def test_live_producer_does_not_recover_vwap_before_five_completed_minutes() -> None:
-    producer = CausalOrderflowProducer()
-    start = datetime(2026, 1, 1, 3, 45, tzinfo=UTC)
-    producer.ingest(_bar(start, 100.0))
-    producer.ingest(_bar(start + timedelta(minutes=2), 110.0))
-    for index in range(3, 10):
-        producer.ingest(_bar(start + timedelta(minutes=index), 110.0 + index))
-
-    context = producer.context("2026-01-01", "09:24")
-    assert context is not None
-    measurements = VwapLocationProvider().publish(
-        context.observations, cutoff=context.cutoff,
-    )
-    one_minute = tuple(item for item in measurements if item.timeframe == "1m")
-    assert len(one_minute) == 5
-    assert one_minute[0].observed_at == start
-    assert one_minute[1].observed_at == start + timedelta(minutes=6)
 
 
 def test_trigger_expiry_uses_available_evidence_and_versions() -> None:

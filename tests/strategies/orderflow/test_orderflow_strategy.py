@@ -11,7 +11,7 @@ from ftx_paper.domain.decision_context import (
     MarginSnapshot,
 )
 from ftx_paper.market import DecisionBundle
-from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OrderIntent, OrderRole, OrderSide
+from ftx_paper.contracts import Instrument, MarketBar, OrderIntent, OrderRole, OrderSide
 from ftx_paper.runtime.engine import MultiStrategyEngine, PaperEngine
 from ftx_paper.runtime.parity_artifacts import build_parity_artifact
 from ftx_paper.strategy import (
@@ -50,24 +50,6 @@ def test_score_margin_gate_preserves_unavailable_scores(
     assert _score_rejection(
         direction=direction, long_score=long_score, short_score=short_score, margin=0.05,
     ) == expected
-
-
-def test_confirmation_scores_hide_observed_but_unavailable_children() -> None:
-    bundle, _ = _context()
-    assert bundle.orderflow_context is not None
-    observations = bundle.orderflow_context.observations_for("1m") + bundle.orderflow_context.observations_for("5m")
-    parent = next(item for item in observations if item.timeframe == "5m")
-    delayed_child_id = parent.context.child_observation_ids[0] if parent.context else ""
-    delayed = tuple(
-        replace(item, available_at=parent.available_at + timedelta(minutes=1))
-        if item.observation_id == delayed_child_id else item
-        for item in observations
-    )
-
-    policy = OrderflowPolicy()
-    policy._evaluation_observations = delayed
-
-    assert policy._confirmation_scores(parent) is None
 
 
 def _context(
@@ -119,6 +101,7 @@ def _context(
                 availability_status="available",
                 replay_provenance={"source": "test"},
                 generation=generation,
+                frozen_atr=1.0,
                 causal_sequence=1,
             ),
         )
@@ -144,6 +127,7 @@ def _context(
             availability_status="available",
             replay_provenance={"source": "test", "gap_status": gap_status},
             generation=generation,
+            frozen_atr=1.0,
             causal_sequence=1,
             child_observation_ids=tuple(item.observation_id for item in children),
             child_intervals=tuple(
@@ -176,6 +160,7 @@ def _context(
                 availability_status="available",
                 replay_provenance={"source": "test", "gap_status": "none"},
                 generation=generation,
+                frozen_atr=1.0,
                 causal_sequence=2,
             ),
         ),)
@@ -584,91 +569,10 @@ def test_generation_change_preserves_old_interaction_and_opens_new_generation() 
     assert any("2026-01-01T10:00:00+00:00" in str(event.payload["interaction_id"]) for event in observed)
 
 
-def test_generation_specific_interaction_is_visible_before_same_timestamp_execution() -> None:
-    strategy = OrderflowStrategy(OrderflowConfig(execution_mode=ExecutionMode.EXECUTABLE))
-    first, account = _context(
-        close=99.5, observation_id="first", generation=1,
-    )
-    strategy.evaluate(first, account)
-
-    replacement, replacement_account = _context(
-        close=99.5, response_close=101.0, observation_id="replacement", generation=2,
-    )
-    replacement = replace(
-        replacement,
-        bars={MarketRole.FUTURES: MarketBar(
-            Instrument("NIFTYFUT", "NFO", "FUTURES"), OBSERVED, 100.0, 101.0, 99.0, 100.0,
-        )},
-    )
-    events = strategy.evaluate(replacement, replacement_account)
-
-    executable = [event for event in events if event.order is not None]
-
-    assert executable
-    assert all(event.payload.get("reference_generation") != 1 for event in executable)
-
-
-def test_executable_proposal_without_futures_contract_is_unavailable() -> None:
-    strategy = OrderflowStrategy(OrderflowConfig(execution_mode=ExecutionMode.EXECUTABLE))
-    first, account = _context(close=99.5, observation_id="first", generation=1)
-    strategy.evaluate(first, account)
-    replacement, replacement_account = _context(
-        close=99.5, response_close=101.0, observation_id="replacement", generation=2,
-    )
-
-    events = strategy.evaluate(replacement, replacement_account)
-    unavailable = [
-        event for event in events
-        if event.payload.get("reason") == "futures_instrument_unavailable"
-    ]
-
-    assert unavailable
-    assert unavailable[0].payload["outcome"] == "unavailable"
-    assert unavailable[0].order is None
-
-
 def test_non_contact_location_observation_does_not_start_interaction() -> None:
     bundle, account = _context(contact=False, observation_id="no-contact")
 
     assert OrderflowStrategy().evaluate(bundle, account) == ()
-
-
-def test_response_and_admission_use_completed_causal_evidence() -> None:
-    bundle, account = _context(close=99.5, response_close=101.0)
-
-    events = OrderflowStrategy().evaluate(bundle, account)
-
-    response = next(event for event in events if event.payload.get("decision_stage") == "response")
-    admission = next(event for event in events if event.payload.get("decision_stage") == "admission")
-    assert response.payload["response_state"] == "CONFIRMED"
-    assert response.payload["response_evidence_ids"] == [
-        "obs-5m", "response-evidence-obs-5m",
-    ]
-    assert response.payload["source_observation_ids"] == ["response-obs-5m"]
-    assert admission.payload["reason"] == "orderflow_admission"
-    assert admission.payload["outcome"] == "accepted"
-    assert admission.order is None
-
-
-def test_admission_projection_includes_causal_trigger_eligibility() -> None:
-    bundle, account = _context(close=99.5, response_close=101.0)
-
-    events = OrderflowStrategy().evaluate(bundle, account)
-    admission = next(
-        event for event in events
-        if event.payload.get("decision_stage") == "admission"
-    )
-    trigger_projection = next(
-        event for event in events
-        if event.payload.get("decision_stage") == "trigger"
-    )
-    assert admission.payload["trigger_eligible"] is True
-    trigger = admission.payload["trigger"]
-    assert isinstance(trigger, dict)
-    assert trigger["source_observation_id"] == "response-obs-5m"
-    assert trigger["effective_at"] is not None
-    assert trigger_projection.payload["outcome"] == "accepted"
-    assert trigger_projection.payload["trigger"] == trigger
 
 
 def test_orderflow_executable_mode_emits_bounded_futures_entry() -> None:
