@@ -8,7 +8,7 @@ from ftx_paper.strategy import (
     CANONICAL_PHASE_ORDER, ReplayMachine, ReplayPhase,
     observe_market, prepare_replay_input,
 )
-from tests.test_orderflow_observation import _rows
+from tests.strategies.orderflow.test_orderflow_observation import _rows
 
 
 UTC = timezone.utc

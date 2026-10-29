@@ -214,6 +214,34 @@ def test_producer_published_location_observation_starts_diagnostic_interaction()
     assert event.order is None
 
 
+def test_opening_seed_materializes_an_or_candidate() -> None:
+    bundle, account = _context()
+    assert bundle.orderflow_context is not None
+    observation = bundle.orderflow_context.observations_for("1m")[0]
+    policy = OrderflowPolicy()
+
+    events = policy._form_opening_candidate(
+        observation,
+        {
+            "seed_id": "opening-seed",
+            "direction": "short",
+            "location": "OR_LOW",
+            "reference_level": 100.0,
+            "band_lower": 99.5,
+            "band_upper": 100.5,
+        },
+        bundle.orderflow_context,
+        account,
+        {},
+        None,
+    )
+
+    assert len(events) == 1
+    assert events[0].payload["reason"] == "setup_candidate_formed"
+    assert events[0].payload["candidate_provenance"] == "opening_hypothesis"
+    assert events[0].payload["location"] == "OR_LOW"
+
+
 def test_completed_five_minute_extreme_publishes_before_same_clock_location() -> None:
     bundle, account = _context()
     assert bundle.orderflow_context is not None
@@ -879,3 +907,38 @@ def test_strategy_rejects_mismatched_location_timeframe() -> None:
 
     with pytest.raises(ValueError, match="timeframe"):
         OrderflowStrategy().evaluate(malformed_bundle, account)
+
+
+def test_late_parent_location_facts_do_not_replay_historical_children() -> None:
+    from ftx_paper.strategy import CausalOrderflowProducer
+
+    producer = CausalOrderflowProducer()
+    producer.set_frozen_atr(10.0)
+    start = datetime(2026, 1, 1, 3, 45, tzinfo=UTC)
+    instrument = Instrument("NIFTYFUT", "NSE", "FUTURES")
+    for index in range(5):
+        producer.ingest(MarketBar(
+            instrument, start + timedelta(minutes=index),
+            100.0, 101.0, 99.0, 100.0, 10.0,
+        ))
+    native = producer.context("2026-01-01", "09:20")
+    assert native is not None
+    bundle, account = _context()
+    policy = OrderflowPolicy()
+    events = policy.evaluate(
+        replace(bundle, orderflow_context=native),
+        replace(account, as_of=start + timedelta(minutes=5)),
+    )
+    interactions = [event.payload for event in events
+                    if event.payload.get("reason") == "location_interaction_observed"]
+    one_minute = [event for event in interactions if event.get("timeframe") == "1m"]
+    assert one_minute
+    assert all(str(event["interaction_id"]).endswith("09:19:00+05:30")
+               or str(event["interaction_id"]).endswith("03:49:00+00:00")
+               for event in one_minute)
+    assert all(datetime.fromisoformat(str(event["available_at"])) == start + timedelta(minutes=5)
+               for event in one_minute)
+    assert policy.evaluate(
+        replace(bundle, orderflow_context=native),
+        replace(account, as_of=start + timedelta(minutes=5)),
+    ) == ()

@@ -234,7 +234,7 @@ def test_synthetic_quote_selection_requires_same_minute_unless_fallback_is_expli
 
 
 def test_p6_stop_and_quantity_golden_fixture() -> None:
-    fixture = json.loads((Path(__file__).parent / "fixtures" / "p6_stop_quantity.json").read_text())
+    fixture = json.loads((Path(__file__).parents[2] / "fixtures" / "p6_stop_quantity.json").read_text())
     instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
     bars = tuple(
         MarketBar(instrument, datetime(2026, 1, 1, 4, 0 + index, tzinfo=timezone.utc), row["high"], row["high"], row["low"], row["close"])
@@ -265,7 +265,7 @@ def test_adaptive_stop_uses_event_close_with_prior_bar_ranges() -> None:
 
 def test_p0_behavioral_fixture_captures_capital_margin_and_downward_lots() -> None:
     fixture = json.loads(
-        (Path(__file__).parent / "fixtures" / "p0_behavioral_contract.json").read_text()
+        (Path(__file__).parents[2] / "fixtures" / "p0_behavioral_contract.json").read_text()
     )
     instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
     entry = OrderIntent("p0-entry", instrument, OrderSide.BUY, 2, role=OrderRole.ENTRY)

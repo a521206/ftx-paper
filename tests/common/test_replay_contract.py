@@ -44,6 +44,24 @@ def test_replay_result_requires_only_canonical_fields() -> None:
     assert ReplayResult.from_mapping(result).to_dict() == result
 
 
+def test_replay_result_requires_shadow_trades() -> None:
+    result = {
+        "run_id": "run-1",
+        "schema_version": 1,
+        "execution_scope": "replay",
+        "ledger_scope": "replay",
+        "summary": {"setup_candidates": 0, "location_interactions": 0, "entries_filled": 0,
+                     "gross_reward_points": 0.0, "achieved_risk_reward": None},
+        "events": [],
+        "shadow_ledger": [],
+        "authoritative_trades": [],
+        "authoritative_ledger": [],
+        "parity_artifact": None,
+    }
+    with pytest.raises(ValueError, match="missing replay result fields: shadow_trades"):
+        ReplayResult.from_mapping(result)
+
+
 def test_replay_result_rejects_ambiguous_aliases() -> None:
     result = {
         "run_id": "run-1", "schema_version": 1, "execution_scope": "replay", "ledger_scope": "replay",

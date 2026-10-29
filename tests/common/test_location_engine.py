@@ -9,7 +9,7 @@ from ftx_paper.contracts import Instrument, MarketBar
 from ftx_paper.market.location import Cell, Location, LocationDetector, LocationFeatures, detect_all_locations
 
 
-_FIXTURES = json.loads((Path(__file__).parent / "fixtures" / "location_cells.json").read_text())
+_FIXTURES = json.loads((Path(__file__).parents[1] / "fixtures" / "location_cells.json").read_text())
 
 
 def test_location_and_cell_golden_fixtures() -> None:

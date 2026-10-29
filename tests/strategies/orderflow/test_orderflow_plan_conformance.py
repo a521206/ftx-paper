@@ -110,7 +110,7 @@ def test_location_boundary_carry_is_once_and_detached() -> None:
 
 
 def test_interaction_closure_distinguishes_cross_band_departure() -> None:
-    from tests.test_orderflow_interaction import _observation
+    from tests.strategies.orderflow.test_orderflow_interaction import _observation
 
     location = LocationRecord(
         "loc", "opening_range", 100.0, LocationBand(99.0, 101.0), 1,

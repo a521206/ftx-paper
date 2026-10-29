@@ -12,11 +12,11 @@ from ftx_paper.runtime.engine import PaperEngine
 from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.runtime.store import RuntimeStore
 from ftx_paper.strategy import OrderflowStrategy
-from tests.test_orderflow_strategy import _context
+from tests.strategies.orderflow.test_orderflow_strategy import _context
 
 
 FIXTURE = json.loads(
-    (Path(__file__).parent / "fixtures" / "next_available_entry.json").read_text(),
+    (Path(__file__).parents[2] / "fixtures" / "next_available_entry.json").read_text(),
 )
 class _CanonicalReplayAggregator:
     def __init__(self, bundles):
