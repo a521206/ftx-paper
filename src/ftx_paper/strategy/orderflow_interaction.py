@@ -311,6 +311,10 @@ def _freeze_projections(interaction: LocationInteraction) -> LocationInteraction
 class InteractionDetector:
     """One detector per timeframe; references are never mutated after creation."""
 
+    _SUPPORTED_LOCATIONS = {
+        "VWAP", "OR_HIGH", "OR_LOW", "PD_HIGH", "PD_LOW", "SESSION_HIGH", "SESSION_LOW",
+    }
+
     def __init__(self, timeframe: str) -> None:
         if timeframe not in {"1m", "5m"}:
             raise ValueError("interaction timeframe must be 1m or 5m")
@@ -333,6 +337,8 @@ class InteractionDetector:
             return None
         if location.timeframe and location.timeframe != self.timeframe:
             return None
+        if location.alias.upper() not in self._SUPPORTED_LOCATIONS:
+            return None
         if location.available_at > observation.available_at:
             return None
         if observation.interval_end is not None and observation.available_at < observation.interval_end:
@@ -353,6 +359,15 @@ class InteractionDetector:
                 for left, right in zip(context.child_intervals, context.child_intervals[1:])
             ):
                 raise ValueError("5m observation children do not exactly cover the parent interval")
+            if (
+                observation.interval_start is not None
+                and observation.interval_end is not None
+                and (
+                    context.child_intervals[0][0] != observation.interval_start
+                    or context.child_intervals[-1][1] != observation.interval_end
+                )
+            ):
+                raise ValueError("5m observation children do not cover the parent interval")
         close = observation.features.get("close")
         open_price = observation.features.get("open", close)
         high = observation.features.get("high", close)
@@ -448,7 +463,7 @@ class InteractionDetector:
                     in_containing_parent = (
                         source.interval_start is not None
                         and source.interval_end is not None
-                        and source.interval_start <= interaction.created_at < source.interval_end
+                        and source.interval_start <= observation.observed_at < source.interval_end
                     )
                     if source.observed_at < interaction.created_at and not in_containing_parent:
                         continue
@@ -561,7 +576,7 @@ class InteractionDetector:
             replace(_freeze_projections(item), status=InteractionStatus.ENDED, close_reason=reason, closed_at=at)
             for item in self._active.values()
         )
-        if any(at < item.created_at or at < item.available_at for item in ended):
+        if any(at < item.created_at or at < item.contact_candles[0].available_at for item in ended):
             raise ValueError("interaction ending must be causal")
         self._active.clear()
         self._closed.extend(ended)
@@ -578,7 +593,7 @@ class InteractionDetector:
         for key, interaction in tuple(self._active.items()):
             if interaction.interaction_id != interaction_id:
                 continue
-            if at < interaction.created_at or at < interaction.available_at:
+            if at < interaction.created_at or at < interaction.contact_candles[0].available_at:
                 raise ValueError("interaction session transition must be causal")
             carried = replace(interaction, sessions_carried=interaction.sessions_carried + 1)
             if carried.sessions_carried > carry_sessions:

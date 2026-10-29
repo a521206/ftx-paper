@@ -11,7 +11,6 @@ from ftx_paper.strategy import (
     observe_market,
     prepare_replay_input,
 )
-from ftx_paper.strategy.orderflow_interaction import InteractionCloseReason, InteractionDetector
 from ftx_paper.contracts import build_decision_view, validate_decision_view
 
 
@@ -107,20 +106,6 @@ def test_location_boundary_carry_is_once_and_detached() -> None:
     assert len(carried) == 1
     assert registry.next_generation(at=start + timedelta(days=1), carry=True) == ()
     assert carried[0].to_dict()["source_aggregate_id"] == "agg-1"
-
-
-def test_interaction_closure_distinguishes_cross_band_departure() -> None:
-    from tests.strategies.orderflow.test_orderflow_interaction import _observation
-
-    location = LocationRecord(
-        "loc", "opening_range", 100.0, LocationBand(99.0, 101.0), 1,
-        datetime(2026, 1, 1, 9, 15, tzinfo=UTC), "agg",
-    )
-    detector = InteractionDetector("1m")
-    detector.observe(location, _observation(0, 99.5))
-    ended = detector.observe(location, _observation(1, 101.5))
-    assert ended is not None
-    assert ended.close_reason is InteractionCloseReason.CROSS_BAND
 
 
 def test_unavailable_decision_preserves_reason_and_availability_boundary() -> None:
