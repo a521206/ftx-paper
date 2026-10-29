@@ -28,38 +28,52 @@ def test_live_producer_marks_forward_gap_and_resets_vwap_prefix() -> None:
     assert observations[-1].context.replay_provenance["gap_status"] == "source_gap"
 
 
-def test_trigger_expiry_uses_available_evidence_and_versions() -> None:
+def test_trigger_expiry_is_canonical_and_uses_observed_time() -> None:
     observed = datetime(2026, 1, 1, 3, 45, tzinfo=UTC)
     available = observed + timedelta(minutes=1)
     observation = OrderflowObservation(
         "obs", "bar", "v1", "1m", "NIFTYFUT", observed, available,
-        {"close": 102.0, "previous_close": 99.0, "armed": True}, observed, available,
+        {"open": 99.0, "high": 102.0, "low": 99.0, "close": 102.0}, observed, available,
         context=OrderflowObservationContext("2026-01-01", "complete", "available", {}, 1),
     )
 
     expired = observe_trigger(
-        observation, boundary=100.0, execution_mode="enabled",
+        observation, intent_id="intent", direction="long", boundary=100.0,
         expires_at=observed.isoformat(), setup_version="old", permission_version="p1",
         expected_setup_version="new",
     )
     assert not expired.eligible
-    assert expired.ineligible_reason == "expired_setup"
+    assert expired.ineligible_reason == "intent_expired"
 
 
-def test_trigger_retest_requires_both_confirmation_flags() -> None:
+def test_trigger_pullback_records_touch_then_confirms_rejection() -> None:
     observed = datetime(2026, 1, 1, 3, 45, tzinfo=UTC)
     observation = OrderflowObservation(
         "obs", "bar", "v1", "1m", "NIFTYFUT", observed, observed + timedelta(minutes=1),
-        {"close": 102.0, "previous_close": 99.0, "armed": True, "retest_touch": True},
+        {"open": 100.0, "high": 101.0, "low": 99.8, "close": 100.0},
         observed, observed + timedelta(minutes=1),
         context=OrderflowObservationContext("2026-01-01", "complete", "available", {}, 1),
     )
-    result = observe_trigger(observation, boundary=100.0, execution_mode="enabled", trigger_type="retest")
+    result = observe_trigger(
+        observation, intent_id="intent", direction="long", boundary=100.0,
+        trigger_type="pullback",
+    )
     assert not result.eligible
-    assert result.ineligible_reason == "retest_confirmation_required"
-    assert result.trigger_type == "retest"
+    assert result.ineligible_reason == "entry boundary touched; awaiting rejection"
+    assert result.retest_touched
+    assert result.trigger_type == "pullback"
     assert result.boundary == 100.0
-    assert result.armed is True
+    rejection = OrderflowObservation(
+        "obs-2", "bar", "v1", "1m", "NIFTYFUT", observed + timedelta(minutes=1), observed + timedelta(minutes=2),
+        {"open": 100.0, "high": 101.2, "low": 99.9, "close": 100.8}, observed + timedelta(minutes=1), observed + timedelta(minutes=2),
+        context=OrderflowObservationContext("2026-01-01", "complete", "available", {}, 1),
+    )
+    confirmed = observe_trigger(
+        rejection, intent_id="intent", direction="long", boundary=100.0,
+        trigger_type="pullback", retest_touched=True,
+    )
+    assert confirmed.eligible
+    assert confirmed.retest_confirmed
 
 
 def test_trigger_rejects_causal_timing_and_version_mismatches() -> None:
@@ -67,19 +81,20 @@ def test_trigger_rejects_causal_timing_and_version_mismatches() -> None:
     available = observed + timedelta(minutes=1)
     observation = OrderflowObservation(
         "obs", "bar", "v1", "1m", "NIFTYFUT", observed, available,
-        {"close": 102.0, "previous_close": 99.0, "armed": True},
+        {"open": 99.0, "high": 102.0, "low": 99.0, "close": 102.0},
         observed, available,
         context=OrderflowObservationContext("2026-01-01", "complete", "available", {}, 1),
     )
     cases = (
-        ({"effective_at": (available + timedelta(minutes=1)).isoformat()}, "before_effective_time"),
-        ({"setup_version": "old", "expected_setup_version": "new"}, "setup_version_mismatch"),
-        ({"permission_version": "old", "expected_permission_version": "new"}, "permission_version_mismatch"),
-        ({"next_bar_open_at": (available + timedelta(minutes=1)).isoformat()}, "next_bar_open_unavailable"),
-        ({"trigger_type": "unknown"}, "unsupported_trigger:unknown"),
+        ({"effective_at": (available + timedelta(minutes=1)).isoformat()}, "before_effective_at"),
+        ({"setup_version": "old", "expected_setup_version": "new"}, "setup_no_longer_valid"),
+        ({"permission_version": "old", "expected_permission_version": "new"}, "parent_permission_blocked"),
+        ({"permission_allowed": False}, "parent_permission_blocked"),
     )
     for kwargs, reason in cases:
-        result = observe_trigger(observation, boundary=100.0, execution_mode="enabled", **kwargs)
+        result = observe_trigger(
+            observation, intent_id="intent", direction="long", boundary=100.0, **kwargs,
+        )
         assert not result.eligible
         assert result.ineligible_reason == reason
 
@@ -88,42 +103,41 @@ def test_trigger_requires_a_causal_price() -> None:
     observed = datetime(2026, 1, 1, 3, 45, tzinfo=UTC)
     observation = OrderflowObservation(
         "obs", "bar", "v1", "1m", "NIFTYFUT", observed, observed + timedelta(minutes=1),
-        {"previous_close": 99.0, "armed": True}, observed, observed + timedelta(minutes=1),
+        {"open": 99.0, "high": 99.5, "low": 98.5}, observed, observed + timedelta(minutes=1),
         context=OrderflowObservationContext("2026-01-01", "complete", "available", {}, 1),
     )
-    result = observe_trigger(observation, boundary=100.0, execution_mode="enabled")
+    result = observe_trigger(observation, intent_id="intent", direction="long", boundary=100.0)
     assert not result.eligible
-    assert result.trigger_price is None
+    assert result.price is None
     assert result.ineligible_reason == "missing_trigger_price"
 
 
-def test_trigger_accepts_causal_displacement_only_after_crossing() -> None:
+def test_trigger_accepts_intrabar_crossing_from_ohlc() -> None:
     observed = datetime(2026, 1, 1, 3, 45, tzinfo=UTC)
     observation = OrderflowObservation(
         "obs", "bar", "v1", "1m", "NIFTYFUT", observed, observed + timedelta(minutes=1),
-        {"close": 102.0, "previous_close": 99.0, "armed": True},
+        {"open": 99.0, "high": 102.0, "low": 99.0, "close": 102.0},
         observed, observed + timedelta(minutes=1),
         context=OrderflowObservationContext("2026-01-01", "complete", "available", {}, 1),
     )
 
-    result = observe_trigger(observation, boundary=100.0, execution_mode="enabled")
+    result = observe_trigger(observation, intent_id="intent", direction="long", boundary=100.0)
 
     assert result.crossed
     assert result.eligible
     assert result.ineligible_reason is None
 
 
-def test_diagnostic_trigger_preserves_crossing_without_authorizing_execution() -> None:
+def test_trigger_observation_is_not_an_execution_authorization() -> None:
     observed = datetime(2026, 1, 1, 3, 45, tzinfo=UTC)
     observation = OrderflowObservation(
         "obs", "bar", "v1", "1m", "NIFTYFUT", observed, observed + timedelta(minutes=1),
-        {"close": 102.0, "previous_close": 99.0, "armed": True},
+        {"open": 99.0, "high": 102.0, "low": 99.0, "close": 102.0},
         observed, observed + timedelta(minutes=1),
         context=OrderflowObservationContext("2026-01-01", "complete", "available", {}, 1),
     )
 
-    result = observe_trigger(observation, boundary=100.0, execution_mode="diagnostic")
+    result = observe_trigger(observation, intent_id="intent", direction="long", boundary=100.0)
 
     assert result.crossed
-    assert not result.eligible
-    assert result.ineligible_reason == "diagnostic_only"
+    assert result.eligible

@@ -17,7 +17,7 @@ if TYPE_CHECKING:
         OrderflowContext, OrderflowObservation, OrderflowObservationContext,
         UnavailableReason, UnavailableValue, feature_values_to_dict, stable_orderflow_id,
     )
-    from .orderflow_trigger import TriggerObservation, observe_trigger
+    from .orderflow_trigger import EntryPolicy, TriggerObservation, observe_trigger
     from .orderflow_producer import CausalOrderflowProducer
     from .orderflow_source import (
         OrderflowReplayInput, OrderflowSourceMetadata, SourceIdentity, normalize_session_date,
@@ -113,9 +113,9 @@ def __getattr__(name: str):
     if name == "SharedDecisionCoordinator":
         from .coordinator import SharedDecisionCoordinator
         return SharedDecisionCoordinator
-    if name in {"TriggerObservation", "observe_trigger"}:
-        from .orderflow_trigger import TriggerObservation, observe_trigger
-        return {"TriggerObservation": TriggerObservation, "observe_trigger": observe_trigger}[name]
+    if name in {"EntryPolicy", "TriggerObservation", "observe_trigger"}:
+        from .orderflow_trigger import EntryPolicy, TriggerObservation, observe_trigger
+        return {"EntryPolicy": EntryPolicy, "TriggerObservation": TriggerObservation, "observe_trigger": observe_trigger}[name]
     if name == "CausalOrderflowProducer":
         from .orderflow_producer import CausalOrderflowProducer
         return CausalOrderflowProducer
@@ -235,7 +235,7 @@ __all__ = [
     "ExecutionMode", "FeatureRequirement", "PolicyDecision", "StrategyPolicy",
     "SharedDecisionCoordinator", "feature_union",
     "OrderflowConfig", "OrderflowPolicy", "OrderflowStrategy",
-    "TriggerObservation", "observe_trigger",
+    "EntryPolicy", "TriggerObservation", "observe_trigger",
     "CausalOrderflowProducer",
     "OrderflowReplayInput", "OrderflowSourceMetadata", "SourceIdentity", "normalize_session_date",
     "prepare_replay_input", "source_fingerprint",

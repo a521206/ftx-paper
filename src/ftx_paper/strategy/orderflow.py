@@ -38,8 +38,9 @@ from .orderflow_location import (
 )
 from .orderflow_response import evaluate_policy_responses
 from .templates import TRADE_TEMPLATES, TradeTemplate
+from .orderflow_exit import exit_plan_from_template, exit_plan_payload
 from .orderflow_vwap import evaluate_vwap_diagnostic_response
-from .orderflow_trigger import observe_trigger
+from .orderflow_trigger import EntryPolicy, observe_trigger
 from .policy_contract import ExecutionMode, FeatureRequirement, PolicyDecision
 from .protocol import StrategyMetadata
 from .snapshot_envelope import wrap_snapshot
@@ -589,32 +590,6 @@ class OrderflowPolicy:
             "opening_interaction_evidence": evidence,
             "available_at": observation.available_at.isoformat(),
         })
-        if opening_kind in {"opening_breakout", "opening_retest"}:
-            template = TRADE_TEMPLATES.get(("5m_acceptance_breakout", str(seed["location"])))
-            if template is not None:
-                attached = PolicyDecision({
-                    **attached.payload,
-                    "execution_proposal": {
-                        "eligible": True,
-                        "direction": direction,
-                        "instrument": observation.instrument,
-                        "exchange": futures.instrument.exchange if futures is not None else None,
-                        "instrument_type": futures.instrument.instrument_type if futures is not None else None,
-                        "lifecycle_id": opportunity.lifecycle_id,
-                        "stop_price": opportunity.setup.failure_boundary,
-                        "trigger_price": (
-                            opportunity.setup.entry_upper
-                            if direction == "long" else opportunity.setup.entry_lower
-                        ),
-                        "stop_policy": template.stop_policy.value,
-                        "exit_mode": self.config.exit_policy,
-                        "cell": str(seed["location"]).lower(),
-                        "entry_bar": context.as_of.minute,
-                        "strategy_id": self.config.name,
-                        "execution_group_id": opportunity.execution_group_id,
-                        "setup_availability": opportunity.setup.formed_at.isoformat(),
-                    },
-                })
         return (attached,)
 
     def _process_location_observation(
@@ -844,8 +819,6 @@ class OrderflowPolicy:
         self, observation: OrderflowObservation, context: DecisionContext,
         base: Mapping[str, Any], futures: MarketBar | None,
     ) -> tuple[PolicyDecision, ...]:
-        if observation.timeframe != "1m":
-            return ()
         events: list[PolicyDecision] = []
         for lifecycle_id, pending in tuple(self._pending_triggers.items()):
             opportunity = self._opportunities.get(lifecycle_id)
@@ -858,23 +831,36 @@ class OrderflowPolicy:
             ):
                 self._pending_triggers.pop(lifecycle_id, None)
                 continue
-            trigger = observe_trigger(
-                observation,
-                boundary=(opportunity.setup.entry_upper if str(pending["direction"]) == "long"
-                          else opportunity.setup.entry_lower),
-                execution_mode=ExecutionMode.EXECUTABLE.value,
-                trigger_type=template.trigger_type.value,
-                effective_at=opportunity.setup.formed_at.isoformat(),
-                expires_at=opportunity.setup.expires_at.isoformat(),
-                setup_version=opportunity.setup.setup_id, armed=True,
-            )
-            if not trigger.eligible:
-                continue
             direction = str(pending["direction"])
             current_context = self._context_history.as_of_location(
                 interaction.location_alias, observation.available_at,
             )
             permission = current_context.permission if current_context is not None else "UNAVAILABLE"
+            trigger = observe_trigger(
+                observation, intent_id=lifecycle_id, direction=direction,
+                boundary=(opportunity.setup.entry_upper if direction == "long"
+                          else opportunity.setup.entry_lower),
+                entry_policy=EntryPolicy.INTRABAR_CROSS,
+                trigger_type=template.trigger_type,
+                setup_valid=(
+                    opportunity.status is OpportunityStatus.ACTIVE
+                    and observation.observed_at < opportunity.setup.expires_at
+                ),
+                permission_allowed=permission in {"BOTH", "LONG" if direction == "long" else "SHORT"},
+                effective_at=opportunity.setup.formed_at.isoformat(),
+                expires_at=opportunity.setup.expires_at.isoformat(),
+                setup_id=opportunity.setup.setup_id,
+                expected_setup_id=opportunity.setup.setup_id,
+                setup_version=opportunity.policy_version,
+                expected_setup_version=opportunity.policy_version,
+                permission_version=str(current_context.version) if current_context else None,
+                expected_permission_version=str(current_context.version) if current_context else None,
+                context_conflicted=opportunity.context_relation == "CONFLICTED",
+                retest_touched=bool(pending.get("retest_touched", False)),
+            )
+            pending["retest_touched"] = trigger.retest_touched
+            if not trigger.eligible:
+                continue
             direction_allowed = permission in {
                 "BOTH", "LONG" if direction == "long" else "SHORT",
             }
@@ -965,6 +951,7 @@ class OrderflowPolicy:
                 if (
                     opportunity.source_interaction_id == getattr(interaction, "interaction_id")
                     and opportunity.status is OpportunityStatus.ACTIVE
+                    and opportunity_id not in self._pending_triggers
                     and opportunity.setup.formed_at <= candidate.available_at
                 ):
                     invalidated = opportunity.invalidate(
@@ -1002,6 +989,22 @@ class OrderflowPolicy:
         context: DecisionContext,
         futures: MarketBar | None,
     ) -> dict[str, object]:
+        levels = {
+            rule.location.value: (
+                record.band_low if direction == "long" else record.band_high
+            )
+            for rule in template.exits
+            if (record := self._location_registry.resolve_as_of(
+                rule.location.value, context.as_of,
+            )) is not None
+        }
+        bands = {
+            rule.location.value: (record.band_low, record.band_high)
+            for rule in template.exits
+            if (record := self._location_registry.resolve_as_of(
+                rule.location.value, context.as_of,
+            )) is not None
+        }
         return {
             "eligible": accepted,
             "direction": direction,
@@ -1016,6 +1019,9 @@ class OrderflowPolicy:
             ),
             "stop_policy": template.stop_policy.value,
             "exit_mode": self.config.exit_policy,
+            "exit_plan": exit_plan_payload(
+                exit_plan_from_template(template.exits, levels=levels, bands=bands),
+            ),
             "cell": str(getattr(interaction, "location_alias", "orderflow")).lower(),
             "entry_bar": context.as_of.minute,
             "strategy_id": self.config.name,
@@ -1291,13 +1297,20 @@ class OrderflowPolicy:
             return ()
         current_context = formation_context
         trigger_observation = next((item for item in response_observations if item.observation_id == confirmation_id), observation)
-        trigger = observe_trigger(trigger_observation,
+        trigger = observe_trigger(
+            trigger_observation, intent_id=opportunity.lifecycle_id, direction=direction,
             boundary=(opportunity.setup.entry_upper if direction == "long" else opportunity.setup.entry_lower),
-            execution_mode=ExecutionMode.EXECUTABLE.value, trigger_type=template.trigger_type.value,
-            effective_at=formed_at.isoformat(), expires_at=opportunity.setup.expires_at.isoformat(),
-            setup_version=opportunity.setup.setup_id, permission_version=str(current_context.version) if current_context else None,
-            expected_setup_version=opportunity.setup.setup_id,
-            expected_permission_version=str(current_context.version) if current_context else None, armed=True)
+            entry_policy=EntryPolicy.INTRABAR_CROSS, trigger_type=template.trigger_type,
+            effective_at=trigger_observation.observed_at.isoformat(),
+            expires_at=opportunity.setup.expires_at.isoformat(),
+            setup_id=opportunity.setup.setup_id, expected_setup_id=opportunity.setup.setup_id,
+            setup_version=opportunity.policy_version, expected_setup_version=opportunity.policy_version,
+            permission_version=str(current_context.version) if current_context else None,
+            expected_permission_version=str(current_context.version) if current_context else None,
+            permission_allowed=current_context is not None and current_context.permission in {
+                "BOTH", "LONG" if direction == "long" else "SHORT",
+            }, armed=True, context_conflicted=relation.value == "CONFLICTED",
+        )
         admission = evaluate_admission(opportunity,
             context_available=current_context is not None,
             opening_gap_allowed=(current_context is not None and current_context.opening_gap.status != "UNAVAILABLE" and
@@ -1323,14 +1336,12 @@ class OrderflowPolicy:
             evaluate_portfolio_gates=False)
         self._opportunities[opportunity.lifecycle_id] = opportunity
         accepted = admission.status.value == "PASSED"
-        if accepted and not trigger.eligible:
+        if accepted:
             self._pending_triggers[opportunity.lifecycle_id] = {
                 "direction": direction, "template": template, "interaction": interaction,
+                "retest_touched": trigger.retest_touched,
             }
-        proposal = self._execution_proposal(
-            accepted=accepted and trigger.eligible,
-            direction=direction, observation=observation,
-            opportunity=opportunity, template=template, interaction=interaction, context=context, futures=futures)
+        proposal = None
         return (
             PolicyDecision({**base, "decision_stage": "opportunity", "outcome": "recorded", "reason": "setup_candidate_formed",
                 "decision_id": _decision_id("candidate", opportunity.lifecycle_id), "opportunity_id": opportunity.lifecycle_id,
@@ -1668,7 +1679,27 @@ class OrderflowStrategy:
 
     def evaluate(self, bundle: DecisionBundle, context: DecisionContext):
         self.policy.set_active_position(context.exposure.open_positions > 0)
-        return self.coordinator.evaluate(bundle, context)
+        self._position_manager.update_exit_levels({
+            record.alias: (record.band_low, record.band_high)
+            for record in self.policy._location_registry.available_as_of(context.as_of)
+        })
+        decisions = self.coordinator.evaluate(bundle, context)
+        for decision in decisions:
+            payload = decision.payload
+            location = payload.get("location")
+            long_score = payload.get("long_score")
+            short_score = payload.get("short_score")
+            if (
+                isinstance(location, str)
+                and (isinstance(long_score, (int, float)) or long_score is None)
+                and (isinstance(short_score, (int, float)) or short_score is None)
+                and (long_score is not None or short_score is not None)
+            ):
+                self._position_manager.update_exit_scores(
+                    location, (float(long_score) if long_score is not None else None,
+                               float(short_score) if short_score is not None else None),
+                )
+        return decisions
 
     def on_execution_event(self, event: ExecutionNotification) -> None:
         self.coordinator.on_execution_event(event)
@@ -1689,6 +1720,10 @@ class OrderflowStrategy:
     @property
     def stop_update_evidence(self) -> tuple[Mapping[str, object], ...]:
         return tuple(self._stop_update_evidence)
+
+    @property
+    def _exit_scores(self):
+        return self._position_manager.exit_scores
 
     def settle_exit(self, exit_order_id: str, *, filled: bool, **_kwargs: object) -> None:
         self._position_manager.settle_exit(exit_order_id, filled=filled)
