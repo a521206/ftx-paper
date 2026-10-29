@@ -267,7 +267,11 @@ class MultiStrategyEngine:
         return EngineResult(tuple(orders), tuple(events))
 
     def on_execution_event(self, event: ExecutionNotification) -> None:
-        targets = (self._engines[event.strategy_id],) if event.strategy_id in self._engines else self._engines.values()
+        if event.strategy_id is None:
+            raise ValueError("execution event strategy_id is required")
+        if event.strategy_id not in self._engines:
+            raise KeyError(f"unknown strategy_id: {event.strategy_id}")
+        targets = (self._engines[event.strategy_id],)
         for engine in targets:
             engine.on_execution_event(event)
 
@@ -306,21 +310,25 @@ class MultiStrategyEngine:
     def register_entry(self, order: OrderIntent, *, fill_price: float | None = None,
                        entry_fill_time: Any = None, reference_price: float | None = None) -> None:
         engine = self._engines.get(order.strategy_id or "")
-        if engine is not None:
-            engine.register_entry(order, fill_price=fill_price, entry_fill_time=entry_fill_time,
-                                  reference_price=reference_price)
+        if engine is None:
+            raise KeyError(f"unknown strategy_id: {order.strategy_id}")
+        engine.register_entry(order, fill_price=fill_price, entry_fill_time=entry_fill_time,
+                              reference_price=reference_price)
 
     def record_exit(self, *, strategy_id: str | None = None, **kwargs: object) -> None:
         engine = self._engines.get(strategy_id or "")
-        if engine is not None:
-            engine.record_exit(**kwargs)
+        if engine is None:
+            raise KeyError(f"unknown strategy_id: {strategy_id}")
+        engine.record_exit(**kwargs)
 
     def cancel_entry(self, *, strategy_id: str | None = None, **kwargs: object) -> None:
         engine = self._engines.get(strategy_id or "")
-        if engine is not None:
-            engine.cancel_entry(**kwargs)
+        if engine is None:
+            raise KeyError(f"unknown strategy_id: {strategy_id}")
+        engine.cancel_entry(**kwargs)
 
     def settle_exit(self, exit_order_id: str, *, filled: bool, strategy_id: str | None = None) -> None:
         engine = self._engines.get(strategy_id or "")
-        if engine is not None:
-            engine.settle_exit(exit_order_id, filled=filled)
+        if engine is None:
+            raise KeyError(f"unknown strategy_id: {strategy_id}")
+        engine.settle_exit(exit_order_id, filled=filled)

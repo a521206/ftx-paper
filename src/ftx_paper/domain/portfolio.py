@@ -364,7 +364,13 @@ class PortfolioState:
         self.equity += net
         self.peak_equity = max(self.peak_equity, self.equity)
         self.pending_orders[order.client_order_id] = "partially_settled"
-        self.pending_exits.pop(order.client_order_id, None)
+        pending_exit = self.pending_exits.get(order.client_order_id)
+        if pending_exit is not None:
+            pending_exit = dict(pending_exit)
+            pending_exit["status"] = "partially_settled"
+            prior_filled = pending_exit.get("filled_quantity", 0)
+            pending_exit["filled_quantity"] = (prior_filled if isinstance(prior_filled, int) else 0) + quantity
+            self.pending_exits[order.client_order_id] = pending_exit
         self.state_revision += 1
         result: SettlementResult = {
             "entry_order_id": entry_id, "gross_pnl": gross, "costs": float(cost), "net_pnl": net,

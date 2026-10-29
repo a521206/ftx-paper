@@ -1,9 +1,26 @@
-"""One order lifecycle for live and replay."""
+"""One authoritative Paper order lifecycle for live and replay."""
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 from ftx_paper.contracts import OrderIntent, OrderRole
 from ftx_paper.domain.portfolio import PortfolioState, PaperPosition, SettlementResult
 from ftx_paper.domain.capital import ResearchCapitalProfile, CapitalRuntimeContext
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionLifecycleEvent:
+    """Detached lifecycle fact emitted by the execution owner."""
+
+    sequence: int
+    operation: str
+    order_id: str
+    status: str
+    reason: str | None = None
+    fill_id: str | None = None
+    timestamp: str | None = None
+    quantity: int | None = None
+    price: float | None = None
 
 
 class PaperExecutionCoordinator:
@@ -14,11 +31,26 @@ class PaperExecutionCoordinator:
         self._denied: dict[str, str] = {}
         self._pending_position_limits: dict[str, int] = {}
         self._claimed_execution_groups: dict[str, str] = {}
+        self._pending_execution_groups: dict[str, str] = {}
         self._group_orders: dict[str, set[str]] = {}
+        self._lifecycle_events: list[ExecutionLifecycleEvent] = []
 
     @property
     def denied_proposals(self) -> dict[str, str]:
         return dict(self._denied)
+
+    @property
+    def lifecycle_events(self) -> tuple[ExecutionLifecycleEvent, ...]:
+        return tuple(self._lifecycle_events)
+
+    def _record(self, operation: str, order: OrderIntent, status: str, *,
+                reason: str | None = None, fill_id: str | None = None,
+                timestamp: str | None = None, quantity: int | None = None,
+                price: float | None = None) -> None:
+        self._lifecycle_events.append(ExecutionLifecycleEvent(
+            len(self._lifecycle_events), operation, order.client_order_id, status,
+            reason, fill_id, timestamp, quantity, price,
+        ))
 
     def arbitrate(
         self, orders: tuple[OrderIntent, ...] | list[OrderIntent], *,
@@ -44,6 +76,7 @@ class PaperExecutionCoordinator:
             if getattr(item, "execution_group_id", None) is not None
         }
         claimed.update(self._claimed_execution_groups)
+        claimed.update(self._pending_execution_groups)
         for order in ranked:
             if order.client_order_id in seen_ids:
                 self._denied[order.client_order_id] = "duplicate_proposal"
@@ -58,19 +91,29 @@ class PaperExecutionCoordinator:
                 self._denied[order.client_order_id] = "execution_group_already_claimed"
             else:
                 accepted.append(order)
+                if order.role is OrderRole.ENTRY and group is not None:
+                    group_key = str(group)
+                    claimed.add(group_key)
+                    self._pending_execution_groups[group_key] = order.client_order_id
                 if order.role is OrderRole.ENTRY and max_open_positions is not None:
                     self._pending_position_limits[order.client_order_id] = max_open_positions
+        for order_id, reason in self._denied.items():
+            order = next((item for item in candidates if item.client_order_id == order_id), None)
+            if order is not None:
+                self._record("arbitrate", order, "denied", reason=reason)
         return tuple(accepted)
 
     def submit(self, order: OrderIntent) -> None:
         self._require_futures(order)
         self.portfolio.submit(order)
+        self._record("submit", order, "submitted")
         if order.execution_group_id is not None:
             self._group_orders.setdefault(order.execution_group_id, set()).add(order.client_order_id)
         if order.role is OrderRole.ENTRY:
             self.portfolio.reserve_entry(
                 order, margin_per_lot=self.capital_context.profile.vehicle_limit(order.vehicle).margin_per_lot,
             )
+            self._record("reserve", order, "reserved")
 
     def fill(self, order: OrderIntent, *, price: float, timestamp: str | None = None,
              synthetic_entry_prices: tuple[float, float] | None = None,
@@ -81,6 +124,7 @@ class PaperExecutionCoordinator:
             existing = self.portfolio.positions.get(order.client_order_id)
             fill_ids = self._entry_fill_ids.setdefault(order.client_order_id, set())
             if fill_id is not None and fill_id in fill_ids:
+                self._record("fill", order, "duplicate", fill_id=fill_id)
                 return existing
             group = order.execution_group_id
             if group is not None and (
@@ -92,10 +136,12 @@ class PaperExecutionCoordinator:
                 )
             ):
                 self._denied[order.client_order_id] = "execution_group_already_claimed"
+                self._record("fill", order, "denied", reason="execution_group_already_claimed", fill_id=fill_id)
                 return None
             position_limit = self._pending_position_limits.get(order.client_order_id)
             if position_limit is not None and len(self.portfolio.positions) >= position_limit:
                 self._denied[order.client_order_id] = "portfolio_position_limit"
+                self._record("fill", order, "denied", reason="portfolio_position_limit", fill_id=fill_id)
                 return None
             result = self.portfolio.fill_entry(
                 order, price=price,
@@ -105,7 +151,13 @@ class PaperExecutionCoordinator:
             )
             if fill_id is not None:
                 fill_ids.add(fill_id)
+            self._record(
+                "fill", order, "filled" if result is not None and getattr(result, "quantity", 0) == order.quantity else "partially_filled",
+                fill_id=fill_id, timestamp=timestamp, quantity=getattr(result, "quantity", None) if result is not None else None,
+                price=price,
+            )
             if result is not None and group is not None:
+                self._pending_execution_groups.pop(group, None)
                 self._claimed_execution_groups.setdefault(group, order.client_order_id)
                 sibling_ids = set(self._group_orders.get(group, set()))
                 sibling_ids.update(
@@ -117,7 +169,9 @@ class PaperExecutionCoordinator:
                     if sibling_id != order.client_order_id:
                         self.portfolio.cancel_entry(sibling_id)
             return result
-        return self.portfolio.settle_exit(order, price=price, cost=cost, fill_id=fill_id)
+        result = self.portfolio.settle_exit(order, price=price, cost=cost, fill_id=fill_id)
+        self._record("exit_fill", order, "settled", fill_id=fill_id, price=price)
+        return result
 
     def partial_exit(
         self, order: OrderIntent, *, price: float, quantity: int, cost: float = 0.0,
@@ -126,22 +180,34 @@ class PaperExecutionCoordinator:
         self._require_futures(order)
         if order.role is not OrderRole.EXIT:
             raise ValueError("only exit orders may partially settle")
-        return self.portfolio.settle_partial_exit(
+        result = self.portfolio.settle_partial_exit(
             order, price=price, quantity=quantity, cost=cost, fill_id=fill_id,
         )
+        self._record("partial_exit", order, "partially_settled", fill_id=fill_id,
+                     quantity=quantity, price=price)
+        return result
 
     def queue_exit(
         self, order: OrderIntent, *, available_at: str, reason: str,
     ) -> dict[str, object]:
         self._require_futures(order)
-        return self.portfolio.queue_pending_exit(order, available_at=available_at, reason=reason)
+        result = self.portfolio.queue_pending_exit(order, available_at=available_at, reason=reason)
+        self._record("queue_exit", order, "exit_pending", reason=reason, timestamp=available_at)
+        return result
 
     def cancel(self, order: OrderIntent) -> bool:
-        return self.portfolio.cancel_entry(order.client_order_id)
+        changed = self.portfolio.cancel_entry(order.client_order_id)
+        if changed:
+            for group, owner in tuple(self._pending_execution_groups.items()):
+                if owner == order.client_order_id:
+                    self._pending_execution_groups.pop(group, None)
+            self._record("cancel", order, "cancelled")
+        return changed
 
     def failed_exit(self, order: OrderIntent) -> None:
         self._require_futures(order)
         self.portfolio.pending_orders[order.client_order_id] = "exit_failed"
+        self._record("exit_failure", order, "failed", reason="exit_failed")
 
     @staticmethod
     def _require_futures(order: OrderIntent) -> None:
@@ -149,4 +215,4 @@ class PaperExecutionCoordinator:
             raise ValueError("synthetic orders are derived settlement only")
 
 
-__all__ = ["PaperExecutionCoordinator"]
+__all__ = ["ExecutionLifecycleEvent", "PaperExecutionCoordinator"]

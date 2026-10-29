@@ -123,9 +123,11 @@ def test_partial_exit_realizes_pnl_and_retains_position() -> None:
     coordinator = PaperExecutionCoordinator(portfolio, CapitalRuntimeContext(RESEARCH_CAPITAL_PROFILE))
     coordinator.submit(entry)
     coordinator.fill(entry, price=100.0, filled_quantity=2)
+    coordinator.queue_exit(exit_order, available_at="2026-01-01T10:01:00+00:00", reason="target")
     result = coordinator.partial_exit(exit_order, price=103.0, quantity=1, cost=10.0)
     assert result is not None and result["net_pnl"] == 3.0 * NIFTY_LOT_SIZE - 10.0
     assert portfolio.positions[entry.client_order_id].quantity == 1
+    assert portfolio.pending_exits[exit_order.client_order_id]["status"] == "partially_settled"
 
 
 def test_arbitration_counts_entries_only_and_persists_execution_groups() -> None:
@@ -151,7 +153,7 @@ def test_arbitration_counts_entries_only_and_persists_execution_groups() -> None
     assert coordinator.denied_proposals[second.client_order_id] == "execution_group_already_claimed"
 
 
-def test_unfilled_execution_group_candidates_do_not_claim_until_fill() -> None:
+def test_unfilled_execution_group_candidates_select_one_owner_before_submission() -> None:
     instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
     first = OrderIntent(
         "unfilled-first", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY,
@@ -164,13 +166,31 @@ def test_unfilled_execution_group_candidates_do_not_claim_until_fill() -> None:
     portfolio = PortfolioState(RESEARCH_CAPITAL_PROFILE.initial_capital)
     coordinator = PaperExecutionCoordinator(portfolio, CapitalRuntimeContext(RESEARCH_CAPITAL_PROFILE))
 
-    assert coordinator.arbitrate((first, second)) == (first, second)
-    coordinator.submit(first)
-    coordinator.submit(second)
-    coordinator.fill(first, price=100.0)
-
-    assert coordinator.fill(second, price=100.0) is None
+    assert coordinator.arbitrate((first, second)) == (first,)
     assert coordinator.denied_proposals[second.client_order_id] == "execution_group_already_claimed"
+    coordinator.submit(first)
+    coordinator.fill(first, price=100.0)
+    assert coordinator.lifecycle_events[-1].status == "filled"
+
+
+def test_execution_lifecycle_records_idempotent_fill_and_exit_transitions() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    entry = OrderIntent("event-entry", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY)
+    exit_order = OrderIntent(
+        "event-exit", instrument, OrderSide.SELL, 1, role=OrderRole.EXIT,
+        entry_order_id=entry.client_order_id,
+    )
+    coordinator = PaperExecutionCoordinator(PortfolioState(RESEARCH_CAPITAL_PROFILE.initial_capital))
+    coordinator.submit(entry)
+    coordinator.fill(entry, price=100.0, fill_id="entry-fill")
+    coordinator.fill(entry, price=100.0, fill_id="entry-fill")
+    coordinator.submit(exit_order)
+    coordinator.fill(exit_order, price=101.0, fill_id="exit-fill")
+
+    assert [event.operation for event in coordinator.lifecycle_events] == [
+        "submit", "reserve", "fill", "fill", "submit", "exit_fill",
+    ]
+    assert coordinator.lifecycle_events[3].status == "duplicate"
 
 
 def test_execution_group_fill_releases_reservations_from_another_coordinator() -> None:

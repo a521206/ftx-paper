@@ -1,4 +1,4 @@
-from .coordinator import PaperExecutionCoordinator
+from .coordinator import ExecutionLifecycleEvent, PaperExecutionCoordinator
 from .service import ExecutionService
 from .cost import futures_cost, synthetic_futures_cost
 from .events import ExecutionNotification
@@ -9,7 +9,7 @@ from .lifecycle import (
 )
 
 __all__ = [
-    "ExecutionService", "PaperExecutionCoordinator", "ExecutionNotification",
+    "ExecutionService", "ExecutionLifecycleEvent", "PaperExecutionCoordinator", "ExecutionNotification",
     "ExitValidationError", "futures_cost", "settle_synthetic_plan",
     "synthetic_futures_cost", "validate_exit_order",
     "EXECUTION_PHASES", "ExecutionLifecycleCoordinator", "ExecutionPhase",
