@@ -100,6 +100,13 @@ class ConfiguredLiveStrategy:
         self.policy = ResearchPolicyAdapter(self._decision_engine)
         self.coordinator = SharedDecisionCoordinator(self.policy)
 
+    def bind_account_context(
+        self, portfolio: PortfolioState, capital_context: CapitalRuntimeContext,
+    ) -> None:
+        """Accept the runtime-owned account objects used by live decisions."""
+        self.portfolio = portfolio
+        self.capital_context = capital_context
+
     @property
     def portfolio_state(self) -> dict[str, float]:
         """Return the equity inputs used by the risk/sizing layer."""

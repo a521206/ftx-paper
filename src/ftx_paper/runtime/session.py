@@ -15,7 +15,7 @@ from ftx_paper.config import IST
 from ftx_paper.domain.capital import CapitalRuntimeContext, ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
 from ftx_paper.domain.portfolio import PaperPosition, PortfolioState
 from ftx_paper.contracts import (
-    MarketBar, MarketRole, OptionRole, OrderRole, OrderSide, Role, RuntimeEvent, build_decision_view, parse_role,
+    Instrument, MarketBar, MarketRole, OptionRole, OrderRole, OrderSide, Role, RuntimeEvent, build_decision_view, parse_role,
     validate_decision_view,
     role_to_key,
 )
@@ -35,7 +35,7 @@ from .event_bus import EventBus
 from ftx_paper.execution import ExecutionService, PaperExecutionCoordinator
 from .events import is_decision_event, serialize_datetime
 from .state import LiveRuntimeState
-from .futures_source import materialize_orderflow_daily_atr
+from .futures_source import FuturesSessionSourceResolver, materialize_orderflow_daily_atr
 from ftx_paper.execution.lifecycle import (
     ExecutionLifecycleCoordinator,
     ExecutionPhase,
@@ -165,6 +165,54 @@ class RuntimeSession:
             snapshot = getattr(strategy, "snapshot", None)
         if callable(snapshot):
             self.store.patch_status({"strategy_snapshot": snapshot()})
+
+    def _initialize_orderflow_prior_context(self, session_date: str) -> None:
+        """Warm the live producer from the latest complete stored futures session."""
+        dates_reader = getattr(self.store, "read_market_dates", None)
+        if not callable(dates_reader):
+            return
+        available_dates = cast(Iterable[object], dates_reader())
+        prior_dates = sorted(str(value) for value in available_dates if str(value) < session_date)
+        source = None
+        for prior_date in reversed(prior_dates):
+            candidate = FuturesSessionSourceResolver(self.store).resolve(prior_date)
+            if candidate is None or not candidate.bars:
+                continue
+            minutes = [str(row["minute"])[11:16] for row in candidate.bars]
+            expected = [
+                f"{9 + (15 + index) // 60:02d}:{(15 + index) % 60:02d}"
+                for index in range(375)
+            ]
+            if minutes == expected:
+                source = candidate
+                break
+        if source is None:
+            return
+        rows = source.bars
+        prior_bars = tuple(
+            MarketBar(
+                instrument=Instrument(
+                    symbol=str(row["symbol"]),
+                    exchange=str(row["exchange"]),
+                    instrument_type=str(row.get("instrument_type", "FUT")).upper(),
+                    expiry=str(row.get("expiry")) if row.get("expiry") is not None else None,
+                ),
+                timestamp=datetime.fromisoformat(str(row["minute"])),
+                open=float(row["open"]),
+                high=float(row["high"]),
+                low=float(row["low"]),
+                close=float(row["close"]),
+                volume=row.get("volume"),
+                open_interest=row.get("open_interest"),
+            )
+            for row in rows
+        )
+        self._orderflow_producer.set_prior_bars(prior_bars)
+        self._orderflow_producer.set_prior_close(prior_bars[-1].close)
+        self._orderflow_producer.set_prior_value_bounds(
+            max(bar.high for bar in prior_bars),
+            min(bar.low for bar in prior_bars),
+        )
 
     def strategy_status(self) -> tuple[dict[str, object], ...]:
         status = getattr(self.engine, "strategy_status", None)
@@ -362,6 +410,7 @@ class RuntimeSession:
                 if clock.tzinfo is None:
                     clock = clock.replace(tzinfo=IST)
                 session_date = clock.astimezone(IST).date().isoformat()
+                self._initialize_orderflow_prior_context(session_date)
                 self._orderflow_producer.set_frozen_atr(
                     materialize_orderflow_daily_atr(self.store, session_date),
                 )

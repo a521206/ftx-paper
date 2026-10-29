@@ -22,7 +22,7 @@ from ftx_paper.config import SESSION_EXIT_DEADLINE_TIME
 from ftx_paper.market.bundles import DecisionBundle
 
 from .coordinator import SharedDecisionCoordinator
-from .orderflow_contract import OrderflowObservation, feature_values_to_dict, stable_orderflow_id
+from .orderflow_contract import FeatureValue, OrderflowObservation, feature_values_to_dict, stable_orderflow_id
 from .orderflow_context import (
     ContextHistory, MarketContext, ContextVersionRef, OpeningGapState, SessionLevels,
     advance_opening_gap, classify_context_relation, classify_opening_gap,
@@ -110,7 +110,20 @@ class OrderflowConfig:
 
 def _number(observation: OrderflowObservation, name: str) -> float | None:
     value = observation.features.get(name)
+    return _feature_number(value)
+
+
+def _feature_number(value: FeatureValue) -> float | None:
+    """Convert an available numeric feature without masking unavailable values."""
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _volume_average(observations: list[OrderflowObservation]) -> float | None:
+    values = [_feature_number(item.features.get("volume")) for item in observations]
+    numeric_values = [value for value in values if value is not None]
+    if len(numeric_values) != len(values):
+        return None
+    return sum(numeric_values) / len(numeric_values) if numeric_values else None
 
 
 def _score_rejection(
@@ -184,6 +197,17 @@ class OrderflowPolicy:
             None,
         )
         if atr is None:
+            atr = next(
+                (
+                    location.frozen_atr
+                    for item in self._evaluation_observations
+                    if item.observed_at <= observation.observed_at
+                    for location in item.location_observations
+                    if location.frozen_atr is not None and location.frozen_atr > 0
+                ),
+                None,
+            )
+        if atr is None:
             return None
         all_observations = self._evaluation_observations
         children_by_id = {
@@ -206,15 +230,15 @@ class OrderflowPolicy:
                 item for item in all_observations
                 if item.timeframe == child.timeframe and item.observed_at < child.observed_at
             ][-20:]
-            score = score_aggregate(
-                child.features,
-                prior.features if prior is not None else None,
-                atr=atr,
-                volume_average=(
-                    sum(float(item.features.get("volume", 0.0)) for item in prior_items)
-                    / min(len(prior_items), 20) if prior_items else None
-                ),
-            )
+            try:
+                score = score_aggregate(
+                    child.features,
+                    prior.features if prior is not None else None,
+                    atr=atr,
+                    volume_average=_volume_average(prior_items),
+                )
+            except ValueError:
+                return None
             if score is None:
                 return None
             child_scores.append(score)
@@ -229,16 +253,16 @@ class OrderflowPolicy:
             if item.timeframe == observation.timeframe
             and item.observed_at < observation.observed_at
         ][-20:]
-        return score_aggregate(
-            observation.features,
-            prior_parent.features if prior_parent is not None else None,
-            atr=atr,
-            child_scores=tuple(child_scores),
-            volume_average=(
-                sum(float(item.features.get("volume", 0.0)) for item in prior_parents)
-                / min(len(prior_parents), 20) if prior_parents else None
-            ),
-        )
+        try:
+            return score_aggregate(
+                observation.features,
+                prior_parent.features if prior_parent is not None else None,
+                atr=atr,
+                child_scores=tuple(child_scores),
+                volume_average=_volume_average(prior_parents),
+            )
+        except ValueError:
+            return None
 
     def evaluate(self, bundle: DecisionBundle, context: DecisionContext) -> tuple[PolicyDecision, ...]:
         orderflow = bundle.orderflow_context
@@ -1299,7 +1323,10 @@ class OrderflowPolicy:
                     # Permission uses the confirmation aggregate's local scores,
                     # matching the canonical replay rather than the older
                     # formation-context snapshot.
-                    decision_scores = self._confirmation_scores(confirmation_observation)
+                    decision_scores = (
+                        self._confirmation_scores(confirmation_observation)
+                        if confirmation_observation is not None else None
+                    )
                     long_score = decision_scores[0] if decision_scores is not None else None
                     short_score = decision_scores[1] if decision_scores is not None else None
                     score_rejection = _score_rejection(
@@ -1739,6 +1766,10 @@ class OrderflowStrategy:
         self._pending_exit_actions: dict[str, tuple[ExitAction, datetime]] = {}
         self._completed_bars: list[MarketBar] = []
         self._stop_update_evidence: list[dict[str, object]] = []
+
+    def bind_account_context(self, portfolio: object, capital_context: object) -> None:
+        """Record the runtime-owned account boundary without owning its state."""
+        del portfolio, capital_context
 
     @property
     def metadata(self) -> StrategyMetadata:

@@ -6,12 +6,11 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from ftx_paper.api import create_app
-from ftx_paper.application import RuntimeOperations
+from ftx_paper.application import RuntimeOperations, build_runtime_session
 from ftx_paper.config import PaperConfig
 from ftx_paper.domain.capital import CapitalRuntimeContext, RESEARCH_CAPITAL_PROFILE
 from ftx_paper.domain.portfolio import PortfolioState
 from ftx_paper.infrastructure.sqlite.runtime_store import ProcessAlreadyRunningError
-from ftx_paper.runtime.session import RuntimeSession
 from ftx_paper.runtime.store import RuntimeStore
 from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.strategy import ConfiguredStrategyFactory
@@ -108,7 +107,7 @@ def api_main() -> None:
             instruments_value = raw.get("instruments", ())
             if not isinstance(instruments_value, list) or any(not isinstance(item, dict) for item in instruments_value):
                 raise ValueError("Zerodha instruments must be a list of objects")
-        session = RuntimeSession(
+        session = build_runtime_session(
             store,
             auth,
             instruments_value,

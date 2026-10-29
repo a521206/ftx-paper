@@ -178,11 +178,18 @@ class MultiStrategyEngine:
         } for item in self.instances)
 
     def set_account_context(self, portfolio: Any, capital_context: Any) -> None:
-        """Bind all instances to the runtime-owned account context."""
+        """Bind and validate the runtime-owned account context for every instance."""
         for item in self.instances:
+            bind = getattr(item.strategy, "bind_account_context", None)
+            if callable(bind):
+                bind(portfolio, capital_context)
             for name, value in (("portfolio", portfolio), ("capital_context", capital_context)):
                 if hasattr(item.strategy, name):
                     setattr(item.strategy, name, value)
+                    if getattr(item.strategy, name) is not value:
+                        raise RuntimeError(
+                            f"strategy {item.strategy_id!r} rejected shared {name} context"
+                        )
 
     def reset(self) -> None:
         for engine in self._engines.values():

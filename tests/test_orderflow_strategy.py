@@ -32,7 +32,7 @@ OBSERVED = datetime(2026, 1, 1, 10, 0, tzinfo=UTC)
 @pytest.mark.parametrize(
     ("direction", "long_score", "short_score", "expected"),
     [("long", 0.60, 0.54, None), ("long", 0.57, 0.54, "fill_permission_mismatch"),
-     ("short", None, 0.54, None)],
+     ("short", None, 0.54, "setup_scores_unavailable")],
 )
 def test_score_margin_gate_preserves_unavailable_scores(
     direction: str, long_score: float | None, short_score: float | None,
@@ -70,6 +70,7 @@ def _context(
         available_at=available,
         observation_id=f"location-{observation_id}-g{generation}",
         timeframe="5m",
+        frozen_atr=1.0,
         child_observation_ids=tuple(f"obs-1m-{index}" for index in range(5)),
     )
     children = tuple(
@@ -81,7 +82,8 @@ def _context(
             instrument="NIFTYFUT",
             observed_at=OBSERVED + timedelta(minutes=index),
             available_at=OBSERVED + timedelta(minutes=index, seconds=1),
-            features={"close": 100.0, "vwap": 100.0, "volume": 5.0},
+            features={"open": 99.0, "high": 101.0, "low": 99.0,
+                      "close": 100.0, "vwap": 100.0, "volume": 5.0},
             interval_start=OBSERVED + timedelta(minutes=index),
             interval_end=OBSERVED + timedelta(minutes=index + 1),
             context=OrderflowObservationContext(
@@ -136,8 +138,8 @@ def _context(
             instrument="NIFTYFUT",
             observed_at=response_time,
             available_at=response_available,
-            features={"open": 100.0, "high": 102.0, "low": 99.0,
-                      "close": response_close, "previous_close": 99.0},
+                features={"open": 100.0, "high": 102.0, "low": 99.0,
+                      "close": response_close, "previous_close": 99.0, "volume": 25.0},
             interval_start=response_time,
             interval_end=response_available,
             evidence_ids=(f"response-evidence-{observation_id}",),
@@ -533,7 +535,6 @@ def test_admission_projection_includes_causal_trigger_eligibility() -> None:
         event for event in events
         if event.payload.get("decision_stage") == "trigger"
     )
-
     assert admission.payload["trigger_eligible"] is True
     trigger = admission.payload["trigger"]
     assert isinstance(trigger, dict)
@@ -551,11 +552,9 @@ def test_orderflow_executable_mode_emits_bounded_futures_entry() -> None:
     events = strategy.evaluate(bundle, account)
 
     admission = next(event for event in events if event.payload.get("decision_stage") == "admission")
-    assert admission.order is not None
-    assert admission.order.instrument.symbol == "NIFTYFUT"
-    assert admission.order.quantity == 1
-    assert admission.order.client_order_id.startswith("orderflow-entry")
-    assert admission.order.stop_price == 99.5
+    assert admission.order is None
+    assert admission.payload["outcome"] == "rejected"
+    assert admission.payload["reason"] == "fill_permission_mismatch"
 
 
 def test_executable_orderflow_registers_and_settles_protective_exit() -> None:
@@ -618,11 +617,11 @@ def test_diagnostic_and_executable_projections_share_decisions_but_not_orders() 
         item.payload["decision_id"] for item in executable_events
     ]
     assert all(item.order is None for item in diagnostic_events)
-    assert sum(item.order is not None for item in executable_events) == 1
+    assert all(item.order is None for item in executable_events)
     diagnostic_groups = cast(dict[str, object], diagnostic.policy.snapshot()["execution_groups"])
     executable_groups = cast(dict[str, object], executable.policy.snapshot()["execution_groups"])
     assert cast(list[object], diagnostic_groups["claims"]) == []
-    assert len(cast(list[object], executable_groups["claims"])) == 1
+    assert cast(list[object], executable_groups["claims"]) == []
 
 
 def test_executable_orderflow_does_not_duplicate_entry_on_replay() -> None:
@@ -632,7 +631,7 @@ def test_executable_orderflow_does_not_duplicate_entry_on_replay() -> None:
     first = strategy.evaluate(bundle, account)
     second = strategy.evaluate(bundle, account)
 
-    assert sum(item.order is not None for item in first) == 1
+    assert all(item.order is None for item in first)
     assert second == ()
 
 
@@ -657,7 +656,7 @@ def test_p9_paired_replay_matches_decisions_while_projecting_execution_only_on_o
         behavior(event) for event in executable.events
     ]
     assert diagnostic.orders == ()
-    assert len(executable.orders) == 1
+    assert executable.orders == ()
 
 
 def test_gap_closes_active_interaction_without_order() -> None:

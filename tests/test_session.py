@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from threading import Event
+from types import SimpleNamespace
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
@@ -16,6 +17,7 @@ from ftx_paper.runtime import RuntimeSession, RuntimeStore
 from ftx_paper.domain.capital import ResearchCapitalProfile
 from ftx_paper.strategy import ConfiguredLiveStrategy
 import ftx_paper.broker.zerodha as zerodha
+import ftx_paper.runtime.session as session_module
 
 
 class Feed:
@@ -681,6 +683,40 @@ def test_startup_discovers_options_before_backfill_and_feed_subscription(monkeyp
     assert any(item["symbol"] == option["symbol"] for item in captured["backfill"])
     assert 3 in captured["tokens"]
     assert isinstance(session.broker, PaperBroker)
+
+
+def test_live_orderflow_prior_context_uses_latest_complete_prior_session(monkeypatch, tmp_path):
+    valid_rows = tuple({
+        "symbol": "NIFTY26SEP", "exchange": "NFO", "instrument_type": "FUT",
+        "expiry": "2026-09-24", "minute": f"2026-09-14T{9 + (15 + index) // 60:02d}:{(15 + index) % 60:02d}:00+05:30",
+        "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5,
+        "volume": 1, "open_interest": 1,
+    } for index in range(375))
+    incomplete_rows = valid_rows[:-1]
+
+    class Store:
+        def read_status(self):
+            return {}
+
+        def read_market_dates(self):
+            return ("2026-09-13", "2026-09-14")
+
+    class Resolver:
+        def __init__(self, _store):
+            pass
+
+        def resolve(self, session_date):
+            rows = incomplete_rows if session_date == "2026-09-14" else valid_rows
+            return SimpleNamespace(bars=rows)
+
+    monkeypatch.setattr(session_module, "FuturesSessionSourceResolver", Resolver)
+    session = RuntimeSession(Store(), None, [], engine=PaperEngine())
+    session._initialize_orderflow_prior_context("2026-09-15")
+
+    assert len(session._orderflow_producer._prior_bars) == 375
+    assert session._orderflow_producer._prior_close == 100.5
+    assert session._orderflow_producer._prior_value_high == 101.0
+    assert session._orderflow_producer._prior_value_low == 99.0
 
 
 def test_runtime_session_rejects_non_flat_intraday_startup(tmp_path):
