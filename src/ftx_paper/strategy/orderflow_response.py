@@ -49,6 +49,45 @@ def _after_prior_day_transition(
     )
 
 
+def _causal_candidates(
+    interaction: object, observations: Sequence[object], template: TradeTemplate,
+    cutoff: datetime, *, expiry: datetime | None,
+) -> tuple[object, ...]:
+    """Select only completed, same-instrument/session response evidence."""
+    created_at = getattr(interaction, "created_at", None)
+    terminal_at = getattr(interaction, "closed_at", None)
+    expected_instrument = getattr(interaction, "instrument", None)
+    expected_session = getattr(interaction, "session_id", None)
+    selected: list[object] = []
+    for item in observations:
+        observed_at = getattr(item, "observed_at", None)
+        available_at = getattr(item, "available_at", None)
+        if (
+            getattr(item, "timeframe", None) != template.response_timeframe
+            or not isinstance(observed_at, datetime)
+            or not isinstance(available_at, datetime)
+            or not isinstance(created_at, datetime)
+            or observed_at < created_at
+            or available_at > cutoff
+            or (expiry is not None and available_at > expiry)
+            or (isinstance(terminal_at, datetime) and observed_at > terminal_at)
+            or (expected_instrument is not None and getattr(item, "instrument", None) != expected_instrument)
+            or (expected_session is not None and getattr(getattr(item, "context", None), "session_id", None) != expected_session)
+        ):
+            continue
+        interval_end = getattr(item, "interval_end", None)
+        if isinstance(interval_end, datetime) and available_at < interval_end:
+            continue
+        selected.append(item)
+    return tuple(sorted(
+        selected,
+        key=lambda item: (
+            getattr(item, "observed_at"), getattr(item, "available_at"),
+            getattr(item, "observation_id", ""),
+        ),
+    ))
+
+
 def _template_expiry(created_at: datetime, expiry_at: str) -> datetime:
     expiry = time.fromisoformat(expiry_at)
     # Session timestamps are normally IST-aware.  UTC fixtures represent the
@@ -77,20 +116,11 @@ def evaluate_policy_response(
         return None
     template = _effective_template(template, interaction)
     created_at = getattr(interaction, "created_at", None)
-    terminal_at = getattr(interaction, "closed_at", None)
     expiry = _template_expiry(created_at, template.expiry_at) if isinstance(created_at, datetime) else None
-    candidates = _after_prior_day_transition(tuple(sorted(
-        (item for item in observations
-        if getattr(item, "timeframe", None) == template.response_timeframe
-        and isinstance(getattr(item, "observed_at", None), datetime)
-        and isinstance(getattr(interaction, "created_at", None), datetime)
-        and getattr(item, "observed_at") > getattr(interaction, "created_at")
-        and isinstance(getattr(item, "available_at", None), datetime)
-        and getattr(item, "available_at") <= cutoff
-        and (expiry is None or getattr(item, "available_at") <= expiry)
-        and (not isinstance(terminal_at, datetime) or getattr(item, "observed_at") <= terminal_at)),
-        key=lambda item: (getattr(item, "observed_at"), getattr(item, "available_at"), getattr(item, "observation_id", "")),
-    )), interaction)[:max_candles]
+    candidates = _after_prior_day_transition(
+        _causal_candidates(interaction, observations, template, cutoff, expiry=expiry),
+        interaction,
+    )[:max_candles]
     if not candidates:
         return GeometryResponseEvaluation(None, False, (), None, template.direction)
     lower, upper = getattr(interaction, "band_lower", None), getattr(interaction, "band_upper", None)
@@ -144,23 +174,12 @@ def evaluate_policy_responses(
     for template in templates:
         template_for_evaluation = _effective_template(template, interaction)
         created_at = getattr(interaction, "created_at", None)
-        terminal_at = getattr(interaction, "closed_at", None)
         expiry = _template_expiry(created_at, template_for_evaluation.expiry_at) if isinstance(created_at, datetime) else None
-        candidates = _after_prior_day_transition(tuple(sorted(
-            (item for item in observations
-            if getattr(item, "timeframe", None) == template_for_evaluation.response_timeframe
-            and isinstance(getattr(item, "observed_at", None), datetime)
-            and isinstance(created_at, datetime)
-            # The contact candle is response-window candle one.  NiftyZoning
-            # includes the creation candle once its completed evidence is
-            # available; excluding it shifts every response window by one bar.
-            and getattr(item, "observed_at") >= created_at
-            and isinstance(getattr(item, "available_at", None), datetime)
-            and getattr(item, "available_at") <= cutoff
-            and (expiry is None or getattr(item, "available_at") <= expiry)
-                and (not isinstance(terminal_at, datetime) or getattr(item, "observed_at") <= terminal_at)),
-            key=lambda item: (getattr(item, "observed_at"), getattr(item, "available_at"), getattr(item, "observation_id", "")),
-        )), interaction)[:max_candles]
+        candidates = _after_prior_day_transition(
+            _causal_candidates(
+                interaction, observations, template_for_evaluation, cutoff, expiry=expiry,
+            ), interaction,
+        )[:max_candles]
         lower, upper = getattr(interaction, "band_lower", None), getattr(interaction, "band_upper", None)
         if not isinstance(lower, (int, float)) or not isinstance(upper, (int, float)):
             continue

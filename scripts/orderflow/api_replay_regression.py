@@ -28,6 +28,8 @@ CANONICAL = {
     "gross_reward_points": 155.2143,
     "achieved_risk_reward": 6.1443,
 }
+
+
 def _request(url: str, *, method: str = "GET", payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
     body = json.dumps(payload).encode() if payload is not None else None
     request = Request(url, data=body, method=method, headers={"Content-Type": "application/json"})
@@ -63,6 +65,10 @@ def _display_value(value: Any) -> str:
 
 
 def run(base_url: str, *, timeout: float, interval: float) -> int:
+    if timeout <= 0:
+        raise ValueError("timeout must be greater than zero")
+    if interval < 0:
+        raise ValueError("interval must be non-negative")
     root = base_url.rstrip("/")
     queued = _request(
         f"{root}/api/v1/replay",
@@ -93,8 +99,9 @@ def run(base_url: str, *, timeout: float, interval: float) -> int:
 
     if state != "completed":
         raise RuntimeError(f"replay {run_id} ended with status {state!r}: {status.get('error')}")
-    completed = _request(f"{root}/api/v1/replay/{run_id}?include=result")
-    result = completed.get("result")
+    # Terminal replay responses already include the result. Avoid a second
+    # full SQLite read, JSON decode, and HTTP response for the same payload.
+    result = status.get("result")
     if not isinstance(result, Mapping):
         raise RuntimeError("completed replay did not include result")
 
@@ -108,21 +115,26 @@ def run(base_url: str, *, timeout: float, interval: float) -> int:
             failure = "unavailable (API did not publish this metric)"
             failures.append(f"{name}: {failure}")
             rows.append([name, _display_value(expected), "unavailable", "-", "FAIL"])
-        elif abs(float(observed) - expected) > 1e-4:
-            failures.append(f"{name}: expected {expected}, got {observed}")
-            rows.append([
-                name,
-                _display_value(expected),
-                _display_value(observed),
-                _display_value(float(observed) - expected),
-                "FAIL",
-            ])
         else:
+            try:
+                delta = float(observed) - expected
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(f"replay metric {name} is not numeric: {observed!r}") from exc
+            if abs(delta) > 1e-4:
+                failures.append(f"{name}: expected {expected}, got {observed}")
+                rows.append([
+                    name,
+                    _display_value(expected),
+                    _display_value(observed),
+                    _display_value(delta),
+                    "FAIL",
+                ])
+                continue
             rows.append([
                 name,
                 _display_value(expected),
                 _display_value(observed),
-                _display_value(float(observed) - expected),
+                _display_value(delta),
                 "PASS",
             ])
 
@@ -163,7 +175,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return run(args.base_url, timeout=args.timeout, interval=args.interval)
-    except RuntimeError as exc:
+    except (RuntimeError, ValueError) as exc:
         print(f"Regression ERROR: {exc}", file=sys.stderr)
         return 2
 

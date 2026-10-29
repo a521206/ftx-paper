@@ -51,7 +51,8 @@ class ResponseSpec:
 
     def confirmation_close(self, close: float) -> bool:
         boundary = self.band_upper if self.response_type is ResponseType.ACCEPTANCE and self.direction is Direction.LONG else self.band_lower if self.response_type is ResponseType.ACCEPTANCE else self.center
-        return close > boundary if self.direction is Direction.LONG else close < boundary
+        # Canonical rejection responses confirm at the reference boundary too.
+        return close >= boundary if self.direction is Direction.LONG else close <= boundary
 
     def invalidation_close(self, close: float) -> bool:
         if self.response_type is ResponseType.ACCEPTANCE:

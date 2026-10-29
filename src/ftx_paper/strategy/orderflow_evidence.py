@@ -217,6 +217,7 @@ class OrderflowEvidenceAssembler:
                             method="vwap_provider",
                             reference_source_aggregate_id=location.source_aggregate_id,
                             reference_source_timeframe=location.timeframe or item.timeframe,
+                            frozen_atr=location.frozen_atr,
                         )
                         for location in locations
                         if stable_orderflow_id(
