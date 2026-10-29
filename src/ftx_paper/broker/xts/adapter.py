@@ -155,20 +155,44 @@ def resolve_instruments(
         else:
             sym_clean = str(symbol).strip().upper().replace(" ", "")
             for r in rows:
-                r_tsym = str(r.get("tradingsymbol") or r.get("symbol") or "").strip().upper().replace(" ", "")
-                r_name = str(r.get("name") or "").strip().upper().replace(" ", "")
-                if sym_clean in (r_tsym, r_name):
+                candidate = " ".join(
+                    str(r.get(key) or "") for key in ("tradingsymbol", "symbol", "name")
+                ).strip().upper().replace(" ", "")
+                if sym_clean in candidate or (
+                    sym_clean == "INDIAVIX" and "INDIA" in candidate and "VIX" in candidate
+                ):
                     found = r
                     break
+
+            if not found and sym_clean == "INDIAVIX":
+                try:
+                    index_list = client.index_list(seg_id)
+                    entry = next((value for value in index_list if value.upper().startswith("INDIA VIX_")), None)
+                    if entry is not None:
+                        index_name, token = entry.rsplit("_", 1)
+                        found = {
+                            "instrument_token": int(token), "segment_id": seg_id,
+                            "exchange": master_exchange, "symbol": index_name,
+                            "tradingsymbol": index_name, "name": index_name,
+                            "instrument_type": "INDEX", "expiry": None,
+                            "strike": None, "lot_size": 1, "tick_size": 0.05,
+                        }
+                except Exception:
+                    pass
 
             if not found:
                 # Fallback: search API
                 try:
                     search_results = client.search(str(symbol))
                     for r in search_results:
-                        r_tsym = str(r.get("DisplayName") or r.get("TradingSymbol") or "").strip().upper().replace(" ", "")
-                        if sym_clean == r_tsym:
-                            seg = int(r.get("ExchangeSegment", seg_id))
+                        candidate = " ".join(
+                            str(r.get(key) or "")
+                            for key in ("DisplayName", "TradingSymbol", "Description", "Name")
+                        ).strip().upper().replace(" ", "")
+                        if sym_clean in candidate or (
+                            sym_clean == "INDIAVIX" and "INDIA" in candidate and "VIX" in candidate
+                        ):
+                            seg = normalize_segment(r.get("ExchangeSegment", seg_id))
                             found = {
                                 "instrument_token": int(r["ExchangeInstrumentID"]),
                                 "segment_id": seg,
@@ -187,38 +211,7 @@ def resolve_instruments(
                     pass
 
         if not found:
-            # Special well-known standard defaults for NSE indices if lookup is empty in mock/fallback
-            sym_clean = str(symbol or underlying).strip().upper().replace(" ", "")
-            if sym_clean in ("NIFTY", "NIFTY50") and seg_id == 1:
-                found = {
-                    "instrument_token": 26000,
-                    "segment_id": 1,
-                    "exchange": "NSE",
-                    "symbol": "Nifty 50",
-                    "tradingsymbol": "Nifty 50",
-                    "name": "NIFTY",
-                    "instrument_type": "INDEX",
-                    "expiry": None,
-                    "strike": None,
-                    "lot_size": 1,
-                    "tick_size": 0.05,
-                }
-            elif sym_clean in ("INDIAVIX", "VIX") and seg_id == 1:
-                found = {
-                    "instrument_token": 26001,
-                    "segment_id": 1,
-                    "exchange": "NSE",
-                    "symbol": "India VIX",
-                    "tradingsymbol": "India VIX",
-                    "name": "INDIA VIX",
-                    "instrument_type": "INDEX",
-                    "expiry": None,
-                    "strike": None,
-                    "lot_size": 1,
-                    "tick_size": 0.05,
-                }
-            else:
-                raise ValueError(f"XTS instrument not found: {exchange_str}:{symbol or underlying}")
+            raise ValueError(f"XTS instrument not found: {exchange_str}:{symbol or underlying}")
 
         resolved.append(
             XTSInstrument(

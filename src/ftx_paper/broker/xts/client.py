@@ -210,6 +210,16 @@ class XTSClient:
         result = data.get("result", [])
         return list(result) if isinstance(result, list) else []
 
+    def index_list(self, exchange_segment: int | str = 1) -> list[str]:
+        """Return XTS index names and instrument IDs for an exchange segment."""
+        resp = self._request(
+            "GET", f"{self.root_url}/instruments/indexlist",
+            params={"exchangeSegment": normalize_segment(exchange_segment)},
+        )
+        result = resp.json().get("result", {})
+        values = result.get("indexList", []) if isinstance(result, dict) else []
+        return [str(value) for value in values]
+
     def subscription(
         self,
         instruments: list[dict[str, Any]],

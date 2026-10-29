@@ -95,6 +95,53 @@ def test_load_startup_backfill():
     assert b.close == 25020.0
 
 
+def test_resolve_instruments_uses_search_segment_name_for_vix():
+    class SearchClient(MockXTSClient):
+        def search(self, search_text):
+            assert search_text == "INDIA VIX"
+            return [{
+                "ExchangeSegment": "NSECM", "ExchangeInstrumentID": 987654,
+                "DisplayName": "INDIA VIX", "Name": "INDIA VIX",
+            }]
+
+    resolved = resolve_instruments(SearchClient([]), [{
+        "exchange": "NSECM", "tradingsymbol": "INDIA VIX", "role": "vix",
+    }])
+
+    assert resolved[0]["instrument_token"] == 987654
+    assert resolved[0]["segment_id"] == 1
+
+
+def test_resolve_instruments_uses_index_list_for_vix():
+    class IndexClient(MockXTSClient):
+        def index_list(self, exchange_segment):
+            assert exchange_segment == 1
+            return ["NIFTY 50_26000", "INDIA VIX_26002"]
+
+    resolved = resolve_instruments(IndexClient([]), [{
+        "exchange": "NSECM", "tradingsymbol": "INDIA VIX", "role": "vix",
+    }])
+
+    assert resolved[0]["instrument_token"] == 26002
+    assert resolved[0]["symbol"] == "INDIA VIX"
+
+
+def test_load_startup_backfill_keeps_vix_prices_unchanged():
+    class VIXClient(MockXTSClient):
+        def ohlc(self, segment, token, start, end, compression=60):
+            return [{
+                "time": "2026-10-14 09:15:00", "open": 15.4, "high": 15.6,
+                "low": 15.3, "close": 15.5, "volume": 0.0, "oi": 0.0,
+            }]
+
+    bars = load_startup_backfill(VIXClient([]), [{
+        "instrument_token": 26002, "segment_id": 1, "exchange": "NSE",
+        "symbol": "India VIX", "instrument_type": "INDEX",
+    }])
+
+    assert (bars[0].open, bars[0].high, bars[0].low, bars[0].close) == (15.4, 15.6, 15.3, 15.5)
+
+
 def test_load_startup_backfill_aborts_on_expired_session():
     class ExpiredClient(MockXTSClient):
         def ohlc(self, segment, token, start, end, compression=60):
