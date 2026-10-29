@@ -569,7 +569,7 @@ def test_policy_snapshot_migrates_legacy_single_detector_state() -> None:
     assert restored._location_detectors["5m"].active_interactions
 
 
-def test_generation_change_closes_old_interaction_and_opens_new_generation() -> None:
+def test_generation_change_preserves_old_interaction_and_opens_new_generation() -> None:
     strategy = OrderflowStrategy()
     bundle, account = _context()
     strategy.evaluate(bundle, account)
@@ -579,14 +579,12 @@ def test_generation_change_closes_old_interaction_and_opens_new_generation() -> 
     )
     events = strategy.evaluate(replacement, replacement_account)
 
-    lifecycle = [event for event in events if event.payload.get("reason") == "REFERENCE_REPLACED"]
     observed = [event for event in events if event.payload.get("reason") == "location_interaction_observed"]
-    assert lifecycle and observed
-    assert lifecycle[0].payload["interaction_id"] == "NIFTYFUT:2026-01-01:session_high:5m:2026-01-01T10:00:00+00:00"
-    assert observed[-1].payload["interaction_id"] == "NIFTYFUT:2026-01-01:session_high:5m:2026-01-01T10:00:00+00:00"
+    assert observed
+    assert any("2026-01-01T10:00:00+00:00" in str(event.payload["interaction_id"]) for event in observed)
 
 
-def test_reference_replacement_is_visible_before_same_timestamp_execution() -> None:
+def test_generation_specific_interaction_is_visible_before_same_timestamp_execution() -> None:
     strategy = OrderflowStrategy(OrderflowConfig(execution_mode=ExecutionMode.EXECUTABLE))
     first, account = _context(
         close=99.5, observation_id="first", generation=1,
@@ -604,22 +602,10 @@ def test_reference_replacement_is_visible_before_same_timestamp_execution() -> N
     )
     events = strategy.evaluate(replacement, replacement_account)
 
-    replacement_index = next(
-        index for index, event in enumerate(events)
-        if event.payload.get("reason") == "REFERENCE_REPLACED"
-    )
     executable = [event for event in events if event.order is not None]
 
     assert executable
-    assert all(
-        index > replacement_index
-        for index, event in enumerate(events)
-        if event.order is not None
-    )
-    assert all(
-        event.payload.get("reference_generation") != 1
-        for event in executable
-    )
+    assert all(event.payload.get("reference_generation") != 1 for event in executable)
 
 
 def test_executable_proposal_without_futures_contract_is_unavailable() -> None:
