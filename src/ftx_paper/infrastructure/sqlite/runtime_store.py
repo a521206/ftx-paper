@@ -15,6 +15,7 @@ from ftx_paper.config import IST
 from ftx_paper.contracts import (
     MarketBar, MarketRole, OptionRole, OrderLifecycle, OrderLifecycleState, build_decision_view,
     canonical_market_exchange,
+    canonical_market_symbol,
     is_legal_order_transition, validate_decision_view,
     validate_market_bar,
     role_to_key,
@@ -466,14 +467,15 @@ class SqliteRuntimeStore:
             validate_market_bar(bar)
             timestamp = bar.timestamp.astimezone(IST)
             minute = timestamp.replace(second=0, microsecond=0).isoformat()
-            exchange = canonical_market_exchange(bar.instrument.symbol, bar.instrument.exchange)
+            symbol = canonical_market_symbol(bar.instrument.symbol)
+            exchange = canonical_market_exchange(symbol, bar.instrument.exchange)
             rows.append((
-                bar.instrument.symbol, exchange, minute,
+                symbol, exchange, minute,
                 bar.open, bar.high, bar.low, bar.close, bar.volume,
                 (bar.open_interest if bar.open_interest is not None else 0.0
                  if str(bar.instrument.instrument_type).upper() in {"FUT", "FUTURES"} else None),
                 ("FUT" if str(bar.instrument.instrument_type).upper() == "FUTURES"
-                else "INDEX" if bar.instrument.symbol.upper() in {"NIFTY", "NIFTY 50", "INDIA VIX"}
+                else "INDEX" if symbol.upper() in {"NIFTY", "NIFTY 50", "INDIA VIX"}
                  else bar.instrument.instrument_type),
                 bar.instrument.expiry if str(bar.instrument.instrument_type).upper() in {"FUT", "FUTURES", "CE", "PE"} and bar.instrument.expiry else "",
                 bar.instrument.strike if str(bar.instrument.instrument_type).upper() in {"CE", "PE"} else None,

@@ -55,12 +55,27 @@ def test_runtime_store_canonicalizes_index_exchange_and_rejects_bad_vix(tmp_path
     rows = store.read_market_bars("2026-10-06")
     assert len(rows) == 1
     assert rows[0]["exchange"] == "NSE_INDEX"
+    assert rows[0]["symbol"] == "INDIA VIX"
     assert store.read_market_coverage("2026-10-06")["rows"][0]["bars"] == 1
 
     with pytest.raises(ValueError, match="implausibly high"):
         store.append_market_bars((
             MarketBar(Instrument("India VIX", "NSE", "INDEX"), timestamp, 54900, 54900, 54900, 54900),
         ), source="fixture")
+
+
+def test_runtime_store_canonicalizes_nifty_symbol_aliases(tmp_path):
+    store = RuntimeStore(tmp_path)
+    timestamp = datetime(2026, 10, 6, 4, 0, tzinfo=ZoneInfo("UTC"))
+    store.append_market_bars((
+        MarketBar(Instrument("Nifty 50", "NSE_INDEX", "INDEX"), timestamp, 1, 2, 0, 1),
+        MarketBar(Instrument("NIFTY 50", "NSE_INDEX", "INDEX"), timestamp, 3, 4, 2, 3),
+    ), source="fixture")
+
+    rows = store.read_market_bars("2026-10-06")
+    assert len(rows) == 1
+    assert rows[0]["symbol"] == "NIFTY 50"
+    assert rows[0]["close"] == 3.0
 
 
 def test_runtime_store_keeps_same_minute_contract_bars_separate(tmp_path):

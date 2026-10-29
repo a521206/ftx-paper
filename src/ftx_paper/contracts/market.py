@@ -38,6 +38,16 @@ def canonical_market_exchange(symbol: str, exchange: str) -> str:
     return exchange
 
 
+def canonical_market_symbol(symbol: str) -> str:
+    """Return stable storage names for supported index aliases."""
+    normalized = " ".join(symbol.strip().upper().split())
+    if normalized in {"NIFTY", "NIFTY 50"}:
+        return "NIFTY 50"
+    if normalized == "INDIA VIX":
+        return "INDIA VIX"
+    return symbol.strip()
+
+
 def validate_market_bar(bar: "MarketBar") -> None:
     """Reject malformed normalized OHLC values before Paper persistence."""
     prices = (bar.open, bar.high, bar.low, bar.close)

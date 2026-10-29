@@ -2,7 +2,7 @@
 
 from .market import (
     Instrument, MarketBar, MarketRole, OptionRole, OptionType, Role, SyntheticFutureQuote, SyntheticPremiumPair, SyntheticQuoteSelection, market_minute_key, select_synthetic_quote, synthetic_future_quote,
-    canonical_market_exchange, normalize_exchange_timestamp, parse_role, role_to_key,
+    canonical_market_exchange, canonical_market_symbol, normalize_exchange_timestamp, parse_role, role_to_key,
     validate_market_bar,
 )
 from .orders import (
@@ -23,7 +23,7 @@ from .futures_rollover import (
 
 __all__ = [
     "Instrument", "MarketBar", "MarketRole", "OptionRole", "OptionType", "Role", "SyntheticFutureQuote", "SyntheticPremiumPair", "SyntheticQuoteSelection", "select_synthetic_quote", "synthetic_future_quote",
-    "market_minute_key", "canonical_market_exchange", "normalize_exchange_timestamp", "parse_role", "role_to_key",
+    "market_minute_key", "canonical_market_exchange", "canonical_market_symbol", "normalize_exchange_timestamp", "parse_role", "role_to_key",
     "validate_market_bar",
     "OrderAck", "OrderIntent", "OrderLifecycle", "OrderLifecycleState", "OrderRole", "OrderSide", "OrderType",
     "is_legal_order_transition",

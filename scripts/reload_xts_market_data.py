@@ -28,6 +28,7 @@ from ftx_paper.infrastructure.sqlite.runtime_store import SqliteRuntimeStore
 SESSION_START = time(9, 15)
 SESSION_END = time(15, 30)  # exclusive
 EXPECTED_MINUTES = 375
+ANCHOR_SYMBOLS = frozenset(("NIFTY 50", "INDIA VIX"))
 
 
 def _session_minutes(session_date: date) -> tuple[datetime, ...]:
@@ -97,6 +98,29 @@ def _bars_for_instrument(
     return tuple(by_timestamp[key] for key in expected if key in by_timestamp)
 
 
+def _validate_counts(counts: Counter[str], expected_symbols: tuple[str, ...]) -> str:
+    """Classify a session without treating sparse futures bars as corruption."""
+    normalized = {symbol.upper() for symbol in expected_symbols}
+    anchors = [counts[symbol] for symbol in normalized & ANCHOR_SYMBOLS]
+    if not anchors or all(count == 0 for count in anchors):
+        return "holiday_or_unavailable"
+    if any(count == 0 for count in anchors) or len(set(anchors)) != 1:
+        raise RuntimeError("XTS returned inconsistent spot/index data")
+
+    anchor_count = anchors[0]
+    if anchor_count > EXPECTED_MINUTES:
+        raise RuntimeError("XTS returned more than one session of spot/index data")
+    futures = [
+        counts[symbol] for symbol in normalized - ANCHOR_SYMBOLS
+        if counts[symbol] > 0
+    ]
+    if any(counts[symbol] == 0 for symbol in normalized - ANCHOR_SYMBOLS):
+        raise RuntimeError("XTS returned missing required futures data")
+    if any(count > anchor_count for count in futures):
+        raise RuntimeError("XTS returned inconsistent futures data")
+    return "complete" if anchor_count == EXPECTED_MINUTES else "partial"
+
+
 def reload_dates(
     store: SqliteRuntimeStore, client: Any, dates: tuple[date, ...], *, apply: bool,
 ) -> int:
@@ -109,14 +133,12 @@ def reload_dates(
         )
         counts = Counter(bar.instrument.symbol.upper() for bar in fetched)
         expected_symbols = tuple(str(item["symbol"]).upper() for item in instruments)
-        complete = all(counts[symbol] == EXPECTED_MINUTES for symbol in expected_symbols)
+        status = _validate_counts(counts, expected_symbols)
         print(
             f"{session_date.isoformat()}: "
             f"{[(item['symbol'], item['instrument_token']) for item in instruments]} "
-            f"counts={counts} complete={complete}"
+            f"counts={counts} status={status}"
         )
-        if not complete:
-            raise RuntimeError(f"XTS returned incomplete required data for {session_date.isoformat()}")
         if apply:
             store.append_market_bars(fetched, source="xts_reload")
         total += len(fetched)
