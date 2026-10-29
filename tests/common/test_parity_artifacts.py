@@ -33,6 +33,25 @@ def test_artifact_uses_only_four_layers() -> None:
     validate_parity_artifact(artifact)
     assert set(artifact["layers"]) == set(PARITY_LAYERS)
     assert "p9" not in artifact and "p10" not in artifact
+
+
+def test_artifact_resequences_restarted_producer_decision_stream() -> None:
+    artifact = build_parity_artifact(
+        {"strategy": {"name": "paper", "version": "v1"}, "bars_seen": 3,
+         "events": [], "metadata": {"normalized_fingerprint": "fixture"}},
+        request={"session_date": "2026-01-05"},
+        layer_records={"decision": [
+            {"event_type": "POLICY_DECISION", "decision_id": "d1",
+             "timestamp": "2026-01-05T09:15:00Z", "stage": "interaction", "outcome": "observed", "sequence": 0},
+            {"event_type": "POLICY_DECISION", "decision_id": "d2",
+             "timestamp": "2026-01-05T09:20:00Z", "stage": "candidate", "outcome": "observed", "sequence": 0},
+            {"event_type": "POLICY_DECISION", "decision_id": "d3",
+             "timestamp": "2026-01-05T09:25:00Z", "stage": "admission", "outcome": "rejected", "sequence": 0},
+        ], "execution_settlement": []},
+    )
+
+    validate_parity_artifact(artifact)
+    assert [item["sequence"] for item in artifact["layers"]["decision"]] == [0, 1, 2]
     assert parity_layer_records(artifact, "decision")[0]["sequence"] == 0
 
 

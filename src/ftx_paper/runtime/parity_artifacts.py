@@ -608,6 +608,9 @@ def build_parity_artifact(
             projected = _record(event, kind="decision", sequence=len(decisions))
         except ValueError as exc:
             raise ValueError(f"decision projection failed at {index}: {exc}") from exc
+        # Sequence is an artifact-owned stream position.  Never retain a
+        # producer/runtime sequence (which may restart for each bar).
+        projected["sequence"] = len(projected_decisions)
         projected_decisions.append(projected)
         decision_parents.append(str(local_parent) if local_parent is not None else None)
         for key in ("decision_id", "candidate_id", "opportunity_id", "lifecycle_id", "setup_id"):
@@ -621,6 +624,7 @@ def build_parity_artifact(
                 projected["causal_parent_id"] = parent
             elif not parent:
                 projection_issues.append(f"missing_parent_link:decision:{index}")
+        projected["sequence"] = len(decisions)
         decisions.append(projected)
     execution_types = {"ORDER_INTENT", "ORDER_AUTHORIZED", "ORDER_ACK", "FILL", "ORDER_UNFILLED", "ORDER_SUPPRESSED", "RISK_REJECTED", "RESERVATION", "AUTHORIZATION", "SUBMISSION", "PENDING_EXIT", "EXIT_FILL", "CANCELLATION", "SETTLEMENT"}
     source_execution = [event for event in layer_records.get("execution_settlement", ())
@@ -643,12 +647,17 @@ def build_parity_artifact(
         parent = _parent_identity(event, local_identities)
         if any(event.get(key) for key in ("decision_id", "causal_parent_id", "entry_decision_id", "opportunity_id", "candidate_id", "lifecycle_id")) and parent is None:
             projection_issues.append(f"missing_parent_link:execution:{index}")
-        execution.append(_record(
+        projected = _record(
             event, kind=execution_kinds.get(str(event.get("event_type", "")).upper(), "order_intent"),
             sequence=index, parent_identity=parent,
-        ))
-    settlements = [_record(event, kind="synthetic_settlement", sequence=len(execution) + index)
-                   for index, event in enumerate(result.get("synthetic_settlements", ()))]
+        )
+        projected["sequence"] = len(execution)
+        execution.append(projected)
+    settlements = []
+    for index, event in enumerate(result.get("synthetic_settlements", ())):
+        projected = _record(event, kind="synthetic_settlement", sequence=len(execution) + index)
+        projected["sequence"] = len(execution) + index
+        settlements.append(projected)
     ledger_records: list[dict[str, Any]] = []
     for event in layer_records.get("portfolio_ledger", ()):
         if isinstance(event, Mapping):
@@ -657,12 +666,14 @@ def build_parity_artifact(
             parent = _parent_identity(event, local_identities)
             if any(event.get(key) for key in ("decision_id", "causal_parent_id", "entry_decision_id", "opportunity_id", "candidate_id", "lifecycle_id")) and parent is None:
                 projection_issues.append(f"missing_parent_link:ledger:{len(ledger_records)}")
-            ledger_records.append(_record(
+            projected = _record(
                 event,
                 kind=str(event.get("kind") or event.get("event_type") or "ledger_mutation").lower(),
                 sequence=len(ledger_records),
                 parent_identity=parent,
-            ))
+            )
+            projected["sequence"] = len(ledger_records)
+            ledger_records.append(projected)
     strategy, strategy_hash = strategy_payload_hash(result.get("strategy"))
     metadata = result.get("metadata", {})
     metadata = metadata if isinstance(metadata, Mapping) else {}

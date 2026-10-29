@@ -69,14 +69,12 @@ def evaluate_admission(
     opportunity: SetupOpportunity,
     *,
     context_available: bool,
-    regime_allowed: bool | None,
     opening_gap_allowed: bool | None,
     active_position_allowed: bool | None = None,
     exposure_allowed: bool | None = None,
     allocation_allowed: bool | None = None,
     sizing_allowed: bool | None = None,
     risk_allowed: bool | None = None,
-    setup_valid: bool | None = None,
     direction_matches: bool | None = None,
     confirmations_available: bool | None = None,
     current_at: datetime | None = None,
@@ -90,11 +88,11 @@ def evaluate_admission(
     reference_window: str | None = None,
     evaluate_portfolio_gates: bool = True,
 ) -> AdmissionDecision:
-    """Apply gates in canonical order without owning executable mutations.
+    """Project canonical lifecycle predicates without owning execution.
 
-    The execution owner decides whether a passed projection becomes an order.
-    This helper therefore evaluates executable-mode gates as well as diagnostic
-    gates, while always returning the detached diagnostic projection here.
+    Entry triggers and account constraints remain owned by their respective
+    canonical execution boundaries; this function only returns a detached
+    diagnostic projection.
     """
     if opportunity.status.value != "ACTIVE":
         predicate = PredicateResult(
@@ -132,7 +130,6 @@ def evaluate_admission(
     ) if context_relation is not None else context_available
     checks = [
         ("context_relation", relation_allowed),
-        ("regime_permission", regime_allowed),
         ("opening_gap_permission", opening_gap_allowed),
     ]
     if evaluate_portfolio_gates:
@@ -143,8 +140,6 @@ def evaluate_admission(
     )
     if evaluate_portfolio_gates:
         checks.extend(optional_checks)
-    if setup_valid is not None:
-        checks.append(("setup_validity", setup_valid))
     if direction_matches is not None:
         checks.append(("direction_match", direction_matches))
     if confirmations_available is not None:

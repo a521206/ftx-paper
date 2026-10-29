@@ -115,7 +115,6 @@ class OrderflowPolicy:
     def _confirmation_scores(
         self, observation: OrderflowObservation,
     ) -> tuple[float, float] | None:
-        """Recompute canonical scores from the confirmation evidence boundary."""
         cached = self._confirmation_score_cache.get(observation.observation_id)
         if observation.observation_id in self._confirmation_score_cache:
             return cached
@@ -138,9 +137,6 @@ class OrderflowPolicy:
         if atr is None:
             self._confirmation_score_cache[observation.observation_id] = None
             return None
-        # Scores may only consume evidence available at the confirmation
-        # boundary.  A source row can be observed before it is available, so
-        # ordering by observed_at alone would leak delayed/future evidence.
         all_observations = tuple(
             item for item in self._evaluation_observations
             if item.available_at <= observation.available_at
@@ -208,7 +204,6 @@ class OrderflowPolicy:
     def _prepare_observations(
         self, orderflow: OrderflowContext, context: DecisionContext,
     ) -> tuple[OrderflowObservation, ...]:
-        """Prepare the causal observation prefix and enrich it with VWAP locations."""
         incoming_observations = tuple(sorted(
             (*orderflow.observations_for("1m"), *orderflow.observations_for("5m")),
             key=lambda item: (item.available_at, item.timeframe, item.observed_at, item.observation_id),
@@ -266,8 +261,6 @@ class OrderflowPolicy:
         )
         locations_by_source: dict[str, list[LocationRecord]] = {}
         for location in vwap_locations:
-            # Measurements retain the full prefix; interactions start only once
-            # structural context exists, using the current completed candle.
             if first_parent_available is not None and location.available_at < first_parent_available:
                 continue
             locations_by_source.setdefault(location.source_aggregate_id, []).append(location)
@@ -318,7 +311,6 @@ class OrderflowPolicy:
         self, orderflow: OrderflowContext, boundary: datetime,
         base: Mapping[str, Any],
     ) -> list[PolicyDecision]:
-        """Close prior interactions and reset policy state at a session boundary."""
         transitions = [
             PolicyDecision({
                 **base,
@@ -334,8 +326,6 @@ class OrderflowPolicy:
             for detector in self._location_detectors.values()
             for item in detector.close_all(InteractionCloseReason.SESSION_END, boundary)
         ]
-        # Registry generations are advanced once at the authoritative
-        # session boundary; carried references remain immutable evidence.
         self._location_registry.remove_diagnostic_locations()
         self._location_registry.next_generation(at=boundary, carry=self._session_id is not None)
         self._processed_observation_ids.clear()
@@ -371,7 +361,6 @@ class OrderflowPolicy:
         OrderflowObservation | None,
         OrderflowObservation | None,
     ]:
-        """Publish the opening-gap fact and return the next causal cursors."""
         def is_causally_available(item: OrderflowObservation) -> bool:
             return (
                 (expected_instrument is None or item.instrument == expected_instrument)
@@ -379,9 +368,6 @@ class OrderflowPolicy:
             )
 
         events: list[PolicyDecision] = []
-        # Publish the opening-gap fact from the first causally available 1m
-        # observation. Waiting for the first 5m parent changes the permission
-        # clock and drops the producer fact entirely.
         if not self._opening_gap_initialized:
             first_1m = next(
                 (item for item in observations if item.timeframe == "1m" and is_causally_available(item)),
@@ -460,7 +446,6 @@ class OrderflowPolicy:
         next_opening_gap_1m: OrderflowObservation | None,
         base: Mapping[str, Any],
     ) -> tuple[PolicyDecision, ...]:
-        """Advance the opening-gap permission clock for one causal 1m bar."""
         if (
             observation.timeframe != "1m"
             or not self._opening_gap_initialized
@@ -520,7 +505,6 @@ class OrderflowPolicy:
         already_processed: bool,
         base: Mapping[str, Any],
     ) -> tuple[tuple[PolicyDecision, ...], bool]:
-        """Publish completed-parent context and return whether processing stops."""
         if observation.timeframe != "5m" or already_processed or observation.context is None:
             return (), False
         events: list[PolicyDecision] = []
@@ -584,8 +568,6 @@ class OrderflowPolicy:
             ),
             permission=(
                 "UNAVAILABLE" if observation.context.replay_provenance.get("gap_status") == "source_gap"
-                else "SHORT" if (context_gap.status == "DOWN" or (context_gap.gap_points or 0) < 0)
-                else "LONG" if (context_gap.status == "UP" or (context_gap.gap_points or 0) > 0)
                 else "BOTH"
             ),
             long_score=_number(observation, "long_score"), short_score=_number(observation, "short_score"),
@@ -647,7 +629,6 @@ class OrderflowPolicy:
         gap_status: object,
         base: Mapping[str, Any],
     ) -> tuple[PolicyDecision, ...]:
-        """Apply source-gap suspension, recovery, and lifecycle projections."""
         events: list[PolicyDecision] = []
         if gap_status == "source_gap":
             self._admission_suspended = True
@@ -700,7 +681,6 @@ class OrderflowPolicy:
     def _attach_opening_seed(
         self, observation: OrderflowObservation, base: Mapping[str, Any],
     ) -> tuple[PolicyDecision, ...] | None:
-        """Attach a pending opening hypothesis, or signal causal deferral."""
         if (
             observation.timeframe != "1m"
             or self._opening_seed is None
@@ -760,7 +740,6 @@ class OrderflowPolicy:
         location_observation: LocationObservation,
         base: Mapping[str, Any],
     ) -> tuple[tuple[PolicyDecision, ...], tuple[PolicyDecision, ...], tuple[PolicyDecision, ...]]:
-        """Process one location observation through the live detector."""
         if not isinstance(location_observation, LocationObservation):
             raise ValueError("invalid causal location observation")
         if location_observation.timeframe and location_observation.timeframe != observation.timeframe:
@@ -769,8 +748,6 @@ class OrderflowPolicy:
             parent_context = observation.context
             if parent_context is None or location_observation.child_observation_ids != parent_context.child_observation_ids:
                 raise ValueError("5m location observation lineage does not match parent")
-        # Parent child facts are lineage, not permission to replay historical
-        # candles against a reference published after those candles completed.
         if location_observation.available_at > observation.available_at:
             return (), (), ()
         location_key = location_observation.observation_id
@@ -871,7 +848,6 @@ class OrderflowPolicy:
         self, observation: OrderflowObservation,
         observations: tuple[OrderflowObservation, ...],
     ) -> None:
-        """Advance cumulative 1m/5m projections before response evaluation."""
         if observation.timeframe != "5m":
             return
         projection_sources = {
@@ -899,7 +875,6 @@ class OrderflowPolicy:
     def _advance_opportunity_timeouts(
         self, observation: OrderflowObservation, detector: InteractionDetector,
     ) -> dict[str, SetupOpportunity]:
-        """Advance 5m opportunity expiry before same-bar responses form."""
         previous = dict(self._opportunities)
         if observation.timeframe != "5m":
             return previous
@@ -925,7 +900,6 @@ class OrderflowPolicy:
         interaction: object,
         observations: tuple[OrderflowObservation, ...],
     ) -> tuple[OrderflowObservation, ...]:
-        """Select response-window evidence, retaining future rows for unavailable results."""
         contact_candles = getattr(interaction, "contact_candles", ())
         if not contact_candles:
             return ()
@@ -946,7 +920,6 @@ class OrderflowPolicy:
         previous_opportunities: Mapping[str, SetupOpportunity],
         base: Mapping[str, Any],
     ) -> tuple[PolicyDecision, ...]:
-        """Project newly expired opportunity transitions after causal processing."""
         events: list[PolicyDecision] = []
         for opportunity_id, opportunity in self._opportunities.items():
             previous_opportunity = previous_opportunities.get(opportunity_id)
@@ -979,7 +952,6 @@ class OrderflowPolicy:
         base: Mapping[str, Any],
         detector: InteractionDetector,
     ) -> tuple[LocationInteraction, tuple[PolicyDecision, ...]]:
-        """Apply causal prior-day role transitions before response hypotheses."""
         alias = getattr(interaction, "location_alias", None)
         if alias not in {"PD_LOW", "PD_HIGH"}:
             return interaction, ()
@@ -1047,7 +1019,6 @@ class OrderflowPolicy:
         context: DecisionContext,
         futures: MarketBar | None,
     ) -> dict[str, object]:
-        """Project executable metadata without constructing an order."""
         return {
             "eligible": accepted,
             "direction": direction,
@@ -1074,7 +1045,6 @@ class OrderflowPolicy:
         base: Mapping[str, Any],
         futures: MarketBar | None,
     ) -> tuple[PolicyDecision, ...]:
-        """Materialize the canonical provisional OR seed as an executable candidate."""
         direction = str(seed["direction"])
         alias = str(seed["location"])
         template = TRADE_TEMPLATES.get(("5m_acceptance_breakout", alias))
@@ -1148,7 +1118,6 @@ class OrderflowPolicy:
         detector: InteractionDetector,
         futures: MarketBar | None,
     ) -> tuple[PolicyDecision, ...]:
-        """Evaluate one interaction and handle its confirmed response."""
         if interaction.timeframe != self.config.response_timeframe:
             return ()
         decision_cutoff = min(context.as_of, orderflow.cutoff)
@@ -1183,7 +1152,6 @@ class OrderflowPolicy:
         detector: InteractionDetector,
         futures: MarketBar | None,
     ) -> tuple[PolicyDecision, ...]:
-        """Persist a response hypothesis and, when confirmed, admit its setup."""
         hypothesis_id = template.template_id
         future = next((item for item in response_observations if item.available_at > decision_cutoff), None)
         if future is not None and evaluation.status is None:
@@ -1259,7 +1227,6 @@ class OrderflowPolicy:
         base: Mapping[str, Any],
         futures: MarketBar | None,
     ) -> tuple[PolicyDecision, ...]:
-        """Apply admission and trigger handling for a confirmed response."""
         if direction is None:
             return (PolicyDecision({**base, "decision_stage": "admission", "outcome": "unavailable",
                 "reason": "response_direction_unavailable",
@@ -1313,19 +1280,18 @@ class OrderflowPolicy:
             expected_permission_version=str(current_context.version) if current_context else None, armed=True)
         admission = evaluate_admission(opportunity,
             context_available=current_context is not None,
-            regime_allowed=(current_context is not None and current_context.permission != "UNAVAILABLE" and
-                ((direction == "long" and current_context.permission in {"LONG", "BOTH"}) or
-                 (direction == "short" and current_context.permission in {"SHORT", "BOTH"})) and not self._admission_suspended),
             opening_gap_allowed=(current_context is not None and current_context.opening_gap.status != "UNAVAILABLE" and
                 (current_context.opening_gap.status not in {"UP", "DOWN"} or
                  (direction == "long" and (current_context.opening_gap.gap_points or 0) >= 0) or
                  (direction == "short" and (current_context.opening_gap.gap_points or 0) <= 0)) and not self._admission_suspended),
-            setup_valid=trigger.eligible, direction_matches=True, confirmations_available=confirmation_id is not None,
+            direction_matches=True, confirmations_available=confirmation_id is not None,
             current_at=formed_at, context_version=str(current_context.version) if current_context else None,
             context_relation=relation.value, evidence_ids=evidence_ids, evaluate_portfolio_gates=False)
         self._opportunities[opportunity.lifecycle_id] = opportunity
-        accepted = admission.status.value == "PASSED" and (self.execution_mode is not ExecutionMode.EXECUTABLE or trigger.eligible)
-        proposal = self._execution_proposal(accepted=accepted, direction=direction, observation=observation,
+        accepted = admission.status.value == "PASSED"
+        proposal = self._execution_proposal(
+            accepted=accepted and trigger.eligible,
+            direction=direction, observation=observation,
             opportunity=opportunity, template=template, interaction=interaction, context=context, futures=futures)
         return (
             PolicyDecision({**base, "decision_stage": "opportunity", "outcome": "recorded", "reason": "setup_candidate_formed",
@@ -1410,7 +1376,6 @@ class OrderflowPolicy:
         next_opening_gap_1m: OrderflowObservation | None,
         first_causal_5m: OrderflowObservation | None,
     ) -> list[PolicyDecision]:
-        """Process the causally available observation prefix in event order."""
         results: list[PolicyDecision] = []
         ordered_observations = sorted(
             observations,
@@ -1538,7 +1503,6 @@ class OrderflowPolicy:
 
     @staticmethod
     def _finalize_lifecycle_events(results: list[PolicyDecision]) -> tuple[PolicyDecision, ...]:
-        """Move lifecycle publications to their canonical position without reordering others."""
         lifecycle_reasons = {"interaction_context_published", "interaction_created"}
         lifecycle_events = [item for item in results if item.payload.get("reason") in lifecycle_reasons]
         if lifecycle_events:
@@ -1552,7 +1516,6 @@ class OrderflowPolicy:
         return tuple(results)
 
     def on_execution_event(self, event: ExecutionNotification) -> None:
-        # Diagnostic mode cannot own execution state.
         return None
 
     def snapshot(self) -> Mapping[str, object]:
@@ -1688,7 +1651,6 @@ class OrderflowStrategy:
         self._stop_update_evidence: list[dict[str, object]] = []
 
     def bind_account_context(self, portfolio: object, capital_context: object) -> None:
-        """Record the runtime-owned account boundary without owning its state."""
         del portfolio, capital_context
 
     @property
@@ -1729,7 +1691,6 @@ class OrderflowStrategy:
     def register_entry(self, order: OrderIntent, *, fill_price: float | None = None,
                        entry_fill_time: datetime | str | None = None,
                        reference_price: float | None = None) -> None:
-        """Attach the executable orderflow entry to its causal exit state."""
         if order.stop_price is None or order.client_order_id in self._decision_positions:
             return
         if isinstance(entry_fill_time, str):
