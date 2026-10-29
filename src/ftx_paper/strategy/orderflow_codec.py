@@ -72,7 +72,12 @@ def policy_snapshot_payload(policy: _PolicySnapshotSource) -> dict[str, object]:
         },
         "context_history": policy._context_history.to_dict(),
         "location_registry": [
-            {**asdict(item), "band": asdict(item.band)}
+            {
+                **asdict(item),
+                "created_at": item.created_at.isoformat(),
+                "available_at": item.available_at.isoformat(),
+                "band": asdict(item.band),
+            }
             for item in policy._location_registry.records.values()
         ],
         "context_version": policy._context_version,
