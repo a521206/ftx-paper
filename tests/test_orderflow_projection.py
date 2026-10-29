@@ -62,6 +62,25 @@ def test_orderflow_projection_does_not_misclassify_lifecycle_as_market_state():
     assert result["market_state"] is None
 
 
+def test_orderflow_projection_surfaces_unavailable_diagnostics():
+    unavailable = _view(
+        decision_id="d-unavailable",
+        stage="admission",
+        policy={"outcome": "unavailable", "reason_code": "setup_scores_unavailable"},
+    )
+
+    result = build_orderflow_projection([{"decision_view": unavailable}], [], [], [])
+
+    assert result["diagnostics"] == [{
+        "at": "2026-10-27T10:00:00+05:30",
+        "stage": "admission",
+        "outcome": "unavailable",
+        "reason": "setup_scores_unavailable",
+        "decision_id": "d-unavailable",
+        "evidence": {"metrics": {"entry_price": 100, "stop": 98}, "state": {"response_state": "PENDING_RESPONSE"}, "provenance": {"reference_level": 100}},
+    }]
+
+
 def test_orderflow_projection_uses_explicit_market_state_and_labels_positions():
     view = _view(
         market_state="TRENDING",

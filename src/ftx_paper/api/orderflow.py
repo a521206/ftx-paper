@@ -46,6 +46,21 @@ def build_orderflow_projection(
     canonical = [row for row in decisions if isinstance(row.get("decision_view"), Mapping)]
     canonical.sort(key=lambda row: str(row["decision_view"].get("at") or row.get("created_at") or ""), reverse=True)
     latest = canonical[0] if canonical else {}
+    diagnostics = []
+    for row in canonical[:100]:
+        row_view = _mapping(row.get("decision_view"))
+        row_policy = _mapping(row_view.get("policy"))
+        outcome = _first(row_view.get("outcome"), row_policy.get("outcome"))
+        if outcome not in {"unavailable", "rejected"}:
+            continue
+        diagnostics.append({
+            "at": _first(row_view.get("at"), row.get("created_at")),
+            "stage": _first(row_view.get("stage"), row_policy.get("stage")),
+            "outcome": outcome,
+            "reason": _first(row_policy.get("reason_code"), row_policy.get("message"), row_view.get("detail")),
+            "decision_id": row_view.get("decision_id"),
+            "evidence": _mapping(row_view.get("evidence")),
+        })
     view = _mapping(latest.get("decision_view"))
     subject = _mapping(view.get("subject"))
     policy = _mapping(view.get("policy"))
@@ -134,4 +149,5 @@ def build_orderflow_projection(
         "position_scope": "shared_portfolio",
         "trades": list(trades),
         "provenance": {"decision_id": view.get("decision_id"), "decision_at": view.get("at"), "source": provenance},
+        "diagnostics": diagnostics,
     }
