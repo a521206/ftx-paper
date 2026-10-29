@@ -1,5 +1,16 @@
 from ftx_paper.strategy.response import ResponseCandle, build_response_spec, evaluate_response_window
-from ftx_paper.strategy.templates import Direction, ResponseType, TRADE_TEMPLATES
+import pytest
+
+from ftx_paper.strategy.templates import (
+    Direction,
+    ExitExecutionTiming,
+    ExitMode,
+    ExitResponseConfig,
+    LocationTemplate,
+    ResponseType,
+    TradeExit,
+    TRADE_TEMPLATES,
+)
 
 
 def test_template_registry_derives_direction_and_response_geometry() -> None:
@@ -18,10 +29,51 @@ def test_template_registry_derives_direction_and_response_geometry() -> None:
 
 
 def test_template_exits_and_vwap_stops_match_canonical_locations() -> None:
-    assert TRADE_TEMPLATES[("5m_recovery_breakout", "PD_HIGH")].exits[0].location.value == "PD_LOW"
-    assert TRADE_TEMPLATES[("5m_recovery_breakout", "PD_LOW")].exits[0].location.value == "PD_HIGH"
-    assert TRADE_TEMPLATES[("5m_recovery_breakout", "SESSION_HIGH")].exits[0].location.value == "OR_LOW"
-    assert TRADE_TEMPLATES[("5m_acceptance_breakout", "SESSION_LOW")].exits[0].location.value == "OR_HIGH"
+    exits = {
+        key: TRADE_TEMPLATES[key].exits[0]
+        for key in (
+            ("5m_recovery_breakout", "PD_HIGH"),
+            ("5m_recovery_breakout", "PD_LOW"),
+            ("5m_recovery_breakout", "SESSION_HIGH"),
+            ("5m_acceptance_breakout", "SESSION_LOW"),
+        )
+    }
+    assert exits[("5m_recovery_breakout", "PD_HIGH")].location is LocationTemplate.PD_LOW
+    assert exits[("5m_recovery_breakout", "PD_LOW")].location is LocationTemplate.PD_HIGH
+    assert exits[("5m_recovery_breakout", "SESSION_HIGH")].location is LocationTemplate.OR_LOW
+    assert exits[("5m_acceptance_breakout", "SESSION_LOW")].location is LocationTemplate.OR_HIGH
+    assert all(exit_rule.mode is ExitMode.CONDITIONAL for exit_rule in exits.values())
+    assert all(exit_rule.execution == ExitExecutionTiming() for exit_rule in exits.values())
     assert TRADE_TEMPLATES[("5m_recovery_breakout", "OR_HIGH")].exits == ()
     assert TRADE_TEMPLATES[("5m_acceptance_breakout", "OR_HIGH")].stop_policy.value == "or_vwap"
     assert TRADE_TEMPLATES[("5m_acceptance_breakout", "OR_LOW")].stop_policy.value == "or_vwap"
+
+
+def test_template_locations_do_not_use_vwap_as_a_location() -> None:
+    assert all(
+        LocationTemplate.VWAP not in template.locations
+        for template in TRADE_TEMPLATES.values()
+    )
+
+
+def test_exit_execution_timing_rejects_unsupported_contracts() -> None:
+    with pytest.raises(ValueError, match="same-bar exits"):
+        ExitExecutionTiming(order="same_bar")
+    with pytest.raises(ValueError, match="completed-close exits"):
+        ExitExecutionTiming(evidence="completed_close", order="same_bar")
+
+
+def test_exit_response_normalizes_enums_and_rejects_unstructured_execution_values() -> None:
+    response = ExitResponseConfig("long", "rejection")
+    assert response.direction is Direction.LONG
+    assert response.response_type is ResponseType.REJECTION
+
+    with pytest.raises(TypeError, match="structured execution timing"):
+        TradeExit(
+            rule_id="unstructured",
+            location=LocationTemplate.PD_LOW,
+            mode=ExitMode.CONDITIONAL,
+            required=False,
+            execution=object(),  # type: ignore[arg-type]
+            trigger="touch_after_confirmation",
+        )

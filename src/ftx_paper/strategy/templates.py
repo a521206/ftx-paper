@@ -18,6 +18,7 @@ class Direction(StrEnum):
 
 
 class LocationTemplate(StrEnum):
+    VWAP = "VWAP"
     OR_HIGH = "OR_HIGH"
     OR_LOW = "OR_LOW"
     PD_HIGH = "PD_HIGH"
@@ -49,23 +50,62 @@ class StopPolicy(StrEnum):
     OR_VWAP = "or_vwap"
 
 
+class ExitMode(StrEnum):
+    FIXED_TARGET = "fixed_target"
+    CONDITIONAL = "conditional"
+
+
+@dataclass(frozen=True, slots=True)
+class ExitExecutionTiming:
+    evidence: str = "touch"
+    order: str = "next_bar_open"
+    fill: str = "open"
+    gap_policy: str = "fill_open"
+
+    def __post_init__(self) -> None:
+        if self.evidence not in {"touch", "completed_close"}:
+            raise ValueError("unsupported execution evidence")
+        if self.order not in {"next_bar_open", "same_bar"}:
+            raise ValueError("unsupported execution order")
+        if self.fill not in {"open", "level"}:
+            raise ValueError("unsupported execution fill")
+        if self.gap_policy not in {"fill_open", "reject"}:
+            raise ValueError("unsupported execution gap policy")
+        if self.evidence == "completed_close" and self.order != "next_bar_open":
+            raise ValueError("completed-close exits require next-bar execution")
+        if self.order == "same_bar":
+            raise ValueError("same-bar exits are not supported by the replay")
+        if self.fill != "open" or self.gap_policy != "fill_open":
+            raise ValueError("the replay supports only next-bar-open fill_open execution")
+
+
 @dataclass(frozen=True, slots=True)
 class ExitResponseConfig:
     direction: Direction
     response_type: ResponseType
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "direction", Direction(self.direction))
+        object.__setattr__(self, "response_type", ResponseType(self.response_type))
 
 
 @dataclass(frozen=True, slots=True)
 class TradeExit:
     rule_id: str
     location: LocationTemplate
+    mode: ExitMode
+    required: bool
+    execution: ExitExecutionTiming
     trigger: str
-    required: bool = False
-    response: ExitResponseConfig | None = None
-    mode: str = "conditional"
-    execution: str = "next_bar"
     score_direction: str | None = None
     score_margin: float | None = None
+    response: ExitResponseConfig | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "location", LocationTemplate(self.location))
+        object.__setattr__(self, "mode", ExitMode(self.mode))
+        if not isinstance(self.execution, ExitExecutionTiming):
+            raise TypeError("trade exits require structured execution timing")
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +119,7 @@ class TradeTemplate:
     response_timeframe: str
     carry_sessions: int
     trigger_type: TriggerType
-    exits: tuple[TradeExit, ...] = ()
+    exits: tuple[TradeExit, ...]
     stop_policy: StopPolicy = StopPolicy.STRUCTURAL_TRAILING
     expiry_at: str = "15:00"
     required_confirmation: tuple[str, ...] = ()
@@ -109,23 +149,27 @@ class TradeTemplate:
 
 TRADE_EXITS: Mapping[str, TradeExit] = {
     "short_to_or_low": TradeExit(
-        "short-to-or-low-exit", LocationTemplate.OR_LOW,
-        "touch_after_confirmation", response=ExitResponseConfig(Direction.LONG, ResponseType.REJECTION),
+        rule_id="short-to-or-low-exit", location=LocationTemplate.OR_LOW,
+        mode=ExitMode.CONDITIONAL, required=False, execution=ExitExecutionTiming(),
+        trigger="touch_after_confirmation", response=ExitResponseConfig(Direction.LONG, ResponseType.REJECTION),
         score_direction="long", score_margin=0.0,
     ),
     "long_to_or_high": TradeExit(
-        "long-to-or-high-exit", LocationTemplate.OR_HIGH,
-        "touch_after_confirmation", response=ExitResponseConfig(Direction.SHORT, ResponseType.REJECTION),
+        rule_id="long-to-or-high-exit", location=LocationTemplate.OR_HIGH,
+        mode=ExitMode.CONDITIONAL, required=False, execution=ExitExecutionTiming(),
+        trigger="touch_after_confirmation", response=ExitResponseConfig(Direction.SHORT, ResponseType.REJECTION),
         score_direction="short", score_margin=0.0,
     ),
     "pd_high_short": TradeExit(
-        "pd_high-short-exit", LocationTemplate.PD_LOW,
-        "touch_after_confirmation", response=ExitResponseConfig(Direction.LONG, ResponseType.REJECTION),
+        rule_id="pd_high-short-exit", location=LocationTemplate.PD_LOW,
+        mode=ExitMode.CONDITIONAL, required=False, execution=ExitExecutionTiming(),
+        trigger="touch_after_confirmation", response=ExitResponseConfig(Direction.LONG, ResponseType.REJECTION),
         score_direction="long", score_margin=0.0,
     ),
     "pd_low_long": TradeExit(
-        "pd_low-long-exit", LocationTemplate.PD_HIGH,
-        "touch_after_confirmation", response=ExitResponseConfig(Direction.SHORT, ResponseType.REJECTION),
+        rule_id="pd_low-long-exit", location=LocationTemplate.PD_HIGH,
+        mode=ExitMode.CONDITIONAL, required=False, execution=ExitExecutionTiming(),
+        trigger="touch_after_confirmation", response=ExitResponseConfig(Direction.SHORT, ResponseType.REJECTION),
         score_direction="short", score_margin=0.0,
     ),
 }
@@ -172,13 +216,23 @@ TRADE_TEMPLATES: Mapping[tuple[str, str], TradeTemplate] = {
     ("5m_acceptance_breakout", "SESSION_LOW"): _template("session_low-short-acceptance_breakout", LocationTemplate.SESSION_LOW, Direction.SHORT, ResponseType.ACCEPTANCE, TriggerType.BREAKOUT, stop=StopPolicy.OR_VWAP, exits=(TRADE_EXITS["long_to_or_high"],)),
 }
 
-DEFAULT_TEMPLATES: Mapping[str, TradeTemplate] = {item.template_id: item for item in TRADE_TEMPLATES.values()}
+# Keep the canonical default subset rule even though every current template
+# uses one of these registered locations.
+DEFAULT_TEMPLATES: Mapping[str, TradeTemplate] = {
+    template.template_id: template
+    for template in TRADE_TEMPLATES.values()
+    if template.response_type is ResponseType.REJECTION
+    or any(location.value in {
+        "OR_LOW", "OR_HIGH", "PD_LOW", "PD_HIGH", "SESSION_LOW", "SESSION_HIGH",
+    } for location in template.locations)
+}
 DEFAULT_REJECTION_TEMPLATES: Mapping[str, TradeTemplate] = {
     key: item for key, item in DEFAULT_TEMPLATES.items() if item.response_type is ResponseType.REJECTION
 }
 
 __all__ = [
     "DEFAULT_REJECTION_TEMPLATES", "DEFAULT_TEMPLATES", "Direction",
-    "LocationTemplate", "OpeningInteractionKind", "ResponseType", "StopPolicy", "TradeExit",
+    "ExitExecutionTiming", "ExitMode", "LocationTemplate", "OpeningInteractionKind",
+    "ResponseType", "StopPolicy", "TradeExit", "ExitResponseConfig",
     "TradeTemplate", "TRADE_EXITS", "TRADE_TEMPLATES", "TriggerType",
 ]
