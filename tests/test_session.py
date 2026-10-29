@@ -9,12 +9,14 @@ from ftx_paper.broker import Fill, PaperBroker
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderIntent, OrderRole, OrderSide
 from ftx_paper.runtime.store import _json_safe
 from ftx_paper.market import DecisionBundle, CompletedBarAggregator
-from ftx_paper.runtime.engine import EngineResult, PaperEngine
+from ftx_paper.runtime.engine import EngineResult, MultiStrategyEngine, PaperEngine
 from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.runtime.futures_source import FuturesSessionSourceResolver
 from ftx_paper.runtime import RuntimeSession, RuntimeStore
 from ftx_paper.domain.capital import ResearchCapitalProfile
 from ftx_paper.strategy import ConfiguredLiveStrategy
+from ftx_paper.strategy.decision import CandidateDecision
+from ftx_paper.strategy.protocol import StrategyMetadata
 import ftx_paper.broker.zerodha as zerodha
 
 
@@ -642,3 +644,76 @@ def test_runtime_session_rejects_non_flat_intraday_startup(tmp_path):
 
     with pytest.raises(RuntimeError, match="must start flat"):
         session.start()
+
+
+class _SameIdDecisionStrategy:
+    metadata = StrategyMetadata("same-id", "1", "config")
+
+    def __init__(self, vehicles: tuple[str, ...]) -> None:
+        self.vehicles = vehicles
+
+    def on_bundle(self, bundle):
+        return tuple(
+            CandidateDecision({"decision_id": "candidate-1", "vehicle": vehicle, "outcome": "rejected",
+                               "reason": "insufficient_risk_budget"})
+            for vehicle in self.vehicles
+        )
+
+    def evaluate(self, bundle, context):
+        return self.on_bundle(bundle)
+
+    def on_execution_event(self, event):
+        pass
+
+    def snapshot(self):
+        return {}
+
+
+def _futures_bundle():
+    instrument = Instrument("NIFTY26JANFUT", "NFO", "FUTURES", "2026-01-29")
+    aggregator = CompletedBarAggregator(
+        {("NFO", "NIFTY26JANFUT"): MarketRole.FUTURES},
+        required_roles=(MarketRole.FUTURES,), deadline_seconds=0,
+    )
+    bundle = aggregator.ingest(MarketBar(instrument, datetime(2026, 1, 1, 4, 50, tzinfo=timezone.utc), 100, 102, 99, 101))
+    assert bundle is not None
+    return bundle
+
+
+def test_live_decisions_for_each_vehicle_of_one_candidate_are_all_stored(tmp_path):
+    store = RuntimeStore(tmp_path)
+    session = RuntimeSession(store, None, [], engine=PaperEngine(
+        _SameIdDecisionStrategy(("futures", "synthetic")), emit_rejected_decisions=True,
+    ))
+
+    session._process_bundle(_futures_bundle(), source="live")
+
+    decisions = store.read_decision_events(session_date="2026-01-01")
+    assert sorted(event["payload"]["vehicle"] for event in decisions) == ["futures", "synthetic"]
+
+
+def test_live_decisions_from_two_strategies_with_the_same_id_are_both_stored(tmp_path):
+    store = RuntimeStore(tmp_path)
+    session = RuntimeSession(store, None, [], engine=cast(PaperEngine, MultiStrategyEngine({
+        "research-a": _SameIdDecisionStrategy(("futures",)),
+        "research-b": _SameIdDecisionStrategy(("futures",)),
+    }, emit_rejected_decisions=True)))
+
+    session._process_bundle(_futures_bundle(), source="live")
+
+    decisions = store.read_decision_events(session_date="2026-01-01")
+    assert sorted(event["payload"]["strategy_id"] for event in decisions) == ["research-a", "research-b"]
+
+
+def test_reprocessing_the_same_live_minute_does_not_duplicate_decisions(tmp_path):
+    store = RuntimeStore(tmp_path)
+    session = RuntimeSession(store, None, [], engine=PaperEngine(
+        _SameIdDecisionStrategy(("futures", "synthetic")), emit_rejected_decisions=True,
+    ))
+    bundle = _futures_bundle()
+
+    session._process_bundle(bundle, source="live")
+    session._process_bundle(bundle, source="live")
+
+    decisions = store.read_decision_events(session_date="2026-01-01")
+    assert sorted(event["payload"]["vehicle"] for event in decisions) == ["futures", "synthetic"]
