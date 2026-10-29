@@ -28,7 +28,8 @@ if TYPE_CHECKING:
         observe_market, rows_available_for_observation,
     )
     from .orderflow_context import (
-        ContextHistory, MarketContext, ContextVersionRef, ContextRelation,
+        ContextHistory, MarketContext, ContextVersionRef, ContextRelation, ContextTransition,
+        Permission, RegimePermission,
         OpeningGapState, SessionLevels, ValueReference,
         advance_opening_gap, classify_opening_gap, classify_context_relation,
     )
@@ -148,9 +149,10 @@ def __getattr__(name: str):
             "observe_market": observe_market,
             "rows_available_for_observation": rows_available_for_observation,
         }[name]
-    if name in {"ContextHistory", "MarketContext", "ContextVersionRef", "ContextRelation", "OpeningGapState", "SessionLevels", "ValueReference", "advance_opening_gap", "classify_opening_gap", "classify_context_relation"}:
+    if name in {"ContextHistory", "MarketContext", "ContextVersionRef", "ContextRelation", "ContextTransition", "Permission", "RegimePermission", "OpeningGapState", "SessionLevels", "ValueReference", "advance_opening_gap", "classify_opening_gap", "classify_context_relation"}:
         from .orderflow_context import (
-            ContextHistory, MarketContext, ContextVersionRef, ContextRelation,
+            ContextHistory, MarketContext, ContextVersionRef, ContextRelation, ContextTransition,
+            Permission, RegimePermission,
             OpeningGapState, SessionLevels, ValueReference,
             advance_opening_gap, classify_opening_gap, classify_context_relation,
         )
@@ -159,6 +161,9 @@ def __getattr__(name: str):
             "MarketContext": MarketContext,
             "ContextVersionRef": ContextVersionRef,
             "ContextRelation": ContextRelation,
+            "ContextTransition": ContextTransition,
+            "Permission": Permission,
+            "RegimePermission": RegimePermission,
             "OpeningGapState": OpeningGapState,
             "SessionLevels": SessionLevels,
             "ValueReference": ValueReference,
@@ -241,7 +246,8 @@ __all__ = [
     "prepare_replay_input", "source_fingerprint",
     "MarketObservation", "ObservationBoundary", "ObservationGap", "ObservationIssue",
     "observe_market", "rows_available_for_observation",
-    "ContextHistory", "MarketContext", "ContextVersionRef", "ContextRelation",
+    "ContextHistory", "MarketContext", "ContextVersionRef", "ContextRelation", "ContextTransition",
+    "Permission", "RegimePermission",
     "OpeningGapState", "SessionLevels", "ValueReference",
     "advance_opening_gap", "classify_opening_gap", "classify_context_relation",
     "LocationBand", "LocationObservation", "LocationRecord", "LocationRegistry",

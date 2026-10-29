@@ -4,7 +4,8 @@ import pytest
 
 from ftx_paper.strategy import (
     ContextHistory, ContextVersionRef, MarketContext, OpeningGapState,
-    SessionLevels, ValueReference, advance_opening_gap, classify_context_relation,
+    Permission, RegimePermission, SessionLevels, ValueReference, advance_opening_gap,
+    classify_context_relation,
 )
 
 
@@ -14,7 +15,8 @@ UTC = timezone.utc
 def _version(number: int, available_at: datetime) -> MarketContext:
     return MarketContext(
         "ctx-2026-01-01", number, available_at,
-        SessionLevels("2026-01-01"), OpeningGapState("NONE"), "BOTH",
+        SessionLevels("2026-01-01"), OpeningGapState("NONE"),
+        RegimePermission(str(number), "market", Permission.ALLOWED, Permission.ALLOWED),
     )
 
 
@@ -79,7 +81,8 @@ def test_market_context_preserves_parent_child_identity_and_location_as_of() -> 
     available = datetime(2026, 1, 1, 9, 20, tzinfo=UTC)
     parent = MarketContext(
         "context:2026-01-01", 1, available, SessionLevels("2026-01-01"),
-        OpeningGapState("NONE"), "BOTH", location=None,
+        OpeningGapState("NONE"),
+        RegimePermission("1", "market", Permission.ALLOWED, Permission.ALLOWED), location=None,
     )
     child = MarketContext(
         "interaction:OR_LOW:2026-01-01", 2, available, parent.levels, parent.opening_gap,
@@ -102,3 +105,14 @@ def test_context_relation_is_directional_and_does_not_treat_weak_evidence_as_con
     assert classify_context_relation(
         location="OR_LOW", direction="long", evidence={},
     ).value == "neutral"
+
+
+def test_market_context_evidence_is_immutable_after_publication() -> None:
+    context = MarketContext(
+        "ctx-immutable", 1, datetime(2026, 1, 1, 9, 15, tzinfo=UTC),
+        SessionLevels("2026-01-01"), OpeningGapState("NONE"),
+        RegimePermission("1", "market", Permission.ALLOWED, Permission.ALLOWED),
+        evidence=({"source": {"id": "obs-1"}},),
+    )
+    with pytest.raises(TypeError):
+        context.evidence[0]["source"]["id"] = "obs-2"  # type: ignore[index]

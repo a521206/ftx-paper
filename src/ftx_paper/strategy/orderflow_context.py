@@ -6,8 +6,22 @@ from dataclasses import dataclass
 from datetime import datetime
 from collections.abc import Iterable
 from collections.abc import Mapping
+from types import MappingProxyType
+from typing import Any
 from .orderflow_capture import detached_asdict
 from enum import StrEnum
+
+
+def _freeze(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze(item) for item in value)
+    if isinstance(value, tuple):
+        return tuple(_freeze(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_freeze(item) for item in value)
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +89,44 @@ class OpeningGapState:
             raise ValueError("unavailable opening gap cannot have a value")
 
 
+class Permission(StrEnum):
+    ALLOWED = "allowed"
+    CONDITIONAL = "conditional"
+    BLOCKED = "blocked"
+
+
+@dataclass(frozen=True, slots=True)
+class RegimePermission:
+    """Directional permission inherited by lower-level orderflow decisions."""
+
+    version: str
+    context: str
+    long: Permission
+    short: Permission
+    restrictions: tuple[str, ...] = ()
+    opening_gap_state: str | None = None
+    opening_gap_direction: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.version.strip() or not self.context.strip():
+            raise ValueError("permission version and context are required")
+        object.__setattr__(self, "long", Permission(self.long))
+        object.__setattr__(self, "short", Permission(self.short))
+        if self.opening_gap_direction not in {None, "up", "down"}:
+            raise ValueError("invalid opening-gap direction")
+
+    def permits(self, direction: str) -> bool:
+        if direction not in {"long", "short"}:
+            raise ValueError(f"unsupported direction: {direction}")
+        return (self.long if direction == "long" else self.short) is not Permission.BLOCKED
+
+
+class ContextTransition(StrEnum):
+    MARKET_CONTEXT = "market_context_transition"
+    SETUP_INVALIDATION = "setup_invalidation"
+    INTENT_CANCELLATION = "trade_intent_cancellation"
+
+
 @dataclass(frozen=True, slots=True)
 class ContextVersionRef:
     """Stable reference to the exact context consulted by a decision."""
@@ -99,7 +151,7 @@ class MarketContext:
     available_at: datetime
     levels: SessionLevels
     opening_gap: OpeningGapState
-    permission: str
+    permission: RegimePermission
     evidence_ids: tuple[str, ...] = ()
     value_reference: ValueReference | None = None
     location: str | None = None
@@ -114,21 +166,23 @@ class MarketContext:
     def __post_init__(self) -> None:
         if not self.context_id.strip() or self.version < 1:
             raise ValueError("context identity and positive version are required")
-        if self.permission not in {"UNAVAILABLE", "LONG", "SHORT", "BOTH", "NONE"}:
-            raise ValueError("invalid context permission")
+        if not isinstance(self.permission, RegimePermission):
+            raise TypeError("context permission must be RegimePermission")
         if len(self.evidence_ids) != len(set(self.evidence_ids)):
             raise ValueError("context evidence IDs must be unique")
         if self.available_at.tzinfo is None or self.available_at.utcoffset() is None:
             raise ValueError("context availability must be timezone-aware")
         if self.source_timeframe != "5m":
             raise ValueError("orderflow context must be sourced from completed 5m evidence")
+        object.__setattr__(self, "evidence", _freeze(self.evidence))
+        object.__setattr__(self, "source_provenance", _freeze(self.source_provenance))
 
     def to_dict(self) -> dict[str, object]:
         return {
             "context_id": self.context_id, "version": self.version,
             "available_at": self.available_at.isoformat(),
             "levels": detached_asdict(self.levels), "opening_gap": detached_asdict(self.opening_gap),
-            "permission": self.permission, "evidence_ids": list(self.evidence_ids),
+            "permission": detached_asdict(self.permission), "evidence_ids": list(self.evidence_ids),
             "value_reference": detached_asdict(self.value_reference) if self.value_reference else None,
             "location": self.location, "market_state": self.market_state,
             "long_score": self.long_score, "short_score": self.short_score,
@@ -232,9 +286,18 @@ class ContextHistory:
                 float(gap_raw["prior_value_low"]) if gap_raw.get("prior_value_low") is not None else None,
                 float(gap_raw["prior_value_high"]) if gap_raw.get("prior_value_high") is not None else None,
             )
+            permission_raw = item.get("permission")
+            if not isinstance(permission_raw, Mapping):
+                raise ValueError("context permission payload is invalid")
             decoded.append(MarketContext(
                 str(item["context_id"]), int(item["version"]), datetime.fromisoformat(str(item["available_at"])),
-                levels, gap, str(item["permission"]),
+                levels, gap, RegimePermission(
+                    str(permission_raw["version"]), str(permission_raw["context"]),
+                    Permission(str(permission_raw["long"])), Permission(str(permission_raw["short"])),
+                    tuple(str(value) for value in permission_raw.get("restrictions", ())),
+                    str(permission_raw["opening_gap_state"]) if permission_raw.get("opening_gap_state") is not None else None,
+                    str(permission_raw["opening_gap_direction"]) if permission_raw.get("opening_gap_direction") is not None else None,
+                ),
                 tuple(str(value) for value in item.get("evidence_ids", ())), value,
                 str(item["location"]) if item.get("location") is not None else None,
                 str(item["market_state"]) if item.get("market_state") is not None else None,
@@ -327,7 +390,8 @@ def advance_opening_gap(
 
 
 __all__ = [
-    "ContextHistory", "MarketContext", "ContextVersionRef", "ContextRelation",
+    "ContextHistory", "MarketContext", "ContextVersionRef", "ContextRelation", "ContextTransition",
+    "Permission", "RegimePermission",
     "OpeningGapState", "SessionLevels", "ValueReference", "advance_opening_gap",
     "classify_opening_gap", "classify_context_relation",
 ]
