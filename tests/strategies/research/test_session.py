@@ -271,7 +271,7 @@ def test_replay_resolves_current_then_prior_source_once(tmp_path):
         MarketBar(
             Instrument("NIFTY26SEPFUT", "NFO", "FUTURES", "2026-09-30"),
             datetime(2026, 9, 28, 4, 0, tzinfo=timezone.utc),
-            22800, 23124.1, 22792.9, 22900,
+            100, 23124.1, 22792.9, 105,
         ),
         MarketBar(
             Instrument("NIFTY01OCTFUT", "NFO", "FUTURES", "2026-10-01"),

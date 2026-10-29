@@ -148,6 +148,27 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             return jsonify(error_payload("invalid_date", "session_date must be YYYY-MM-DD")), 400
         if parsed_date != requested_date or parsed_date not in store.read_market_dates():
             return jsonify(error_payload("no_data", "no market data for session_date")), 404
+        if replay_request.strategy_id == "ftx-paper-orderflow":
+            coverage = store.read_market_coverage(parsed_date)
+            symbols = {
+                str(row["symbol"]).strip().upper()
+                for row in coverage["rows"]
+                if str(row["instrument_type"]).upper() == "INDEX"
+            }
+            missing = sorted(
+                symbol for symbol in ("NIFTY", "NIFTY 50", "INDIA VIX")
+                if symbol not in symbols
+            )
+            # NIFTY and NIFTY 50 are equivalent storage symbols.
+            if "NIFTY" in missing and "NIFTY 50" in symbols:
+                missing.remove("NIFTY")
+            if "NIFTY 50" in missing and "NIFTY" in symbols:
+                missing.remove("NIFTY 50")
+            if missing:
+                return jsonify(error_payload(
+                    "incomplete_market_data",
+                    "required index input is missing: " + ", ".join(missing),
+                )), 409
         payload = replay_request.to_dict()
         payload["session_date"] = parsed_date
         try:

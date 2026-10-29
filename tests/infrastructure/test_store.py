@@ -67,8 +67,8 @@ def test_runtime_store_keeps_same_minute_contract_bars_separate(tmp_path):
     store = RuntimeStore(tmp_path)
     timestamp = datetime(2026, 9, 29, 4, 0, tzinfo=ZoneInfo("UTC"))
     store.append_market_bars((
-            MarketBar(Instrument("NIFTYFUT", "NFO", "FUTURES", "2026-09-29"), timestamp, 1, 2, 0.5, 1),
-            MarketBar(Instrument("NIFTYFUT", "NFO", "FUTURES", "2026-10-27"), timestamp, 3, 4, 2, 3),
+        MarketBar(Instrument("NIFTYFUT", "NFO", "FUTURES", "2026-09-29"), timestamp, 1, 2, 0, 1),
+        MarketBar(Instrument("NIFTYFUT", "NFO", "FUTURES", "2026-10-27"), timestamp, 3, 4, 2, 3),
     ), source="fixture")
 
     rows = store.read_market_bars("2026-09-29")
