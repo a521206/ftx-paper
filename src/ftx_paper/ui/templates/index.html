@@ -1711,7 +1711,26 @@
       const buttons = document.querySelectorAll(`[data-run-id="${CSS.escape(runId)}"]`);
       buttons.forEach((button) => { button.disabled = true; button.textContent = 'Loading replay details…'; });
       try {
-        replayDetails.set(runId, await get(`/api/v1/replay/${encodeURIComponent(runId)}`));
+        const detail = await get(`/api/v1/replay/${encodeURIComponent(runId)}`);
+        if (String(detail.status || '').toLowerCase() === 'completed'
+            && !Array.isArray(detail.result?.shadow_trades)) {
+          const request = detail.request || {};
+          await get('/api/v1/replay', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              session_date: request.session_date,
+              strategy_id: request.strategy_id || 'ftx-paper-orderflow',
+              vehicles: request.vehicles || ['futures', 'synthetic'],
+              mode: 'replay',
+              include_parity_layers: Boolean(request.include_parity_layers),
+            }),
+          });
+          flash('Cached replay lacked shadow trades; queued a fresh replay.');
+          refresh();
+          return;
+        }
+        replayDetails.set(runId, detail);
         if (latestData) render(latestData);
       } catch (e) {
         buttons.forEach((button) => { button.disabled = false; button.textContent = 'Load replay details'; });

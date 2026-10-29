@@ -1583,6 +1583,10 @@ class ReplayWorker:
             "unavailable_fields": sorted(unavailable_fields),
             "summary_schema_version": REPLAY_SUMMARY_SCHEMA_VERSION,
             "summary": summary,
+            "shadow_trades": normalized_trades,
+            "shadow_ledger": ledger_records,
+            "authoritative_trades": [],
+            "authoritative_ledger": [],
             "first_divergent_stage": None,
             # Diagnostic-only trades live inside the replay run result. They
             # are never written to runtime_events, the broker ledger, or the
