@@ -525,7 +525,8 @@ class OrderflowPolicy:
             "attached_observation_id": observation.observation_id,
             "opening_interaction_kind": opening_kind,
         }
-        return (PolicyDecision({
+        evidence_ids = [str(seed["source_observation_id"]), observation.observation_id]
+        attached = PolicyDecision({
             **base,
             "decision_stage": "interaction", "outcome": "recorded",
             "reason": "opening_interaction_attached",
@@ -538,9 +539,28 @@ class OrderflowPolicy:
             "location": seed["location"], "direction": direction,
             "reference_level": boundary,
             "reference_generation": seed["reference_generation"],
-            "source_observation_ids": [observation.observation_id],
+            "source_observation_ids": evidence_ids,
+            "response_evidence_ids": evidence_ids,
             "available_at": observation.available_at.isoformat(),
-        }),)
+        })
+        # Keep the opening path producer-neutral: the seed is a hypothesis,
+        # while the first causally available one-minute bar is its response.
+        response = PolicyDecision({
+            **base,
+            "decision_stage": "interaction", "outcome": "recorded",
+            "reason": "response_confirmed",
+            "decision_id": _decision_id(
+                "opening_response", str(seed["seed_id"]), observation.observation_id,
+            ),
+            "interaction_id": str(seed["seed_id"]),
+            "location": seed["location"], "direction": direction,
+            "response_type": "acceptance",
+            "evidence_ids": evidence_ids,
+            "source_observation_ids": evidence_ids,
+            "observed_at": observation.observed_at.isoformat(),
+            "available_at": observation.available_at.isoformat(),
+        })
+        return (attached, response)
 
     def _process_location_observation(
         self,
@@ -1010,14 +1030,40 @@ class OrderflowPolicy:
                 "decision_id": _decision_id("candidate", opportunity.lifecycle_id),
                 "opportunity_id": opportunity.lifecycle_id,
                 "setup_id": opportunity.setup.setup_id,
-                "interaction_id": str(seed["seed_id"]), "location": alias,
+                "interaction_id": None, "location": alias,
+                "opening_seed_id": str(seed["seed_id"]),
                 "direction": direction, "template_id": template.template_id,
                 "candidate_provenance": "opening_hypothesis",
                 "response_evidence_ids": list(evidence_ids),
                 "source_observation_ids": list(evidence_ids),
                 "observed_at": response_observation.observed_at.isoformat(),
                 "available_at": formed_at.isoformat(),
+                "response_type": template.response_type.value,
                 "execution_proposal": proposal,
+            }),
+            PolicyDecision({
+                **base, "decision_stage": "candidate", "outcome": "recorded",
+                "reason": "hypothesis_arbitrated",
+                "decision_id": _decision_id("opening_arbitration", opportunity.lifecycle_id),
+                "interaction_id": None, "opening_seed_id": str(seed["seed_id"]),
+                "location": alias, "direction": direction,
+                "template_id": template.template_id, "arbitration_selected": True,
+                "arbitration_reason": "opening_candle_directional_seed",
+                "source_observation_ids": list(evidence_ids),
+                "observed_at": response_observation.observed_at.isoformat(),
+                "available_at": formed_at.isoformat(),
+            }),
+            PolicyDecision({
+                **base, "decision_stage": "candidate", "outcome": "recorded",
+                "reason": "opening_candle_directional_seed",
+                "decision_id": _decision_id("opening_outcome", opportunity.lifecycle_id),
+                "interaction_id": None, "opening_seed_id": str(seed["seed_id"]),
+                "location": alias, "direction": direction,
+                "template_id": template.template_id, "response_type": template.response_type.value,
+                "status": "RESOLVED", "response_evidence_ids": list(evidence_ids),
+                "source_observation_ids": list(evidence_ids),
+                "observed_at": response_observation.observed_at.isoformat(),
+                "available_at": formed_at.isoformat(),
             }),
     )
 
@@ -1159,11 +1205,17 @@ class OrderflowPolicy:
         rejection = _score_rejection(direction=direction, long_score=long_score, short_score=short_score,
             margin=self.config.fill_permission_margin)
         if rejection is not None:
-            return (PolicyDecision({**base, "decision_stage": "admission", "outcome": "rejected", "reason": rejection,
-                "decision_id": _decision_id("score_admission", interaction.interaction_id, confirmation_id),
-                "interaction_id": interaction.interaction_id, "direction": direction,
-                "long_score": long_score, "short_score": short_score,
-                "score_margin": self.config.fill_permission_margin, "source_observation_ids": list(evidence_ids),
+            return (PolicyDecision({**base, "decision_stage": "candidate", "outcome": "rejected",
+                "observed_at": confirmation.observed_at.isoformat() if confirmation is not None
+                else formed_at.isoformat(),
+                "decision_at": formed_at.isoformat(), "available_at": formed_at.isoformat(),
+                "reason": "setup_score_mismatch" if rejection == "fill_permission_mismatch" else rejection,
+                "decision_id": _decision_id("score_rejected", interaction.interaction_id, confirmation_id),
+                "interaction_id": interaction.interaction_id,
+                "location": interaction.location_alias, "direction": direction,
+                "template_id": template.template_id, "long_score": long_score, "short_score": short_score,
+                "score_margin": self.config.fill_permission_margin,
+                "response_evidence_ids": list(evidence_ids), "source_observation_ids": list(evidence_ids),
                 "evidence": {"metrics": {"long_score": long_score, "short_score": short_score,
                     "fill_permission_margin": self.config.fill_permission_margin},
                     "provenance": {"context_version": formation_context.version if formation_context else None,
@@ -1388,7 +1440,7 @@ class OrderflowPolicy:
                         }
                         results.append(PolicyDecision({
                             **base, "decision_stage": "candidate", "outcome": "recorded",
-                            "reason": "opening_hypothesis", "decision_id": seed_id,
+                            "reason": "opening_candle_directional_seed", "decision_id": seed_id,
                             "candidate_provenance": "opening_hypothesis", "direction": direction,
                             "location": opening_alias, "reference_level": seed_location.reference,
                             "reference_generation": seed_location.reference_generation,

@@ -236,10 +236,17 @@ def test_opening_seed_materializes_an_or_candidate() -> None:
         None,
     )
 
-    assert len(events) == 1
-    assert events[0].payload["reason"] == "setup_candidate_formed"
-    assert events[0].payload["candidate_provenance"] == "opening_hypothesis"
-    assert events[0].payload["location"] == "OR_LOW"
+    assert len(events) == 3
+    candidate, arbitration, outcome = events
+    assert candidate.payload["reason"] == "setup_candidate_formed"
+    assert candidate.payload["candidate_provenance"] == "opening_hypothesis"
+    assert candidate.payload["location"] == "OR_LOW"
+    assert candidate.payload["interaction_id"] is None
+    assert candidate.payload["opening_seed_id"] == "opening-seed"
+    assert arbitration.payload["reason"] == "hypothesis_arbitrated"
+    assert arbitration.payload["arbitration_selected"] is True
+    assert outcome.payload["reason"] == "opening_candle_directional_seed"
+    assert outcome.payload["status"] == "RESOLVED"
 
 
 def test_completed_five_minute_extreme_publishes_before_same_clock_location() -> None:
@@ -685,10 +692,16 @@ def test_orderflow_executable_mode_emits_bounded_futures_entry() -> None:
 
     events = strategy.evaluate(bundle, account)
 
-    admission = next(event for event in events if event.payload.get("decision_stage") == "admission")
-    assert admission.order is None
-    assert admission.payload["outcome"] == "rejected"
-    assert admission.payload["reason"] == "fill_permission_mismatch"
+    candidate = next(
+        event for event in events
+        if event.payload.get("decision_stage") == "candidate"
+        and event.payload.get("reason") == "setup_score_mismatch"
+    )
+    assert candidate.order is None
+    assert candidate.payload["outcome"] == "rejected"
+    assert "candidate_provenance" not in candidate.payload
+    assert candidate.payload["decision_at"] == candidate.payload["available_at"]
+    assert candidate.payload["observed_at"] <= candidate.payload["available_at"]
 
 
 def test_executable_orderflow_registers_and_settles_protective_exit() -> None:

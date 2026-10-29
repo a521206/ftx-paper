@@ -38,6 +38,7 @@ def _build_daily_atr_snapshot(
     calculator_version: str,
     feature_parameters: tuple[tuple[str, str], ...],
     zone_boundaries: tuple[tuple[str, str], ...] | None = None,
+    prior_close: float | None = None,
     computed_at: datetime | None = None,
 ) -> "FeatureSnapshot":
     """Build one Paper-owned prior-session ATR artifact.
@@ -53,10 +54,10 @@ def _build_daily_atr_snapshot(
     if len(sessions) < window:
         raise ValueError("insufficient completed sessions for daily ATR")
 
+    input_prior_close = prior_close
     true_ranges: list[float] = []
     source_bar_ids: list[str] = []
     fingerprint_rows: list[dict[str, object]] = []
-    prior_close: float | None = None
     for date_value, rows in sessions:
         if not rows:
             raise ValueError("daily ATR sessions must contain bars")
@@ -112,7 +113,10 @@ def _build_daily_atr_snapshot(
             })
 
     digest = hashlib.sha256(
-        json.dumps(fingerprint_rows, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+        json.dumps(
+            {"prior_close": input_prior_close, "rows": fingerprint_rows},
+            sort_keys=True, separators=(",", ":"), default=str,
+        ).encode("utf-8")
     ).hexdigest()
     return FeatureSnapshot(
         key=FeatureCacheKey(
@@ -156,6 +160,7 @@ def build_orderflow_daily_atr_snapshot(
     sessions: Sequence[tuple[str, Sequence[Mapping[str, object]]]],
     *,
     window: int = 14,
+    prior_close: float | None = None,
     computed_at: datetime | None = None,
 ) -> "FeatureSnapshot":
     """Build the canonical orderflow ATR using the three strategy zones."""
@@ -168,6 +173,7 @@ def build_orderflow_daily_atr_snapshot(
             ("zones", "09:15-11:00,11:00-13:00,13:00-15:00"),
         ),
         zone_boundaries=(("09:15", "11:00"), ("11:00", "13:00"), ("13:00", "15:00")),
+        prior_close=prior_close,
         computed_at=computed_at,
     )
 

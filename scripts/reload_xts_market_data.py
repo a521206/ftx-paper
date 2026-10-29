@@ -160,7 +160,9 @@ def reload_dates(
     total = 0
     for session_date in dates:
         instruments = resolve_instruments(
-            client, _specifications(), contract_store=store, as_of=session_date,
+            client, _specifications(),
+            contract_store=store if apply else None,
+            as_of=session_date,
         )
         historical_futures = _stored_futures_instrument(store, session_date)
         instruments = [

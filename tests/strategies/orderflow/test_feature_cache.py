@@ -221,6 +221,31 @@ def test_daily_atr_snapshot_uses_true_range_across_session_closes():
     assert snapshot.key.feature_set == ORDERFLOW_DAILY_ATR_FEATURE_SET
 
 
+def test_orderflow_atr_accepts_prior_close_outside_window():
+    sessions = []
+    for day_index in range(14):
+        rows = []
+        for minute_index in range(345):
+            hour, minute = divmod(9 * 60 + 15 + minute_index, 60)
+            rows.append({
+                "minute": f"2026-01-{day_index + 1:02d}T{hour:02d}:{minute:02d}:00+05:30",
+                "open": 100.0, "high": 110.0, "low": 100.0, "close": 105.0,
+                "volume": 1,
+            })
+        sessions.append((f"2026-01-{day_index + 1:02d}", tuple(rows)))
+
+    snapshot = build_orderflow_daily_atr_snapshot(
+        "2026-01-15", sessions, prior_close=200.0,
+    )
+
+    assert snapshot.values["atr_14"] == (100.0 + 13.0 * 10.0) / 14.0
+
+    changed = build_orderflow_daily_atr_snapshot(
+        "2026-01-15", sessions, prior_close=300.0,
+    )
+    assert changed.key.input_fingerprint != snapshot.key.input_fingerprint
+
+
 def test_daily_atr_snapshot_uses_strategy_zone_cutoff_for_complete_sessions():
     rows = []
     for minute_index in range(375):

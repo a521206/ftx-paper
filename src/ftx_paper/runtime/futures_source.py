@@ -273,7 +273,21 @@ def materialize_orderflow_daily_atr(store: Any, session_date: str) -> float | No
     if len(completed) < 14:
         return existing_value
 
-    artifact = build_orderflow_daily_atr_snapshot(session_date, completed[-14:])
+    sessions = completed[-14:]
+    prior_rows = completed[-15][1] if len(completed) >= 15 else ()
+    prior_close = None
+    if prior_rows:
+        prior_day_rows = tuple(
+            row for row in sorted(prior_rows, key=lambda item: str(item["minute"]))
+            if str(row["minute"])[11:16] < "15:00"
+        )
+        if prior_day_rows:
+            close_value = prior_day_rows[-1].get("close")
+            if isinstance(close_value, (int, float)) and not isinstance(close_value, bool):
+                prior_close = float(close_value)
+    artifact = build_orderflow_daily_atr_snapshot(
+        session_date, sessions, prior_close=prior_close,
+    )
     if (
         isinstance(existing, FeatureSnapshot)
         and existing_value is not None
