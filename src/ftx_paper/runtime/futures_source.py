@@ -258,11 +258,10 @@ def materialize_orderflow_daily_atr(store: Any, session_date: str) -> float | No
         instrument="NIFTY",
         session_date=session_date,
     )
-    if isinstance(existing, FeatureSnapshot):
-        value = daily_atr_from_snapshot(existing)
-        if value is not None:
-            return value
-
+    existing_value = (
+        daily_atr_from_snapshot(existing)
+        if isinstance(existing, FeatureSnapshot) else None
+    )
     resolver = FuturesSessionSourceResolver(store)
     completed: list[tuple[str, Sequence[Mapping[str, object]]]] = []
     available_dates = cast(Sequence[object], dates_reader())
@@ -272,9 +271,15 @@ def materialize_orderflow_daily_atr(store: Any, session_date: str) -> float | No
             continue
         completed.append((prior_date, source.bars))
     if len(completed) < 14:
-        return None
+        return existing_value
 
     artifact = build_orderflow_daily_atr_snapshot(session_date, completed[-14:])
+    if (
+        isinstance(existing, FeatureSnapshot)
+        and existing_value is not None
+        and existing.key.input_fingerprint == artifact.key.input_fingerprint
+    ):
+        return existing_value
     writer(artifact)
     return daily_atr_from_snapshot(artifact)
 

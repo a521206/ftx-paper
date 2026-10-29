@@ -3,7 +3,8 @@ from datetime import date, datetime, timedelta, timezone
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole
 from ftx_paper.market import DecisionBundle, FeatureMemoryCache, FeatureService, LiveFeatureCalculator
 from ftx_paper.market.feature_cache import (
-    FeatureCacheKey, FeatureSnapshot, ORDERFLOW_DAILY_ATR_FEATURE_SET,
+    FeatureCacheKey, FeatureSnapshot, ORDERFLOW_DAILY_ATR_CALCULATOR_VERSION,
+    ORDERFLOW_DAILY_ATR_FEATURE_SET,
     build_daily_atr_snapshot, build_orderflow_daily_atr_snapshot, daily_atr_from_snapshot,
 )
 from ftx_paper.infrastructure.sqlite.feature_repository import SqliteFeatureRepository
@@ -91,8 +92,11 @@ def test_daily_atr_artifact_requires_canonical_feature_set_and_availability():
     key = FeatureCacheKey(
         instrument="NIFTY", session_date="2026-01-02", timeframe="1d",
         cutoff_minute="00:00", feature_set=ORDERFLOW_DAILY_ATR_FEATURE_SET,
-        calculator_version="niftyzoning-orderflow-daily-atr-v1",
-        parameters=(("series", "continuous"), ("window", "14")),
+        calculator_version=ORDERFLOW_DAILY_ATR_CALCULATOR_VERSION,
+        parameters=(
+            ("series", "continuous"), ("window", "14"),
+            ("zones", "09:15-11:00,11:00-13:00,13:00-15:00"),
+        ),
         input_fingerprint="canonical-fingerprint",
     )
     snapshot = FeatureSnapshot(
@@ -113,8 +117,11 @@ def test_sqlite_feature_repository_reads_daily_atr_artifact_by_session(tmp_path)
     key = FeatureCacheKey(
         instrument="NIFTY", session_date="2026-01-02", timeframe="1d",
         cutoff_minute="00:00", feature_set=ORDERFLOW_DAILY_ATR_FEATURE_SET,
-        calculator_version="niftyzoning-orderflow-daily-atr-v1",
-        parameters=(("series", "continuous"), ("window", "14")),
+        calculator_version=ORDERFLOW_DAILY_ATR_CALCULATOR_VERSION,
+        parameters=(
+            ("series", "continuous"), ("window", "14"),
+            ("zones", "09:15-11:00,11:00-13:00,13:00-15:00"),
+        ),
         input_fingerprint="canonical-fingerprint",
     )
     repository.write_feature_snapshot(FeatureSnapshot(
@@ -160,7 +167,10 @@ def test_paper_materializes_daily_atr_from_its_own_market_history(tmp_path):
         session_date="2026-01-15",
     )
     assert snapshot is not None
-    assert snapshot.key.parameters == (("series", "continuous"), ("window", "14"))
+    assert snapshot.key.parameters == (
+        ("series", "continuous"), ("window", "14"),
+        ("zones", "09:15-11:00,11:00-13:00,13:00-15:00"),
+    )
     assert snapshot.source_bar_ids
     assert daily_atr_from_snapshot(snapshot) == 10.0
 
@@ -189,16 +199,20 @@ def test_daily_atr_snapshot_uses_true_range_across_session_closes():
     sessions = []
     for index in range(14):
         close = 100.0 + index * 5
-        sessions.append((
-            f"2026-01-{index + 1:02d}",
-            ({
-                "minute": f"2026-01-{index + 1:02d}T09:15:00+05:30",
+        rows = []
+        for minute_index in range(345):
+            hour, minute = divmod(9 * 60 + 15 + minute_index, 60)
+            rows.append({
+                "minute": f"2026-01-{index + 1:02d}T{hour:02d}:{minute:02d}:00+05:30",
                 "open": close,
                 "high": close + 2,
                 "low": close - 2,
                 "close": close,
                 "volume": 1,
-            },),
+            })
+        sessions.append((
+            f"2026-01-{index + 1:02d}",
+            tuple(rows),
         ))
 
     snapshot = build_orderflow_daily_atr_snapshot("2026-01-15", sessions)

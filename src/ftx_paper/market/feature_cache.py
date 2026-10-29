@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 FEATURE_CALCULATOR_VERSION = "live-features-v1"
 ORDERFLOW_DAILY_ATR_FEATURE_SET = "orderflow_daily_atr_v1"
-ORDERFLOW_DAILY_ATR_CALCULATOR_VERSION = "ftx-paper-orderflow-daily-atr-v1"
+ORDERFLOW_DAILY_ATR_CALCULATOR_VERSION = "ftx-paper-orderflow-daily-atr-v2"
 DAILY_ATR_FEATURE_SET = "daily_atr_v1"
 DAILY_ATR_CALCULATOR_VERSION = "ftx-paper-daily-atr-v1"
 
@@ -37,6 +37,7 @@ def _build_daily_atr_snapshot(
     feature_set: str,
     calculator_version: str,
     feature_parameters: tuple[tuple[str, str], ...],
+    zone_boundaries: tuple[tuple[str, str], ...] | None = None,
     computed_at: datetime | None = None,
 ) -> "FeatureSnapshot":
     """Build one Paper-owned prior-session ATR artifact.
@@ -65,11 +66,30 @@ def _build_daily_atr_snapshot(
             if str(row["minute"])[11:16] < session_end_minute
         ]
         expected_count = _session_minute_count(session_end_minute)
-        if len(filtered_rows) >= expected_count:
-            ordered = filtered_rows
-        high = max(_required_bar_number(row, "high") for row in ordered)
-        low = min(_required_bar_number(row, "low") for row in ordered)
-        close = _required_bar_number(ordered[-1], "close")
+        if len(filtered_rows) < expected_count:
+            raise ValueError("daily ATR session is incomplete")
+        ordered = filtered_rows
+        if zone_boundaries is None:
+            zone_rows = (ordered,)
+        else:
+            zone_rows = tuple(
+                tuple(
+                    row for row in ordered
+                    if start <= str(row["minute"])[11:16] < end
+                )
+                for start, end in zone_boundaries
+            )
+            if any(not zone for zone in zone_rows):
+                raise ValueError("daily ATR session is missing a strategy zone")
+        high = max(
+            _required_bar_number(row, "high")
+            for zone in zone_rows for row in zone
+        )
+        low = min(
+            _required_bar_number(row, "low")
+            for zone in zone_rows for row in zone
+        )
+        close = _required_bar_number(zone_rows[-1][-1], "close")
         true_range = high - low
         if prior_close is not None:
             true_range = max(true_range, abs(high - prior_close), abs(low - prior_close))
@@ -143,7 +163,11 @@ def build_orderflow_daily_atr_snapshot(
         session_date, sessions, window=window, session_end_minute="15:00",
         feature_set=ORDERFLOW_DAILY_ATR_FEATURE_SET,
         calculator_version=ORDERFLOW_DAILY_ATR_CALCULATOR_VERSION,
-        feature_parameters=(("series", "continuous"), ("window", str(window))),
+        feature_parameters=(
+            ("series", "continuous"), ("window", str(window)),
+            ("zones", "09:15-11:00,11:00-13:00,13:00-15:00"),
+        ),
+        zone_boundaries=(("09:15", "11:00"), ("11:00", "13:00"), ("13:00", "15:00")),
         computed_at=computed_at,
     )
 
@@ -164,10 +188,16 @@ def daily_atr_from_snapshot(snapshot: "FeatureSnapshot | None") -> float | None:
     """Read canonical prior-session ATR from an existing feature artifact."""
     if snapshot is None or snapshot.key.feature_set != ORDERFLOW_DAILY_ATR_FEATURE_SET:
         return None
-    if snapshot.key.timeframe != "1d" or not snapshot.key.calculator_version:
+    if snapshot.key.timeframe != "1d":
+        return None
+    if snapshot.key.calculator_version != ORDERFLOW_DAILY_ATR_CALCULATOR_VERSION:
         return None
     parameters = dict(snapshot.key.parameters)
-    if parameters.get("series") != "continuous" or parameters.get("window") != "14":
+    if (
+        parameters.get("series") != "continuous"
+        or parameters.get("window") != "14"
+        or parameters.get("zones") != "09:15-11:00,11:00-13:00,13:00-15:00"
+    ):
         return None
     if snapshot.availability != "available":
         return None
