@@ -251,10 +251,14 @@ def classify_opening_gap(
     *, opening_price: float | None, prior_close: float | None,
     observed_at: datetime | None = None, tolerance: float = 0.0,
     reference_id: str | None = None, prior_value_low: float | None = None,
-    prior_value_high: float | None = None,
+    prior_value_high: float | None = None, reference_price: float | None = None,
 ) -> OpeningGapState:
     if opening_price is None or prior_close is None:
         return OpeningGapState("UNAVAILABLE", observed_at=observed_at, reference_id=reference_id)
+    if reference_id is None:
+        return OpeningGapState("NONE", 0.0, None, observed_at,
+                               reference_id=None, prior_value_low=prior_value_low,
+                               prior_value_high=prior_value_high)
     gap = opening_price - prior_close
     if abs(gap) <= tolerance:
         status = "NONE"
@@ -262,7 +266,7 @@ def classify_opening_gap(
         status = "GAP_UP_CANDIDATE"
     else:
         status = "GAP_DOWN_CANDIDATE"
-    return OpeningGapState(status, gap, prior_close, observed_at, reference_id=reference_id,
+    return OpeningGapState(status, gap, reference_price if reference_price is not None else prior_close, observed_at, reference_id=reference_id,
                            prior_value_low=prior_value_low, prior_value_high=prior_value_high)
 
 

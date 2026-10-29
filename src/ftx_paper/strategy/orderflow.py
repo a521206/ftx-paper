@@ -196,10 +196,11 @@ class OrderflowPolicy:
                         else None
                     )
                     classified_gap = classify_opening_gap(
-                        opening_price=opening, prior_close=reference,
+                        opening_price=opening, prior_close=previous_close,
                         observed_at=first_1m.observed_at, reference_id=reference_id,
                         prior_value_low=_number(first_1m, "prior_value_low"),
                         prior_value_high=_number(first_1m, "prior_value_high"),
+                        reference_price=reference if reference_id is not None else None,
                     )
                     self._opening_gap_state = OpeningGapState(
                         classified_gap.status,

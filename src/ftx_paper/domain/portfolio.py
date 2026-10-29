@@ -19,6 +19,7 @@ class MarginReservation:
     risk_scope: str = ""
     risk_allowance: float = 0.0
     reserved_risk: float = 0.0
+    execution_group_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.order_id or self.vehicle not in {"futures", "synthetic"}:
@@ -227,6 +228,7 @@ class PortfolioState:
             risk_scope=risk.scope if risk is not None else "",
             risk_allowance=risk.allowance if risk is not None else 0.0,
             reserved_risk=risk.amount if risk is not None else 0.0,
+            execution_group_id=order.execution_group_id,
         )
         self.reservations[order.client_order_id] = reservation
         self.pending_orders[order.client_order_id] = "reserved"

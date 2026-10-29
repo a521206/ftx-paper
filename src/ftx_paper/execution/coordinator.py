@@ -79,7 +79,8 @@ class PaperExecutionCoordinator:
         self._require_futures(order)
         if order.role is OrderRole.ENTRY:
             existing = self.portfolio.positions.get(order.client_order_id)
-            if existing is not None:
+            fill_ids = self._entry_fill_ids.setdefault(order.client_order_id, set())
+            if fill_id is not None and fill_id in fill_ids:
                 return existing
             group = order.execution_group_id
             if group is not None and (
@@ -103,10 +104,16 @@ class PaperExecutionCoordinator:
                 filled_quantity=filled_quantity,
             )
             if fill_id is not None:
-                self._entry_fill_ids.setdefault(order.client_order_id, set()).add(fill_id)
+                fill_ids.add(fill_id)
             if result is not None and group is not None:
                 self._claimed_execution_groups.setdefault(group, order.client_order_id)
-                for sibling_id in self._group_orders.get(group, set()):
+                sibling_ids = set(self._group_orders.get(group, set()))
+                sibling_ids.update(
+                    reservation.order_id
+                    for reservation in self.portfolio.reservations.values()
+                    if reservation.execution_group_id == group
+                )
+                for sibling_id in sibling_ids:
                     if sibling_id != order.client_order_id:
                         self.portfolio.cancel_entry(sibling_id)
             return result

@@ -96,6 +96,22 @@ def test_orderflow_paper_execution_settles_and_duplicate_fill_is_idempotent() ->
     assert portfolio.settled_orders == {exit_order.client_order_id}
 
 
+def test_partial_entry_fills_accumulate_and_duplicate_fill_ids_are_idempotent() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    entry = OrderIntent("entry-partial-fill", instrument, OrderSide.BUY, 2, role=OrderRole.ENTRY)
+    portfolio = PortfolioState(RESEARCH_CAPITAL_PROFILE.initial_capital)
+    coordinator = PaperExecutionCoordinator(portfolio, CapitalRuntimeContext(RESEARCH_CAPITAL_PROFILE))
+    coordinator.submit(entry)
+
+    coordinator.fill(entry, price=100.0, filled_quantity=1, fill_id="fill-1")
+    coordinator.fill(entry, price=102.0, filled_quantity=1, fill_id="fill-2")
+    coordinator.fill(entry, price=102.0, filled_quantity=1, fill_id="fill-2")
+
+    position = portfolio.positions[entry.client_order_id]
+    assert position.quantity == 2
+    assert position.entry_price == 101.0
+
+
 def test_partial_exit_realizes_pnl_and_retains_position() -> None:
     instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
     entry = OrderIntent("entry-partial", instrument, OrderSide.BUY, 2, role=OrderRole.ENTRY)
@@ -155,6 +171,24 @@ def test_unfilled_execution_group_candidates_do_not_claim_until_fill() -> None:
 
     assert coordinator.fill(second, price=100.0) is None
     assert coordinator.denied_proposals[second.client_order_id] == "execution_group_already_claimed"
+
+
+def test_execution_group_fill_releases_reservations_from_another_coordinator() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    first = OrderIntent("cross-owner-first", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY,
+                        execution_group_id="cross-owner-group")
+    second = OrderIntent("cross-owner-second", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY,
+                         execution_group_id="cross-owner-group")
+    portfolio = PortfolioState(RESEARCH_CAPITAL_PROFILE.initial_capital)
+    owner_a = PaperExecutionCoordinator(portfolio, CapitalRuntimeContext(RESEARCH_CAPITAL_PROFILE))
+    owner_b = PaperExecutionCoordinator(portfolio, CapitalRuntimeContext(RESEARCH_CAPITAL_PROFILE))
+    owner_a.submit(first)
+    owner_b.submit(second)
+
+    owner_a.fill(first, price=100.0)
+
+    assert second.client_order_id not in portfolio.reservations
+    assert second.client_order_id in portfolio.settled_orders
 
 
 def test_filled_execution_group_remains_claimed_after_position_closes() -> None:
