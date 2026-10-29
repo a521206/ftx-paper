@@ -9,12 +9,14 @@ from ftx_paper.broker import Fill, PaperBroker
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderIntent, OrderRole, OrderSide
 from ftx_paper.runtime.store import _json_safe
 from ftx_paper.market import DecisionBundle, CompletedBarAggregator
-from ftx_paper.runtime.engine import EngineResult, PaperEngine
+from ftx_paper.runtime.engine import EngineResult, MultiStrategyEngine, PaperEngine
 from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.runtime.futures_source import FuturesSessionSourceResolver
 from ftx_paper.runtime import RuntimeSession, RuntimeStore
 from ftx_paper.domain.capital import ResearchCapitalProfile
 from ftx_paper.strategy import ConfiguredLiveStrategy
+from ftx_paper.strategy.decision import CandidateDecision
+from ftx_paper.strategy.protocol import StrategyMetadata
 import ftx_paper.broker.zerodha as zerodha
 
 
@@ -642,3 +644,42 @@ def test_runtime_session_rejects_non_flat_intraday_startup(tmp_path):
 
     with pytest.raises(RuntimeError, match="must start flat"):
         session.start()
+
+
+def test_live_entry_lifecycle_links_back_to_its_candidate_decision(tmp_path):
+    instrument = Instrument("NIFTY26JANFUT", "NFO", "FUTURES", "2026-01-29")
+
+    class OneEntryStrategy:
+        metadata = StrategyMetadata("one-entry", "1", "config")
+
+        def on_bundle(self, bundle):
+            order = OrderIntent("candidate-1:futures", instrument, OrderSide.BUY, 1,
+                                role=OrderRole.ENTRY, decision_id="candidate-1")
+            return (CandidateDecision({"decision_id": "candidate-1", "outcome": "accepted"}, order=order),)
+
+        def evaluate(self, bundle, context):
+            return self.on_bundle(bundle)
+
+        def on_execution_event(self, event):
+            pass
+
+        def snapshot(self):
+            return {}
+
+    aggregator = CompletedBarAggregator(
+        {("NFO", "NIFTY26JANFUT"): MarketRole.FUTURES},
+        required_roles=(MarketRole.FUTURES,), deadline_seconds=0,
+    )
+    bundle = aggregator.ingest(MarketBar(instrument, datetime(2026, 1, 1, 4, 50, tzinfo=timezone.utc), 100, 102, 99, 101))
+    assert bundle is not None
+    store = RuntimeStore(tmp_path)
+    session = RuntimeSession(store, None, [], engine=cast(PaperEngine, MultiStrategyEngine({"research": OneEntryStrategy()})))
+    session.broker = PaperBroker({"NIFTY26JANFUT": 101.0})
+
+    session._process_bundle(bundle, source="live")
+
+    lifecycle = store.read_decision_lifecycle_events({"candidate-1"})
+    assert {"ORDER_INTENT", "ORDER_ACK", "FILL"}.issubset({event["event_type"] for event in lifecycle})
+    fill = next(event for event in lifecycle if event["event_type"] == "FILL")
+    assert fill["payload"]["client_order_id"] == "research:candidate-1:futures"
+    assert store.read_decision_summary("2026-01-01", strategy_id="research")["totals"]["executed"] == 1

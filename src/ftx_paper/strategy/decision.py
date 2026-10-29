@@ -605,7 +605,7 @@ class IndependentLiveDecisionEngine:
                 order = OrderIntent(candidate_id + f":{vehicle}", futures.instrument, side, quantity,
                                     reason="live_policy_accepted", cell=cell.name, stop_price=stop,
                                     exit_mode=cell_policy.exit_mode.value, entry_bar=sequence,
-                    role=OrderRole.ENTRY, vehicle=vehicle)
+                    role=OrderRole.ENTRY, vehicle=vehicle, decision_id=candidate_id)
                 if risk_allowance > 0:
                     self.portfolio.reserve_scoped_risk(
                         order.client_order_id,
