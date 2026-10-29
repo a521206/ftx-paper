@@ -483,7 +483,8 @@ class RuntimeSession:
         if metadata:
             payload.update(strategy_version=metadata.version, config_hash=metadata.config_hash)
         self.store.append_event(event_type, payload,
-                                f"{event_type}:{source}:{bundle_id}:{payload.get('decision_id', '')}",
+                                f"{event_type}:{source}:{bundle_id}:{payload.get('strategy_id', '')}:"
+                                f"{payload.get('vehicle', '')}:{payload.get('decision_id', '')}",
                                 timestamp=timestamp)
         try:
             self.event_bus.publish(RuntimeEvent(
