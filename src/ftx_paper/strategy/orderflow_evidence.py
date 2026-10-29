@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import replace
 from datetime import datetime
 from typing import TYPE_CHECKING, cast
@@ -11,7 +12,7 @@ from ftx_paper.domain.decision_context import DecisionContext
 from .orderflow_contract import OrderflowContext, OrderflowObservation, stable_orderflow_id
 from .orderflow_helpers import observation_number, volume_average
 from .orderflow_location import LocationObservation, LocationRecord, LocationRegistry, is_diagnostic_location
-from .orderflow_scores import score_aggregate
+from .orderflow_scores import ScoreResult, score_aggregate
 from .orderflow_vwap import MarketAggregate, VwapLocationProvider
 
 if TYPE_CHECKING:
@@ -27,11 +28,19 @@ class OrderflowEvidenceAssembler:
         self.observations: tuple[OrderflowObservation, ...] = ()
         self._observation_ids: frozenset[str] = frozenset()
         self._observation_indices: dict[str, int] = {}
-        self._confirmation_score_cache: dict[str, tuple[float, float] | None] = {}
+        self._confirmation_score_cache: dict[str, ScoreResult | None] = {}
+        self._observations_by_timeframe: dict[str, tuple[OrderflowObservation, ...]] = {}
+        self._availability_by_timeframe: dict[str, tuple[datetime, ...]] = {}
 
     def confirmation_scores(
         self, observation: OrderflowObservation,
     ) -> tuple[float, float] | None:
+        result = self.confirmation_score_result(observation)
+        return result.scores if result is not None else None
+
+    def confirmation_score_result(
+        self, observation: OrderflowObservation,
+    ) -> ScoreResult | None:
         cached = self._confirmation_score_cache.get(observation.observation_id)
         if observation.observation_id in self._confirmation_score_cache:
             return cached
@@ -40,30 +49,47 @@ class OrderflowEvidenceAssembler:
             self._confirmation_score_cache[observation.observation_id] = None
             return None
         session_id = observation.context.session_id if observation.context else None
-        all_observations = tuple(
-            item for item in self.observations
-            if item.available_at <= observation.available_at
-            and (
-                session_id is None
-                or item.context is not None and item.context.session_id == session_id
-            )
-        )
-
+        by_timeframe = self._observations_by_timeframe or {
+            timeframe: tuple(item for item in self.observations if item.timeframe == timeframe)
+            for timeframe in {item.timeframe for item in self.observations}
+        }
+        visible_by_timeframe = {
+            timeframe: values[:bisect_right(
+                self._availability_by_timeframe.get(
+                    timeframe, tuple(item.available_at for item in values),
+                ),
+                observation.available_at,
+            )]
+            for timeframe, values in by_timeframe.items()
+        }
         def prior_items(item: OrderflowObservation) -> list[OrderflowObservation]:
             return [
-                candidate for candidate in all_observations
-                if candidate.timeframe == item.timeframe
-                and self._interval_end(candidate) < item.observed_at
+                candidate for candidate in visible_by_timeframe.get(item.timeframe, ())
+                if (
+                    session_id is None
+                    or candidate.context is not None and candidate.context.session_id == session_id
+                )
+                and (
+                    candidate.observed_at < item.observed_at
+                    if item.timeframe == "1m"
+                    else self._interval_end(candidate) < item.observed_at
+                )
             ][-20:]
 
-        children = (
-            tuple(
-                item for item in all_observations
-                if item.timeframe == "1m"
+        children = ()
+        if observation.timeframe == "5m":
+            parent_start = observation.interval_start or observation.observed_at
+            parent_end = observation.interval_end or observation.observed_at
+            children = tuple(
+                item for item in visible_by_timeframe.get("1m", ())
+                if (
+                    session_id is None
+                    or item.context is not None and item.context.session_id == session_id
+                )
+                and parent_start <= item.observed_at
+                and self._interval_end(item) <= parent_end
                 and self._interval_end(item) <= observation.available_at
-            )[-2:]
-            if observation.timeframe == "5m" else ()
-        )
+            )
         child_scores: list[tuple[float, float]] = []
         for child in children:
             history = prior_items(child)
@@ -95,8 +121,17 @@ class OrderflowEvidenceAssembler:
         except ValueError:
             self._confirmation_score_cache[observation.observation_id] = None
             return None
-        self._confirmation_score_cache[observation.observation_id] = scores
-        return scores
+        if scores is None:
+            self._confirmation_score_cache[observation.observation_id] = None
+            return None
+        result = ScoreResult(
+            scores=scores,
+            prior_observation_id=prior_parent.observation_id if prior_parent else None,
+            child_observation_ids=tuple(item.observation_id for item in children),
+            causal_cutoff=observation.available_at,
+        )
+        self._confirmation_score_cache[observation.observation_id] = result
+        return result
 
     @staticmethod
     def _interval_end(observation: OrderflowObservation) -> datetime:
@@ -125,6 +160,16 @@ class OrderflowEvidenceAssembler:
         )
         if incoming_ids != self._observation_ids:
             self.observations = incoming_observations
+            self._observations_by_timeframe = {
+                timeframe: tuple(
+                    item for item in incoming_observations if item.timeframe == timeframe
+                )
+                for timeframe in {item.timeframe for item in incoming_observations}
+            }
+            self._availability_by_timeframe = {
+                timeframe: tuple(item.available_at for item in values)
+                for timeframe, values in self._observations_by_timeframe.items()
+            }
             self._observation_ids = incoming_ids
             self._confirmation_score_cache.clear()
             self._observation_indices = {

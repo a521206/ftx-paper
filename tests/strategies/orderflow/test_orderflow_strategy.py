@@ -406,21 +406,8 @@ def test_orderflow_snapshot_codecs_reject_malformed_values(codec, raw, message) 
 def test_interaction_projection_advancement_records_causal_score_once() -> None:
     bundle, account = _context()
     assert bundle.orderflow_context is not None
-    parent = bundle.orderflow_context.observations_for("5m")[0]
-    scored = replace(
-        parent,
-        features={**parent.features, "long_score": 2.0, "short_score": 1.0},
-    )
-    context = replace(
-        bundle.orderflow_context,
-        observations=(scored, *bundle.orderflow_context.observations[1:]),
-        prefixes={
-            **bundle.orderflow_context.prefixes,
-            "5m": (scored, *bundle.orderflow_context.observations_for("5m")[1:]),
-        },
-    )
     strategy = OrderflowStrategy()
-    strategy.evaluate(replace(bundle, orderflow_context=context), account)
+    strategy.evaluate(bundle, account)
     snapshot = strategy.policy.snapshot()
     detectors = cast(dict[str, object], snapshot["location_detectors"])
     five_minute = cast(dict[str, object], detectors["5m"])
@@ -429,8 +416,8 @@ def test_interaction_projection_advancement_records_causal_score_once() -> None:
     scores = cast(list[object], interaction["score_history"])
     assert len(scores) == 1
     score = cast(dict[str, object], scores[0])
-    assert score["long_score"] == 2.0
-    assert score["short_score"] == 1.0
+    assert score["long_score"] == pytest.approx(0.07)
+    assert score["short_score"] == pytest.approx(0.07)
     assert cast(dict[str, str], interaction["source_cursors"])["5m"] == "obs-5m"
 
 

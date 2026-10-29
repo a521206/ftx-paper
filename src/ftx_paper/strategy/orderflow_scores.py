@@ -9,6 +9,18 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ScoreResult:
+    """Canonical scores together with the exact causal evidence used."""
+
+    scores: tuple[float, float]
+    prior_observation_id: str | None
+    child_observation_ids: tuple[str, ...]
+    causal_cutoff: datetime
 
 
 def _value(item: Mapping[str, object], name: str) -> float:
@@ -86,4 +98,4 @@ def score_aggregate(
     return hierarchical_score(own, child_scores)
 
 
-__all__ = ["contextual_support", "hierarchical_score", "score_aggregate"]
+__all__ = ["ScoreResult", "contextual_support", "hierarchical_score", "score_aggregate"]

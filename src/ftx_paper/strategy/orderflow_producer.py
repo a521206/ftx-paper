@@ -19,7 +19,6 @@ from .orderflow_contract import (
 )
 from .orderflow_location import LocationBand, LocationObservation, LocationRecord, is_diagnostic_location
 from .orderflow_source import source_fingerprint
-from .orderflow_scores import score_aggregate
 
 
 def _numeric_feature(features: Mapping[str, object], name: str) -> float:
@@ -241,7 +240,6 @@ class CausalOrderflowProducer:
             tzinfo=self._session_timezone
         ).astimezone(timezone.utc)
         start_index = len(prefix)
-        prior_1m: OrderflowObservation | None = prefix[-1] if prefix else None
         for bar_index, bar in enumerate(bars[start_index:], start=start_index):
             boundary_gap = bar_index == 0 and bar.timestamp > session_start
             source_gap = bool(
@@ -281,17 +279,6 @@ class CausalOrderflowProducer:
                 "prior_value_high": self._prior_value_high,
                 "prior_value_low": self._prior_value_low,
             }
-            prior_features = prior_1m.features if prior_1m is not None and not bar_has_gap else None
-            scores = score_aggregate(
-                features, prior_features, atr=self._frozen_atr,
-                volume_average=(
-                    sum(_numeric_feature(cast(Mapping[str, object], item.features), "volume")
-                        for item in prefix[-20:]) / min(len(prefix), 20)
-                    if prefix else None
-                ),
-            )
-            if scores is not None:
-                features["long_score"], features["short_score"] = scores
             current = OrderflowObservation(
                 observation_id=stable_orderflow_id("observation", trading_date, stream_identity, "1m", bar.timestamp.isoformat()),
                 source_observation_id=stable_orderflow_id("source", trading_date, stream_identity, bar.timestamp.isoformat()),
@@ -318,7 +305,6 @@ class CausalOrderflowProducer:
                 ),
             )
             prefix.append(current)
-            prior_1m = current
         self._context_bars = tuple(bars)
         self._context_prefix = tuple(prefix)
         five_minute: list[OrderflowObservation] = (
@@ -389,48 +375,6 @@ class CausalOrderflowProducer:
                 "previous_close": child_features[0].get("previous_close"),
                 "volume": total_volume,
             }
-            prior_parent = next(
-                (item for item in reversed(five_minute)
-                 if item.interval_end is not None and item.interval_end < start), None,
-            )
-            child_scores_list: list[tuple[float, float]] = []
-            for child in children[-2:]:
-                prior_child = next(
-                    (item for item in reversed(prefix)
-                     if item.observed_at < child.observed_at),
-                    None,
-                )
-                prior_children = [
-                    item for item in prefix if item.observed_at < child.observed_at
-                ][-20:]
-                child_score = score_aggregate(
-                    child.features,
-                    prior_child.features if prior_child is not None else None,
-                    atr=atr,
-                    volume_average=(
-                        sum(_numeric_feature(cast(Mapping[str, object], item.features), "volume")
-                            for item in prior_children) / min(len(prior_children), 20)
-                        if prior_children else None
-                    ),
-                )
-                if child_score is None:
-                    child_scores_list = []
-                    break
-                child_scores_list.append(child_score)
-            child_scores = tuple(child_scores_list)
-            parent_scores = score_aggregate(
-                parent_features,
-                prior_parent.features if prior_parent is not None else None,
-                atr=atr,
-                child_scores=child_scores,
-                volume_average=(
-                    sum(_numeric_feature(cast(Mapping[str, object], item.features), "volume")
-                        for item in five_minute[-20:])
-                    / min(len(five_minute), 20) if five_minute else None
-                ),
-            )
-            if parent_scores is not None:
-                parent_features["long_score"], parent_features["short_score"] = parent_scores
             session_children = [
                 item for item in prefix if item.observed_at <= children[-1].observed_at
             ]

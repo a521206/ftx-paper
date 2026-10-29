@@ -49,7 +49,7 @@ def test_causal_producer_builds_complete_five_minute_context() -> None:
     assert all("vwap" not in parent.features for parent in context.observations)
 
 
-def test_causal_producer_publishes_directional_scores_with_causal_lineage() -> None:
+def test_causal_producer_publishes_aggregates_without_decision_scores() -> None:
     producer = CausalOrderflowProducer()
     producer.set_frozen_atr(1.0)
     instrument = Instrument("NIFTYFUT", "NSE", "FUTURES")
@@ -65,10 +65,10 @@ def test_causal_producer_publishes_directional_scores_with_causal_lineage() -> N
     assert context is not None
     children = context.observations_for("1m")
     parents = context.observations_for("5m")
-    assert all("long_score" in item.features for item in children)
-    assert all("short_score" in item.features for item in children)
-    assert all("long_score" in item.features for item in parents)
-    assert all("short_score" in item.features for item in parents)
+    assert all("long_score" not in item.features for item in children)
+    assert all("short_score" not in item.features for item in children)
+    assert all("long_score" not in item.features for item in parents)
+    assert all("short_score" not in item.features for item in parents)
     assert parents[0].available_at <= parents[1].available_at
 
 

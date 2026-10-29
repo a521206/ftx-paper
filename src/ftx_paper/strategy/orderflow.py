@@ -362,6 +362,8 @@ class OrderflowPolicy:
             self._opening_gap_state
             if self._opening_gap_state.status != "UNAVAILABLE" else opening_gap
         )
+        score_result = self._evidence.confirmation_score_result(observation)
+        scores = score_result.scores if score_result is not None else None
         parent_context = MarketContext(
             context_id=f"context:{orderflow.session_id}", version=self._context_version,
             available_at=observation.available_at,
@@ -379,16 +381,20 @@ class OrderflowPolicy:
                 "UNAVAILABLE" if observation.context.replay_provenance.get("gap_status") == "source_gap"
                 else "BOTH"
             ),
-            long_score=_number(observation, "long_score"), short_score=_number(observation, "short_score"),
+            long_score=scores[0] if scores is not None else None,
+            short_score=(score_result.scores[1] if score_result is not None else None),
             evidence_ids=(observation.observation_id,),
             evidence=({
                 "completed_bar": True, "observation_id": observation.observation_id,
-                "long_score": _number(observation, "long_score"),
-                "short_score": _number(observation, "short_score"),
+                "long_score": scores[0] if scores is not None else None,
+                "short_score": scores[1] if scores is not None else None,
             },),
             source_provenance=({
                 "source_observation_id": observation.observation_id,
                 "score_source_observation_id": observation.observation_id,
+                "score_prior_observation_id": score_result.prior_observation_id if score_result else None,
+                "score_child_observation_ids": list(score_result.child_observation_ids) if score_result else [],
+                "score_causal_cutoff": score_result.causal_cutoff.isoformat() if score_result else None,
             },),
         )
         self._context_history.publish(parent_context)
@@ -751,8 +757,9 @@ class OrderflowPolicy:
             snapshots = dict(candidate.synthetic_snapshots).get("5m", ())
             if not snapshots:
                 continue
-            long_score = _number(observation, "long_score")
-            short_score = _number(observation, "short_score")
+            scores = self._confirmation_scores(observation)
+            long_score = scores[0] if scores is not None else None
+            short_score = scores[1] if scores is not None else None
             if long_score is not None or short_score is not None:
                 detector5.record_score(
                     candidate.interaction_id, snapshot=snapshots[-1],
