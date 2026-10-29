@@ -3,22 +3,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, fields, is_dataclass
-from datetime import datetime
+from datetime import date, datetime, time, timedelta
 from types import MappingProxyType
 from collections.abc import Mapping
 from copy import deepcopy
-from enum import StrEnum
+from enum import Enum, StrEnum
 import hashlib
 import json
 from typing import cast
 
 
 class CaptureMode(StrEnum):
+    NONE = "none"
     SUMMARY = "summary"
     DIAGNOSTIC = "diagnostic"
     FULL = "full"
 
 REPLAY_RECORD_SCHEMA_VERSION = 2
+_ATOMIC_TYPES = (str, int, float, bool, bytes, type(None), date, time, timedelta, Enum)
 
 
 def validate_replay_scope(scope: Mapping[str, object]) -> dict[str, object]:
@@ -49,6 +51,8 @@ def validate_replay_scope(scope: Mapping[str, object]) -> dict[str, object]:
 
 def _detached(value: object) -> object:
     """Copy nested mappings without asking ``deepcopy`` to pickle proxies."""
+    if isinstance(value, _ATOMIC_TYPES):
+        return value
     if is_dataclass(value) and not isinstance(value, type):
         return {
             field.name: _detached(getattr(value, field.name))
@@ -116,14 +120,14 @@ class ReplayRecord:
             "schema_version": self.schema_version, "record_id": self.record_id,
             "sequence": self.sequence, "timestamp": self.timestamp.isoformat(),
             "available_at": self.available_at.isoformat(),
-            "before_state": deepcopy(dict(self.before_state)),
-            "after_state": deepcopy(dict(self.after_state)),
+            "before_state": _detached(self.before_state),
+            "after_state": _detached(self.after_state),
             "observations": list(self.observations), "decisions": list(self.decisions),
-            "aggregates": deepcopy(list(self.aggregates)), "predicates": deepcopy(list(self.predicates)),
-            "events": deepcopy(list(self.events)), "transitions": deepcopy(list(self.transitions)),
-            "unavailable": deepcopy(list(self.unavailable)),
-            "checkpoints": deepcopy(list(self.checkpoints)),
-            "scope": deepcopy(dict(self.scope)),
+            "aggregates": _detached(self.aggregates), "predicates": _detached(self.predicates),
+            "events": _detached(self.events), "transitions": _detached(self.transitions),
+            "unavailable": _detached(self.unavailable),
+            "checkpoints": _detached(self.checkpoints),
+            "scope": _detached(self.scope),
         }
 
     @classmethod

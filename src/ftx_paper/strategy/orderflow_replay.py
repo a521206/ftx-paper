@@ -98,12 +98,16 @@ class ReplayMachine:
             raise ValueError("replay availability cannot precede the decision timestamp")
         context = self.observation.available(timestamp)
         available_ids = tuple(item.observation_id for item in context.observations)
-        captured_aggregates = aggregates or tuple(
-            detached_asdict(item) for item in context.observations
-        )
-        captured_unavailable = unavailable or tuple(
-            dict(issue) for issue in context.source_issues
-        )
+        if self.recorder.capture_mode is CaptureMode.SUMMARY:
+            captured_aggregates = ()
+            captured_unavailable = ()
+        else:
+            captured_aggregates = aggregates or tuple(
+                detached_asdict(item) for item in context.observations
+            )
+            captured_unavailable = unavailable or tuple(
+                dict(issue) for issue in context.source_issues
+            )
         phases = tuple(
             _EXECUTION_PHASE_TO_REPLAY_PHASE[str(item.get("phase"))]
             for item in phase_results

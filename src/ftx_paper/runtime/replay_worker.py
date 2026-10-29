@@ -49,6 +49,7 @@ from ftx_paper.execution.settlement import ExitValidationError, validate_exit_or
 from ftx_paper.strategy.exits import ExitAction
 from ftx_paper.strategy import ConfiguredStrategyFactory, StrategyFactory
 from ftx_paper.strategy.orderflow import OrderflowConfig
+from ftx_paper.strategy.orderflow_capture import CaptureMode
 from ftx_paper.strategy.orderflow_reporting import detached_replay_records
 from ftx_paper.strategy.policy_contract import ExecutionMode
 from ftx_paper.strategy.config import (
@@ -533,6 +534,10 @@ class ReplayWorker:
         include_parity_layers = request.get("include_parity_layers", False)
         if not isinstance(include_parity_layers, bool):
             raise ValueError("include_parity_layers must be a boolean")
+        try:
+            capture_mode = CaptureMode(str(request.get("capture_mode", CaptureMode.SUMMARY)))
+        except ValueError as exc:
+            raise ValueError("capture_mode must be none, summary, diagnostic, or full") from exc
         dates = [session_date]
         run_id = str(request.get("run_id") or uuid4().hex)
         all_events = _ScopedEvents(
@@ -593,7 +598,7 @@ class ReplayWorker:
                 if str(bar.instrument.instrument_type).upper() in {"FUT", "FUTURES"}
             )
             replay_machine = None
-            if futures_bars:
+            if futures_bars and capture_mode is not CaptureMode.NONE:
                 replay_input = prepare_replay_input(
                     futures_bars,
                     date,
@@ -602,7 +607,7 @@ class ReplayWorker:
                 )
                 replay_machine = ReplayMachine(
                     observe_market(replay_input),
-                    capture_mode=request.get("capture_mode", "full"),
+                    capture_mode=capture_mode,
                 )
             prior_day_high, prior_day_low = self._prior_day_levels(date, available_dates)
             # Historical replay databases may not contain the imported expiry
@@ -752,7 +757,7 @@ class ReplayWorker:
                 ready_bundle = bundle
                 event_start = len(all_events)
                 futures_bar = bundle.bars[MarketRole.FUTURES]
-                before_state = replay_state_snapshot()
+                before_state = replay_state_snapshot() if capture_mode is CaptureMode.FULL else {}
                 turn = ExecutionTurn(
                     turn_id=f"{date}:{futures_bar.timestamp.isoformat()}",
                     observed_at=futures_bar.timestamp.isoformat(),
@@ -1171,7 +1176,7 @@ class ReplayWorker:
                             futures_bar.timestamp, futures_bar.timestamp,
                         ),
                         before_state=before_state,
-                        after_state=replay_state_snapshot(),
+                        after_state=(replay_state_snapshot() if capture_mode is CaptureMode.FULL else {}),
                         decisions=tuple(
                             str(event.get("decision_id"))
                             for event in all_events[event_start:]
@@ -1597,11 +1602,11 @@ class ReplayWorker:
                     "session_date": session_date,
                     "vehicles": list(vehicles),
                     "emit_rejected_decisions": emit_rejected_decisions,
-                    "capture_mode": request.get("capture_mode", "full"),
+                    "capture_mode": capture_mode.value,
                     "mode": mode,
                     "include_parity_layers": include_parity_layers,
                 },
-                "capture_mode": request.get("capture_mode", "full"),
+                "capture_mode": capture_mode.value,
                 "mode": mode,
                 "include_parity_layers": include_parity_layers,
             }
@@ -1701,9 +1706,10 @@ class ReplayWorker:
                 "processed_decision_bars": metadata["processed_decision_bars"],
             },
         }
-        replay_result["replay_records"] = runtime_replay_records or [
-            record.to_dict() for record in detached_replay_records(tuple(all_events), scope=detached_scope)
-        ]
+        if capture_mode is not CaptureMode.NONE:
+            replay_result["replay_records"] = runtime_replay_records or [
+                record.to_dict() for record in detached_replay_records(tuple(all_events), scope=detached_scope)
+            ]
         parity_artifact = build_parity_artifact(
             replay_result, request=request, layer_records=parity_records,
         ) if include_parity_layers else None
@@ -1722,7 +1728,7 @@ class ReplayWorker:
             authoritative_trades=(),
             authoritative_ledger=(),
             parity_artifact=parity_artifact,
-            replay_records=tuple(runtime_replay_records),
+            replay_records=tuple(runtime_replay_records) if capture_mode is not CaptureMode.NONE else (),
         )
         return canonical.to_dict()
 

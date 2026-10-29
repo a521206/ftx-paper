@@ -13,6 +13,7 @@ LedgerScope = Literal["replay"]
 REPLAY_SCHEMA_VERSION = 1
 REPLAY_MODES = frozenset({"replay"})
 REPLAY_VEHICLES = frozenset({"futures", "synthetic"})
+REPLAY_CAPTURE_MODES = frozenset({"none", "summary", "diagnostic", "full"})
 _RESULT_FIELDS = frozenset({
     "run_id", "schema_version", "execution_scope", "ledger_scope", "summary", "events",
     "shadow_trades", "shadow_ledger", "authoritative_trades", "authoritative_ledger",
@@ -66,6 +67,7 @@ class ReplayRequest:
     vehicles: tuple[str, ...]
     mode: Literal["replay"] = "replay"
     include_parity_layers: bool = False
+    capture_mode: Literal["none", "summary", "diagnostic", "full"] = "summary"
 
     def __post_init__(self) -> None:
         if len(self.session_date) != 10 or not self.strategy_id:
@@ -76,10 +78,12 @@ class ReplayRequest:
             raise ValueError("vehicles must include futures")
         if self.mode not in REPLAY_MODES:
             raise ValueError("mode must be 'replay'")
+        if self.capture_mode not in REPLAY_CAPTURE_MODES:
+            raise ValueError("capture_mode must be none, summary, diagnostic, or full")
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "ReplayRequest":
-        allowed = {"session_date", "strategy_id", "vehicles", "mode", "include_parity_layers"}
+        allowed = {"session_date", "strategy_id", "vehicles", "mode", "include_parity_layers", "capture_mode"}
         unexpected = set(value) - allowed
         if unexpected:
             raise ValueError("unsupported replay request fields: " + ", ".join(sorted(unexpected)))
@@ -92,6 +96,9 @@ class ReplayRequest:
         include = value.get("include_parity_layers", False)
         if not isinstance(include, bool):
             raise ValueError("include_parity_layers must be a boolean")
+        capture_mode = value.get("capture_mode", "summary")
+        if not isinstance(capture_mode, str) or capture_mode.lower() not in REPLAY_CAPTURE_MODES:
+            raise ValueError("capture_mode must be none, summary, diagnostic, or full")
         session_date = value.get("session_date")
         strategy_id = value.get("strategy_id")
         if not isinstance(session_date, str) or not isinstance(strategy_id, str):
@@ -100,12 +107,14 @@ class ReplayRequest:
             raise ValueError("vehicles must contain strings")
         return cls(session_date, strategy_id,
                    tuple(item.lower() for item in vehicles),
-                   cast(Literal["replay"], mode.lower()), include)
+                   cast(Literal["replay"], mode.lower()), include,
+                   cast(Literal["none", "summary", "diagnostic", "full"], capture_mode.lower()))
 
     def to_dict(self) -> dict[str, Any]:
         return {"session_date": self.session_date, "strategy_id": self.strategy_id,
-                "vehicles": list(self.vehicles), "mode": self.mode,
-                "include_parity_layers": self.include_parity_layers}
+                 "vehicles": list(self.vehicles), "mode": self.mode,
+                 "include_parity_layers": self.include_parity_layers,
+                 "capture_mode": self.capture_mode}
 
 
 @dataclass(frozen=True, slots=True)

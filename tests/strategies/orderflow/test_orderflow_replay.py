@@ -61,6 +61,7 @@ def test_orderflow_replay_is_isolated_from_live_execution_state(tmp_path) -> Non
         "vehicles": ["futures", "synthetic"],
         "mode": "replay",
         "include_parity_layers": False,
+        "capture_mode": "full",
     })
 
     assert result["execution_scope"] == "replay"

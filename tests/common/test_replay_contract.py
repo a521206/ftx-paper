@@ -26,6 +26,15 @@ def test_replay_request_rejects_shadow_mode() -> None:
         ReplayRequest.from_mapping({**_request(), "mode": "shadow"})
 
 
+def test_replay_request_defaults_to_lightweight_capture() -> None:
+    request = ReplayRequest.from_mapping(_request())
+    assert request.capture_mode == "summary"
+    assert request.to_dict()["capture_mode"] == "summary"
+    assert ReplayRequest.from_mapping({**_request(), "capture_mode": "full"}).capture_mode == "full"
+    with pytest.raises(ValueError, match="capture_mode"):
+        ReplayRequest.from_mapping({**_request(), "capture_mode": "invalid"})
+
+
 def test_replay_result_requires_only_canonical_fields() -> None:
     result = {
         "run_id": "run-1",

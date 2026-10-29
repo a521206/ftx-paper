@@ -35,3 +35,5 @@ def test_summary_capture_preserves_decisions_but_reduces_observation_detail() ->
 
     assert recorder.records[0].decisions == ("decision",)
     assert recorder.records[0].observations == ()
+    assert recorder.records[0].aggregates == ()
+    assert recorder.records[0].unavailable == ()

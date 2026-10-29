@@ -76,11 +76,12 @@ def run(base_url: str, *, timeout: float, interval: float) -> int:
         payload={
             "session_date": "2026-09-29",
             "strategy_id": "ftx-paper-orderflow",
-            # The canonical strategy metrics are futures-owned.  Synthetic is a
+            # The canonical strategy metrics are futures-owned. Synthetic is a
             # reporting projection and must not participate in reconciliation.
             "vehicles": ["futures"],
             "mode": "replay",
             "include_parity_layers": True,
+            "capture_mode": "summary",
         },
     )
     run_id = queued.get("run_id")
