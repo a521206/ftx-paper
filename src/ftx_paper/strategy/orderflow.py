@@ -488,20 +488,29 @@ class OrderflowPolicy:
 
     def _attach_opening_seed(
         self, observation: OrderflowObservation, base: Mapping[str, Any],
+        context: DecisionContext, futures: MarketBar | None,
     ) -> tuple[PolicyDecision, ...] | None:
-        if (
-            observation.timeframe != "1m"
-            or self._opening_seed is None
-            or self._opening_seed.get("attached_observation_id") is not None
-            or observation.observation_id == self._opening_gap_observation_id
-        ):
+        if observation.timeframe != "1m" or self._opening_seed is None:
             return ()
         seed = self._opening_seed
-        formation_available_at = seed.get("formation_available_at")
-        if isinstance(formation_available_at, str):
-            formation_available = datetime.fromisoformat(formation_available_at.replace("Z", "+00:00"))
-            if observation.available_at <= formation_available:
-                return None
+        if observation.observation_id == self._opening_gap_observation_id:
+            return ()
+        seed_id = str(seed["seed_id"])
+        opportunity = next(
+            (
+                item for item in self._opportunities.values()
+                if item.source_interaction_id == seed_id
+            ),
+            None,
+        )
+        if opportunity is None:
+            return None
+        if opportunity.status is not OpportunityStatus.ACTIVE:
+            return ()
+        if opportunity.opening_interaction_kind in {"opening_breakout", "opening_retest"}:
+            return ()
+        if observation.observed_at <= opportunity.setup.formed_at:
+            return None
         raw_boundary = seed.get("reference_level")
         if not isinstance(raw_boundary, (int, float)) or isinstance(raw_boundary, bool):
             return None
@@ -514,59 +523,99 @@ class OrderflowPolicy:
         direction = str(seed["direction"])
         crossed = close >= boundary if direction == "long" else close <= boundary
         touched = low <= boundary <= high
-        opening_policy = str(seed.get("opening_policy", ""))
         if not touched and not crossed:
             return None
-        if opening_policy == "opening_breakout" and not crossed:
+        opening_policy = opportunity.opening_policy_version or ""
+        if opening_policy.startswith("opening_breakout") and not crossed:
             return None
-        opening_kind = "opening_breakout" if opening_policy == "opening_breakout" else "opening_rejection"
-        self._opening_seed = {
-            **seed,
-            "attached_observation_id": observation.observation_id,
-            "opening_interaction_kind": opening_kind,
+        evidence = list(opportunity.opening_interaction_evidence)
+        if opening_policy.startswith("opening_breakout"):
+            opening_kind = "opening_breakout"
+            evidence_kind = opening_kind
+        elif not evidence:
+            opening_kind = "opening_rejection"
+            evidence_kind = opening_kind
+        else:
+            has_recovery = any(item.get("kind") == "opening_recovery" for item in evidence)
+            recovered = close > boundary if direction == "short" else close < boundary
+            if not has_recovery and recovered:
+                opening_kind = "opening_rejection"
+                evidence_kind = "opening_recovery"
+            elif has_recovery and crossed:
+                opening_kind = "opening_retest"
+                evidence_kind = opening_kind
+            else:
+                return None
+        current_evidence = {
+            "observation_id": observation.observation_id,
+            "observed_at": observation.observed_at.isoformat(),
+            "available_at": observation.available_at.isoformat(),
+            "open": _number(observation, "open"),
+            "high": high,
+            "low": low,
+            "close": close,
+            "reference_level": boundary,
+            "kind": evidence_kind,
         }
-        evidence_ids = [str(seed["source_observation_id"]), observation.observation_id]
+        evidence.append(current_evidence)
+        updated = opportunity.record_opening_interaction(
+            kind=opening_kind, evidence=current_evidence, at=observation.available_at,
+        )
+        self._opportunities[opportunity.lifecycle_id] = updated
+        evidence_ids = [str(item["observation_id"]) for item in evidence]
         attached = PolicyDecision({
             **base,
             "decision_stage": "interaction", "outcome": "recorded",
             "reason": "opening_interaction_attached",
             "decision_id": _decision_id(
-                "opening_interaction", str(seed["seed_id"]), observation.observation_id,
+                "opening_interaction", seed_id, observation.observation_id,
             ),
             "candidate_provenance": "opening_hypothesis",
-            "interaction_id": str(seed["seed_id"]),
+            "interaction_id": seed_id,
+            "opportunity_id": opportunity.lifecycle_id,
             "opening_interaction_kind": opening_kind,
             "location": seed["location"], "direction": direction,
             "reference_level": boundary,
             "reference_generation": seed["reference_generation"],
             "source_observation_ids": evidence_ids,
             "response_evidence_ids": evidence_ids,
+            "opening_interaction_evidence": evidence,
             "available_at": observation.available_at.isoformat(),
         })
-        # Keep the opening path producer-neutral: the seed is a hypothesis,
-        # while the first causally available one-minute bar is its response.
-        response = PolicyDecision({
-            **base,
-            "decision_stage": "interaction", "outcome": "recorded",
-            "reason": "response_confirmed",
-            "decision_id": _decision_id(
-                "opening_response", str(seed["seed_id"]), observation.observation_id,
-            ),
-            "interaction_id": str(seed["seed_id"]),
-            "location": seed["location"], "direction": direction,
-            "response_type": "acceptance",
-            "evidence_ids": evidence_ids,
-            "source_observation_ids": evidence_ids,
-            "observed_at": observation.observed_at.isoformat(),
-            "available_at": observation.available_at.isoformat(),
-        })
-        return (attached, response)
+        if opening_kind in {"opening_breakout", "opening_retest"}:
+            template = TRADE_TEMPLATES.get(("5m_acceptance_breakout", str(seed["location"])))
+            if template is not None:
+                attached = PolicyDecision({
+                    **attached.payload,
+                    "execution_proposal": {
+                        "eligible": True,
+                        "direction": direction,
+                        "instrument": observation.instrument,
+                        "exchange": futures.instrument.exchange if futures is not None else None,
+                        "instrument_type": futures.instrument.instrument_type if futures is not None else None,
+                        "lifecycle_id": opportunity.lifecycle_id,
+                        "stop_price": opportunity.setup.failure_boundary,
+                        "trigger_price": (
+                            opportunity.setup.entry_upper
+                            if direction == "long" else opportunity.setup.entry_lower
+                        ),
+                        "stop_policy": template.stop_policy.value,
+                        "exit_mode": self.config.exit_policy,
+                        "cell": str(seed["location"]).lower(),
+                        "entry_bar": context.as_of.minute,
+                        "strategy_id": self.config.name,
+                        "execution_group_id": opportunity.execution_group_id,
+                        "setup_availability": opportunity.setup.formed_at.isoformat(),
+                    },
+                })
+        return (attached,)
 
     def _process_location_observation(
         self,
         observation: OrderflowObservation,
         location_observation: LocationObservation,
         base: Mapping[str, Any],
+        projection_sources: Mapping[str, tuple[OrderflowObservation, ...]] | None = None,
     ) -> tuple[tuple[PolicyDecision, ...], tuple[PolicyDecision, ...], tuple[PolicyDecision, ...]]:
         if not isinstance(location_observation, LocationObservation):
             raise ValueError("invalid causal location observation")
@@ -624,7 +673,12 @@ class OrderflowPolicy:
                 }))
         detector = self._location_detectors[observation.timeframe]
         closed_before = len(detector.closed_interactions)
-        interaction = detector.observe(location, observation, observation_id=location_key)
+        interaction = detector.observe(
+            location,
+            observation,
+            observation_id=location_key,
+            projection_sources=projection_sources,
+        )
         for ended in detector.closed_interactions[closed_before:]:
             lifecycle_events.append(PolicyDecision({
                 **base, "decision_stage": "lifecycle", "outcome": "rejected",
@@ -986,11 +1040,6 @@ class OrderflowPolicy:
             observation.observation_id,
         )
         formed_at = observation.available_at
-        self._opening_seed = {
-            **seed,
-            "attached_observation_id": response_observation.observation_id,
-            "opening_interaction_kind": None,
-        }
         opportunity = SetupOpportunity.create(
             interaction_id=str(seed["seed_id"]), direction=direction,
             formed_at=formed_at,
@@ -1002,27 +1051,11 @@ class OrderflowPolicy:
             conflict_group_id=template.execution_conflict_group,
             source_instrument=observation.instrument,
             source_session_id=orderflow.session_id,
+            opening_policy_version=str(seed.get("opening_policy", "")) + "-1m-v1",
         )
         if opportunity.lifecycle_id in self._opportunities:
             return ()
         self._opportunities[opportunity.lifecycle_id] = opportunity
-        proposal = {
-            "eligible": True,
-            "direction": direction,
-            "instrument": observation.instrument,
-            "exchange": futures.instrument.exchange if futures is not None else None,
-            "instrument_type": futures.instrument.instrument_type if futures is not None else None,
-            "lifecycle_id": opportunity.lifecycle_id,
-            "stop_price": opportunity.setup.failure_boundary,
-            "trigger_price": opportunity.setup.entry_upper if direction == "long" else opportunity.setup.entry_lower,
-            "stop_policy": template.stop_policy.value,
-            "exit_mode": self.config.exit_policy,
-            "cell": alias.lower(),
-            "entry_bar": context.as_of.minute,
-            "strategy_id": self.config.name,
-            "execution_group_id": opportunity.execution_group_id,
-            "setup_availability": formed_at.isoformat(),
-        }
         return (
             PolicyDecision({
                 **base, "decision_stage": "opportunity", "outcome": "recorded",
@@ -1039,8 +1072,7 @@ class OrderflowPolicy:
                 "observed_at": response_observation.observed_at.isoformat(),
                 "available_at": formed_at.isoformat(),
                 "response_type": template.response_type.value,
-                "execution_proposal": proposal,
-            }),
+        }),
             PolicyDecision({
                 **base, "decision_stage": "candidate", "outcome": "recorded",
                 "reason": "hypothesis_arbitrated",
@@ -1383,16 +1415,9 @@ class OrderflowPolicy:
             if observation.context is None or observation.context.session_id != orderflow.session_id:
                 continue
             results.extend(self._advance_pending_triggers(observation, context, base, futures))
-            opening_seed_events = self._attach_opening_seed(observation, base)
+            opening_seed_events = self._attach_opening_seed(observation, base, context, futures)
             if opening_seed_events is not None:
                 results.extend(opening_seed_events)
-                if any(
-                    item.payload.get("reason") == "opening_interaction_attached"
-                    for item in opening_seed_events
-                ) and self._opening_seed is not None:
-                    results.extend(self._form_opening_candidate(
-                        observation, self._opening_seed, orderflow, context, base, futures,
-                    ))
             gap_status = observation.context.replay_provenance.get("gap_status")
             context_events, skip_observation = self._advance_context(
                 observation, orderflow, causal_cutoff, already_processed, base,
@@ -1412,8 +1437,8 @@ class OrderflowPolicy:
                 opening_open = _number(observation, "open")
                 if opening_close is not None and opening_open is not None and opening_close != opening_open:
                     direction = "short" if opening_close < opening_open else "long"
-                    long_score = _number(observation, "long_score")
-                    short_score = _number(observation, "short_score")
+                    scores = self._confirmation_scores(observation)
+                    long_score, short_score = scores if scores is not None else (None, None)
                     own_score = short_score if direction == "short" else long_score
                     opposing_score = long_score if direction == "short" else short_score
                     opening_alias = "OR_LOW" if direction == "short" else "OR_HIGH"
@@ -1431,7 +1456,6 @@ class OrderflowPolicy:
                             "band_upper": seed_location.band_upper,
                             "reference_generation": seed_location.reference_generation,
                             "source_observation_id": observation.observation_id,
-                            "attached_observation_id": None,
                             "formation_available_at": observation.available_at.isoformat(),
                             "opening_policy": ("opening_retest" if (
                                 direction == "short" and opening_close <= seed_location.reference
@@ -1465,6 +1489,13 @@ class OrderflowPolicy:
             ):
                 context_events, created_events, lifecycle_events = self._process_location_observation(
                     observation, location_observation, base,
+                    projection_sources={
+                        timeframe: tuple(
+                            item for item in observations
+                            if item.timeframe == timeframe and item.available_at <= observation.available_at
+                        )
+                        for timeframe in ("1m", "5m")
+                    },
                 )
                 interaction_context_events.extend(context_events)
                 interaction_created_events.extend(created_events)

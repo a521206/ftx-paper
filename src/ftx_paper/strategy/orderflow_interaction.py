@@ -13,14 +13,12 @@ from .orderflow_location import LocationRecord
 
 
 class InteractionStatus(StrEnum):
-    CREATED = "CREATED"
     ACTIVE = "ACTIVE"
     ENDED = "ENDED"
 
 
 class InteractionCloseReason(StrEnum):
-    DEPARTED = "DEPARTED"
-    CROSS_BAND = "CROSS_BAND"
+    CROSS_BAND_DEPARTURE = "CROSS_BAND_DEPARTURE"
     SAME_SIDE_DEPARTURE = "SAME_SIDE_DEPARTURE"
     OUTSIDE_BAND_DEPARTURE = "OUTSIDE_BAND_DEPARTURE"
     SESSION_END = "SESSION_END"
@@ -45,6 +43,7 @@ class InteractionCandle:
     open: float | None = None
     child_observation_ids: tuple[str, ...] = ()
     context_version: int | None = None
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +141,7 @@ class LocationInteraction:
     created_at: datetime
     status: InteractionStatus
     contact_candles: tuple[InteractionCandle, ...] = ()
+    atr: float | None = None
     close_reason: InteractionCloseReason | None = None
     closed_at: datetime | None = None
     pre_contact_side: str | None = None
@@ -160,6 +160,8 @@ class LocationInteraction:
     synthetic_snapshots: tuple[tuple[str, tuple[ProjectionSnapshot, ...]], ...] = ()
     score_history: tuple[SyntheticScoreSnapshot, ...] = ()
     source_cursors: tuple[tuple[str, str], ...] = ()
+    frozen_projections: tuple[tuple[str, ProjectionSnapshot], ...] = ()
+    sessions_carried: int = 0
 
     def __post_init__(self) -> None:
         if not self.interaction_id.strip() or not self.location_id.strip():
@@ -170,6 +172,10 @@ class LocationInteraction:
             raise ValueError("ended interaction requires a close reason")
         if self.response_status not in {"PENDING", "PENDING_RESPONSE", "CONFIRMED", "INVALIDATED", "EXPIRED"}:
             raise ValueError("invalid interaction response status")
+        if self.atr is not None and self.atr < 0:
+            raise ValueError("interaction ATR must be non-negative")
+        if self.sessions_carried < 0:
+            raise ValueError("interaction sessions carried must be non-negative")
         if self.pre_contact_side not in {None, "ABOVE", "BELOW"}:
             raise ValueError("invalid pre-contact side")
         if self.terminal_close_side not in {None, "ABOVE", "INSIDE_BAND", "BELOW"}:
@@ -269,12 +275,45 @@ def _pre_contact_side(
     return side if side != "INSIDE_BAND" else None
 
 
+def _active_key(alias: str, timeframe: str) -> str:
+    """One canonical episode per location template and timeframe."""
+    return f"{alias.upper()}:{timeframe}"
+
+
+def _source_candle(observation: OrderflowObservation) -> InteractionCandle | None:
+    close = observation.features.get("close")
+    if not isinstance(close, (int, float)) or isinstance(close, bool):
+        return None
+    values = {
+        name: observation.features.get(name, close)
+        for name in ("open", "high", "low")
+    }
+    if any(not isinstance(value, (int, float)) or isinstance(value, bool) for value in values.values()):
+        return None
+    return InteractionCandle(
+        observation.observation_id, observation.timeframe, observation.observed_at,
+        observation.available_at, float(cast(float, close)), float(cast(float, values["high"])),
+        float(cast(float, values["low"])), float(cast(float, values["open"])),
+        observation.context.child_observation_ids if observation.context else (),
+        observation.context.generation if observation.context else None,
+    )
+
+
+def _freeze_projections(interaction: LocationInteraction) -> LocationInteraction:
+    latest = tuple(
+        (timeframe, values[-1])
+        for timeframe, values in interaction.synthetic_snapshots
+        if values
+    )
+    return replace(interaction, frozen_projections=latest)
+
+
 class InteractionDetector:
     """One detector per timeframe; references are never mutated after creation."""
 
     def __init__(self, timeframe: str) -> None:
-        if not timeframe.strip():
-            raise ValueError("interaction timeframe is required")
+        if timeframe not in {"1m", "5m"}:
+            raise ValueError("interaction timeframe must be 1m or 5m")
         self.timeframe = timeframe
         self._active: dict[str, LocationInteraction] = {}
         self._closed: list[LocationInteraction] = []
@@ -288,15 +327,32 @@ class InteractionDetector:
         *,
         band_contact: bool | None = None,
         observation_id: str | None = None,
+        projection_sources: Mapping[str, tuple[OrderflowObservation, ...]] | None = None,
     ) -> LocationInteraction | None:
         if observation.timeframe != self.timeframe:
             return None
+        if location.timeframe and location.timeframe != self.timeframe:
+            return None
+        if location.available_at > observation.available_at:
+            return None
+        if observation.interval_end is not None and observation.available_at < observation.interval_end:
+            raise ValueError("interaction candle must be causally complete")
         processed_id = observation_id or observation.observation_id
+        key = _active_key(location.alias, self.timeframe)
         if processed_id in self._processed_observations:
-            return self._active.get(f"{location.alias}:{self.timeframe}")
+            return self._active.get(key)
         self._processed_observations.add(processed_id)
         if observation.context is None or observation.context.availability_status != "available":
             return None
+        if self.timeframe == "5m":
+            context = observation.context
+            if context.completeness != "complete" or len(context.child_observation_ids) != 5:
+                raise ValueError("incomplete 5m observation cannot reach detector")
+            if len(context.child_intervals) != 5 or any(
+                left[1] != right[0]
+                for left, right in zip(context.child_intervals, context.child_intervals[1:])
+            ):
+                raise ValueError("5m observation children do not exactly cover the parent interval")
         close = observation.features.get("close")
         open_price = observation.features.get("open", close)
         high = observation.features.get("high", close)
@@ -314,26 +370,24 @@ class InteractionDetector:
         if first_observed_at is None or observation.observed_at < first_observed_at:
             self._session_first_observed_at[session_id] = observation.observed_at
             first_observed_at = observation.observed_at
-        key = f"{location.alias}:{self.timeframe}"
         interaction = self._active.get(key)
-        if interaction is not None and location.alias.upper() != "VWAP" and (
-            interaction.location_id != location.location_id
-            or interaction.reference_generation != location.generation
-            or interaction.reference_level != location.price
-            or interaction.band_lower != location.band.lower
-            or interaction.band_upper != location.band.upper
+        if (
+            interaction is not None
+            and location.alias.upper() != "VWAP"
+            and interaction.reference_generation != location.generation
         ):
-            ended = replace(
-                interaction,
+            replaced = replace(
+                _freeze_projections(interaction),
                 status=InteractionStatus.ENDED,
                 close_reason=InteractionCloseReason.REFERENCE_REPLACED,
-                closed_at=observation.available_at,
+                closed_at=location.available_at,
             )
             self._active.pop(key, None)
-            self._closed.append(ended)
+            self._closed.append(replaced)
             interaction = None
         if interaction is not None and any(
             item.observation_id == observation.observation_id
+            or item.observed_at == observation.observed_at
             for item in interaction.contact_candles
         ):
             return interaction
@@ -356,13 +410,11 @@ class InteractionDetector:
             if (
                 location.alias in {"OR_HIGH", "OR_LOW"}
                 and observation.observed_at == first_observed_at
-                and (
-                    location.source_aggregate_id == observation.source_observation_id
-                    or location.source_aggregate_id.startswith("aggregate:")
-                )
             ):
                 return None
             if not contact:
+                return None
+            if location.frozen_atr is None:
                 return None
             interaction = LocationInteraction(
                 ":".join((
@@ -375,6 +427,7 @@ class InteractionDetector:
                 self.timeframe, location.location_id, location.alias,
                 location.price, location.generation, observation.observation_id,
                 observation.observed_at, InteractionStatus.ACTIVE, (candle,),
+                atr=location.frozen_atr,
                 band_lower=location.band.lower, band_upper=location.band.upper,
                 location_type=location.location_type,
                 reference_provenance={
@@ -384,39 +437,57 @@ class InteractionDetector:
                 },
                 pre_contact_side=_pre_contact_side(observation, location),
             )
-            interaction = _append_projection(interaction, interaction.contact_candles)
+            seeded = projection_sources or {}
+            for source_timeframe, sources in seeded.items():
+                for source in sorted(
+                    sources,
+                    key=lambda item: (item.observed_at, item.available_at, item.observation_id),
+                ):
+                    if source.available_at > observation.available_at:
+                        continue
+                    in_containing_parent = (
+                        source.interval_start is not None
+                        and source.interval_end is not None
+                        and source.interval_start <= interaction.created_at < source.interval_end
+                    )
+                    if source.observed_at < interaction.created_at and not in_containing_parent:
+                        continue
+                    candle = _source_candle(source)
+                    if candle is not None and candle.timeframe == source_timeframe:
+                        interaction = _append_source_projection(interaction, candle)
+            if not interaction.synthetic_snapshots:
+                interaction = _append_projection(interaction, interaction.contact_candles)
             self._active[key] = interaction
             return interaction
         if not inside:
             assert interaction.band_lower is not None and interaction.band_upper is not None
             terminal_side = _close_side(close_value, interaction.band_lower, interaction.band_upper)
-            previous_close = interaction.contact_candles[0].close
-            crossed = ((previous_close < interaction.reference_level < close_value)
-                       or (previous_close > interaction.reference_level > close_value))
-            close_reason = (
-                InteractionCloseReason.CROSS_BAND if crossed
-                else InteractionCloseReason.DEPARTED
-                if previous_close == interaction.reference_level
-                else InteractionCloseReason.SAME_SIDE_DEPARTURE
-            )
             initial_side = interaction.pre_contact_side
             if initial_side is None:
                 first_close = interaction.contact_candles[0].close
                 first_side = _close_side(first_close, interaction.band_lower, interaction.band_upper)
                 initial_side = first_side if first_side != "INSIDE_BAND" else None
+            departure_direction = (
+                None if initial_side is None
+                else InteractionDepartureDirection.SAME_SIDE
+                if terminal_side == initial_side
+                else InteractionDepartureDirection.CROSS_BAND
+            )
+            close_reason = (
+                InteractionCloseReason.OUTSIDE_BAND_DEPARTURE
+                if departure_direction is None
+                else InteractionCloseReason.SAME_SIDE_DEPARTURE
+                if departure_direction is InteractionDepartureDirection.SAME_SIDE
+                else InteractionCloseReason.CROSS_BAND_DEPARTURE
+            )
             ended = replace(
-                interaction, status=InteractionStatus.ENDED,
+                _freeze_projections(interaction), status=InteractionStatus.ENDED,
                 close_reason=close_reason,
                 closed_at=observation.available_at,
                 contact_candles=(*interaction.contact_candles, candle),
                 terminal_close_side=terminal_side,
                 terminal_candle_id=observation.observation_id,
-                departure_direction=(
-                    None if initial_side is None
-                    else InteractionDepartureDirection.SAME_SIDE
-                    if terminal_side == initial_side
-                    else InteractionDepartureDirection.CROSS_BAND
-                ),
+                departure_direction=departure_direction,
             )
             ended = _append_projection(ended, ended.contact_candles)
             self._active.pop(key, None)
@@ -484,10 +555,14 @@ class InteractionDetector:
         raise KeyError(interaction_id)
 
     def close_all(self, reason: InteractionCloseReason, at: datetime) -> tuple[LocationInteraction, ...]:
+        if reason is InteractionCloseReason.CROSS_BAND_DEPARTURE:
+            raise ValueError("cross-band closure requires a terminal candle")
         ended = tuple(
-            replace(item, status=InteractionStatus.ENDED, close_reason=reason, closed_at=at)
+            replace(_freeze_projections(item), status=InteractionStatus.ENDED, close_reason=reason, closed_at=at)
             for item in self._active.values()
         )
+        if any(at < item.created_at or at < item.available_at for item in ended):
+            raise ValueError("interaction ending must be causal")
         self._active.clear()
         self._closed.extend(ended)
         return ended
@@ -495,6 +570,30 @@ class InteractionDetector:
     def observe_gap(self, at: datetime) -> tuple[LocationInteraction, ...]:
         """Close active episodes at a source boundary without inventing candles."""
         return self.close_all(InteractionCloseReason.DATA_GAP, at)
+
+    def advance_session(
+        self, interaction_id: str, *, at: datetime, carry_sessions: int,
+    ) -> LocationInteraction | None:
+        """Apply the canonical carry limit at a session boundary."""
+        for key, interaction in tuple(self._active.items()):
+            if interaction.interaction_id != interaction_id:
+                continue
+            if at < interaction.created_at or at < interaction.available_at:
+                raise ValueError("interaction session transition must be causal")
+            carried = replace(interaction, sessions_carried=interaction.sessions_carried + 1)
+            if carried.sessions_carried > carry_sessions:
+                carried = replace(
+                    _freeze_projections(carried),
+                    status=InteractionStatus.ENDED,
+                    close_reason=InteractionCloseReason.SESSION_END,
+                    closed_at=at,
+                )
+                self._active.pop(key)
+                self._closed.append(carried)
+            else:
+                self._active[key] = carried
+            return carried
+        return None
 
     def snapshot(self) -> dict[str, object]:
         def encode(item: LocationInteraction) -> dict[str, object]:
@@ -536,6 +635,24 @@ class InteractionDetector:
                     for score in item.score_history
                 ],
                 "source_cursors": dict(item.source_cursors),
+                "atr": item.atr,
+                "frozen_projections": {
+                    timeframe: {
+                        "timeframe": snapshot.timeframe,
+                        "open": snapshot.open,
+                        "high": snapshot.high,
+                        "low": snapshot.low,
+                        "close": snapshot.close,
+                        "source_observation_ids": list(snapshot.source_observation_ids),
+                        "child_observation_ids": list(snapshot.child_observation_ids),
+                        "context_version": snapshot.context_version,
+                        "first_observed_at": snapshot.first_observed_at.isoformat(),
+                        "last_observed_at": snapshot.last_observed_at.isoformat(),
+                        "available_at": snapshot.available_at.isoformat(),
+                    }
+                    for timeframe, snapshot in item.frozen_projections
+                },
+                "sessions_carried": item.sessions_carried,
                 "reference_level": item.reference_level,
                 "reference_generation": item.reference_generation,
                 "source_observation_id": item.source_observation_id,
@@ -706,6 +823,23 @@ class InteractionDetector:
             raw_cursors = raw.get("source_cursors", {})
             if not isinstance(raw_cursors, Mapping):
                 raise ValueError("invalid interaction source cursors")
+            raw_frozen = raw.get("frozen_projections", {})
+            if not isinstance(raw_frozen, Mapping):
+                raise ValueError("invalid frozen interaction projections")
+            frozen: list[tuple[str, ProjectionSnapshot]] = []
+            for timeframe, value in raw_frozen.items():
+                if not isinstance(value, Mapping):
+                    raise ValueError("invalid frozen interaction projection")
+                frozen.append((str(timeframe), ProjectionSnapshot(
+                    str(value["timeframe"]), float(value["open"]), float(value["high"]),
+                    float(value["low"]), float(value["close"]),
+                    tuple(str(item) for item in value.get("source_observation_ids", ())),
+                    tuple(str(item) for item in value.get("child_observation_ids", ())),
+                    datetime.fromisoformat(str(value["first_observed_at"])),
+                    datetime.fromisoformat(str(value["last_observed_at"])),
+                    datetime.fromisoformat(str(value["available_at"])),
+                    int(value["context_version"]) if value.get("context_version") is not None else None,
+                )))
             return LocationInteraction(
                 str(raw["interaction_id"]), str(raw["timeframe"]),
                 str(raw["location_id"]), str(raw["location_alias"]),
@@ -713,6 +847,7 @@ class InteractionDetector:
                 str(raw["source_observation_id"]),
                 datetime.fromisoformat(str(raw["created_at"])),
                 InteractionStatus(str(raw["status"])), candles,
+                float(raw["atr"]) if raw.get("atr") is not None else None,
                 InteractionCloseReason(str(close_reason)) if close_reason is not None else None,
                 datetime.fromisoformat(str(closed_at)) if closed_at is not None else None,
                 str(raw["pre_contact_side"]) if raw.get("pre_contact_side") is not None else None,
@@ -731,6 +866,8 @@ class InteractionDetector:
                 tuple(sorted(projections)),
                 scores,
                 tuple(sorted((str(key), str(value)) for key, value in raw_cursors.items())),
+                tuple(sorted(frozen)),
+                int(raw.get("sessions_carried", 0)),
             )
 
         active = snapshot.get("active", ())
@@ -742,10 +879,12 @@ class InteractionDetector:
             interaction = decode(item)
             if interaction.status is not InteractionStatus.ACTIVE:
                 raise ValueError("active interaction snapshot has terminal status")
-            key = f"{interaction.location_alias}:{interaction.timeframe}"
+            key = (
+                _active_key(interaction.location_alias, interaction.timeframe)
+            )
             if key in detector._active:
                 raise ValueError("duplicate active interaction snapshot")
-            detector._active[f"{interaction.location_alias}:{interaction.timeframe}"] = interaction
+            detector._active[key] = interaction
         for item in closed:
             interaction = decode(item)
             if interaction.status is not InteractionStatus.ENDED:

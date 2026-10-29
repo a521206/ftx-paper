@@ -163,6 +163,9 @@ class SetupOpportunity:
     decision_context: ContextVersionRef | None = None
     source_instrument: str | None = None
     source_session_id: str | None = None
+    opening_interaction_kind: str | None = None
+    opening_interaction_evidence: tuple[Mapping[str, object], ...] = ()
+    opening_policy_version: str | None = None
 
     @property
     def decision_id(self) -> str:
@@ -236,9 +239,10 @@ class SetupOpportunity:
          context_relation: str | None = None,
          formation_context: ContextVersionRef | None = None,
          confirmation_ids: tuple[str, ...] = (),
-         source_instrument: str | None = None,
-         source_session_id: str | None = None,
-    ) -> "SetupOpportunity":
+          source_instrument: str | None = None,
+          source_session_id: str | None = None,
+          opening_policy_version: str | None = None,
+     ) -> "SetupOpportunity":
         seed = (
             f"{interaction_id}|{formed_at.isoformat()}|{direction}|{evidence_ids}|"
             f"{evidence_timeframe}|{regime_version}|{template_id}|{policy_version}"
@@ -260,6 +264,22 @@ class SetupOpportunity:
             context_relation=context_relation, source_interaction_id=interaction_id,
             formation_context=formation_context, decision_context=formation_context,
             source_instrument=source_instrument, source_session_id=source_session_id,
+            opening_policy_version=opening_policy_version,
+        )
+
+    def record_opening_interaction(
+        self, *, kind: str, evidence: Mapping[str, object], at: datetime,
+    ) -> "SetupOpportunity":
+        if self.status is not OpportunityStatus.ACTIVE:
+            return self
+        return replace(
+            self,
+            opening_interaction_kind=kind,
+            opening_interaction_evidence=(*self.opening_interaction_evidence, dict(evidence)),
+            transitions=(*self.transitions, OpportunityTransition(
+                OpportunityStatus.ACTIVE, at, "opening_interaction",
+                (str(evidence["observation_id"]),),
+            )),
         )
 
     def promote(
@@ -405,6 +425,9 @@ class SetupOpportunity:
             ),
             "source_instrument": self.source_instrument,
             "source_session_id": self.source_session_id,
+            "opening_interaction_kind": self.opening_interaction_kind,
+            "opening_interaction_evidence": [dict(item) for item in self.opening_interaction_evidence],
+            "opening_policy_version": self.opening_policy_version,
         }
 
     @classmethod
@@ -450,6 +473,14 @@ class SetupOpportunity:
             raise ValueError("opportunity snapshot requires an initial transition")
         if len(set(transitions)) != len(transitions):
             raise ValueError("opportunity snapshot contains duplicate transitions")
+        opening_evidence_raw = raw.get("opening_interaction_evidence", ())
+        if not isinstance(opening_evidence_raw, (list, tuple)):
+            raise ValueError("invalid opening interaction evidence")
+        opening_evidence: list[Mapping[str, object]] = []
+        for item in opening_evidence_raw:
+            if not isinstance(item, Mapping):
+                raise ValueError("opening interaction evidence must be an object")
+            opening_evidence.append(dict(item))
         if transitions[0].status is not OpportunityStatus.ACTIVE or transitions[0].at != setup.formed_at:
             raise ValueError("opportunity snapshot has an invalid initial transition")
         if transitions[0].reason != "formed":
@@ -496,6 +527,9 @@ class SetupOpportunity:
             context_ref(raw.get("formation_context")), context_ref(raw.get("decision_context")),
             str(raw["source_instrument"]) if raw.get("source_instrument") is not None else None,
             str(raw["source_session_id"]) if raw.get("source_session_id") is not None else None,
+            str(raw["opening_interaction_kind"]) if raw.get("opening_interaction_kind") is not None else None,
+            tuple(opening_evidence),
+            str(raw["opening_policy_version"]) if raw.get("opening_policy_version") is not None else None,
         )
 
 
