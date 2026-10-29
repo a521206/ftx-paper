@@ -26,6 +26,9 @@ class MarketBarRepository(Protocol):
 
 class FeatureRepository(Protocol):
     def read_feature_snapshot(self, key: "FeatureCacheKey") -> "FeatureSnapshot | None": ...
+    def read_feature_snapshot_for_session(
+        self, *, feature_set: str, instrument: str, session_date: str,
+    ) -> "FeatureSnapshot | None": ...
     def write_feature_snapshot(self, snapshot: "FeatureSnapshot") -> None: ...
 
 

@@ -71,7 +71,7 @@ def evaluate_admission(
     context_available: bool,
     regime_allowed: bool | None,
     opening_gap_allowed: bool | None,
-    active_position_allowed: bool | None,
+    active_position_allowed: bool | None = None,
     exposure_allowed: bool | None = None,
     allocation_allowed: bool | None = None,
     sizing_allowed: bool | None = None,
@@ -88,6 +88,7 @@ def evaluate_admission(
     expected_setup_version: str | None = None,
     expected_context_version: str | None = None,
     reference_window: str | None = None,
+    evaluate_portfolio_gates: bool = True,
 ) -> AdmissionDecision:
     """Apply gates in canonical order without owning executable mutations.
 
@@ -133,13 +134,15 @@ def evaluate_admission(
         ("context_relation", relation_allowed),
         ("regime_permission", regime_allowed),
         ("opening_gap_permission", opening_gap_allowed),
-        ("active_position_gate", active_position_allowed),
     ]
+    if evaluate_portfolio_gates:
+        checks.append(("active_position_gate", active_position_allowed))
     optional_checks = (
         ("exposure_gate", exposure_allowed), ("allocation_gate", allocation_allowed),
         ("sizing_gate", sizing_allowed), ("risk_gate", risk_allowed),
     )
-    checks.extend(optional_checks)
+    if evaluate_portfolio_gates:
+        checks.extend(optional_checks)
     if setup_valid is not None:
         checks.append(("setup_validity", setup_valid))
     if direction_matches is not None:

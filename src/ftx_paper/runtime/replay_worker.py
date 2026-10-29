@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import hashlib
 import json
 from queue import Empty, Full, Queue
@@ -28,7 +28,9 @@ from ftx_paper.strategy.orderflow_observation import observe_market
 from ftx_paper.strategy.orderflow_producer import CausalOrderflowProducer
 from ftx_paper.strategy.orderflow_replay import ReplayMachine
 from ftx_paper.strategy.orderflow_source import prepare_replay_input
-from ftx_paper.runtime.futures_source import FuturesSessionSourceResolver
+from ftx_paper.runtime.futures_source import (
+    FuturesSessionSourceResolver, materialize_orderflow_daily_atr,
+)
 from ftx_paper.runtime.parity_artifacts import (
     NORMALIZED_BAR_FINGERPRINT_RECIPE,
     build_parity_artifact,
@@ -1899,42 +1901,9 @@ class ReplayWorker:
     def _prior_daily_atr(
         self, session_date: str, available_dates: list[str],
     ) -> float | None:
-        """Return the completed-session ATR used for causal location bands."""
-        prior_dates = [item for item in available_dates if item < session_date]
-        daily: list[tuple[float, float, float]] = []
-        for date in prior_dates:
-            source = self._resolve_source(date)
-            bars = self._bars(date, rows=self.store.read_market_bars(date), futures_source=source)
-            futures = [
-                item for item in bars
-                if str(item.instrument.instrument_type).upper() in {"FUT", "FUTURES"}
-                and (source is None or item.instrument.symbol == source.symbol)
-                and (source is None or item.instrument.expiry == source.expiry)
-            ]
-            if not futures:
-                continue
-            futures = sorted(futures, key=lambda item: item.timestamp)
-            local_times = [item.timestamp.astimezone(IST) for item in futures]
-            if len(local_times) != 375 or any(
-                right - left != timedelta(minutes=1)
-                for left, right in zip(local_times, local_times[1:])
-            ):
-                continue
-            high = max(float(item.high) for item in futures)
-            low = min(float(item.low) for item in futures)
-            close = float(futures[-1].close)
-            daily.append((high, low, close))
-        if len(daily) < 14:
-            return None
-        ranges: list[float] = []
-        prior_close: float | None = None
-        for high, low, close in daily:
-            true_range = high - low
-            if prior_close is not None:
-                true_range = max(true_range, abs(high - prior_close), abs(low - prior_close))
-            ranges.append(true_range)
-            prior_close = close
-        return sum(ranges[-14:]) / 14.0
+        """Read or materialize Paper's prior-session ATR artifact."""
+        del available_dates
+        return materialize_orderflow_daily_atr(self.store, session_date)
 
     def _prior_day_levels(
         self, session_date: str, available_dates: list[str] | None = None,

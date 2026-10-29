@@ -33,6 +33,34 @@ class SqliteFeatureRepository(FeatureRepository):
             availability=str(row[3]),
         )
 
+    def read_feature_snapshot_for_session(
+        self, *, feature_set: str, instrument: str, session_date: str,
+    ) -> FeatureSnapshot | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT instrument, session_date, timeframe, cutoff_minute,
+                          feature_set, calculator_version, parameters_json,
+                          input_fingerprint, values_json, source_bar_ids_json,
+                          computed_at, availability
+                     FROM feature_cache
+                    WHERE feature_set = ? AND instrument = ? AND session_date = ?
+                    ORDER BY computed_at DESC LIMIT 1""",
+                (feature_set, instrument, session_date),
+            ).fetchone()
+        if row is None:
+            return None
+        return FeatureSnapshot(
+            key=FeatureCacheKey(
+                instrument=str(row[0]), session_date=str(row[1]),
+                timeframe=str(row[2]), cutoff_minute=str(row[3]),
+                feature_set=str(row[4]), calculator_version=str(row[5]),
+                parameters=tuple(tuple(item) for item in json.loads(row[6])),
+                input_fingerprint=str(row[7]),
+            ),
+            values=json.loads(row[8]), source_bar_ids=tuple(json.loads(row[9])),
+            computed_at=_parse_datetime(row[10]), availability=str(row[11]),
+        )
+
     def write_feature_snapshot(self, snapshot: FeatureSnapshot) -> None:
         if self.read_only:
             raise RuntimeError("cannot write feature cache through a read-only repository")

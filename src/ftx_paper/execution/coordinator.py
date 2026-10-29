@@ -12,6 +12,7 @@ class PaperExecutionCoordinator:
         self.capital_context = capital_context or CapitalRuntimeContext(ResearchCapitalProfile())
         self._entry_fill_ids: dict[str, set[str]] = {}
         self._denied: dict[str, str] = {}
+        self._pending_position_limits: dict[str, int] = {}
 
     @property
     def denied_proposals(self) -> dict[str, str]:
@@ -52,14 +53,10 @@ class PaperExecutionCoordinator:
                 self._denied[order.client_order_id] = "duplicate_entry"
             elif group is not None and str(group) in claimed:
                 self._denied[order.client_order_id] = "execution_group_already_claimed"
-            elif max_open_positions is not None and len(self.portfolio.positions) + sum(
-                item.role is OrderRole.ENTRY for item in accepted
-            ) >= max_open_positions:
-                self._denied[order.client_order_id] = "portfolio_position_limit"
             else:
                 accepted.append(order)
-                if group is not None:
-                    claimed.add(str(group))
+                if order.role is OrderRole.ENTRY and max_open_positions is not None:
+                    self._pending_position_limits[order.client_order_id] = max_open_positions
         return tuple(accepted)
 
     def submit(self, order: OrderIntent) -> None:
@@ -79,6 +76,18 @@ class PaperExecutionCoordinator:
             existing = self.portfolio.positions.get(order.client_order_id)
             if fill_id is not None and fill_id in self._entry_fill_ids.setdefault(order.client_order_id, set()):
                 return existing
+            group = order.execution_group_id
+            if group is not None and any(
+                position.execution_group_id == group
+                and position.entry_order_id != order.client_order_id
+                for position in self.portfolio.positions.values()
+            ):
+                self._denied[order.client_order_id] = "execution_group_already_claimed"
+                return None
+            position_limit = self._pending_position_limits.get(order.client_order_id)
+            if position_limit is not None and len(self.portfolio.positions) >= position_limit:
+                self._denied[order.client_order_id] = "portfolio_position_limit"
+                return None
             result = self.portfolio.fill_entry(
                 order, price=price,
                 margin_per_lot=self.capital_context.profile.vehicle_limit(order.vehicle).margin_per_lot,

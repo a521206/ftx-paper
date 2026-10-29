@@ -1,9 +1,15 @@
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole
 from ftx_paper.market import DecisionBundle, FeatureMemoryCache, FeatureService, LiveFeatureCalculator
+from ftx_paper.market.feature_cache import (
+    FeatureCacheKey, FeatureSnapshot, ORDERFLOW_DAILY_ATR_FEATURE_SET,
+    build_orderflow_daily_atr_snapshot, daily_atr_from_snapshot,
+)
 from ftx_paper.infrastructure.sqlite.feature_repository import SqliteFeatureRepository
 from ftx_paper.runtime import RuntimeStore
+from ftx_paper.runtime.futures_source import materialize_orderflow_daily_atr
+from ftx_paper.runtime.replay_worker import ReplayWorker
 
 
 def _bar(minute: int, close: float) -> MarketBar:
@@ -79,3 +85,123 @@ def test_feature_service_excludes_vix_bars_after_event_cutoff():
     assert snapshot is not None
     assert snapshot.values["vix"] == 12.0
     assert snapshot.values["vix_open"] == 12.0
+
+
+def test_daily_atr_artifact_requires_canonical_feature_set_and_availability():
+    key = FeatureCacheKey(
+        instrument="NIFTY", session_date="2026-01-02", timeframe="1d",
+        cutoff_minute="00:00", feature_set=ORDERFLOW_DAILY_ATR_FEATURE_SET,
+        calculator_version="niftyzoning-orderflow-daily-atr-v1",
+        parameters=(("series", "continuous"), ("window", "14")),
+        input_fingerprint="canonical-fingerprint",
+    )
+    snapshot = FeatureSnapshot(
+        key=key, values={"atr_14": 12.5}, source_bar_ids=("daily-1",),
+        computed_at=datetime.fromisoformat("2026-01-02T00:00:00+00:00"),
+    )
+
+    assert daily_atr_from_snapshot(snapshot) == 12.5
+    assert daily_atr_from_snapshot(FeatureSnapshot(
+        key=key, values={"atr_14": 12.5}, source_bar_ids=(),
+        computed_at=snapshot.computed_at, availability="unavailable",
+    )) is None
+
+
+def test_sqlite_feature_repository_reads_daily_atr_artifact_by_session(tmp_path):
+    store = RuntimeStore(tmp_path / "runtime")
+    repository = SqliteFeatureRepository(store.database)
+    key = FeatureCacheKey(
+        instrument="NIFTY", session_date="2026-01-02", timeframe="1d",
+        cutoff_minute="00:00", feature_set=ORDERFLOW_DAILY_ATR_FEATURE_SET,
+        calculator_version="niftyzoning-orderflow-daily-atr-v1",
+        parameters=(("series", "continuous"), ("window", "14")),
+        input_fingerprint="canonical-fingerprint",
+    )
+    repository.write_feature_snapshot(FeatureSnapshot(
+        key=key, values={"atr_14": 12.5}, source_bar_ids=("daily-1",),
+        computed_at=datetime.fromisoformat("2026-01-02T00:00:00+00:00"),
+    ))
+
+    restored = repository.read_feature_snapshot_for_session(
+        feature_set=ORDERFLOW_DAILY_ATR_FEATURE_SET,
+        instrument="NIFTY", session_date="2026-01-02",
+    )
+    assert restored is not None
+    assert daily_atr_from_snapshot(restored) == 12.5
+    assert ReplayWorker(store)._prior_daily_atr("2026-01-02", []) == 12.5
+
+
+def test_paper_materializes_daily_atr_from_its_own_market_history(tmp_path):
+    store = RuntimeStore(tmp_path / "runtime")
+    start = date(2026, 1, 1)
+    bars = []
+    dates = []
+    for day_index in range(14):
+        session_date = start + timedelta(days=day_index)
+        date_value = session_date.isoformat()
+        dates.append(date_value)
+        for minute_index in range(375):
+            timestamp = datetime.combine(
+                session_date, datetime.strptime("09:15", "%H:%M").time(),
+            ).replace(tzinfo=timezone(timedelta(hours=5, minutes=30))) + timedelta(minutes=minute_index)
+            bars.append(MarketBar(
+                Instrument("NIFTY", "NFO", "FUTURES", expiry="2026-12-31"),
+                timestamp,
+                100.0, 110.0, 100.0, 105.0, 100.0,
+            ))
+    store.append_market_bars(bars, source="paper-test")
+
+    worker = ReplayWorker(store)
+    assert worker._prior_daily_atr("2026-01-15", [*dates, "2026-01-15"]) == 10.0
+
+    snapshot = SqliteFeatureRepository(store.database).read_feature_snapshot_for_session(
+        feature_set=ORDERFLOW_DAILY_ATR_FEATURE_SET,
+        instrument="NIFTY",
+        session_date="2026-01-15",
+    )
+    assert snapshot is not None
+    assert snapshot.key.parameters == (("series", "continuous"), ("window", "14"))
+    assert snapshot.source_bar_ids
+    assert daily_atr_from_snapshot(snapshot) == 10.0
+
+
+def test_live_atr_materializer_reuses_paper_history_and_artifact(tmp_path):
+    store = RuntimeStore(tmp_path / "runtime")
+    start = date(2026, 2, 1)
+    bars = []
+    for day_index in range(14):
+        session_date = start + timedelta(days=day_index)
+        for minute_index in range(375):
+            timestamp = datetime.combine(
+                session_date, datetime.strptime("09:15", "%H:%M").time(),
+            ).replace(tzinfo=timezone(timedelta(hours=5, minutes=30))) + timedelta(minutes=minute_index)
+            bars.append(MarketBar(
+                Instrument("NIFTY", "NFO", "FUTURES", expiry="2026-12-31"),
+                timestamp, 100.0, 110.0, 100.0, 105.0, 100.0,
+            ))
+    store.append_market_bars(bars, source="paper-test")
+
+    assert materialize_orderflow_daily_atr(store, "2026-02-15") == 10.0
+    assert materialize_orderflow_daily_atr(store, "2026-02-15") == 10.0
+
+
+def test_daily_atr_snapshot_uses_true_range_across_session_closes():
+    sessions = []
+    for index in range(14):
+        close = 100.0 + index * 5
+        sessions.append((
+            f"2026-01-{index + 1:02d}",
+            ({
+                "minute": f"2026-01-{index + 1:02d}T09:15:00+05:30",
+                "open": close,
+                "high": close + 2,
+                "low": close - 2,
+                "close": close,
+                "volume": 1,
+            },),
+        ))
+
+    snapshot = build_orderflow_daily_atr_snapshot("2026-01-15", sessions)
+
+    assert snapshot.values["atr_14"] == (4.0 + 13.0 * 7.0) / 14.0
+    assert snapshot.key.feature_set == ORDERFLOW_DAILY_ATR_FEATURE_SET

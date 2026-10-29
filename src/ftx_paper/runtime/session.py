@@ -35,6 +35,7 @@ from .event_bus import EventBus
 from ftx_paper.execution import ExecutionService, PaperExecutionCoordinator
 from .events import is_decision_event, serialize_datetime
 from .state import LiveRuntimeState
+from .futures_source import materialize_orderflow_daily_atr
 from ftx_paper.execution.lifecycle import (
     ExecutionLifecycleCoordinator,
     ExecutionPhase,
@@ -344,7 +345,9 @@ class RuntimeSession:
                 self.live_state.broker = self.broker
             if not isinstance(self.broker, PaperBroker):
                 raise TypeError("runtime order execution must use PaperBroker")
-            backfill_kwargs: dict[str, Any] = {"contract_store": self.store}
+            # Keep enough recent futures history locally to warm the causal
+            # 14-session ATR on a fresh Paper deployment.
+            backfill_kwargs: dict[str, Any] = {"contract_store": self.store, "days": 20}
             if provider == "xts":
                 backfill_kwargs["stop_event"] = self._stop_event
             backfill = tuple(load_startup_backfill(client, cast(Any, resolved), **backfill_kwargs))
@@ -354,6 +357,14 @@ class RuntimeSession:
             self.store.append_market_bars(backfill, source="historical_backfill")
             for historical_bar in sorted(backfill, key=lambda item: item.timestamp):
                 self._feature_service.ingest(historical_bar)
+            if orderflow_enabled:
+                clock = self.market_clock()
+                if clock.tzinfo is None:
+                    clock = clock.replace(tzinfo=IST)
+                session_date = clock.astimezone(IST).date().isoformat()
+                self._orderflow_producer.set_frozen_atr(
+                    materialize_orderflow_daily_atr(self.store, session_date),
+                )
             access_token = self._wait_for_session_readiness(is_nse_market_open)
             if access_token is None:
                 self._release_feed_lease()

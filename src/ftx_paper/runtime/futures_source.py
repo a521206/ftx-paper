@@ -6,11 +6,18 @@ from dataclasses import asdict, dataclass
 from datetime import date as date_type, datetime
 import hashlib
 import json
-from typing import Any
+from collections.abc import Mapping, Sequence
+from typing import Any, cast
 
 from ftx_paper.config import IST, SESSION_DATA_END_MINUTES, SESSION_OPEN_MINUTES
 from ftx_paper.contracts import (
     FuturesContract, SELECTION_POLICY_VERSION, parse_expiry, select_front_futures_contract,
+)
+from ftx_paper.market.feature_cache import (
+    ORDERFLOW_DAILY_ATR_FEATURE_SET,
+    FeatureSnapshot,
+    build_orderflow_daily_atr_snapshot,
+    daily_atr_from_snapshot,
 )
 
 
@@ -194,6 +201,60 @@ class FuturesSessionSourceResolver:
         return SESSION_OPEN_MINUTES <= minute < SESSION_DATA_END_MINUTES
 
 
+def materialize_orderflow_daily_atr(store: Any, session_date: str) -> float | None:
+    """Materialize and return the causal ATR needed by a live session.
+
+    The current session is excluded.  Historical bars remain Paper-owned and
+    are resolved with the same dated-contract policy used by replay.
+    """
+    repository_factory = getattr(store, "feature_repository", None)
+    dates_reader = getattr(store, "read_market_dates", None)
+    if not callable(repository_factory) or not callable(dates_reader):
+        return None
+    repository = repository_factory()
+    reader = getattr(repository, "read_feature_snapshot_for_session", None)
+    writer = getattr(repository, "write_feature_snapshot", None)
+    if not callable(reader) or not callable(writer):
+        return None
+
+    existing = reader(
+        feature_set=ORDERFLOW_DAILY_ATR_FEATURE_SET,
+        instrument="NIFTY",
+        session_date=session_date,
+    )
+    if isinstance(existing, FeatureSnapshot):
+        value = daily_atr_from_snapshot(existing)
+        if value is not None:
+            return value
+
+    resolver = FuturesSessionSourceResolver(store)
+    completed: list[tuple[str, Sequence[Mapping[str, object]]]] = []
+    available_dates = cast(Sequence[object], dates_reader())
+    for prior_date in sorted(str(value) for value in available_dates if str(value) < session_date):
+        source = resolver.resolve(prior_date)
+        if source is None or not _complete_daily_session(source.bars):
+            continue
+        completed.append((prior_date, source.bars))
+    if len(completed) < 14:
+        return None
+
+    artifact = build_orderflow_daily_atr_snapshot(session_date, completed[-14:])
+    writer(artifact)
+    return daily_atr_from_snapshot(artifact)
+
+
+def _complete_daily_session(rows: Sequence[Mapping[str, object]]) -> bool:
+    if len(rows) != 375:
+        return False
+    minutes = [str(row.get("minute", ""))[11:16] for row in rows]
+    expected = [
+        f"{9 + (15 + index) // 60:02d}:{(15 + index) % 60:02d}"
+        for index in range(375)
+    ]
+    return minutes == expected
+
+
 __all__ = [
     "FuturesSessionSource", "FuturesSessionSourceResolver", "SessionSourceIdentity",
+    "materialize_orderflow_daily_atr",
 ]

@@ -39,6 +39,7 @@ from .orderflow_location import (
     is_diagnostic_location,
 )
 from .orderflow_response import evaluate_policy_responses
+from .orderflow_scores import score_aggregate
 from .orderflow_vwap import (
     MarketAggregate, VwapLocationProvider, calculate_session_vwap, calculate_vwap_stop,
     evaluate_vwap_diagnostic_response,
@@ -171,6 +172,72 @@ class OrderflowPolicy:
         return tuple(
             FeatureRequirement(name, timeframe=self.config.response_timeframe)
             for name in self.config.feature_set
+        )
+
+    def _confirmation_scores(
+        self, observation: OrderflowObservation,
+    ) -> tuple[float, float] | None:
+        """Recompute canonical scores from the confirmation evidence boundary."""
+        atr = next(
+            (item.frozen_atr for item in observation.location_observations
+             if item.frozen_atr is not None and item.frozen_atr > 0),
+            None,
+        )
+        if atr is None:
+            return None
+        all_observations = self._evaluation_observations
+        children_by_id = {
+            item.observation_id: item for item in all_observations
+        }
+        child_ids = observation.context.child_observation_ids if observation.context else ()
+        children = tuple(
+            children_by_id[item_id] for item_id in child_ids if item_id in children_by_id
+        )
+        if observation.timeframe == "5m" and len(children) != len(child_ids):
+            return None
+        child_scores: list[tuple[float, float]] = []
+        for child in children:
+            prior = next(
+                (item for item in reversed(all_observations)
+                 if item.timeframe == child.timeframe and item.observed_at < child.observed_at),
+                None,
+            )
+            prior_items = [
+                item for item in all_observations
+                if item.timeframe == child.timeframe and item.observed_at < child.observed_at
+            ][-20:]
+            score = score_aggregate(
+                child.features,
+                prior.features if prior is not None else None,
+                atr=atr,
+                volume_average=(
+                    sum(float(item.features.get("volume", 0.0)) for item in prior_items)
+                    / min(len(prior_items), 20) if prior_items else None
+                ),
+            )
+            if score is None:
+                return None
+            child_scores.append(score)
+        prior_parent = next(
+            (item for item in reversed(all_observations)
+             if item.timeframe == observation.timeframe
+             and item.observed_at < observation.observed_at),
+            None,
+        )
+        prior_parents = [
+            item for item in all_observations
+            if item.timeframe == observation.timeframe
+            and item.observed_at < observation.observed_at
+        ][-20:]
+        return score_aggregate(
+            observation.features,
+            prior_parent.features if prior_parent is not None else None,
+            atr=atr,
+            child_scores=tuple(child_scores),
+            volume_average=(
+                sum(float(item.features.get("volume", 0.0)) for item in prior_parents)
+                / min(len(prior_parents), 20) if prior_parents else None
+            ),
         )
 
     def evaluate(self, bundle: DecisionBundle, context: DecisionContext) -> tuple[PolicyDecision, ...]:
@@ -1232,8 +1299,9 @@ class OrderflowPolicy:
                     # Permission uses the confirmation aggregate's local scores,
                     # matching the canonical replay rather than the older
                     # formation-context snapshot.
-                    long_score = _number(confirmation_observation, "long_score")
-                    short_score = _number(confirmation_observation, "short_score")
+                    decision_scores = self._confirmation_scores(confirmation_observation)
+                    long_score = decision_scores[0] if decision_scores is not None else None
+                    short_score = decision_scores[1] if decision_scores is not None else None
                     score_rejection = _score_rejection(
                         direction=direction,
                         long_score=long_score,
@@ -1328,21 +1396,6 @@ class OrderflowPolicy:
                                 )
                                 and not self._admission_suspended
                             ),
-                            active_position_allowed=context.exposure.open_positions == 0,
-                            exposure_allowed=context.exposure.net_directional_lots == 0,
-                            allocation_allowed=(
-                                context.exposure.open_positions == 0
-                                and context.margin.available > 0
-                            ),
-                            sizing_allowed=(
-                                context.margin.required_per_lot > 0
-                                and context.margin.available >= context.margin.required_per_lot
-                            ),
-                            risk_allowed=(
-                                context.capital.daily_loss < context.capital.daily_loss_limit
-                                if context.capital.daily_loss_limit is not None
-                                else context.capital.daily_loss == 0
-                            ),
                             setup_valid=True,
                             direction_matches=direction is not None,
                              confirmations_available=confirmation_id is not None,
@@ -1352,6 +1405,7 @@ class OrderflowPolicy:
                             ),
                             context_relation=context_relation.value,
                             evidence_ids=evidence_ids,
+                            evaluate_portfolio_gates=False,
                         )
                         self._opportunities[opportunity.lifecycle_id] = opportunity
                         results.append(PolicyDecision({
@@ -1434,28 +1488,6 @@ class OrderflowPolicy:
                             admission.status.value == "PASSED"
                             and (self.execution_mode is not ExecutionMode.EXECUTABLE or trigger.eligible)
                         )
-                        if accepted and self.execution_mode is ExecutionMode.EXECUTABLE:
-                            claim = self._execution_groups.claim(
-                                opportunity.execution_group_id,
-                                opportunity.lifecycle_id,
-                                evidence_ids=evidence_ids,
-                            )
-                            if not claim.accepted:
-                                results.append(PolicyDecision({
-                                    **base,
-                                    "decision_stage": "opportunity",
-                                    "outcome": "rejected",
-                                    "reason": claim.reason,
-                                    "decision_id": _decision_id(
-                                        "opportunity_denied", opportunity.lifecycle_id,
-                                        opportunity.execution_group_id, *claim.evidence_ids,
-                                    ),
-                                    "opportunity_id": opportunity.lifecycle_id,
-                                    "setup_id": opportunity.setup.setup_id,
-                                    "execution_group_id": opportunity.execution_group_id,
-                                    "source_observation_ids": list(claim.evidence_ids),
-                                }))
-                                continue
                         order = None
                         if accepted and self.execution_mode is ExecutionMode.EXECUTABLE:
                             instrument = futures.instrument if futures is not None else next(

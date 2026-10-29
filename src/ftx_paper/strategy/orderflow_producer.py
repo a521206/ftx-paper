@@ -365,12 +365,31 @@ class CausalOrderflowProducer:
                 (item for item in reversed(five_minute)
                  if item.observed_at < start), None,
             )
-            child_scores = tuple(
-                (cast(float, item.features["long_score"]), cast(float, item.features["short_score"]))
-                for item in children
-                if isinstance(item.features.get("long_score"), (int, float))
-                and isinstance(item.features.get("short_score"), (int, float))
-            )
+            child_scores_list: list[tuple[float, float]] = []
+            for child in children:
+                prior_child = next(
+                    (item for item in reversed(prefix)
+                     if item.observed_at < child.observed_at),
+                    None,
+                )
+                prior_children = [
+                    item for item in prefix if item.observed_at < child.observed_at
+                ][-20:]
+                child_score = score_aggregate(
+                    child.features,
+                    prior_child.features if prior_child is not None else None,
+                    atr=atr,
+                    volume_average=(
+                        sum(_numeric_feature(cast(Mapping[str, object], item.features), "volume")
+                            for item in prior_children) / min(len(prior_children), 20)
+                        if prior_children else None
+                    ),
+                )
+                if child_score is None:
+                    child_scores_list = []
+                    break
+                child_scores_list.append(child_score)
+            child_scores = tuple(child_scores_list)
             parent_scores = score_aggregate(
                 parent_features,
                 prior_parent.features if prior_parent is not None else None,

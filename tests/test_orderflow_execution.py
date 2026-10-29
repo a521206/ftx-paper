@@ -75,3 +75,25 @@ def test_arbitration_counts_entries_only_and_persists_execution_groups() -> None
 
     assert coordinator.arbitrate((exit_order, second), max_open_positions=1) == (exit_order,)
     assert coordinator.denied_proposals[second.client_order_id] == "execution_group_already_claimed"
+
+
+def test_unfilled_execution_group_candidates_do_not_claim_until_fill() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    first = OrderIntent(
+        "unfilled-first", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY,
+        execution_group_id="group-unfilled",
+    )
+    second = OrderIntent(
+        "unfilled-second", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY,
+        execution_group_id="group-unfilled",
+    )
+    portfolio = PortfolioState(RESEARCH_CAPITAL_PROFILE.initial_capital)
+    coordinator = PaperExecutionCoordinator(portfolio, CapitalRuntimeContext(RESEARCH_CAPITAL_PROFILE))
+
+    assert coordinator.arbitrate((first, second)) == (first, second)
+    coordinator.submit(first)
+    coordinator.submit(second)
+    coordinator.fill(first, price=100.0)
+
+    assert coordinator.fill(second, price=100.0) is None
+    assert coordinator.denied_proposals[second.client_order_id] == "execution_group_already_claimed"

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -22,6 +22,104 @@ if TYPE_CHECKING:
 
 
 FEATURE_CALCULATOR_VERSION = "live-features-v1"
+ORDERFLOW_DAILY_ATR_FEATURE_SET = "orderflow_daily_atr_v1"
+ORDERFLOW_DAILY_ATR_CALCULATOR_VERSION = "ftx-paper-orderflow-daily-atr-v1"
+
+
+def build_orderflow_daily_atr_snapshot(
+    session_date: str,
+    sessions: Sequence[tuple[str, Sequence[Mapping[str, object]]]],
+    *,
+    window: int = 14,
+    computed_at: datetime | None = None,
+) -> "FeatureSnapshot":
+    """Build Paper's prior-session ATR artifact from normalized daily bars.
+
+    ``sessions`` must contain only complete, already-selected futures sessions
+    in chronological order. The target session is excluded by the caller, so
+    the result is point-in-time safe for replay.
+    """
+    if window < 1:
+        raise ValueError("ATR window must be positive")
+    if window != 14:
+        raise ValueError("orderflow daily ATR artifact requires a 14-session window")
+    if len(sessions) < window:
+        raise ValueError("insufficient completed sessions for daily ATR")
+
+    true_ranges: list[float] = []
+    source_bar_ids: list[str] = []
+    fingerprint_rows: list[dict[str, object]] = []
+    prior_close: float | None = None
+    for date_value, rows in sessions:
+        if not rows:
+            raise ValueError("daily ATR sessions must contain bars")
+        ordered = sorted(rows, key=lambda row: str(row["minute"]))
+        high = max(_required_bar_number(row, "high") for row in ordered)
+        low = min(_required_bar_number(row, "low") for row in ordered)
+        close = _required_bar_number(ordered[-1], "close")
+        true_range = high - low
+        if prior_close is not None:
+            true_range = max(true_range, abs(high - prior_close), abs(low - prior_close))
+        true_ranges.append(true_range)
+        prior_close = close
+        for row in ordered:
+            minute = str(row["minute"])
+            source_bar_ids.append(f"{date_value}:{minute[11:16]}")
+            fingerprint_rows.append({
+                "session_date": date_value,
+                "minute": minute,
+                "open": _required_bar_number(row, "open"),
+                "high": _required_bar_number(row, "high"),
+                "low": _required_bar_number(row, "low"),
+                "close": _required_bar_number(row, "close"),
+                "volume": row.get("volume"),
+                "open_interest": row.get("open_interest"),
+                "symbol": str(row.get("symbol", "NIFTY")),
+                "expiry": str(row.get("expiry", "")),
+            })
+
+    digest = hashlib.sha256(
+        json.dumps(fingerprint_rows, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+    return FeatureSnapshot(
+        key=FeatureCacheKey(
+            instrument="NIFTY",
+            session_date=session_date,
+            timeframe="1d",
+            cutoff_minute="00:00",
+            feature_set=ORDERFLOW_DAILY_ATR_FEATURE_SET,
+            calculator_version=ORDERFLOW_DAILY_ATR_CALCULATOR_VERSION,
+            parameters=(("series", "continuous"), ("window", str(window))),
+            input_fingerprint=digest,
+        ),
+        values={"atr_14": sum(true_ranges[-window:]) / window},
+        source_bar_ids=tuple(source_bar_ids),
+        computed_at=computed_at or datetime.now(timezone.utc),
+    )
+
+
+def _required_bar_number(row: Mapping[str, object], name: str) -> float:
+    value = row.get(name)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError(f"daily ATR bar field {name!r} must be numeric")
+    return float(value)
+
+
+def daily_atr_from_snapshot(snapshot: "FeatureSnapshot | None") -> float | None:
+    """Read canonical prior-session ATR from an existing feature artifact."""
+    if snapshot is None or snapshot.key.feature_set != ORDERFLOW_DAILY_ATR_FEATURE_SET:
+        return None
+    if snapshot.key.timeframe != "1d" or not snapshot.key.calculator_version:
+        return None
+    parameters = dict(snapshot.key.parameters)
+    if parameters.get("series") != "continuous" or parameters.get("window") != "14":
+        return None
+    if snapshot.availability != "available":
+        return None
+    value = snapshot.values.get("atr_14")
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
+        return None
+    return float(value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,6 +410,8 @@ def _fingerprint(
 
 
 __all__ = [
-    "FEATURE_CALCULATOR_VERSION", "FeatureCacheKey", "FeatureMemoryCache",
+    "FEATURE_CALCULATOR_VERSION", "ORDERFLOW_DAILY_ATR_CALCULATOR_VERSION",
+    "ORDERFLOW_DAILY_ATR_FEATURE_SET", "FeatureCacheKey", "FeatureMemoryCache",
     "FeatureRepository", "FeatureService", "FeatureSnapshot",
+    "build_orderflow_daily_atr_snapshot",
 ]

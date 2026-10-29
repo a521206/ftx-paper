@@ -77,6 +77,58 @@ Implementation must stop rather than extend a contract when the mapping cannot
 be completed. Record the gap as unavailable and defer it for an explicit scope
 decision; do not resolve it with a speculative helper or convenience property.
 
+### Canonical Strategy And Ownership Boundary
+
+`C:\Users\agraw\Python\NiftyZoning\src\orderflow` is the behavioral authority
+for this strategy. Paper is an independent implementation of that behavior and
+an execution/accounting host; it is not a second strategy design. Every
+location, response, score, trigger, expiry, conflict group, permission, and
+exit rule must map to a canonical NiftyZoning symbol, test, or an existing Paper
+contract explicitly required by this plan. Paper must not add a setup family,
+score interpretation, fallback, lifecycle transition, or admission rule merely
+because it is convenient to implement.
+
+The ownership split is non-negotiable:
+
+- NiftyZoning behavior defines market observations, causal interactions,
+  responses, opportunity templates, score semantics, trigger rules, and lifecycle
+  transitions. Paper's strategy layer ports these contracts without inventing
+  policy.
+- `OrderflowReplayInput` and the existing `MarketObservation`/observation
+  contracts are the source boundary. Extend those existing contracts only when
+  a corresponding canonical field is proven; do not add a parallel source
+  snapshot type. Prior-session rows, source fingerprint, gaps, and ATR must be
+  passed through the existing replay/observation inputs with explicit
+  availability.
+- Port NiftyZoning's `build_context_scores()`/`_score_for_aggregate()` causal
+  recursion into the existing Paper scoring boundary only after mapping its
+  inputs to existing Paper aggregate/observation contracts. It must consume
+  exact causal raw rows, completed aggregates, and the already existing frozen
+  ATR input; it must not average producer-emitted score fields or introduce a
+  new score state type without a canonical counterpart.
+- The producer publishes normalized bars, aggregates, and lineage only. It does
+  not publish final decision scores or decide score permission.
+- Candidate formation may create a proposal and evidence, but cannot reserve
+  portfolio capacity or consume an execution group. Portfolio gates, risk
+  sizing, pending-entry re-admission, fill-price calculation, group claim, and
+  position creation are one atomic responsibility of the existing Paper
+  execution owner, matching NiftyZoning's `handle_execution()` and lifecycle
+  fill path.
+- A group identifier is metadata before fill, not ownership. The claim is
+  consumed only after a fill succeeds; unfilled siblings remain diagnosable and
+  are invalidated only after that claim is consumed.
+- The proposed generic labels `interaction`, `candidate_formed`,
+  `admission_evaluated`, `intent_armed`, `trigger_observed`, `entry_pending`,
+  and `filled` are reporting boundaries, not permission to add a new strategy
+  state machine. Paper must map them onto the canonical lifecycle stages and
+  intent/execution statuses already defined by NiftyZoning and existing Paper
+  contracts. If a one-to-one mapping is unavailable, retain the label only as
+  an evidence/event projection and leave the typed state unavailable.
+
+If the canonical source is silent, Paper records `unavailable` with a reason
+and does not choose a default strategy. This rule overrides any generic phase
+wording below.
+
 ### Minimal Delivery Scope
 
 The implementation is intentionally minimal. A requirement is included in the
@@ -109,8 +161,8 @@ safety, deterministic replay, or the existing audit/accounting contract.
 - New generic strategy abstractions or parallel lifecycle owners.
 - Exhaustive intermediate-object IDs or provenance fields that are not persisted,
   compared, or required for a decision.
-- Generic live reporting envelopes, multi-session aggregation, and presentation
-  projections.
+- Presentation-only projections beyond the persisted live-event and replay
+  reporting contracts defined in Phase 10.
 - Cross-producer parity artifacts and comparator enhancements. Those remain
   separate deliverables and must not block the Paper live/replay path.
 - Full-capture detail beyond what changes calculations, availability, decisions,
@@ -121,11 +173,13 @@ an existing contract, a production failure, or an explicit scope decision
 requires it. When requirements conflict, this minimal scope takes precedence
 over completeness or generality.
 
-While implementation is in progress, `OrderflowConfig.execution_mode` remains
-diagnostic. Diagnostic processing must create zero executable entries, stops,
-exits, fills, reservations, or portfolio mutations. An explicit opt-in
-execution mode is a later product decision, not an implicit consequence of
-implementing the execution layer.
+`OrderflowConfig.execution_mode` defaults to diagnostic, and diagnostic
+processing must create zero executable entries, stops, exits, fills,
+reservations, or portfolio mutations. The explicit executable mode is already
+available for Paper-owned replay and runtime tests, but it is not enabled by
+default and is not Phase 9 release-complete until the remaining execution,
+paired-replay, and lifecycle acceptance criteria pass. No environment or
+implicit eligibility path may switch it on.
 
 ## Phase 9 Scope Decisions
 
@@ -183,19 +237,27 @@ default remains `ExecutionMode.DIAGNOSTIC`; no environment or implicit
 eligibility path may switch it on. Enabling the mode authorizes proposals to
 the existing Paper execution owner, but does not authorize broker/live
 execution. Executable authorization is available through the strategy/runtime
-path, but the standalone admission helper still rejects `diagnostic=False`.
-That helper must be aligned with the existing Paper execution owner before
-Phase 9 is marked complete.
+path. The standalone `evaluate_admission()` helper currently evaluates the
+same strategy gates for both modes and always returns a detached diagnostic
+projection; it does not accept a `diagnostic` argument and does not create
+execution state. Pending-entry portfolio, sizing, risk, and execution-group
+authorization must remain owned by the execution boundary before Phase 9 is
+marked complete.
 
 ### Parity Coverage
 
 Paired replay validation covers the complete defined Paper projection, not just
-decision labels: canonical decisions and predicates, accepted intents,
-risk/sizing, trigger and entry timing, position management, exits, duplicate
-handling, fills/partial fills, reservations, settlement, and ledger results.
-The diagnostic side must remain mutation-free; the executable side may mutate
-only the existing Paper portfolio, capital, and execution state. Comparisons
-are made at each causal boundary using canonical IDs, evidence, timestamps,
+decision labels: canonical decisions and predicates, diagnostic eligibility
+projections, executable authorization, risk/sizing, trigger and entry timing,
+position management, exits, duplicate handling, fills/partial fills,
+reservations, settlement, and ledger results. The diagnostic side remains
+mutation-free and supplies the causal decision projection; the executable side
+may additionally produce orders and lifecycle/accounting facts by mutating only
+the existing Paper portfolio, capital, and execution state. Comparisons must
+distinguish shared decision/provenance fields from executable-only lifecycle
+facts and compare the latter against the corresponding diagnostic absence or
+unavailable result rather than requiring diagnostic mutations. Comparisons are
+made at each causal boundary using canonical IDs, evidence, timestamps,
 availability, generations, source IDs, and unavailable reasons. VWAP location
 evaluation is covered by paired fixtures; `OR_VWAP` protective-stop behavior is
 covered by executable acceptance fixtures.
@@ -212,16 +274,18 @@ The strategy is built as a causal live decision engine around these layers:
 
 ```text
 source rows
-  -> session input and source identity
+  -> OrderflowReplayInput + MarketObservation (rows, history, gaps, ATR input)
   -> completed 1m/5m aggregates
+  -> existing causal score/provenance fields
   -> session context, values, and permissions
   -> as-of location registry
   -> location observations and interactions
   -> response hypotheses and outcomes
   -> opportunities and structural setups
-  -> admission gates and intents
+  -> candidate evidence and canonical admission predicates
    -> execution and accounting (opt-in only)
-   -> detached diagnostic records and reports
+    -> persisted runtime events / replay facts
+      -> diagnostic and reporting projections
 ```
 
 The layers are dependency boundaries, not mandatory modules. A later layer may
@@ -233,9 +297,10 @@ This plan applies to the live Paper runtime. `RuntimeSession` remains the one
 in-process application/runtime owner, and `OrderflowPolicy` remains the live
 orderflow lifecycle owner within the strategy engine. The policy's existing
 state is authoritative for interactions, response state, opportunities,
-admission projections, and live policy snapshots. Market input, completed
-observations, and account/execution state remain owned by the existing producer,
-shared coordinator, and `RuntimeSession` boundaries.
+strategy-derived context history, permission projections, admission
+projections, and live policy snapshots. Market input and completed observations
+remain producer-owned; account, recovery, authorization, reservations, and
+execution state remain owned by the shared coordinator and `RuntimeSession`.
 Do not introduce a second `LiveOrderflowRuntime`, coordinator, or parallel
 interaction store.
 
@@ -270,8 +335,9 @@ it does not re-ingest source rows or manage portfolio execution:
 
 1. The existing input/producer path normalizes the bar, handles session
    boundaries, detects gaps, and publishes only completed available observations.
-2. The shared runtime/coordinator updates account, execution, recovery, context,
-   and permission state before new policy proposals.
+2. The shared runtime/coordinator updates account, execution, recovery, and any
+   externally owned authorization inputs. `OrderflowPolicy` then publishes its
+   as-of context and strategy permission projections before new proposals.
 3. `OrderflowPolicy` consumes prepared 1m/5m observations in causal order,
    advances interactions and response state, and expires completed lifecycles.
 4. `OrderflowPolicy` forms opportunities and evaluates admission using current
@@ -287,7 +353,9 @@ it does not re-ingest source rows or manage portfolio execution:
 The ordering is part of the contract. In particular, existing execution state
 is managed before new proposals, reference replacements precede execution at
 the same timestamp, interactions precede opportunity formation, and recording
-cannot feed information back into decisions.
+cannot feed information back into decisions. Live diagnostics are projected
+from the persisted runtime events produced after decisions; they are not an
+additional per-bar replay-record or capture owner.
 
 ## Implementation Phases
 
@@ -350,7 +418,9 @@ Phase 0 conformance tests:
 
 ### Phase 1: Market Input And Source Identity
 
-Implement deterministic live session input handling before any strategy policy.
+Implement deterministic source resolution before any strategy policy. Replay and
+live normalization may use different transports, but both must publish the same
+Paper-owned source contract.
 
 Required behavior:
 
@@ -374,6 +444,22 @@ Required behavior:
 - Keep requested dates, selected sessions, rejected sessions, and actually
   replayed sessions as separate fields. `replayed` must not be inferred only
   from whether a non-empty row list happens to exist.
+- Resolve the existing `OrderflowReplayInput` and `MarketObservation` before
+  replay. They must carry the selected continuous-series identity, normalized
+  rows, prior-session history required by the canonical feature builder, source
+  fingerprint, and coverage/gap report. Do not introduce a parallel snapshot
+  object.
+- Materialize Paper's own ATR artifact using the canonical daily-feature
+  semantics (prior completed sessions only, continuous front-series history)
+  from Paper-owned stored market bars. Persist it through the existing
+  `FeatureSnapshot`/`FeatureRepository` input using feature set
+  `orderflow_daily_atr_v1`, daily timeframe, continuous-series parameters, and
+  a source fingerprint. Preserve its value and provenance in existing
+  observation/location fields. A replay worker must never depend on a
+  NiftyZoning database, import, or generated artifact.
+- Reject or mark the snapshot unavailable when required history, ATR, source
+  identity, or coverage cannot be proven. Do not require an arbitrary fixed
+  count such as 375 contiguous bars unless that is a canonical source rule.
 
 Exit criteria:
 
@@ -383,6 +469,8 @@ Exit criteria:
   rows cannot share one continuous replay state.
 - Valid input produces a stable market-input contract consumed by Phase 2, with
   deterministic source metadata and fingerprint values.
+- A replay cannot start without resolved existing source/observation inputs or an explicit unavailable
+  source decision; no downstream score or admission code may silently repair it.
 - Paper tests cover out-of-order ingestion, duplicate ingestion, mixed source
   identity, continuous versus dated selection, missing-minute metadata, and
   requested-versus-replayed date accounting.
@@ -435,6 +523,51 @@ Exit criteria:
 - Capture-mode tests prove summary, diagnostic, and full capture produce the
   same aggregates, availability decisions, gaps, and calculated observations;
   capture mode may change persistence detail only.
+
+### Phase 2A: Canonical Causal Scores
+
+Implement scores as a pure decision-layer service after the source snapshot and
+aggregate graph exist. This phase ports NiftyZoning's
+`src/features/contextual.py` recursion; it does not create a Paper scoring
+policy.
+
+Required behavior:
+
+- The existing Paper score boundary consumes an aggregate, causal raw rows,
+  completed aggregates, and the existing frozen ATR input, returning the
+  existing score representation or an explicit unavailable result. Do not add
+  `ScoreProvider` or `ScoreSnapshot` types without canonical counterparts.
+- Compute the aggregate's own contextual support from its prior aggregate and
+  prior volume window, then recursively compute child scores from the exact raw
+  rows or completed child aggregates visible at that aggregate's availability
+  boundary. Never average score fields previously emitted by a producer.
+- For 5m scores, retain exact 1m child row/aggregate identities and the causal
+  cutoff in existing observation/provenance fields.
+- The producer publishes bars, aggregates, and lineage only. `OrderflowPolicy`
+  requests scores at the canonical formation/decision point and applies the
+  canonical score permission rule; it does not trust copied producer fields.
+- Re-read or recompute the score at pending-entry admission when the canonical
+  execution path requires current decision context. Formation-time scores must
+  not be treated as fill-time scores.
+
+Exit criteria:
+
+- Complete-history fixtures match canonical recursive 1m and 5m scores;
+  changed ATR, missing children, and changed causal cutoffs produce distinct
+  snapshots or explicit unavailable results.
+- Missing ATR or source history is the first upstream divergence and cannot
+  become a neutral, zero, stale, or permitted score.
+- Producer state cannot make a score appear or disappear independently of the
+  immutable source snapshot and causal graph.
+
+Phase 2A conformance tests:
+
+- `test_score_provider_reproduces_canonical_recursive_one_minute_score`
+- `test_score_provider_reproduces_canonical_recursive_five_minute_score`
+- `test_five_minute_score_records_exact_child_lineage_and_cutoff`
+- `test_score_provenance_uses_existing_observation_and_atr_inputs`
+- `test_missing_atr_is_unavailable_not_defaulted`
+- `test_producer_does_not_publish_final_decision_scores`
 
 ### P1-P2 Conformance Test Set
 
@@ -638,8 +771,10 @@ Required behavior:
 - Attach direction, entry zone, failure boundary, expiry, confirmations, regime
   version, and evidence lineage.
 - Advance opportunities only on their configured evidence timeframe.
-- Implement formation, invalidation, expiry, supersession, retest waiting,
-  confirmation, and execution-group ownership.
+- Implement formation, invalidation, expiry, supersession, retest waiting, and
+  confirmation exactly as defined by the canonical templates. Carry the
+  canonical execution-group identity as proposal metadata only; do not claim,
+  reserve, or consume it during formation.
 - Count timeout evidence before structure formation on each bar.
 
 Exit criteria:
@@ -652,8 +787,9 @@ Exit criteria:
   and availability timestamp.
 - Timeout counting is idempotent, counts only new evidence on the configured
   timeframe, and occurs before formation can inspect a trigger on the same bar.
-- Execution-group claims prevent duplicate candidates while preserving the
-  denied candidate and reason for diagnostics.
+- A previously filled execution group denies later candidates, while multiple
+  unfilled candidates retain diagnostic identity until the execution owner
+  atomically consumes the group at fill.
 
 Phase 7 conformance tests:
 
@@ -663,7 +799,7 @@ Phase 7 conformance tests:
 - `test_opportunity_lifecycle_covers_formation_invalidation_expiry_supersession_and_retest`
 - `test_timeout_counts_only_new_configured_timeframe_evidence`
 - `test_timeout_expires_before_same_bar_structure_formation`
-- `test_execution_group_claim_denies_duplicate_candidate_with_reason`
+- `test_filled_execution_group_denies_later_candidate_but_unfilled_candidates_remain_diagnostic`
 - `test_setup_cannot_outlive_source_interaction_or_context_without_transition`
 
 Remaining implementation work:
@@ -681,16 +817,19 @@ Implement decision gates without enabling execution mutations.
 
 Required behavior:
 
-- Apply gates in order: context relation, regime permission, opening-gap
-  permission, active-position gate, exposure, allocation, sizing, and risk.
-  A later gate must not run as if an earlier unavailable gate passed.
+- Apply strategy-owned gates in canonical order: context relation, regime
+  permission, opening-gap permission, and setup/trigger validity. Preserve
+  unavailable predicates without allowing them. Active-position, exposure,
+  allocation, sizing, risk, and execution-group checks are evidence requested
+  by the candidate but are not policy admission gates; the execution owner
+  evaluates them atomically at pending-entry and fill time.
 - Persist every passed, failed, and unavailable predicate with predicate ID,
   value, threshold, units, reference window, evidence IDs, context version, and
   reason. Preserve denied and unavailable decisions, not only winners.
-- Construct a non-executable diagnostic decision intent only for a current,
+- Construct a non-executable diagnostic candidate intent only for a current,
   valid setup with matching direction, regime version, confirmations, and
-  evidence lineage. Construct an executable order intent only in explicit opt-in
-  mode.
+  evidence lineage. The execution owner may construct an executable order
+  intent only in explicit opt-in mode after its own current-state gates pass.
 - Validate trigger type, effective time, expiry, setup version, permission
   version, displacement, pullback/retest touch, retest confirmation, and
   next-bar timing before eligibility is reported.
@@ -702,7 +841,8 @@ Required behavior:
 Exit criteria:
 
 - Every denied and unavailable admission is explainable from recorded evidence.
-- Active-position, exposure, allocation, and requalification tests pass.
+- Strategy-owned predicates and requalification tests pass; portfolio and group
+  decisions are tested at the execution boundary, not in policy admission.
 - Gate order is observable and stable; unavailable predicates do not become
   false, neutral, or allowed through fallback values.
 - Diagnostic decision projections and opt-in executable intents are distinct
@@ -747,8 +887,11 @@ Required behavior:
   generic VWAP stops for templates whose stop policy is unavailable in Paper.
 - Record attempts, fills, partial exits, reservations, realized points, exit
   reasons, and settlement through one execution owner with explicit timestamps.
-- Enforce execution-group claims, duplicate-entry ownership, active-position
-  constraints, exposure reservations, quantity limits, and portfolio boundaries.
+- Atomically evaluate current active-position, exposure, allocation, sizing,
+  risk, quantity, and portfolio constraints at pending-entry and fill-price
+  calculation. Consume an execution-group claim only after the fill succeeds;
+  then invalidate unfilled siblings and record the claim. Policy formation and
+  diagnostic admission may carry the group ID as metadata but must not claim it.
 - Make fill, partial-fill, cancellation, and settlement transitions explicit and
   idempotent; no event may be applied twice after replay or retry.
 - Keep execution vehicle, side, quantity, fill price, fill timestamp, exit
@@ -1118,6 +1261,10 @@ relative to the repository root.
   `strategy/orderflow_observation.py`, and `contracts/market.py`: completed
   market evidence, aggregate availability, gaps, lineage, and source-row
   fingerprints.
+- Canonical NiftyZoning `daily_atr`/`build_context_scores` semantics -> Paper's
+  independent replay/observation and score boundaries: Paper materializes its
+  own prior-session ATR and recursively calculates scores. These values are not
+  producer-owned fields and no NiftyZoning runtime artifact is consumed.
 - `NiftyZoning/src/orderflow/vwap_location.py` ->
   `ftx_paper/strategy/orderflow_producer.py` and
   `strategy/orderflow_observation.py`: causal VWAP and prefix evidence;
@@ -1151,15 +1298,15 @@ relative to the repository root.
   `ftx_paper/strategy/orderflow_opportunity.py`,
   `strategy/opportunity_timeout.py`, and `strategy/opportunity.py`:
   structural setups, bounded opportunity lifecycles, timeout ordering,
-  execution-group claims, and setup identities.
+  execution-group identities, and setup identities. Group claims remain owned
+  by the execution boundary and occur only after fill.
 - `NiftyZoning/src/orderflow/intent_policy.py`, `execution.py`,
   `active_position_gate.py`, `allocation.py` ->
   `ftx_paper/strategy/orderflow_admission.py`,
-  `strategy/orderflow_trigger.py`, `strategy/active_position_gate.py`,
-  `strategy/allocation.py`, `strategy/intent_policy.py`, and
-  `strategy/coordinator.py`: ordered admission predicates, diagnostic versus
-  executable intents, trigger eligibility, active-position gates, sizing, and
-  proposal arbitration.
+  `strategy/orderflow_trigger.py`, and the existing execution owner:
+  strategy-owned predicate ordering and trigger evidence are ported in the
+  strategy layer; active-position, allocation, sizing, risk, reservations,
+  and proposal arbitration are evaluated by execution/account ownership.
 
 ### Execution, Persistence, And Reporting
 
@@ -1310,9 +1457,14 @@ phase can be marked complete:
   `PaperExecutionCoordinator` before authorization. Denied proposals are
   persisted as explicit `ORDER_DENIED` events instead of disappearing between
   policy output and execution. The public
-  `evaluate_admission(diagnostic=False)` helper now evaluates the same gates
-  without creating execution state; remaining work is predicate metadata and
-  trigger-persistence coverage.
+  `evaluate_admission()` helper now evaluates the same gates without creating
+  execution state; remaining work is predicate metadata and trigger-persistence
+  coverage.
+- The current live policy still claims an execution group before constructing
+  the executable order proposal. NiftyZoning consumes the group claim only
+  after a successful fill and then invalidates unfilled siblings. Paper must
+  move that claim and sibling invalidation into the execution owner; until then
+  the live path does not satisfy the authoritative group-ownership contract.
 - Interaction, response, opportunity, admission, and execution-group state is
   not yet fully independent at the persistence boundary. Hypothesis status is
   serialized, but hypothesis evidence and arming state are not.
