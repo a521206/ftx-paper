@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from ftx_paper.contracts.replay import ReplayRequest, ReplayResult
+from ftx_paper.contracts.replay import ReplayRequest, ReplayResult, detach_replay_value
 from ftx_paper.runtime.replay_worker import ReplayWorker
 
 
@@ -82,6 +82,44 @@ def test_replay_result_rejects_ambiguous_aliases() -> None:
     }
     with pytest.raises(ValueError, match="unsupported replay result fields"):
         ReplayResult.from_mapping(result)
+
+
+def test_replay_result_round_trips_versioned_paper_report() -> None:
+    result = {
+        "run_id": "run-1", "schema_version": 1, "execution_scope": "replay", "ledger_scope": "replay",
+        "summary": {"setup_candidates": 0, "location_interactions": 0, "entries_filled": 0,
+                     "gross_reward_points": 0.0, "achieved_risk_reward": None},
+        "events": [], "shadow_trades": [], "shadow_ledger": [],
+        "authoritative_trades": [], "authoritative_ledger": [], "parity_artifact": None,
+        "report": {"schema_version": 1, "report_type": "paper_orderflow", "actions": []},
+    }
+    assert ReplayResult.from_mapping(result).to_dict() == result
+
+
+@pytest.mark.parametrize("field, value, message", [
+    ("report_type", "canonical_orderflow", "unsupported replay report type"),
+    ("schema_version", 2, "unsupported replay report schema version"),
+])
+def test_replay_result_rejects_incompatible_report_envelopes(
+    field: str, value: object, message: str,
+) -> None:
+    report = {"schema_version": 1, "report_type": "paper_orderflow", "actions": []}
+    report[field] = value
+    result = {
+        "run_id": "run-1", "schema_version": 1, "execution_scope": "replay", "ledger_scope": "replay",
+        "summary": {"setup_candidates": 0, "location_interactions": 0, "entries_filled": 0,
+                     "gross_reward_points": 0.0, "achieved_risk_reward": None},
+        "events": [], "shadow_trades": [], "shadow_ledger": [],
+        "authoritative_trades": [], "authoritative_ledger": [], "parity_artifact": None,
+        "report": report,
+    }
+    with pytest.raises(ValueError, match=message):
+        ReplayResult.from_mapping(result)
+
+
+def test_detached_replay_value_rejects_removed_fields_recursively() -> None:
+    with pytest.raises(ValueError, match="legacy replay fields"):
+        detach_replay_value({"nested": [{"canonical_summary": {}}]})
 
 
 def test_replay_summary_exposes_metric_lineage_without_changing_canonical_counts() -> None:

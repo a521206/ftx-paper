@@ -11,13 +11,14 @@ from typing import Any, Literal, cast
 ExecutionScope = Literal["replay"]
 LedgerScope = Literal["replay"]
 REPLAY_SCHEMA_VERSION = 1
+REPLAY_REPORT_SCHEMA_VERSION = 1
 REPLAY_MODES = frozenset({"replay"})
 REPLAY_VEHICLES = frozenset({"futures", "synthetic"})
 REPLAY_CAPTURE_MODES = frozenset({"none", "summary", "diagnostic", "full"})
 _RESULT_FIELDS = frozenset({
     "run_id", "schema_version", "execution_scope", "ledger_scope", "summary", "events",
     "shadow_trades", "shadow_ledger", "authoritative_trades", "authoritative_ledger",
-    "parity_artifact", "replay_records",
+    "parity_artifact", "replay_records", "report",
 })
 LEGACY_REPLAY_FIELDS = frozenset({
     "trades", "ledger", "diagnostic_trades", "replay_summary", "canonical_summary",
@@ -42,6 +43,26 @@ def _mapping(value: Any, field: str) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError(f"{field} must be an object")
     return dict(value)
+
+
+def detach_replay_value(value: Any) -> Any:
+    """Normalize nested replay values and reject removed legacy fields."""
+    if isinstance(value, Mapping):
+        legacy = {str(key) for key in value if str(key) in LEGACY_REPLAY_FIELDS}
+        if legacy:
+            raise ValueError("legacy replay fields are not accepted: " + ", ".join(sorted(legacy)))
+        return {str(key): detach_replay_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [detach_replay_value(item) for item in value]
+    return value
+
+
+def _validate_report(value: Mapping[str, Any]) -> dict[str, Any]:
+    if value.get("schema_version") != REPLAY_REPORT_SCHEMA_VERSION:
+        raise ValueError("unsupported replay report schema version")
+    if value.get("report_type") != "paper_orderflow":
+        raise ValueError("unsupported replay report type")
+    return detach_replay_value(value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,12 +234,15 @@ class ReplayResult:
     authoritative_ledger: tuple[ReplayLedgerEntry, ...]
     parity_artifact: Mapping[str, Any] | None
     replay_records: tuple[Mapping[str, Any], ...] = ()
+    report: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if (self.schema_version != REPLAY_SCHEMA_VERSION or not self.run_id
                 or self.execution_scope != "replay"
                 or self.ledger_scope != "replay"):
             raise ValueError("invalid replay result envelope")
+        if self.report is not None:
+            _validate_report(self.report)
 
     def to_dict(self) -> dict[str, Any]:
         payload = {"run_id": self.run_id, "schema_version": self.schema_version,
@@ -231,6 +255,8 @@ class ReplayResult:
                 "parity_artifact": dict(self.parity_artifact) if self.parity_artifact is not None else None}
         if self.replay_records:
             payload["replay_records"] = [dict(item) for item in self.replay_records]
+        if self.report is not None:
+            payload["report"] = detach_replay_value(self.report)
         return payload
 
     @classmethod
@@ -238,7 +264,7 @@ class ReplayResult:
         unexpected = set(value) - _RESULT_FIELDS
         if unexpected:
             raise ValueError("unsupported replay result fields: " + ", ".join(sorted(unexpected)))
-        missing = (_RESULT_FIELDS - {"replay_records"}) - set(value)
+        missing = (_RESULT_FIELDS - {"replay_records", "report"}) - set(value)
         if missing:
             raise ValueError("missing replay result fields: " + ", ".join(sorted(missing)))
         def records(name: str, factory: Any) -> tuple[Any, ...]:
@@ -255,6 +281,11 @@ class ReplayResult:
             raise ValueError("replay_records must be an array")
         if any(not isinstance(item, Mapping) for item in replay_records):
             raise ValueError("replay_records must contain objects")
+        report = value.get("report")
+        if report is not None:
+            if not isinstance(report, Mapping):
+                raise ValueError("report must be an object")
+            report = _validate_report(report)
         return cls(
             str(value["run_id"]), int(value["schema_version"]), value["execution_scope"],
             value["ledger_scope"], ReplaySummary.from_mapping(value["summary"]), events,
@@ -262,9 +293,10 @@ class ReplayResult:
             records("authoritative_trades", ReplayTrade), records("authoritative_ledger", ReplayLedgerEntry),
             (None if value["parity_artifact"] is None else _mapping(value["parity_artifact"], "parity_artifact")),
             tuple(dict(item) for item in replay_records),
+            None if report is None else dict(report),
         )
 
 
 __all__ = ["ExecutionScope", "LedgerScope", "REPLAY_SCHEMA_VERSION", "ReplayEvent", "ReplayLedgerEntry",
            "ReplayRequest", "ReplayResult", "ReplayScope", "ReplaySummary", "ReplayTrade",
-           "LEGACY_REPLAY_FIELDS"]
+           "LEGACY_REPLAY_FIELDS", "REPLAY_REPORT_SCHEMA_VERSION", "detach_replay_value"]

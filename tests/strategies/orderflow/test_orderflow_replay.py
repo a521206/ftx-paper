@@ -70,6 +70,8 @@ def test_orderflow_replay_is_isolated_from_live_execution_state(tmp_path) -> Non
     assert result["execution_scope"] == "replay"
     assert result["ledger_scope"] == "replay"
     assert result["replay_records"]
+    assert result["report"]["report_type"] == "paper_orderflow"
+    assert result["report"]["session_date"] == "2026-09-29"
     assert result["replay_records"][0]["checkpoints"]
     assert result["replay_records"][0]["before_state"]["engine"]["bars_seen"] == 0
     assert result["replay_records"][0]["after_state"]["engine"]["bars_seen"] == 1

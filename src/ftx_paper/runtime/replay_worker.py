@@ -11,7 +11,10 @@ from typing import Any, cast
 from uuid import uuid4
 
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderRole, OrderSide, Role, SyntheticFutureQuote, build_decision_view, synthetic_future_quote, validate_decision_view
-from ftx_paper.contracts.replay import ExecutionScope, LEGACY_REPLAY_FIELDS, ReplayEvent, ReplayLedgerEntry, ReplayRequest, ReplayResult, ReplaySummary, ReplayTrade, REPLAY_SCHEMA_VERSION
+from ftx_paper.contracts.replay import (
+    ExecutionScope, ReplayEvent, ReplayLedgerEntry, ReplayRequest, ReplayResult,
+    ReplaySummary, ReplayTrade, REPLAY_SCHEMA_VERSION, detach_replay_value,
+)
 from ftx_paper.domain.capital import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE, CapitalRuntimeContext
 from ftx_paper.market import (
     AggregatorConfig, Cell, CompletedBarAggregator, FeatureService, InstrumentKey,
@@ -49,8 +52,13 @@ from ftx_paper.execution.settlement import ExitValidationError, validate_exit_or
 from ftx_paper.strategy.exits import ExitAction
 from ftx_paper.strategy import ConfiguredStrategyFactory, StrategyFactory
 from ftx_paper.strategy.orderflow import OrderflowConfig
-from ftx_paper.strategy.orderflow_capture import CaptureMode
-from ftx_paper.strategy.orderflow_reporting import detached_replay_records
+from ftx_paper.strategy.orderflow_capture import CaptureMode, ReplayRecord
+from ftx_paper.strategy.orderflow_reporting import (
+    build_session_summary,
+    build_replay_summary,
+    compare_paired_replay,
+    detached_replay_records,
+)
 from ftx_paper.strategy.policy_contract import ExecutionMode
 from ftx_paper.strategy.config import (
     AFTERNOON_ENTRY_MINUTES,
@@ -83,20 +91,6 @@ def _timestamp_string(value: Any) -> str:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def _strip_legacy_fields(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        legacy = {str(key) for key in value if str(key) in LEGACY_REPLAY_FIELDS}
-        if legacy:
-            raise ValueError("legacy replay fields are not accepted: " + ", ".join(sorted(legacy)))
-        return {
-            str(key): _strip_legacy_fields(item)
-            for key, item in value.items()
-        }
-    if isinstance(value, (list, tuple)):
-        return [_strip_legacy_fields(item) for item in value]
-    return value
 
 
 class _ScopedEvents(list[dict[str, Any]]):
@@ -247,100 +241,12 @@ class ReplayWorker:
     def compare_paired_replay(
         diagnostic: Mapping[str, Any], executable: Mapping[str, Any],
     ) -> dict[str, Any]:
-        """Compare the complete Paper projection without comparing object identity."""
-        def decisions(result: Mapping[str, Any]) -> dict[str, tuple[Any, ...]]:
-            values: dict[str, tuple[Any, ...]] = {}
-            for event in result.get("events", ()):
-                if not isinstance(event, Mapping) or not event.get("decision_id"):
-                    continue
-                decision_id = str(event["decision_id"])
-                values[decision_id] = tuple(
-                    event.get(field)
-                    for field in (
-                        "decision_stage", "outcome", "reason", "response_state",
-                        "response_evidence_ids", "source_observation_ids",
-                        "observed_at", "available_at", "decision_at",
-                    )
-                )
-            return values
-
-        diagnostic_decisions = decisions(diagnostic)
-        executable_decisions = decisions(executable)
-        mismatches = [
-            {
-                "decision_id": decision_id,
-                "diagnostic": diagnostic_decisions.get(decision_id),
-                "executable": executable_decisions.get(decision_id),
-            }
-            for decision_id in sorted(set(diagnostic_decisions) | set(executable_decisions))
-            if diagnostic_decisions.get(decision_id) != executable_decisions.get(decision_id)
-        ]
-        def lifecycle(result: Mapping[str, Any]) -> tuple[tuple[Any, ...], ...]:
-            values: list[tuple[Any, ...]] = []
-            for event in result.get("events", ()):
-                if not isinstance(event, Mapping):
-                    continue
-                event_type = str(event.get("event_type", "")).upper()
-                if event_type not in _EXECUTION_EVENT_TYPES and event_type not in {"EXIT", "CLOSE"}:
-                    continue
-                values.append(tuple(event.get(field) for field in (
-                    "event_type", "decision_id", "client_order_id", "entry_decision_id",
-                    "outcome", "reason", "status", "quantity", "price", "fill_timestamp",
-                    "timestamp", "available_at", "expected_available_at", "reservation_amount",
-                    "gross_pnl", "net_pnl", "costs",
-                )))
-            return tuple(values)
-
-        def projection(result: Mapping[str, Any], name: str) -> tuple[Any, ...]:
-            values = result.get(name, ())
-            if not isinstance(values, (list, tuple)):
-                return (values,)
-            return tuple(_strip_legacy_fields(item) for item in values)
-
-        diagnostic_mutations = bool(
-            diagnostic.get("authoritative_trades") or diagnostic.get("authoritative_ledger")
+        """Compare detached Paper projections without comparing object identity."""
+        return compare_paired_replay(
+            diagnostic,
+            executable,
+            execution_event_types=_EXECUTION_EVENT_TYPES,
         )
-        lifecycle_mismatches = []
-        diagnostic_lifecycle, executable_lifecycle = lifecycle(diagnostic), lifecycle(executable)
-        if diagnostic_lifecycle != executable_lifecycle:
-            lifecycle_mismatches.append({
-                "diagnostic": diagnostic_lifecycle,
-                "executable": executable_lifecycle,
-            })
-        projection_mismatches = []
-        compare_projections = "execution_scope" in diagnostic and "execution_scope" in executable
-        for name in ("shadow_trades", "shadow_ledger", "authoritative_trades", "authoritative_ledger"):
-            left, right = projection(diagnostic, name), projection(executable, name)
-            if (compare_projections or name.startswith("authoritative_")) and left != right:
-                projection_mismatches.append({"projection": name, "diagnostic": left, "executable": right})
-        diagnostic_projections = {
-            name: projection(diagnostic, name)
-            for name in ("shadow_trades", "shadow_ledger", "authoritative_trades", "authoritative_ledger")
-            if projection(diagnostic, name)
-        }
-        result = {
-            "matched": not mismatches and not diagnostic_mutations and not diagnostic_lifecycle and not diagnostic_projections,
-            "mismatches": mismatches,
-            "diagnostic_mutations": diagnostic_mutations,
-        }
-        # Executable lifecycle and accounting facts are intentionally absent
-        # from diagnostic replay. Keep them visible for reporting, but do not
-        # treat their expected presence on only the executable side as a
-        # decision mismatch.
-        if lifecycle_mismatches:
-            result["executable_lifecycle"] = executable_lifecycle
-        if projection_mismatches:
-            result["executable_projections"] = {
-                name: projection(executable, name)
-                for name in ("shadow_trades", "shadow_ledger", "authoritative_trades", "authoritative_ledger")
-                if projection(executable, name)
-            }
-        if diagnostic_lifecycle or diagnostic_projections:
-            result["unexpected_diagnostic_execution"] = {
-                "lifecycle": diagnostic_lifecycle,
-                "projections": diagnostic_projections,
-            }
-        return result
 
     def input_manifest(
         self,
@@ -604,6 +510,13 @@ class ReplayWorker:
                     date,
                     session_partition="09:15-15:30",
                     selection_rule="continuous_identity",
+                    source_fingerprint_value=(
+                        getattr(futures_source, "source_fingerprint", None)
+                        if futures_source is not None else None
+                    ),
+                    source_provenance=(
+                        futures_source.provenance() if futures_source is not None else None
+                    ),
                 )
                 replay_machine = ReplayMachine(
                     observe_market(replay_input),
@@ -1710,6 +1623,18 @@ class ReplayWorker:
             replay_result["replay_records"] = runtime_replay_records or [
                 record.to_dict() for record in detached_replay_records(tuple(all_events), scope=detached_scope)
             ]
+        persisted_record_dicts = tuple(replay_result.get("replay_records", ()))
+        report_record_dicts = persisted_record_dicts or tuple(
+            record.to_dict() for record in detached_replay_records(tuple(all_events), scope=detached_scope)
+        )
+        report_records = tuple(ReplayRecord.from_dict(item) for item in report_record_dicts)
+        report = {
+            "schema_version": 1,
+            "report_type": "paper_orderflow",
+            "session_date": session_date,
+            "summary": dict(build_session_summary(report_records)),
+            "metrics": summary,
+        }
         parity_artifact = build_parity_artifact(
             replay_result, request=request, layer_records=parity_records,
         ) if include_parity_layers else None
@@ -1728,7 +1653,8 @@ class ReplayWorker:
             authoritative_trades=(),
             authoritative_ledger=(),
             parity_artifact=parity_artifact,
-            replay_records=tuple(runtime_replay_records) if capture_mode is not CaptureMode.NONE else (),
+            replay_records=persisted_record_dicts,
+            report=report,
         )
         return canonical.to_dict()
 
@@ -1753,7 +1679,7 @@ class ReplayWorker:
                 schema_version=REPLAY_SCHEMA_VERSION, run_id=run_id,
                 execution_scope=cast(ExecutionScope, execution_scope), ledger_scope="replay",
                 sequence=sequence, occurred_at=occurred_at, identity=identity,
-                values=_strip_legacy_fields(event),
+                values=detach_replay_value(event),
             ))
         return result
 
@@ -1761,80 +1687,7 @@ class ReplayWorker:
     def _build_summary(
         events: list[dict[str, Any]], trades: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        def reason_identities(
-            reason: str, *, identity_fields: tuple[str, ...],
-        ) -> set[str]:
-            identities = {
-                str(next((event.get(field) for field in identity_fields if event.get(field) is not None), index))
-                for index, event in enumerate(events)
-                if event.get("reason") == reason
-            }
-            return identities
-
-        futures = [trade for trade in trades if trade.get("vehicle") == "futures"]
-        gross_pnl_rs = sum(float(trade.get("gross_pnl_rs") or 0.0) for trade in futures)
-        risk_reward_values: list[float] = []
-        missing_initial_risk = 0
-        for trade in futures:
-            initial_risk_rs = float(trade.get("initial_risk_rs") or 0.0)
-            if initial_risk_rs:
-                risk_reward_values.append(float(trade.get("gross_pnl_rs") or 0.0) / initial_risk_rs)
-            else:
-                missing_initial_risk += 1
-        setup_ids = reason_identities(
-            "setup_candidate_formed", identity_fields=("opportunity_id", "setup_id", "decision_id"),
-        )
-        all_interaction_ids = reason_identities(
-            "location_interaction_observed", identity_fields=("interaction_id",),
-        )
-        interaction_events = [
-            event for event in events if event.get("reason") == "location_interaction_observed"
-        ]
-        structural_interaction_ids = {
-            str(event.get("interaction_id") or index)
-            for index, event in enumerate(interaction_events)
-            if str(event.get("location") or "").upper() in CANONICAL_INTERACTION_LOCATIONS
-        }
-        interaction_ids_by_timeframe: dict[str, set[str]] = {}
-        interaction_ids_by_location: dict[str, set[str]] = {}
-        for event in interaction_events:
-            timeframe = str(event.get("timeframe") or "unknown")
-            location = str(event.get("location") or "unknown").upper()
-            interaction_id = str(event.get("interaction_id") or "")
-            interaction_ids_by_timeframe.setdefault(timeframe, set()).add(interaction_id)
-            interaction_ids_by_location.setdefault(location, set()).add(interaction_id)
-        interaction_by_timeframe = {
-            timeframe: len(ids) for timeframe, ids in interaction_ids_by_timeframe.items()
-        }
-        interaction_by_location = {
-            location: len(ids) for location, ids in interaction_ids_by_location.items()
-        }
-        vwap_interaction_ids = interaction_ids_by_location.get("VWAP", set())
-        return {
-            "setup_candidates": len(setup_ids),
-            "location_interactions": len(structural_interaction_ids),
-            "total_location_interactions": len(all_interaction_ids),
-            "vwap_interactions": len(vwap_interaction_ids),
-            "entries_filled": len(futures),
-            "gross_reward_points": gross_pnl_rs / NIFTY_LOT_SIZE,
-            "achieved_risk_reward": round(sum(risk_reward_values), 5) if risk_reward_values else None,
-            "metric_lineage": {
-                "setup_candidate_event_count": sum(
-                    event.get("reason") == "setup_candidate_formed" for event in events
-                ),
-                "setup_candidate_unique_count": len(setup_ids),
-                "location_interaction_event_count": sum(
-                    event.get("reason") == "location_interaction_observed" for event in events
-                ),
-                "location_interaction_unique_count": len(all_interaction_ids),
-                "canonical_location_interaction_unique_count": len(structural_interaction_ids),
-                "location_interaction_by_timeframe": dict(sorted(interaction_by_timeframe.items())),
-                "location_interaction_by_location": dict(sorted(interaction_by_location.items())),
-                "futures_trade_count": len(futures),
-                "futures_trades_missing_initial_risk": missing_initial_risk,
-                "risk_reward_component_count": len(risk_reward_values),
-            },
-        }
+        return build_replay_summary(events, trades, lot_size=NIFTY_LOT_SIZE)
 
     @staticmethod
     def _normalize_decision(event: dict[str, Any]) -> dict[str, Any]:
