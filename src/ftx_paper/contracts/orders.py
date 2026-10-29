@@ -227,6 +227,12 @@ class OrderIntent:
     request_id: str | None = field(default=None, kw_only=True)
     strategy_id: str | None = field(default=None, kw_only=True)
     account_id: str | None = field(default=None, kw_only=True)
+    decision_id: str | None = field(default=None, kw_only=True)
+
+    @property
+    def lifecycle_decision_id(self) -> str:
+        """Decision id that execution lifecycle events link back to."""
+        return self.decision_id or self.client_order_id
 
     def __post_init__(self) -> None:
         vehicle = str(self.vehicle).lower()

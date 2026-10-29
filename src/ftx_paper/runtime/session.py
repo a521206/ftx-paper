@@ -553,7 +553,6 @@ class RuntimeSession:
             "execution_allowed": source == "live",
         }, f"strategy_evaluation:{source}:{bundle.bundle_id}", timestamp=timestamp)
         for order in result.orders:
-            order_decision_id = order.client_order_id.rsplit(":", 1)[0]
             if source == "live":
                 create_order = getattr(self.store, "create_order_lifecycle", None)
                 if callable(create_order):
@@ -573,7 +572,7 @@ class RuntimeSession:
                         },
                     )
             self.store.append_event("ORDER_INTENT", {
-                "decision_id": order_decision_id,
+                "decision_id": order.lifecycle_decision_id,
                 "client_order_id": order.client_order_id,
                 "instrument": order.instrument.symbol,
                 "direction": "long" if order.side is OrderSide.BUY else "short",
@@ -591,7 +590,7 @@ class RuntimeSession:
             }, f"order_intent:{source}:{bundle.bundle_id}:{order.client_order_id}", timestamp=timestamp)
             if source == "replay":
                 self.store.append_event("ORDER_SUPPRESSED", {
-                    "decision_id": order.client_order_id, "client_order_id": order.client_order_id,
+                    "decision_id": order.lifecycle_decision_id, "client_order_id": order.client_order_id,
                     "vehicle": order.vehicle,
                     "decision_source": "replay", "session_date": bundle.trading_date,
                     "execution_allowed": False, "reason": "startup_recovery",
@@ -637,7 +636,7 @@ class RuntimeSession:
                 f"execution_error:halt:{order.client_order_id}", timestamp=timestamp,
             )
         context = {
-            "decision_id": order.client_order_id,
+            "decision_id": order.lifecycle_decision_id,
             "client_order_id": order.client_order_id,
             "decision_source": "live",
             "session_date": session_date,

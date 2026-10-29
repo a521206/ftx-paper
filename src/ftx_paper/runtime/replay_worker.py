@@ -539,7 +539,7 @@ class ReplayWorker:
                 all_events.extend(result_events)
                 for order in result.orders:
                     all_events.append({"event_type": "ORDER_INTENT",
-                                       "decision_id": order.client_order_id.rsplit(":", 1)[0],
+                                       "decision_id": order.lifecycle_decision_id,
                                        "client_order_id": order.client_order_id,
                                        "instrument": order.instrument.symbol,
                                        "direction": "long" if order.side is OrderSide.BUY else "short",
@@ -554,18 +554,18 @@ class ReplayWorker:
                                 account.authorize_and_reserve(order)
                             except ValueError as exc:
                                 all_events.append({"event_type": "RISK_REJECTED",
-                                                   "decision_id": order.client_order_id,
+                                                   "decision_id": order.lifecycle_decision_id,
                                                    "reason": str(exc), "source": "replay", "session_date": date})
-                                all_events.append({"event_type": "ORDER_SUPPRESSED", "decision_id": order.client_order_id,
+                                all_events.append({"event_type": "ORDER_SUPPRESSED", "decision_id": order.lifecycle_decision_id,
                                                    "vehicle": order.vehicle, "timestamp": futures_bar.timestamp.isoformat(),
                                                    "source": "replay", "session_date": date, "execution_allowed": False,
                                                    "reason": str(exc)})
                                 continue
                             all_events.append({"event_type": "ORDER_AUTHORIZED",
-                                               "decision_id": order.client_order_id,
+                                               "decision_id": order.lifecycle_decision_id,
                                                "account_revision": account.revision,
                                                 "source": "replay", "session_date": date})
-                        all_events.append({"event_type": "ORDER_ACK", "decision_id": order.client_order_id,
+                        all_events.append({"event_type": "ORDER_ACK", "decision_id": order.lifecycle_decision_id,
                                            "client_order_id": order.client_order_id, "vehicle": order.vehicle,
                                            "timestamp": futures_bar.timestamp.isoformat(), "source": "replay",
                                            "session_date": date, "status": "ACKNOWLEDGED"})
@@ -575,16 +575,16 @@ class ReplayWorker:
                             if order.synthetic_legs is not None else None,
                         ) if order.vehicle == "synthetic" else None
                         if entry_quote is None and order.vehicle == "synthetic":
-                            all_events.append({"event_type": "EXECUTION_ERROR", "decision_id": order.client_order_id,
+                            all_events.append({"event_type": "EXECUTION_ERROR", "decision_id": order.lifecycle_decision_id,
                                                "vehicle": order.vehicle,
                                                "reason": "missing_synthetic_future_quote", "source": "replay", "session_date": date})
-                            all_events.append({"event_type": "ORDER_UNFILLED", "decision_id": order.client_order_id,
+                            all_events.append({"event_type": "ORDER_UNFILLED", "decision_id": order.lifecycle_decision_id,
                                                "vehicle": order.vehicle, "timestamp": futures_bar.timestamp.isoformat(),
                                                "source": "replay", "session_date": date, "reason": "missing_synthetic_future_quote"})
                             continue
                         fill_price = entry_quote.price if entry_quote is not None else futures_bar.close
                         for event in reversed(all_events):
-                            if event.get("decision_id") == order.client_order_id:
+                            if event.get("client_order_id") == order.client_order_id:
                                 event.update({"vehicle": order.vehicle, "entry_price": fill_price})
                                 if entry_quote is not None:
                                     event.update({"ce_symbol": entry_quote.ce.instrument.symbol,
@@ -592,12 +592,12 @@ class ReplayWorker:
                                                   "ce_entry_price": entry_quote.ce.close, "pe_entry_price": entry_quote.pe.close,
                                                   "synthetic_entry_price": entry_quote.price})
                                 break
-                        all_events.append({"event_type": "FILL", "decision_id": order.client_order_id,
+                        all_events.append({"event_type": "FILL", "decision_id": order.lifecycle_decision_id,
                                            "fill_timestamp": futures_bar.timestamp.isoformat(),
                                            "price": fill_price, "quantity": order.quantity,
                                            "vehicle": order.vehicle, "source": "replay",
                                             "session_date": date})
-                        all_events.append({"event_type": "EXECUTEDDECISION", "decision_id": order.client_order_id,
+                        all_events.append({"event_type": "EXECUTEDDECISION", "decision_id": order.lifecycle_decision_id,
                                            "client_order_id": order.client_order_id, "fill_timestamp": futures_bar.timestamp.isoformat(),
                                            "price": fill_price, "quantity": order.quantity, "vehicle": order.vehicle,
                                            "source": "replay", "session_date": date, "status": "FILLED"})
@@ -660,7 +660,7 @@ class ReplayWorker:
                         try:
                             open_trade = self._matching_trade(open_trades, order)
                         except ExitValidationError as exc:
-                            all_events.append({"event_type": "EXECUTION_ERROR", "decision_id": order.client_order_id,
+                            all_events.append({"event_type": "EXECUTION_ERROR", "decision_id": order.lifecycle_decision_id,
                                                "reason": exc.reason, "source": "replay", "session_date": date})
                             engine.settle_exit(order.client_order_id, filled=False)
                             continue
@@ -669,7 +669,7 @@ class ReplayWorker:
                             symbols=(open_trade["ce_symbol"], open_trade["pe_symbol"]),
                         ) if open_trade and order.vehicle == "synthetic" else None
                         if exit_quote is None and order.vehicle == "synthetic":
-                            all_events.append({"event_type": "EXECUTION_ERROR", "decision_id": order.client_order_id,
+                            all_events.append({"event_type": "EXECUTION_ERROR", "decision_id": order.lifecycle_decision_id,
                                                "reason": "missing_synthetic_future_quote", "source": "replay", "session_date": date})
                             engine.settle_exit(order.client_order_id, filled=False)
                             continue
