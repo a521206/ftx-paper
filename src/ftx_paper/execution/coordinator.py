@@ -13,6 +13,7 @@ class PaperExecutionCoordinator:
         self._entry_fill_ids: dict[str, set[str]] = {}
         self._denied: dict[str, str] = {}
         self._pending_position_limits: dict[str, int] = {}
+        self._claimed_execution_groups: dict[str, str] = {}
 
     @property
     def denied_proposals(self) -> dict[str, str]:
@@ -41,6 +42,7 @@ class PaperExecutionCoordinator:
             for item in self.portfolio.positions.values()
             if getattr(item, "execution_group_id", None) is not None
         }
+        claimed.update(self._claimed_execution_groups)
         for order in ranked:
             if order.client_order_id in seen_ids:
                 self._denied[order.client_order_id] = "duplicate_proposal"
@@ -77,10 +79,13 @@ class PaperExecutionCoordinator:
             if fill_id is not None and fill_id in self._entry_fill_ids.setdefault(order.client_order_id, set()):
                 return existing
             group = order.execution_group_id
-            if group is not None and any(
+            if group is not None and (
+                group in self._claimed_execution_groups
+                or any(
                 position.execution_group_id == group
                 and position.entry_order_id != order.client_order_id
                 for position in self.portfolio.positions.values()
+                )
             ):
                 self._denied[order.client_order_id] = "execution_group_already_claimed"
                 return None
@@ -96,6 +101,8 @@ class PaperExecutionCoordinator:
             )
             if fill_id is not None:
                 self._entry_fill_ids[order.client_order_id].add(fill_id)
+            if result is not None and group is not None:
+                self._claimed_execution_groups.setdefault(group, order.client_order_id)
             return result
         return self.portfolio.settle_exit(order, price=price, cost=cost, fill_id=fill_id)
 

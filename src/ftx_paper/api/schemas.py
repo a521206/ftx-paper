@@ -58,7 +58,6 @@ def openapi_document() -> dict[str, Any]:
             "/api/v1/health": {"get": {"responses": {"200": {"description": "Healthy"}}}},
             "/api/v1/runtime": {"get": {"responses": {"200": {"description": "Runtime status with configured strategies; interrupted sessions recover to STOPPED"}}}},
             "/api/v1/diagnostics": {"get": {"parameters": [{"name": "strategy_id", "in": "query", "schema": {"type": "string"}}], "responses": {"200": {"description": "Runtime event and rejection counts, optionally filtered by strategy"}}}},
-            "/api/v1/events": {"get": {"parameters": [{"name": "strategy_id", "in": "query", "schema": {"type": "string"}}], "responses": {"200": {"description": "Runtime events, optionally filtered by strategy"}}}},
             "/api/v1/decisions": {"get": {
                 "parameters": [
                     {"name": "date", "in": "query", "schema": {"type": "string", "format": "date"}, "description": "IST session date; defaults to today"},
@@ -81,7 +80,6 @@ def openapi_document() -> dict[str, Any]:
                     },
                 }}},
             }}}},
-            "/api/v1/logs": {"get": {"responses": {"200": {"description": "Runtime logs"}}}},
             "/api/v1/positions": {"get": {"responses": {"200": {"description": "Open positions"}}}},
             "/api/v1/capital": {"get": {"responses": {"200": {"description": "Capital"}}}},
             "/api/v1/trades": {"get": {"parameters": [{"name": "strategy_id", "in": "query", "schema": {"type": "string"}}], "responses": {"200": {"description": "Trades, optionally filtered by strategy"}}}},

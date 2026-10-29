@@ -54,3 +54,15 @@ def test_parity_layer_endpoint_rejects_invalid_pagination(tmp_path) -> None:
 
     assert response.status_code == 400
     assert response.get_json()["error"]["code"] == "invalid_pagination"
+
+
+def test_legacy_event_routes_are_not_exposed(tmp_path) -> None:
+    client = create_app(RuntimeStore(tmp_path)).test_client()
+
+    for path in ("/api/v1/events", "/api/v1/logs", "/api/v1/audit"):
+        assert client.get(path).status_code == 404
+
+    openapi = client.get("/api/v1/openapi.json")
+    assert openapi.status_code == 200
+    paths = openapi.get_json()["paths"]
+    assert "/api/v1/events" not in paths

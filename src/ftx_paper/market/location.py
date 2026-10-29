@@ -298,7 +298,7 @@ class LocationDetector:
                     transitions.append(LocationTransition(reference, kind, stable, pending))
                     self._prior_stable[reference] = pending
         cell = Cell(*detected_locations) if detected_locations else None
-        # Keep every raw match in canonical order for the Layer 3 trace. Cell
+        # Keep every raw match in canonical order for causal diagnostics. Cell
         # normalization remains policy-facing and may intentionally prune
         # implied extremes.
         canonical_locations = tuple(detected_locations)

@@ -1,8 +1,66 @@
+from datetime import UTC, datetime
+from math import inf, nan
+
 from ftx_paper.contracts import Instrument, OrderIntent, OrderRole, OrderSide
 from ftx_paper.config import NIFTY_LOT_SIZE
 from ftx_paper.domain.capital import CapitalRuntimeContext, RESEARCH_CAPITAL_PROFILE
+from ftx_paper.domain.decision_context import (
+    CapitalSnapshot, DecisionContext, ExposureSnapshot, MarginSnapshot,
+)
 from ftx_paper.domain.portfolio import PortfolioState
 from ftx_paper.execution import PaperExecutionCoordinator
+from ftx_paper.execution.order_proposal import build_entry_order
+
+
+def _decision_context(*, available: float = 1000.0) -> DecisionContext:
+    return DecisionContext(
+        as_of=datetime(2026, 1, 1, 10, 0, tzinfo=UTC),
+        account_revision=1,
+        capital=CapitalSnapshot(1000.0, available, 0.0, 0.0),
+        margin=MarginSnapshot(0.0, available, 1000.0),
+        exposure=ExposureSnapshot(0.0, 0),
+    )
+
+
+def test_execution_boundary_builds_entry_from_diagnostic_proposal() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    order = build_entry_order(
+        {
+            "eligible": True, "direction": "long", "instrument": instrument.symbol,
+            "lifecycle_id": "lifecycle-1", "stop_price": 99.0,
+            "execution_group_id": "group-1", "strategy_id": "orderflow",
+        },
+        instrument=instrument,
+        context=_decision_context(),
+    )
+
+    assert order is not None
+    assert order.quantity == 1
+    assert order.execution_group_id == "group-1"
+    assert order.stop_price == 99.0
+
+
+def test_execution_boundary_does_not_build_without_current_margin() -> None:
+    order = build_entry_order(
+        {"eligible": True, "direction": "long", "lifecycle_id": "lifecycle-1", "stop_price": 99.0},
+        instrument=Instrument("NIFTYFUT", "NFO", "FUTURES"),
+        context=_decision_context(available=0.0),
+    )
+
+    assert order is None
+
+
+def test_execution_boundary_rejects_non_finite_stop_price() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    for stop_price in (nan, inf, -inf):
+        assert build_entry_order(
+            {
+                "eligible": True, "direction": "long", "lifecycle_id": "lifecycle-1",
+                "stop_price": stop_price,
+            },
+            instrument=instrument,
+            context=_decision_context(),
+        ) is None
 def test_orderflow_paper_execution_settles_and_duplicate_fill_is_idempotent() -> None:
     instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
     entry = OrderIntent("orderflow-entry:1", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY)
@@ -96,4 +154,31 @@ def test_unfilled_execution_group_candidates_do_not_claim_until_fill() -> None:
     coordinator.fill(first, price=100.0)
 
     assert coordinator.fill(second, price=100.0) is None
+    assert coordinator.denied_proposals[second.client_order_id] == "execution_group_already_claimed"
+
+
+def test_filled_execution_group_remains_claimed_after_position_closes() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    first = OrderIntent(
+        "filled-group-first", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY,
+        execution_group_id="group-terminal",
+    )
+    exit_order = OrderIntent(
+        "filled-group-exit", instrument, OrderSide.SELL, 1, role=OrderRole.EXIT,
+        entry_order_id=first.client_order_id,
+    )
+    second = OrderIntent(
+        "filled-group-second", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY,
+        execution_group_id="group-terminal",
+    )
+    coordinator = PaperExecutionCoordinator(
+        PortfolioState(RESEARCH_CAPITAL_PROFILE.initial_capital),
+        CapitalRuntimeContext(RESEARCH_CAPITAL_PROFILE),
+    )
+    coordinator.submit(first)
+    coordinator.fill(first, price=100.0)
+    coordinator.submit(exit_order)
+    coordinator.fill(exit_order, price=101.0)
+
+    assert coordinator.arbitrate((second,)) == ()
     assert coordinator.denied_proposals[second.client_order_id] == "execution_group_already_claimed"

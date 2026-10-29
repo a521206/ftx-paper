@@ -2202,7 +2202,9 @@
           replay: {
             replays: '/api/v1/replay',
           },
-          activity: { events: strategyQuery('/api/v1/events?limit=100') },
+          activity: {
+            decisions: strategyQuery(`/api/v1/decisions?${new URLSearchParams({ date: decisionDate, limit: '100' }).toString()}`),
+          },
           'market-context': { orderflow: `/api/v1/orderflow?${new URLSearchParams({ date: decisionDate, strategy_id: 'orderflow-research' }).toString()}` },
           orderflow: { orderflow: `/api/v1/orderflow?${new URLSearchParams({ date: decisionDate, strategy_id: 'orderflow-research' }).toString()}` },
         }[page] || {};
@@ -2223,7 +2225,14 @@
         const trades = responseData.trades || { trades: [] };
         const orderflow = responseData.orderflow || {};
         const decisionsData = responseData.decisions || { decisions: [] };
-        const events = responseData.events || { events: [] };
+        const events = page === 'activity'
+          ? { events: (decisionsData.decisions || []).map((item) => ({
+              event_type: 'POLICY_DECISION',
+              ...item.payload,
+              payload: item.payload,
+              decision_view: item.decision_view,
+            })) }
+          : { events: [] };
         const replays = responseData.replays || { runs: [] };
         const replayDates = { dates: (replays.runs || []).map((run) => run.request?.session_date).filter(Boolean) };
 

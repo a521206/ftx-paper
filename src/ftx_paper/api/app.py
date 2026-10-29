@@ -412,18 +412,6 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             return jsonify(error_payload("runtime_already_running", str(exc))), 409
         return jsonify(store.read_status()), 202
 
-
-    @app.get("/api/v1/events")
-    def events():
-        try:
-            limit = min(int(request.args.get("limit", "100")), 1000)
-        except ValueError:
-            return jsonify({"error": {"code": "invalid_limit", "message": "limit must be an integer"}}), 400
-        selected = strategy_filter()
-        if selected is INVALID_STRATEGY:
-            return jsonify(error_payload("invalid_strategy", "strategy_id is not configured")), 400
-        return jsonify(json_safe({"events": filter_attributed(store.read_events(limit), selected)}))
-
     @app.get("/api/v1/decisions")
     def decisions():
         selected_date = request.args.get("date") or datetime.now(IST).date().isoformat()
@@ -537,10 +525,6 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             "next_cursor": next_cursor,
         }))
 
-    @app.get("/api/v1/logs")
-    def logs():
-        return jsonify(json_safe({"logs": store.read_events(1000)}))
-
     @app.get("/api/v1/positions")
     def positions():
         status = store.read_status()
@@ -599,9 +583,5 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
         return jsonify(json_safe(build_orderflow_projection(
             decisions_for_projection, events, store.read_status().get("open_positions", []), trades, as_of=datetime.now(IST).isoformat(),
         )))
-
-    @app.get("/api/v1/audit")
-    def audit():
-        return jsonify(json_safe({"events": store.read_events(1000)}))
 
     return app

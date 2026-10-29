@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 
 from ftx_paper.domain.decision_context import DecisionContext
 from ftx_paper.execution.events import ExecutionNotification
+from ftx_paper.execution.order_proposal import build_entry_order
+from ftx_paper.contracts import MarketRole
 from ftx_paper.contracts import build_decision_view, validate_decision_view
 from .policy_contract import ExecutionMode, StrategyPolicy
 
@@ -57,8 +59,26 @@ class SharedDecisionCoordinator:
                     f"{bundle.bundle_id}:{decision.event_type}:{reason}".encode()
                 ).hexdigest()[:24]
             payload.pop("candidate" + "_id", None)
+            proposal = payload.get("execution_proposal")
+            order = getattr(decision, "order", None)
+            if order is None and self.policy.execution_mode is ExecutionMode.EXECUTABLE:
+                futures = bundle.bars.get(MarketRole.FUTURES)
+                if isinstance(proposal, Mapping) and futures is None:
+                    policy = payload.get("policy")
+                    payload.update({
+                        "outcome": "unavailable",
+                        "reason": "futures_instrument_unavailable",
+                        "policy": {
+                            **(policy if isinstance(policy, Mapping) else {}),
+                            "outcome": "unavailable",
+                            "reason_code": "futures_instrument_unavailable",
+                        },
+                    })
+                elif isinstance(proposal, Mapping) and futures is not None:
+                    order = build_entry_order(
+                        proposal, instrument=futures.instrument, context=context,
+                    )
             if isinstance(decision, (LiveDecision, CandidateDecision)):
-                order = getattr(decision, "order", None)
                 payload_order = payload.get("order")
                 if self.policy.execution_mode is ExecutionMode.DIAGNOSTIC and (order is not None or payload_order is not None):
                     policy = payload.get("policy")
@@ -85,7 +105,6 @@ class SharedDecisionCoordinator:
                 else:
                     result.append(LiveDecision(decision.event_type, payload, order=order))
                 continue
-            order = decision.order
             if self.policy.execution_mode is ExecutionMode.DIAGNOSTIC and (
                 order is not None or payload.get("order") is not None
             ):

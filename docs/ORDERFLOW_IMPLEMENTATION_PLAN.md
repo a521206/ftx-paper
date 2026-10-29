@@ -1492,11 +1492,9 @@ phase can be marked complete:
   `evaluate_admission()` helper now evaluates the same gates without creating
   execution state; remaining work is predicate metadata and trigger-persistence
   coverage.
-- The current live policy still claims an execution group before constructing
-  the executable order proposal. NiftyZoning consumes the group claim only
-  after a successful fill and then invalidates unfilled siblings. Paper must
-  move that claim and sibling invalidation into the execution owner; until then
-  the live path does not satisfy the authoritative group-ownership contract.
+- Execution-group identity is now carried as proposal metadata only. The live
+  policy no longer owns an execution-group registry or emits executable order
+  intents; fill-time group ownership remains in `PaperExecutionCoordinator`.
 - Interaction, response, opportunity, admission, and execution-group state is
   not yet fully independent at the persistence boundary. Hypothesis status is
   serialized, but hypothesis evidence and arming state are not.
@@ -1537,6 +1535,10 @@ phase can be marked complete:
 - Trigger eligibility is now projected through `orderflow_trigger.py` from the
   live policy path; executable authorization requires that projection while
   diagnostic decisions retain the same causal result without creating orders.
+- Executable entry construction is now deferred to the shared execution
+  boundary. The policy emits a detached `execution_proposal`; the coordinator
+  applies current margin sizing and constructs an `OrderIntent` only in explicit
+  executable mode.
 - Opportunity timeout advancement now runs once per completed observation before
   response and opportunity formation, preserving the required same-bar order.
 - Replay no longer constructs the legacy `market.location.LocationDetector` or

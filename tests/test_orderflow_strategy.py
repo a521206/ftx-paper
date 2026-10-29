@@ -11,7 +11,7 @@ from ftx_paper.domain.decision_context import (
     MarginSnapshot,
 )
 from ftx_paper.market import DecisionBundle
-from ftx_paper.contracts import Instrument, MarketBar, OrderIntent, OrderRole, OrderSide
+from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OrderIntent, OrderRole, OrderSide
 from ftx_paper.runtime.engine import MultiStrategyEngine, PaperEngine
 from ftx_paper.runtime.parity_artifacts import build_parity_artifact
 from ftx_paper.strategy import (
@@ -22,6 +22,15 @@ from ftx_paper.strategy import (
     OrderflowStrategy,
 )
 from ftx_paper.strategy.orderflow import OrderflowConfig, OrderflowPolicy, _score_rejection
+from ftx_paper.strategy.orderflow_codec import (
+    bar_from_snapshot,
+    bar_snapshot,
+    instrument_from_snapshot,
+    instrument_snapshot,
+    position_from_snapshot,
+    position_snapshot,
+)
+from ftx_paper.strategy.exits import PositionState
 from ftx_paper.strategy.policy_contract import ExecutionMode
 
 
@@ -41,6 +50,24 @@ def test_score_margin_gate_preserves_unavailable_scores(
     assert _score_rejection(
         direction=direction, long_score=long_score, short_score=short_score, margin=0.05,
     ) == expected
+
+
+def test_confirmation_scores_hide_observed_but_unavailable_children() -> None:
+    bundle, _ = _context()
+    assert bundle.orderflow_context is not None
+    observations = bundle.orderflow_context.observations_for("1m") + bundle.orderflow_context.observations_for("5m")
+    parent = next(item for item in observations if item.timeframe == "5m")
+    delayed_child_id = parent.context.child_observation_ids[0] if parent.context else ""
+    delayed = tuple(
+        replace(item, available_at=parent.available_at + timedelta(minutes=1))
+        if item.observation_id == delayed_child_id else item
+        for item in observations
+    )
+
+    policy = OrderflowPolicy()
+    policy._evaluation_observations = delayed
+
+    assert policy._confirmation_scores(parent) is None
 
 
 def _context(
@@ -393,6 +420,32 @@ def test_public_strategy_snapshot_restores_processed_location_lifecycle() -> Non
     assert restored.evaluate(bundle, account) == ()
 
 
+def test_orderflow_snapshot_codecs_round_trip_instrument_bar_and_position() -> None:
+    instrument = Instrument("NIFTYFUT", "NSE", "FUT", "2026-01-29")
+    bar = MarketBar(instrument, OBSERVED, 99.0, 101.0, 98.5, 100.0, 25.0, 10.0)
+    position = PositionState(
+        instrument, 100.0, 98.0, 2, OrderSide.BUY,
+        entry_fill_time=OBSERVED, entry_order_id="entry-1", initial_risk_points=2.0,
+    )
+
+    assert instrument_from_snapshot(instrument_snapshot(instrument)) == instrument
+    assert bar_from_snapshot(bar_snapshot(bar)) == bar
+    assert position_from_snapshot(position_snapshot(position)) == position
+
+
+@pytest.mark.parametrize(
+    ("codec", "raw", "message"),
+    [
+        (bar_from_snapshot, {"instrument": {}, "timestamp": OBSERVED.isoformat()}, "prices"),
+        (position_from_snapshot, {"instrument": {"symbol": "NIFTYFUT", "exchange": "NSE", "instrument_type": "FUT"}, "entry_price": 1.0, "stop_price": 0.0}, "quantity"),
+        (instrument_from_snapshot, {"symbol": "NIFTYFUT"}, "exchange"),
+    ],
+)
+def test_orderflow_snapshot_codecs_reject_malformed_values(codec, raw, message) -> None:
+    with pytest.raises((ValueError, KeyError), match=message):
+        codec(raw)
+
+
 def test_interaction_projection_advancement_records_causal_score_once() -> None:
     bundle, account = _context()
     assert bundle.orderflow_context is not None
@@ -480,6 +533,12 @@ def test_reference_replacement_is_visible_before_same_timestamp_execution() -> N
     replacement, replacement_account = _context(
         close=99.5, response_close=101.0, observation_id="replacement", generation=2,
     )
+    replacement = replace(
+        replacement,
+        bars={MarketRole.FUTURES: MarketBar(
+            Instrument("NIFTYFUT", "NFO", "FUTURES"), OBSERVED, 100.0, 101.0, 99.0, 100.0,
+        )},
+    )
     events = strategy.evaluate(replacement, replacement_account)
 
     replacement_index = next(
@@ -498,6 +557,25 @@ def test_reference_replacement_is_visible_before_same_timestamp_execution() -> N
         event.payload.get("reference_generation") != 1
         for event in executable
     )
+
+
+def test_executable_proposal_without_futures_contract_is_unavailable() -> None:
+    strategy = OrderflowStrategy(OrderflowConfig(execution_mode=ExecutionMode.EXECUTABLE))
+    first, account = _context(close=99.5, observation_id="first", generation=1)
+    strategy.evaluate(first, account)
+    replacement, replacement_account = _context(
+        close=99.5, response_close=101.0, observation_id="replacement", generation=2,
+    )
+
+    events = strategy.evaluate(replacement, replacement_account)
+    unavailable = [
+        event for event in events
+        if event.payload.get("reason") == "futures_instrument_unavailable"
+    ]
+
+    assert unavailable
+    assert unavailable[0].payload["outcome"] == "unavailable"
+    assert unavailable[0].order is None
 
 
 def test_non_contact_location_observation_does_not_start_interaction() -> None:
@@ -659,10 +737,8 @@ def test_diagnostic_and_executable_projections_share_decisions_but_not_orders() 
     ]
     assert all(item.order is None for item in diagnostic_events)
     assert all(item.order is None for item in executable_events)
-    diagnostic_groups = cast(dict[str, object], diagnostic.policy.snapshot()["execution_groups"])
-    executable_groups = cast(dict[str, object], executable.policy.snapshot()["execution_groups"])
-    assert cast(list[object], diagnostic_groups["claims"]) == []
-    assert cast(list[object], executable_groups["claims"]) == []
+    assert "execution_groups" not in diagnostic.policy.snapshot()
+    assert "execution_groups" not in executable.policy.snapshot()
 
 
 def test_executable_orderflow_does_not_duplicate_entry_on_replay() -> None:
