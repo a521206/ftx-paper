@@ -165,6 +165,10 @@ class SqliteRuntimeStore:
         """Create the runtime directory and schema for a writable store."""
         self.root.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
+            # API reads must remain available while the runtime persists a
+            # batch of events or bars. WAL lets readers use the last committed
+            # snapshot instead of waiting behind the writer transaction.
+            connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS runtime_status (

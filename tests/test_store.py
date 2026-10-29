@@ -12,6 +12,17 @@ from ftx_paper.contracts import Instrument, MarketBar, OptionType
 from ftx_paper.runtime import RuntimeStore
 
 
+def test_runtime_store_allows_reads_during_writer_transaction(tmp_path):
+    store = RuntimeStore(tmp_path)
+    writer = sqlite3.connect(store.database, timeout=0.1)
+    try:
+        writer.execute("BEGIN EXCLUSIVE")
+        assert store.read_status() == {}
+    finally:
+        writer.rollback()
+        writer.close()
+
+
 def test_runtime_store_round_trips_market_bars(tmp_path):
     store = RuntimeStore(tmp_path)
     bar = MarketBar(
