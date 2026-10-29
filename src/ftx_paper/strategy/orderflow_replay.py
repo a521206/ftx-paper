@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from datetime import datetime
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from enum import StrEnum
 from collections.abc import Mapping, Sequence
 
-from .orderflow_capture import CaptureMode, ReplayRecord, ReplayRecorder
+from .orderflow_capture import CaptureMode, ReplayRecord, ReplayRecorder, detached_asdict
 from .orderflow_observation import MarketObservation
 
 
@@ -99,7 +99,7 @@ class ReplayMachine:
         context = self.observation.available(timestamp)
         available_ids = tuple(item.observation_id for item in context.observations)
         captured_aggregates = aggregates or tuple(
-            asdict(item) for item in context.observations
+            detached_asdict(item) for item in context.observations
         )
         captured_unavailable = unavailable or tuple(
             dict(issue) for issue in context.source_issues

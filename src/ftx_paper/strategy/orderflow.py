@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict, replace
+from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -48,6 +48,7 @@ from .orderflow_position_manager import OrderflowPositionManager
 from .orderflow_evidence import OrderflowEvidenceAssembler
 
 from .orderflow_codec import policy_snapshot_payload, strategy_snapshot_payload
+from .orderflow_capture import detached_asdict
 from .orderflow_snapshot import policy_from_snapshot, strategy_from_snapshot
 from .orderflow_config import ORDERFLOW_NAME, ORDERFLOW_VERSION, OrderflowConfig
 from .orderflow_helpers import (
@@ -408,7 +409,7 @@ class OrderflowPolicy:
                 source_provenance=({
                     "source_observation_id": observation.observation_id,
                     "source_aggregate_id": location_observation.source_aggregate_id,
-                    "parent_context": asdict(parent_reference),
+                    "parent_context": detached_asdict(parent_reference),
                 },),
             ))
         active_interactions = {
@@ -900,7 +901,7 @@ class OrderflowPolicy:
                     **common, "decision_stage": "trigger", "outcome": "accepted",
                     "reason": trigger.reason,
                     "decision_id": _decision_id("trigger", lifecycle_id, observation.observation_id),
-                    "trigger": asdict(trigger), "observed_at": trigger.observed_at,
+                    "trigger": detached_asdict(trigger), "observed_at": trigger.observed_at,
                     "available_at": trigger.available_at,
                 }),
                 PolicyDecision({
@@ -908,8 +909,8 @@ class OrderflowPolicy:
                     "outcome": "accepted" if admission.status.value == "PASSED" else "rejected",
                     "reason": "orderflow_admission", "admission_reason": admission.reason,
                     "decision_id": admission.decision_id,
-                    "admission_predicates": [asdict(item) for item in admission.predicates],
-                    "trigger": asdict(trigger), "trigger_eligible": True,
+                    "admission_predicates": [detached_asdict(item) for item in admission.predicates],
+                    "trigger": detached_asdict(trigger), "trigger_eligible": True,
                     "execution_proposal": proposal, "observed_at": trigger.observed_at,
                     "available_at": trigger.available_at,
                 }),
@@ -1206,7 +1207,7 @@ class OrderflowPolicy:
                 confirmation_id or (evidence_ids[-1] if evidence_ids else observation.observation_id), next_status),
             "location": interaction.location_alias, "interaction_id": interaction.interaction_id,
             "reference_generation": interaction.reference_generation, "response_state": next_status,
-            "template_id": template.template_id, "hypothesis_state": asdict(state),
+            "template_id": template.template_id, "hypothesis_state": detached_asdict(state),
             "response_evidence_ids": list(evidence_ids), "source_observation_ids": list(source_ids),
             "expected_available_at": expected_available_at.isoformat() if expected_available_at else None,
         })]
@@ -1333,17 +1334,17 @@ class OrderflowPolicy:
                 "reason": trigger.reason, "decision_id": _decision_id("trigger", opportunity.lifecycle_id, trigger_observation.observation_id),
                 "opportunity_id": opportunity.lifecycle_id, "setup_id": opportunity.setup.setup_id,
                 "interaction_id": interaction.interaction_id, "location": interaction.location_alias, "direction": direction,
-                "trigger": asdict(trigger), "source_observation_ids": list(evidence_ids),
+                "trigger": detached_asdict(trigger), "source_observation_ids": list(evidence_ids),
                 "observed_at": trigger.observed_at, "available_at": trigger.available_at}),
             PolicyDecision({**base, "decision_stage": "admission", "outcome": "accepted" if accepted else "rejected",
                 "reason": "orderflow_admission", "decision_id": admission.decision_id, "opportunity_id": opportunity.lifecycle_id,
                 "setup_id": opportunity.setup.setup_id, "interaction_id": interaction.interaction_id,
                 "location": interaction.location_alias, "direction": direction, "template_id": template.template_id,
                 "admission_status": admission.status.value, "admission_reason": admission.reason,
-                "admission_predicates": [asdict(item) for item in admission.predicates],
-                "formation_context": asdict(opportunity.formation_context) if opportunity.formation_context else None,
-                "decision_context": asdict(opportunity.decision_context) if opportunity.decision_context else None,
-                "trigger": asdict(trigger), "trigger_eligible": trigger.eligible,
+                "admission_predicates": [detached_asdict(item) for item in admission.predicates],
+                "formation_context": detached_asdict(opportunity.formation_context) if opportunity.formation_context else None,
+                "decision_context": detached_asdict(opportunity.decision_context) if opportunity.decision_context else None,
+                "trigger": detached_asdict(trigger), "trigger_eligible": trigger.eligible,
                 "source_observation_ids": list(evidence_ids), "execution_proposal": proposal}),
         )
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime
 from types import MappingProxyType
 from collections.abc import Mapping
@@ -23,7 +23,7 @@ REPLAY_RECORD_SCHEMA_VERSION = 2
 
 def validate_replay_scope(scope: Mapping[str, object]) -> dict[str, object]:
     """Validate the frozen replay contract before facts are captured."""
-    normalized = deepcopy(dict(scope))
+    normalized = cast(dict[str, object], _detached(scope))
     required = {"source_contract", "input_identity", "requested_dates", "effective_dates",
                 "vehicles", "strategy_configuration", "counts"}
     missing = sorted(required - normalized.keys())
@@ -45,6 +45,30 @@ def validate_replay_scope(scope: Mapping[str, object]) -> dict[str, object]:
     if not count_names.issubset(counts):
         raise ValueError("replay scope counts are incomplete")
     return normalized
+
+
+def _detached(value: object) -> object:
+    """Copy nested mappings without asking ``deepcopy`` to pickle proxies."""
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            field.name: _detached(getattr(value, field.name))
+            for field in fields(value)
+        }
+    if isinstance(value, Mapping):
+        return {key: _detached(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return tuple(_detached(item) for item in value)
+    if isinstance(value, list):
+        return [_detached(item) for item in value]
+    return deepcopy(value)
+
+
+def detached_asdict(value: object) -> dict[str, object]:
+    """Project a dataclass and its nested immutable mappings into plain data."""
+    detached = _detached(value)
+    if not isinstance(detached, dict):
+        raise TypeError("detached_asdict requires a dataclass value")
+    return detached
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,10 +95,10 @@ class ReplayRecord:
             raise ValueError("unsupported replay record schema version")
         if self.sequence < 1 or self.available_at < self.timestamp:
             raise ValueError("invalid replay record timing")
-        object.__setattr__(self, "before_state", MappingProxyType(deepcopy(dict(self.before_state))))
-        object.__setattr__(self, "after_state", MappingProxyType(deepcopy(dict(self.after_state))))
+        object.__setattr__(self, "before_state", MappingProxyType(cast(dict[str, object], _detached(self.before_state))))
+        object.__setattr__(self, "after_state", MappingProxyType(cast(dict[str, object], _detached(self.after_state))))
         for name in ("aggregates", "predicates", "events", "transitions", "unavailable", "checkpoints"):
-            object.__setattr__(self, name, tuple(deepcopy(item) for item in getattr(self, name)))
+            object.__setattr__(self, name, tuple(_detached(item) for item in getattr(self, name)))
         object.__setattr__(self, "scope", MappingProxyType(validate_replay_scope(self.scope) if self.scope else {}))
 
     @property

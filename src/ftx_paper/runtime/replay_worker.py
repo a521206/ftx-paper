@@ -716,6 +716,8 @@ class ReplayWorker:
                             for key, item in value.items()
                             if key != "execution_mode"
                         }
+                    if isinstance(value, tuple):
+                        return tuple(scrub_legacy_fields(item) for item in value)
                     if isinstance(value, list):
                         return [scrub_legacy_fields(item) for item in value]
                     return value

@@ -1,11 +1,42 @@
 from datetime import datetime, timedelta, timezone
+from types import MappingProxyType
 
 from ftx_paper.contracts import Instrument, MarketBar
+from ftx_paper.strategy.orderflow_capture import ReplayRecord, detached_asdict
+from ftx_paper.strategy.orderflow_contract import OrderflowObservation, OrderflowObservationContext
 from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.runtime.store import RuntimeStore
 
 
 UTC = timezone.utc
+
+
+def test_replay_record_detaches_nested_mapping_proxies() -> None:
+    timestamp = datetime(2026, 9, 29, 3, 45, tzinfo=UTC)
+    record = ReplayRecord(
+        1,
+        timestamp,
+        timestamp,
+        {"nested": MappingProxyType({"value": 1})},
+        {"nested": (MappingProxyType({"value": 2}),)},
+    )
+
+    assert record.to_dict()["before_state"] == {"nested": {"value": 1}}
+    assert record.to_dict()["after_state"] == {"nested": ({"value": 2},)}
+
+
+def test_orderflow_observation_projection_detaches_immutable_mappings() -> None:
+    timestamp = datetime(2026, 9, 29, 3, 45, tzinfo=UTC)
+    context = OrderflowObservationContext(
+        "2026-09-29", "complete", "available", MappingProxyType({"source": "fixture"}),
+    )
+    observation = OrderflowObservation(
+        "observation-1", None, "v1", "1m", "NIFTY", timestamp, timestamp,
+        MappingProxyType({"close": 100.0}), context=context,
+    )
+
+    assert detached_asdict(observation)["features"] == {"close": 100.0}
+    assert detached_asdict(observation)["context"]["replay_provenance"] == {"source": "fixture"}
 
 
 def test_orderflow_replay_is_isolated_from_live_execution_state(tmp_path) -> None:

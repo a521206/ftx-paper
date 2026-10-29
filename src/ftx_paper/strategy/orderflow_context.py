@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from datetime import datetime
 from collections.abc import Iterable
 from collections.abc import Mapping
+from .orderflow_capture import detached_asdict
 from enum import StrEnum
 
 
@@ -126,9 +127,9 @@ class MarketContext:
         return {
             "context_id": self.context_id, "version": self.version,
             "available_at": self.available_at.isoformat(),
-            "levels": asdict(self.levels), "opening_gap": asdict(self.opening_gap),
+            "levels": detached_asdict(self.levels), "opening_gap": detached_asdict(self.opening_gap),
             "permission": self.permission, "evidence_ids": list(self.evidence_ids),
-            "value_reference": asdict(self.value_reference) if self.value_reference else None,
+            "value_reference": detached_asdict(self.value_reference) if self.value_reference else None,
             "location": self.location, "market_state": self.market_state,
             "long_score": self.long_score, "short_score": self.short_score,
             "source_timeframe": self.source_timeframe,
