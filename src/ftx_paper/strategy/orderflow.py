@@ -188,7 +188,7 @@ class OrderflowPolicy:
                     reference = (
                         prior_low if prior_low is not None and opening < prior_low
                         else prior_high if prior_high is not None and opening > prior_high
-                        else previous_close
+                        else opening
                     )
                     reference_id = (
                         "PD_LOW" if prior_low is not None and opening < prior_low
@@ -198,10 +198,11 @@ class OrderflowPolicy:
                     classified_gap = classify_opening_gap(
                         opening_price=opening, prior_close=reference,
                         observed_at=first_1m.observed_at, reference_id=reference_id,
+                        prior_value_low=_number(first_1m, "prior_value_low"),
+                        prior_value_high=_number(first_1m, "prior_value_high"),
                     )
                     self._opening_gap_state = OpeningGapState(
-                        "GAP_CANDIDATE" if classified_gap.status in {"UP", "DOWN"}
-                        else classified_gap.status,
+                        classified_gap.status,
                         classified_gap.gap_points, classified_gap.reference_price,
                         classified_gap.observed_at, (first_1m.observation_id,),
                         reference_id=classified_gap.reference_id,
@@ -860,6 +861,13 @@ class OrderflowPolicy:
             if not trigger.eligible:
                 continue
             direction = str(pending["direction"])
+            current_context = self._context_history.as_of_location(
+                interaction.location_alias, observation.available_at,
+            )
+            permission = current_context.permission if current_context is not None else "UNAVAILABLE"
+            direction_allowed = permission in {
+                "BOTH", "LONG" if direction == "long" else "SHORT",
+            }
             admission = evaluate_admission(
                 opportunity, context_available=observation.context is not None,
                 opening_gap_allowed=not self._admission_suspended,
@@ -867,8 +875,9 @@ class OrderflowPolicy:
                     not self._active_position
                     or interaction.location_alias not in {"SESSION_LOW", "SESSION_HIGH"}
                 ),
-                direction_matches=True, confirmations_available=True,
+                direction_matches=direction_allowed, confirmations_available=True,
                 current_at=observation.available_at,
+                context_version=str(current_context.version) if current_context is not None else None,
                 context_relation=opportunity.context_relation,
                 evidence_ids=(observation.observation_id,),
                 evaluate_portfolio_gates=False,
@@ -1282,11 +1291,19 @@ class OrderflowPolicy:
         admission = evaluate_admission(opportunity,
             context_available=current_context is not None,
             opening_gap_allowed=(current_context is not None and current_context.opening_gap.status != "UNAVAILABLE" and
-                (current_context.opening_gap.status not in {"UP", "DOWN"} or
+                (current_context.opening_gap.status not in {
+                    "UP", "DOWN", "GAP_UP_CANDIDATE", "GAP_DOWN_CANDIDATE",
+                    "GAP_UP_ACCEPTED", "GAP_DOWN_ACCEPTED",
+                } or
                  (direction == "long" and (current_context.opening_gap.gap_points or 0) >= 0) or
                  (direction == "short" and (current_context.opening_gap.gap_points or 0) <= 0))
                 and not self._admission_suspended),
-            direction_matches=True, confirmations_available=confirmation_id is not None,
+            direction_matches=(
+                current_context is not None
+                and current_context.permission in {
+                    "BOTH", "LONG" if direction == "long" else "SHORT",
+                }
+            ), confirmations_available=confirmation_id is not None,
             current_at=formed_at, context_version=str(current_context.version) if current_context else None,
             context_relation=relation.value, evidence_ids=evidence_ids,
             active_position_allowed=(

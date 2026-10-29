@@ -64,9 +64,11 @@ class OpeningGapState:
     evidence_ids: tuple[str, ...] = ()
     completed_bars: int = 0
     reference_id: str | None = None
+    prior_value_low: float | None = None
+    prior_value_high: float | None = None
 
     def __post_init__(self) -> None:
-        if self.status not in {"UNAVAILABLE", "NONE", "UP", "DOWN", "RECOVERED", "GAP_CANDIDATE", "GAP_ACCEPTED", "GAP_RECLAIMED", "RETURN_TO_VALUE", "EXPIRED"}:
+        if self.status not in {"UNAVAILABLE", "NONE", "UP", "DOWN", "RECOVERED", "GAP_CANDIDATE", "GAP_ACCEPTED", "GAP_RECLAIMED", "RETURN_TO_VALUE", "EXPIRED", "GAP_UP_CANDIDATE", "GAP_DOWN_CANDIDATE", "GAP_UP_ACCEPTED", "GAP_DOWN_ACCEPTED"}:
             raise ValueError("invalid opening gap status")
         if self.status == "UNAVAILABLE" and self.gap_points is not None:
             raise ValueError("unavailable opening gap cannot have a value")
@@ -226,6 +228,8 @@ class ContextHistory:
                 tuple(str(evidence_id) for evidence_id in gap_raw.get("evidence_ids", ())),
                 int(gap_raw.get("completed_bars", 0)),
                 str(gap_raw["reference_id"]) if gap_raw.get("reference_id") is not None else None,
+                float(gap_raw["prior_value_low"]) if gap_raw.get("prior_value_low") is not None else None,
+                float(gap_raw["prior_value_high"]) if gap_raw.get("prior_value_high") is not None else None,
             )
             decoded.append(MarketContext(
                 str(item["context_id"]), int(item["version"]), datetime.fromisoformat(str(item["available_at"])),
@@ -246,7 +250,8 @@ class ContextHistory:
 def classify_opening_gap(
     *, opening_price: float | None, prior_close: float | None,
     observed_at: datetime | None = None, tolerance: float = 0.0,
-    reference_id: str | None = None,
+    reference_id: str | None = None, prior_value_low: float | None = None,
+    prior_value_high: float | None = None,
 ) -> OpeningGapState:
     if opening_price is None or prior_close is None:
         return OpeningGapState("UNAVAILABLE", observed_at=observed_at, reference_id=reference_id)
@@ -254,10 +259,11 @@ def classify_opening_gap(
     if abs(gap) <= tolerance:
         status = "NONE"
     elif gap > 0:
-        status = "UP"
+        status = "GAP_UP_CANDIDATE"
     else:
-        status = "DOWN"
-    return OpeningGapState(status, gap, prior_close, observed_at, reference_id=reference_id)
+        status = "GAP_DOWN_CANDIDATE"
+    return OpeningGapState(status, gap, prior_close, observed_at, reference_id=reference_id,
+                           prior_value_low=prior_value_low, prior_value_high=prior_value_high)
 
 
 def classify_context_relation(*, location: str | None, direction: str | None,
@@ -295,17 +301,23 @@ def advance_opening_gap(
         return state
     completed_bars = state.completed_bars + 1
     recovered = close <= state.reference_price if state.gap_points is not None and state.gap_points > 0 else close >= state.reference_price
+    in_value = (
+        state.prior_value_low is not None and state.prior_value_high is not None
+        and state.prior_value_low <= close <= state.prior_value_high
+    )
     next_status = state.status
     if recovered:
         next_status = "RETURN_TO_VALUE"
-    elif state.status == "GAP_CANDIDATE" and completed_bars >= acceptance_bars:
-        next_status = "GAP_ACCEPTED"
+    elif in_value:
+        next_status = "RETURN_TO_VALUE"
+    elif state.status in {"GAP_CANDIDATE", "GAP_UP_CANDIDATE", "GAP_DOWN_CANDIDATE"} and completed_bars >= acceptance_bars:
+        next_status = "GAP_UP_ACCEPTED" if (state.gap_points or 0) > 0 else "GAP_DOWN_ACCEPTED"
     elif completed_bars >= expiry_bars:
         next_status = "EXPIRED"
     return OpeningGapState(
         next_status, state.gap_points, state.reference_price,
         available_at, (*state.evidence_ids, evidence_id), completed_bars,
-        state.reference_id,
+        state.reference_id, state.prior_value_low, state.prior_value_high,
     )
 
 

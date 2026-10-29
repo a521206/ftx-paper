@@ -14,6 +14,7 @@ class PaperExecutionCoordinator:
         self._denied: dict[str, str] = {}
         self._pending_position_limits: dict[str, int] = {}
         self._claimed_execution_groups: dict[str, str] = {}
+        self._group_orders: dict[str, set[str]] = {}
 
     @property
     def denied_proposals(self) -> dict[str, str]:
@@ -64,6 +65,8 @@ class PaperExecutionCoordinator:
     def submit(self, order: OrderIntent) -> None:
         self._require_futures(order)
         self.portfolio.submit(order)
+        if order.execution_group_id is not None:
+            self._group_orders.setdefault(order.execution_group_id, set()).add(order.client_order_id)
         if order.role is OrderRole.ENTRY:
             self.portfolio.reserve_entry(
                 order, margin_per_lot=self.capital_context.profile.vehicle_limit(order.vehicle).margin_per_lot,
@@ -76,7 +79,7 @@ class PaperExecutionCoordinator:
         self._require_futures(order)
         if order.role is OrderRole.ENTRY:
             existing = self.portfolio.positions.get(order.client_order_id)
-            if fill_id is not None and fill_id in self._entry_fill_ids.setdefault(order.client_order_id, set()):
+            if existing is not None:
                 return existing
             group = order.execution_group_id
             if group is not None and (
@@ -100,9 +103,12 @@ class PaperExecutionCoordinator:
                 filled_quantity=filled_quantity,
             )
             if fill_id is not None:
-                self._entry_fill_ids[order.client_order_id].add(fill_id)
+                self._entry_fill_ids.setdefault(order.client_order_id, set()).add(fill_id)
             if result is not None and group is not None:
                 self._claimed_execution_groups.setdefault(group, order.client_order_id)
+                for sibling_id in self._group_orders.get(group, set()):
+                    if sibling_id != order.client_order_id:
+                        self.portfolio.cancel_entry(sibling_id)
             return result
         return self.portfolio.settle_exit(order, price=price, cost=cost, fill_id=fill_id)
 

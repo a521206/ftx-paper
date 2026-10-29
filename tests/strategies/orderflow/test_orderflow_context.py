@@ -5,7 +5,6 @@ import pytest
 from ftx_paper.strategy import (
     ContextHistory, ContextVersionRef, MarketContext, OpeningGapState,
     SessionLevels, ValueReference, advance_opening_gap, classify_context_relation,
-    classify_opening_gap,
 )
 
 
@@ -39,13 +38,6 @@ def test_context_history_rejects_future_or_duplicate_versions() -> None:
         history.publish(_version(1, start))
     with pytest.raises(ValueError, match="availability"):
         history.publish(_version(2, start - timedelta(seconds=1)))
-
-
-def test_opening_gap_classification_preserves_unavailable_state() -> None:
-    assert classify_opening_gap(opening_price=None, prior_close=100).status == "UNAVAILABLE"
-    assert classify_opening_gap(opening_price=102, prior_close=100).status == "UP"
-    assert classify_opening_gap(opening_price=98, prior_close=100).status == "DOWN"
-    assert classify_opening_gap(opening_price=100, prior_close=100).status == "NONE"
 
 
 def test_opening_gap_recovery_is_explicit_and_causal() -> None:

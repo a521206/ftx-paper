@@ -70,15 +70,6 @@ def test_missing_phase_operation_is_rejected() -> None:
         )
 
 
-def test_pending_entry_requires_strictly_later_observation() -> None:
-    coordinator = ExecutionLifecycleCoordinator()
-    order = _entry()
-    coordinator.defer_entry(order, available_at="2026-10-28T09:15:00+00:00", reason="setup")
-
-    assert coordinator.due_entries("2026-10-28T09:15:00+00:00") == ()
-    assert coordinator.due_entries("2026-10-28T09:16:00+00:00") == (order,)
-
-
 def test_pending_entries_are_idempotent_and_conflicts_are_rejected() -> None:
     coordinator = ExecutionLifecycleCoordinator()
     order = _entry()

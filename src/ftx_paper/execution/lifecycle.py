@@ -79,7 +79,8 @@ class PendingExecution:
     reason: str
 
     def is_due(self, observed_at: str) -> bool:
-        return _parse(observed_at) > _parse(self.available_at)
+        # Consume evidence at its canonical availability boundary.
+        return _parse(observed_at) >= _parse(self.available_at)
 
 
 class ExecutionLifecycleAdapter(Protocol):
