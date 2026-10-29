@@ -204,6 +204,12 @@ class PaperExecutionCoordinator:
             self._record("cancel", order, "cancelled")
         return changed
 
+    def release_deferred_entry(self, order: OrderIntent) -> None:
+        """Release arbitration ownership while an entry awaits availability."""
+        group = order.execution_group_id
+        if group is not None and self._pending_execution_groups.get(group) == order.client_order_id:
+            self._pending_execution_groups.pop(group, None)
+
     def failed_exit(self, order: OrderIntent) -> None:
         self._require_futures(order)
         self.portfolio.pending_orders[order.client_order_id] = "exit_failed"

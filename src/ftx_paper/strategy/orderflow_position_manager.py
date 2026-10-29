@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime
-from typing import TYPE_CHECKING, cast
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any, cast
 from zoneinfo import ZoneInfo
 
 from ftx_paper.config import SESSION_EXIT_DEADLINE_TIME
@@ -12,6 +13,7 @@ from ftx_paper.contracts import MarketBar, OrderIntent, OrderSide
 
 from .exits import ExitAction, ExitStateMachine, PositionState
 from .orderflow_vwap import MarketAggregate, calculate_session_vwap, calculate_vwap_stop
+from .orderflow_exit import evaluate_exit_plan_rule
 
 if TYPE_CHECKING:
     from .orderflow_config import OrderflowConfig
@@ -32,6 +34,61 @@ class OrderflowPositionManager:
         self.pending_exit_actions: dict[str, tuple[ExitAction, datetime]] = {}
         self.completed_bars: list[MarketBar] = []
         self.stop_update_evidence: list[dict[str, object]] = []
+        self.exit_scores: dict[str, tuple[float | None, float | None]] = {}
+        self.exit_interactions: dict[str, tuple[Any, ...]] = {}
+
+    def update_exit_scores(self, location: str, scores: tuple[float | None, float | None]) -> None:
+        self.exit_scores[location.upper()] = scores
+
+    def update_exit_levels(self, bands: Mapping[str, tuple[float, float]]) -> None:
+        """Bind newly available causal location geometry to open plans."""
+        for order_id, (position, exits) in tuple(self.positions.items()):
+            updated_plan = tuple(
+                replace(
+                    rule,
+                    level=(bounds[0] if position.side is OrderSide.BUY else bounds[1]),
+                    band_lower=bounds[0], band_upper=bounds[1],
+                ) if rule.level is None and (bounds := bands.get(rule.location.upper())) is not None else rule
+                for rule in position.exit_plan
+            )
+            if updated_plan != position.exit_plan:
+                self.positions[order_id] = (replace(position, exit_plan=updated_plan), exits)
+
+    def update_exit_interactions(self, interactions: Mapping[str, tuple[Any, ...]]) -> None:
+        self.exit_interactions = {key.upper(): tuple(value) for key, value in interactions.items()}
+
+    def _bind_exit_interaction(self, position: PositionState, *, as_of: datetime) -> PositionState:
+        updated_plan = []
+        for rule in position.exit_plan:
+            if rule.interaction_id is not None:
+                updated_plan.append(rule)
+                continue
+            candidates = [
+                item for item in self.exit_interactions.get(rule.location.upper(), ())
+                if getattr(item, "created_at", None) is not None
+                and getattr(item, "available_at", as_of) <= as_of
+                and (position.entry_fill_time is None or item.created_at >= position.entry_fill_time)
+            ]
+            interaction = min(
+                candidates,
+                key=lambda item: (item.created_at, item.interaction_id),
+                default=None,
+            )
+            if interaction is None:
+                updated_plan.append(rule)
+                continue
+            lower = getattr(interaction, "band_lower", None)
+            upper = getattr(interaction, "band_upper", None)
+            if not isinstance(lower, (int, float)) or not isinstance(upper, (int, float)):
+                updated_plan.append(rule)
+                continue
+            updated_plan.append(replace(
+                rule,
+                level=float(lower if position.side is OrderSide.BUY else upper),
+                band_lower=float(lower), band_upper=float(upper),
+                interaction_id=str(interaction.interaction_id),
+            ))
+        return replace(position, exit_plan=tuple(updated_plan)) if tuple(updated_plan) != position.exit_plan else position
 
     def register_entry(
         self,
@@ -54,6 +111,7 @@ class OrderflowPositionManager:
             synthetic_legs=order.synthetic_legs, entry_bar=order.entry_bar,
             entry_order_id=order.client_order_id,
             initial_risk_points=abs(entry - order.stop_price),
+            exit_plan=order.exit_plan,
         )
         self.positions[order.client_order_id] = (
             position, ExitStateMachine(close_time=SESSION_EXIT_DEADLINE_TIME),
@@ -63,6 +121,8 @@ class OrderflowPositionManager:
         actions: list[ExitAction] = []
         for exit_order_id, (action, discovered_at) in tuple(self.pending_exit_actions.items()):
             if bar.instrument == action.intent.instrument and bar.timestamp > discovered_at:
+                if action.reason.startswith("conditional_exit:"):
+                    action = replace(action, price=bar.open)
                 actions.append(action)
                 self.pending_exit_actions.pop(exit_order_id, None)
         return actions
@@ -137,11 +197,47 @@ class OrderflowPositionManager:
     ) -> None:
         if position.stop_policy == "or_vwap":
             position = self._update_vwap_stop(order_id, position, exits, bar)
+        position = self._bind_exit_interaction(position, as_of=bar.timestamp)
+        if position.exit_plan != self.positions[order_id][0].exit_plan:
+            self.positions[order_id] = (position, exits)
         action = exits.evaluate(
             position, timestamp=bar.timestamp, high=bar.high, low=bar.low,
             close=bar.close, open=bar.open, volume=bar.volume,
             client_order_id=f"exit-{order_id}-{bar.timestamp.isoformat()}",
+            include_signal=True,
         )
+        if action is None and position.exit_plan:
+            entry_index = max(
+                (index for index, item in enumerate(self.completed_bars)
+                 if position.entry_fill_time is not None
+                 and item.timestamp <= position.entry_fill_time),
+                default=-1,
+            )
+            for rule in position.exit_plan:
+                interaction = next(
+                    (item for item in self.exit_interactions.get(rule.location.upper(), ())
+                     if getattr(item, "interaction_id", None) == rule.interaction_id),
+                    None,
+                )
+                interaction_start = getattr(interaction, "created_at", None)
+                interaction_end = getattr(interaction, "closed_at", None)
+                candidate_bars = tuple(
+                    item for item in self.completed_bars
+                    if (interaction_start is None or item.timestamp >= interaction_start)
+                    and (interaction_end is None or item.timestamp <= interaction_end)
+                )
+                result = evaluate_exit_plan_rule(
+                    rule, position_side=position.side, bars=candidate_bars,
+                    entry_bar_index=entry_index,
+                    decision_scores=self.exit_scores.get(rule.location.upper()),
+                )
+                if result.triggered:
+                    action = exits._action(
+                        position, rule.level or bar.close,
+                        f"conditional_exit:{rule.rule_id}",
+                        f"exit-{order_id}-{bar.timestamp.isoformat()}",
+                    )
+                    break
         if action is not None:
             self.pending_exits[action.intent.client_order_id] = order_id
             self.pending_exit_actions[action.intent.client_order_id] = action, bar.timestamp

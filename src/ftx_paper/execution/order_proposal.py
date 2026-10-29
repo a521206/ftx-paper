@@ -5,8 +5,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from math import isfinite
 
-from ftx_paper.contracts import Instrument, OrderIntent, OrderRole, OrderSide
+from ftx_paper.contracts import Instrument, OrderIntent, OrderRole, OrderSide, exit_plan_from_payload
 from ftx_paper.domain.decision_context import DecisionContext
+
 
 
 def build_entry_order(
@@ -61,6 +62,9 @@ def build_entry_order(
     quantity = max(0, min(available_lots, 1))
     if quantity == 0:
         return None
+    exit_plan = exit_plan_from_payload(proposal.get("exit_plan"))
+    if any(rule.required and rule.level is None for rule in exit_plan):
+        return None
     return OrderIntent(
         client_order_id=f"orderflow-entry:{lifecycle_id}",
         instrument=instrument,
@@ -72,6 +76,7 @@ def build_entry_order(
         stop_price=float(stop_price),
         stop_policy=string("stop_policy"),
         exit_mode=string("exit_mode"),
+        exit_plan=exit_plan,
         role=OrderRole.ENTRY,
         entry_bar=integer("entry_bar"),
         strategy_id=string("strategy_id"),

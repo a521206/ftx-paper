@@ -434,7 +434,7 @@ def test_snapshot_restore_rejects_invalid_location_detector_state() -> None:
         OrderflowStrategy.from_snapshot(snapshot)
 
 
-def test_policy_snapshot_migrates_legacy_single_detector_state() -> None:
+def test_policy_snapshot_rejects_legacy_single_detector_state() -> None:
     strategy = OrderflowStrategy()
     bundle, account = _context()
     strategy.evaluate(bundle, account)
@@ -444,10 +444,8 @@ def test_policy_snapshot_migrates_legacy_single_detector_state() -> None:
     current["location_detector"] = detectors["5m"]
     del current["location_detectors"]
 
-    restored = OrderflowPolicy.from_snapshot(current)
-
-    assert set(restored._location_detectors) == {"1m", "5m"}
-    assert restored._location_detectors["5m"].active_interactions
+    with pytest.raises(ValueError, match="unsupported orderflow snapshot schema"):
+        OrderflowPolicy.from_snapshot(current)
 
 
 def test_generation_change_preserves_old_interaction_and_opens_new_generation() -> None:

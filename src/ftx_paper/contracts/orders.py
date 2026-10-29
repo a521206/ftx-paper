@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from math import isfinite
 
 from .market import Instrument
 
@@ -34,6 +36,100 @@ class OrderLifecycleState(StrEnum):
     REJECTED = "REJECTED"
     UNKNOWN = "UNKNOWN"
     RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
+
+
+@dataclass(frozen=True, slots=True)
+class ExitPlanRule:
+    """Frozen, strategy-neutral representation of a canonical exit rule."""
+
+    rule_id: str
+    location: str
+    mode: str
+    required: bool
+    trigger: str
+    score_direction: str | None = None
+    score_margin: float | None = None
+    response_direction: str | None = None
+    response_type: str | None = None
+    evidence: str = "touch"
+    order: str = "next_bar_open"
+    fill: str = "open"
+    gap_policy: str = "fill_open"
+    level: float | None = None
+    band_lower: float | None = None
+    band_upper: float | None = None
+    interaction_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.rule_id or not self.location:
+            raise ValueError("exit plan rule identity is required")
+        if self.mode not in {"fixed_target", "conditional"}:
+            raise ValueError("unsupported exit plan mode")
+        if self.trigger not in {"touch_after_confirmation", "touch", "completed_close"}:
+            raise ValueError("unsupported exit plan trigger")
+        if self.evidence not in {"touch", "completed_close"}:
+            raise ValueError("unsupported exit plan evidence")
+        if self.order != "next_bar_open" or self.fill != "open" or self.gap_policy != "fill_open":
+            raise ValueError("unsupported exit plan execution timing")
+        if self.score_margin is not None and self.score_margin < 0:
+            raise ValueError("exit plan score margin cannot be negative")
+        if self.score_direction is not None and self.score_direction not in {"long", "short"}:
+            raise ValueError("unsupported exit plan score direction")
+        if self.response_direction is not None and self.response_direction not in {"long", "short"}:
+            raise ValueError("unsupported exit plan response direction")
+        if self.response_type is not None and self.response_type not in {"rejection", "acceptance"}:
+            raise ValueError("unsupported exit plan response type")
+        for value in (self.score_margin, self.level, self.band_lower, self.band_upper):
+            if value is not None and not isfinite(value):
+                raise ValueError("exit plan numeric fields must be finite")
+        if self.level is not None and self.level <= 0:
+            raise ValueError("exit plan level must be positive")
+        if self.band_lower is not None and self.band_upper is not None and self.band_lower > self.band_upper:
+            raise ValueError("exit plan band is inverted")
+
+
+def exit_plan_from_payload(raw: object) -> tuple[ExitPlanRule, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError("exit plan must be a sequence")
+    rules: list[ExitPlanRule] = []
+    for item in raw:
+        if not isinstance(item, Mapping):
+            raise ValueError("exit plan rule must be an object")
+        level = item.get("level")
+        margin = item.get("score_margin")
+        def optional_number(name: str, value: object) -> float | None:
+            if value is None:
+                return None
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value):
+                raise ValueError(f"exit plan {name} is invalid")
+            return float(value)
+        required = item.get("required")
+        if not isinstance(required, bool):
+            raise ValueError("exit plan required must be boolean")
+        for name in ("rule_id", "location", "mode", "trigger"):
+            if not isinstance(item.get(name), str) or not item[name]:
+                raise ValueError(f"exit plan {name} is invalid")
+        for name in ("score_direction", "response_direction", "response_type", "interaction_id"):
+            if item.get(name) is not None and not isinstance(item.get(name), str):
+                raise ValueError(f"exit plan {name} is invalid")
+        rules.append(ExitPlanRule(
+            rule_id=item["rule_id"], location=item["location"],
+            mode=item["mode"], required=required,
+            trigger=str(item["trigger"]),
+            score_direction=str(item["score_direction"]) if isinstance(item.get("score_direction"), str) else None,
+            score_margin=optional_number("score margin", margin),
+            response_direction=str(item["response_direction"]) if isinstance(item.get("response_direction"), str) else None,
+            response_type=str(item["response_type"]) if isinstance(item.get("response_type"), str) else None,
+            evidence=str(item.get("evidence", "touch")), order=str(item.get("order", "next_bar_open")),
+            fill=str(item.get("fill", "open")), gap_policy=str(item.get("gap_policy", "fill_open")),
+            level=optional_number("level", level),
+            band_lower=optional_number("band lower", item.get("band_lower")),
+            band_upper=optional_number("band upper", item.get("band_upper")),
+            interaction_id=str(item["interaction_id"]) if isinstance(item.get("interaction_id"), str) else None,
+        ))
+    return tuple(rules)
 
 
 _ORDER_LIFECYCLE_TRANSITIONS: dict[OrderLifecycleState, frozenset[OrderLifecycleState]] = {
@@ -217,6 +313,7 @@ class OrderIntent:
     stop_policy: str | None = None
     exit_mode: str | None = None
     target_price: float | None = None
+    exit_plan: tuple[ExitPlanRule, ...] = ()
     entry_bar: int | None = None
     role: OrderRole = field(kw_only=True)
     # Execution vehicle is a property of this order, never of the strategy.
@@ -246,5 +343,7 @@ class OrderIntent:
             if (call.expiry, call.strike) != (put.expiry, put.strike):
                 raise ValueError("synthetic CE/PE legs must share expiry and strike")
         object.__setattr__(self, "vehicle", vehicle)
+        if any(not isinstance(rule, ExitPlanRule) for rule in self.exit_plan):
+            raise TypeError("order exit_plan must contain ExitPlanRule values")
         if self.structural_rank < 0:
             raise ValueError("structural rank must be non-negative")

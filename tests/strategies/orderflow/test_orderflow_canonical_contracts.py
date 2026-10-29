@@ -1,3 +1,6 @@
+from datetime import datetime, timezone
+
+from ftx_paper.contracts import Instrument, MarketBar, OrderIntent, OrderRole, OrderSide
 from ftx_paper.strategy.response import ResponseCandle, build_response_spec, evaluate_response_window
 import pytest
 
@@ -11,6 +14,9 @@ from ftx_paper.strategy.templates import (
     TradeExit,
     TRADE_TEMPLATES,
 )
+from ftx_paper.strategy.orderflow_exit import evaluate_exit_plan_rule, exit_plan_from_template
+from ftx_paper.strategy.orderflow_config import OrderflowConfig
+from ftx_paper.strategy.orderflow_position_manager import OrderflowPositionManager
 
 
 def test_template_registry_derives_direction_and_response_geometry() -> None:
@@ -77,3 +83,49 @@ def test_exit_response_normalizes_enums_and_rejects_unstructured_execution_value
             execution=object(),  # type: ignore[arg-type]
             trigger="touch_after_confirmation",
         )
+
+
+def test_template_exit_becomes_frozen_plan_and_uses_next_bar_response() -> None:
+    template = TRADE_TEMPLATES[("5m_recovery_breakout", "PD_LOW")]
+    plan = exit_plan_from_template(template.exits, levels={"PD_HIGH": 105.0})
+    assert plan[0].rule_id == "pd_low-long-exit"
+    assert plan[0].level == 105.0
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    bars = (
+        MarketBar(instrument, datetime(2026, 1, 1, 10, tzinfo=timezone.utc), 100, 101, 99, 100),
+        MarketBar(instrument, datetime(2026, 1, 1, 10, 1, tzinfo=timezone.utc), 104, 106, 104, 105),
+        MarketBar(instrument, datetime(2026, 1, 1, 10, 2, tzinfo=timezone.utc), 104, 106, 103, 104),
+    )
+    result = evaluate_exit_plan_rule(
+        plan[0], position_side=OrderSide.BUY, bars=bars, entry_bar_index=0,
+        decision_scores=(0.0, 1.0),
+    )
+    assert result.triggered is True
+    assert result.reason == "exit_triggered"
+
+
+def test_frozen_trade_exit_flows_through_position_manager_to_next_bar_open() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    plan = exit_plan_from_template(
+        TRADE_TEMPLATES[("5m_recovery_breakout", "PD_LOW")].exits,
+        levels={"PD_HIGH": 105.0}, bands={"PD_HIGH": (104.5, 105.5)},
+    )
+    manager = OrderflowPositionManager(OrderflowConfig())
+    manager.update_exit_scores("PD_HIGH", (0.0, 1.0))
+    manager.register_entry(
+        OrderIntent(
+            "entry-canonical-exit", instrument, OrderSide.BUY, 1,
+            stop_price=95.0, role=OrderRole.ENTRY, exit_plan=plan,
+        ),
+        fill_price=100.0,
+            entry_fill_time=datetime(2026, 1, 1, 9, tzinfo=timezone.utc),
+    )
+    assert manager.on_closed_bar(
+        MarketBar(instrument, datetime(2026, 1, 1, 9, 1, tzinfo=timezone.utc), 100, 106, 99, 105),
+    ) == ()
+    actions = manager.on_closed_bar(
+        MarketBar(instrument, datetime(2026, 1, 1, 9, 2, tzinfo=timezone.utc), 104, 106, 103, 104),
+    )
+    assert len(actions) == 1
+    assert actions[0].reason == "conditional_exit:pd_low-long-exit"
+    assert actions[0].price == 104

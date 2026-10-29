@@ -7,7 +7,7 @@ from datetime import datetime, time
 import math
 
 from ftx_paper.config import IST, SESSION_EXIT_DEADLINE_TIME
-from ftx_paper.contracts import Instrument, OrderIntent, OrderRole, OrderSide
+from ftx_paper.contracts import ExitPlanRule, Instrument, OrderIntent, OrderRole, OrderSide
 
 
 def _optional_number(value: object, name: str) -> float | None:
@@ -34,6 +34,7 @@ class PositionState:
     # reference entry separate so the stop/trail never mixes price domains.
     exit_reference_price: float | None = None
     target_price: float | None = None
+    exit_plan: tuple[ExitPlanRule, ...] = ()
     vehicle: str = "futures"
     synthetic_legs: tuple[Instrument, Instrument] | None = None
     entry_bar: int | None = None
@@ -362,6 +363,7 @@ class ExitStateMachine:
             client_order_id, position.instrument, side, position.quantity if quantity is None else quantity,
             reason=reason, role=OrderRole.EXIT, vehicle=position.vehicle,
             exit_mode=position.exit_mode,
+            exit_plan=position.exit_plan,
             synthetic_legs=position.synthetic_legs,
             entry_bar=position.entry_bar,
             entry_order_id=position.entry_order_id,

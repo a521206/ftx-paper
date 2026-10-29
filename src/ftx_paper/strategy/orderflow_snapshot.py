@@ -19,6 +19,7 @@ from .orderflow_interaction import InteractionDetector
 from .orderflow_location import LocationRegistry
 from .orderflow_opportunity import SetupOpportunity
 from .orderflow_position_manager import OrderflowPositionManager
+from .templates import TRADE_TEMPLATES
 from .policy_contract import ExecutionMode
 from .snapshot_envelope import unwrap_snapshot
 
@@ -122,26 +123,44 @@ def restore_policy_state(policy: OrderflowPolicy, snapshot: Mapping[str, object]
         if opportunity.lifecycle_id in policy._opportunities:
             raise ValueError("duplicate orderflow opportunity ID")
         policy._opportunities[opportunity.lifecycle_id] = opportunity
+    raw_pending_triggers = snapshot.get("pending_triggers", {})
+    if not isinstance(raw_pending_triggers, Mapping):
+        raise ValueError("invalid orderflow pending triggers")
+    interactions = {
+        item.interaction_id: item
+        for detector in policy._location_detectors.values()
+        for item in (*detector.active_interactions, *detector.closed_interactions)
+    }
+    for lifecycle_id, raw in raw_pending_triggers.items():
+        if not isinstance(lifecycle_id, str) or not isinstance(raw, Mapping):
+            raise ValueError("invalid orderflow pending trigger")
+        direction = raw.get("direction")
+        template_id = raw.get("template_id")
+        interaction_id = raw.get("interaction_id")
+        retest_touched = raw.get("retest_touched", False)
+        if (
+            direction not in {"long", "short"}
+            or not isinstance(template_id, str)
+            or not isinstance(interaction_id, str)
+            or not isinstance(retest_touched, bool)
+        ):
+            raise ValueError("invalid orderflow pending trigger fields")
+        template = next((item for item in TRADE_TEMPLATES.values() if item.template_id == template_id), None)
+        interaction = interactions.get(interaction_id)
+        if template is None or interaction is None:
+            raise ValueError("orderflow pending trigger references unknown state")
+        policy._pending_triggers[lifecycle_id] = {
+            "direction": direction, "template": template,
+            "interaction": interaction, "retest_touched": retest_touched,
+        }
 
 
 def policy_from_snapshot(
     cls: type[OrderflowPolicy], snapshot: Mapping[str, object],
 ) -> OrderflowPolicy:
     schema_version = snapshot.get("schema_version")
-    if schema_version not in {2, 3}:
+    if schema_version != 3:
         raise ValueError("unsupported orderflow snapshot schema")
-    if schema_version == 2:
-        legacy_detector = snapshot.get("location_detector")
-        if not isinstance(legacy_detector, Mapping):
-            raise ValueError("invalid legacy orderflow location detector snapshot")
-        snapshot = {
-            **snapshot,
-            "schema_version": 3,
-            "location_detectors": {
-                "1m": InteractionDetector("1m").snapshot(),
-                "5m": legacy_detector,
-            },
-        }
     policy = cls(config_from_snapshot(snapshot))
     restore_policy_state(policy, snapshot)
     return policy
@@ -186,6 +205,27 @@ def strategy_from_snapshot(
     if any(value not in strategy._position_manager.positions for value in raw_pending.values()):
         raise ValueError("orderflow pending exit references unknown position")
     strategy._position_manager.pending_exits = dict(raw_pending)
+
+    raw_scores = payload.get("exit_scores", {})
+    if not isinstance(raw_scores, Mapping):
+        raise ValueError("invalid orderflow exit scores")
+    for location, scores in raw_scores.items():
+        if (
+            not isinstance(location, str)
+            or not isinstance(scores, (list, tuple))
+            or len(scores) != 2
+            or any(
+                value is not None
+                and (not isinstance(value, (int, float)) or isinstance(value, bool))
+                for value in scores
+            )
+        ):
+            raise ValueError("invalid orderflow exit score snapshot")
+        strategy._position_manager.update_exit_scores(
+            location,
+            (float(scores[0]) if scores[0] is not None else None,
+             float(scores[1]) if scores[1] is not None else None),
+        )
     strategy.policy.set_active_position(bool(strategy._position_manager.positions))
 
     raw_actions = payload.get("pending_exit_actions", {})

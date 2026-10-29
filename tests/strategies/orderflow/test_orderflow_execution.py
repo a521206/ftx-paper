@@ -173,6 +173,20 @@ def test_unfilled_execution_group_candidates_select_one_owner_before_submission(
     assert coordinator.lifecycle_events[-1].status == "filled"
 
 
+def test_deferred_entry_releases_execution_group_until_next_arbitration() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    entry = OrderIntent(
+        "deferred-entry", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY,
+        execution_group_id="group-deferred",
+    )
+    portfolio = PortfolioState(RESEARCH_CAPITAL_PROFILE.initial_capital)
+    coordinator = PaperExecutionCoordinator(portfolio, CapitalRuntimeContext(RESEARCH_CAPITAL_PROFILE))
+
+    assert coordinator.arbitrate((entry,)) == (entry,)
+    coordinator.release_deferred_entry(entry)
+    assert coordinator.arbitrate((entry,)) == (entry,)
+
+
 def test_execution_lifecycle_records_idempotent_fill_and_exit_transitions() -> None:
     instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
     entry = OrderIntent("event-entry", instrument, OrderSide.BUY, 1, role=OrderRole.ENTRY)

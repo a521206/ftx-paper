@@ -21,7 +21,7 @@ from .coordinator import SharedDecisionCoordinator
 from .orderflow_contract import OrderflowContext, OrderflowObservation, feature_values_to_dict
 from .orderflow_context import (
     ContextHistory, MarketContext, ContextVersionRef, OpeningGapState, SessionLevels,
-    advance_opening_gap, classify_context_relation, classify_opening_gap,
+    Permission, RegimePermission, advance_opening_gap, classify_context_relation, classify_opening_gap,
 )
 from .orderflow_opportunity import (
     OpportunityStatus, SetupOpportunity,
@@ -365,6 +365,14 @@ class OrderflowPolicy:
         )
         score_result = self._evidence.confirmation_score_result(observation)
         scores = score_result.scores if score_result is not None else None
+        gap_blocked = observation.context.replay_provenance.get("gap_status") == "source_gap"
+        permission = RegimePermission(
+            version=str(self._context_version), context="market",
+            long=Permission.BLOCKED if gap_blocked else Permission.ALLOWED,
+            short=Permission.BLOCKED if gap_blocked else Permission.ALLOWED,
+            opening_gap_state=context_gap.status,
+            opening_gap_direction=("up" if (context_gap.gap_points or 0) > 0 else "down") if context_gap.gap_points else None,
+        )
         parent_context = MarketContext(
             context_id=f"context:{orderflow.session_id}", version=self._context_version,
             available_at=observation.available_at,
@@ -378,10 +386,7 @@ class OrderflowPolicy:
                 "GAP_CANDIDATE" if observation.context.replay_provenance.get("gap_status") == "source_gap" else "UNAVAILABLE",
                 observed_at=observation.available_at, evidence_ids=(observation.observation_id,),
             ),
-            permission=(
-                "UNAVAILABLE" if observation.context.replay_provenance.get("gap_status") == "source_gap"
-                else "BOTH"
-            ),
+             permission=permission,
             long_score=scores[0] if scores is not None else None,
             short_score=(score_result.scores[1] if score_result is not None else None),
             evidence_ids=(observation.observation_id,),
@@ -590,6 +595,37 @@ class OrderflowPolicy:
             "opening_interaction_evidence": evidence,
             "available_at": observation.available_at.isoformat(),
         })
+        if opening_kind in {"opening_breakout", "opening_retest"}:
+            template = TRADE_TEMPLATES.get(("5m_acceptance_breakout", str(seed["location"])))
+            if template is not None:
+                levels = {
+                    rule.location.value: (
+                        record.band_low if direction == "long" else record.band_high
+                    )
+                    for rule in template.exits
+                    if (record := self._location_registry.resolve_as_of(
+                        rule.location.value, observation.available_at,
+                    )) is not None
+                }
+                bands = {
+                    rule.location.value: (record.band_low, record.band_high)
+                    for rule in template.exits
+                    if (record := self._location_registry.resolve_as_of(
+                        rule.location.value, observation.available_at,
+                    )) is not None
+                }
+                attached = PolicyDecision({
+                    **attached.payload,
+                    "execution_proposal": self._execution_proposal(
+                        accepted=True, direction=direction, observation=observation,
+                        opportunity=opportunity, template=template,
+                        interaction=seed, context=context, futures=futures,
+                    ) | {
+                        "exit_plan": exit_plan_payload(
+                            exit_plan_from_template(template.exits, levels=levels, bands=bands),
+                        ),
+                    },
+                })
         return (attached,)
 
     def _process_location_observation(
@@ -835,7 +871,7 @@ class OrderflowPolicy:
             current_context = self._context_history.as_of_location(
                 interaction.location_alias, observation.available_at,
             )
-            permission = current_context.permission if current_context is not None else "UNAVAILABLE"
+            permission = current_context.permission if current_context is not None else None
             trigger = observe_trigger(
                 observation, intent_id=lifecycle_id, direction=direction,
                 boundary=(opportunity.setup.entry_upper if direction == "long"
@@ -846,7 +882,7 @@ class OrderflowPolicy:
                     opportunity.status is OpportunityStatus.ACTIVE
                     and observation.observed_at < opportunity.setup.expires_at
                 ),
-                permission_allowed=permission in {"BOTH", "LONG" if direction == "long" else "SHORT"},
+                permission_allowed=permission is not None and permission.permits(direction),
                 effective_at=opportunity.setup.formed_at.isoformat(),
                 expires_at=opportunity.setup.expires_at.isoformat(),
                 setup_id=opportunity.setup.setup_id,
@@ -861,9 +897,7 @@ class OrderflowPolicy:
             pending["retest_touched"] = trigger.retest_touched
             if not trigger.eligible:
                 continue
-            direction_allowed = permission in {
-                "BOTH", "LONG" if direction == "long" else "SHORT",
-            }
+            direction_allowed = permission is not None and permission.permits(direction)
             admission = evaluate_admission(
                 opportunity, context_available=observation.context is not None,
                 opening_gap_allowed=not self._admission_suspended,
@@ -1307,9 +1341,8 @@ class OrderflowPolicy:
             setup_version=opportunity.policy_version, expected_setup_version=opportunity.policy_version,
             permission_version=str(current_context.version) if current_context else None,
             expected_permission_version=str(current_context.version) if current_context else None,
-            permission_allowed=current_context is not None and current_context.permission in {
-                "BOTH", "LONG" if direction == "long" else "SHORT",
-            }, armed=True, context_conflicted=relation.value == "CONFLICTED",
+             permission_allowed=current_context is not None and current_context.permission.permits(direction),
+             armed=True, context_conflicted=relation.value == "CONFLICTED",
         )
         admission = evaluate_admission(opportunity,
             context_available=current_context is not None,
@@ -1323,9 +1356,7 @@ class OrderflowPolicy:
                 and not self._admission_suspended),
             direction_matches=(
                 current_context is not None
-                and current_context.permission in {
-                    "BOTH", "LONG" if direction == "long" else "SHORT",
-                }
+                 and current_context.permission.permits(direction)
             ), confirmations_available=confirmation_id is not None,
             current_at=formed_at, context_version=str(current_context.version) if current_context else None,
             context_relation=relation.value, evidence_ids=evidence_ids,
@@ -1682,6 +1713,13 @@ class OrderflowStrategy:
         self._position_manager.update_exit_levels({
             record.alias: (record.band_low, record.band_high)
             for record in self.policy._location_registry.available_as_of(context.as_of)
+        })
+        interactions: dict[str, list[object]] = {}
+        for detector in self.policy._location_detectors.values():
+            for interaction in (*detector.active_interactions, *detector.closed_interactions):
+                interactions.setdefault(interaction.location_alias, []).append(interaction)
+        self._position_manager.update_exit_interactions({
+            location: tuple(items) for location, items in interactions.items()
         })
         decisions = self.coordinator.evaluate(bundle, context)
         for decision in decisions:

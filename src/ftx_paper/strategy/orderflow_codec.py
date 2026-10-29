@@ -7,7 +7,7 @@ from dataclasses import asdict
 from datetime import datetime
 from typing import Protocol, cast
 
-from ftx_paper.contracts import Instrument, MarketBar, OptionType, OrderIntent, OrderRole, OrderSide
+from ftx_paper.contracts import Instrument, MarketBar, OptionType, OrderIntent, OrderRole, OrderSide, exit_plan_from_payload
 
 from .exits import ExitAction, ExitStateMachine, PositionState
 from .orderflow_config import OrderflowConfig
@@ -15,6 +15,7 @@ from .orderflow_context import ContextHistory
 from .orderflow_interaction import InteractionDetector
 from .orderflow_opportunity import SetupOpportunity
 from .orderflow_location import LocationRegistry
+from .orderflow_exit import exit_plan_payload
 
 
 class _PolicySnapshotSource(Protocol):
@@ -33,6 +34,7 @@ class _PolicySnapshotSource(Protocol):
     _gap_end: datetime | None
     _opening_gap_last_evaluated_id: str | None
     _opening_seed: dict[str, object] | None
+    _pending_triggers: dict[str, dict[str, object]]
     @property
     def _opportunities(self) -> Mapping[str, SetupOpportunity]: ...
 
@@ -54,6 +56,8 @@ class _StrategySnapshotSource(Protocol):
 
     @property
     def _completed_bars(self) -> Sequence[MarketBar]: ...
+    @property
+    def _exit_scores(self) -> Mapping[str, tuple[float | None, float | None]]: ...
 
 
 def policy_snapshot_payload(policy: _PolicySnapshotSource) -> dict[str, object]:
@@ -88,6 +92,15 @@ def policy_snapshot_payload(policy: _PolicySnapshotSource) -> dict[str, object]:
         "opening_gap_last_evaluated_id": policy._opening_gap_last_evaluated_id,
         "opening_seed": dict(policy._opening_seed) if policy._opening_seed is not None else None,
         "opportunities": [policy._opportunities[key].snapshot() for key in sorted(policy._opportunities)],
+        "pending_triggers": {
+            key: {
+                "direction": value.get("direction"),
+                "template_id": getattr(value.get("template"), "template_id", None),
+                "interaction_id": getattr(value.get("interaction"), "interaction_id", None),
+                "retest_touched": value.get("retest_touched", False),
+            }
+            for key, value in policy._pending_triggers.items()
+        },
     }
 
 
@@ -107,6 +120,9 @@ def strategy_snapshot_payload(strategy: _StrategySnapshotSource) -> dict[str, ob
         "pending_exits": dict(strategy._pending_exits),
         "pending_exit_actions": pending_actions,
         "completed_bars": [bar_snapshot(item) for item in strategy._completed_bars],
+        "exit_scores": {
+            location: list(scores) for location, scores in strategy._exit_scores.items()
+        },
     }
 
 
@@ -140,6 +156,7 @@ def position_snapshot(position: PositionState) -> dict[str, object]:
         "vehicle": position.vehicle,
         "synthetic_legs": [instrument_snapshot(item) for item in position.synthetic_legs] if position.synthetic_legs else None,
         "entry_bar": position.entry_bar, "entry_order_id": position.entry_order_id,
+        "exit_plan": exit_plan_payload(position.exit_plan),
         "initial_risk_points": position.initial_risk_points, "partial_exit_enabled": position.partial_exit_enabled,
         "stop_source": position.stop_source, "post_3r_activated": position.post_3r_activated,
     }
@@ -179,6 +196,7 @@ def position_from_snapshot(raw: Mapping[str, object]) -> PositionState:
         entry_fill_time=datetime.fromisoformat(entry_fill_time) if entry_fill_time else None,
         exit_reference_price=optional_float("exit_reference_price"), target_price=optional_float("target_price"),
         vehicle=str(raw.get("vehicle", "futures")), synthetic_legs=legs,
+        exit_plan=exit_plan_from_payload(raw.get("exit_plan")),
         entry_bar=cast(int, raw["entry_bar"]) if isinstance(raw.get("entry_bar"), int) else None,
         entry_order_id=cast(str, raw["entry_order_id"]) if isinstance(raw.get("entry_order_id"), str) else None,
         initial_risk_points=optional_float("initial_risk_points"), partial_exit_enabled=bool(raw.get("partial_exit_enabled", False)),
@@ -219,8 +237,8 @@ def exit_action_snapshot(action: ExitAction) -> dict[str, object]:
             "intent": {"client_order_id": intent.client_order_id, "instrument": instrument_snapshot(intent.instrument),
                        "side": intent.side.value, "quantity": intent.quantity, "role": intent.role.value,
                        "reason": intent.reason, "entry_order_id": intent.entry_order_id, "vehicle": intent.vehicle,
-                       "exit_mode": intent.exit_mode, "synthetic_legs": [instrument_snapshot(item) for item in intent.synthetic_legs] if intent.synthetic_legs else None,
-                       "entry_bar": intent.entry_bar}}
+                        "exit_mode": intent.exit_mode, "synthetic_legs": [instrument_snapshot(item) for item in intent.synthetic_legs] if intent.synthetic_legs else None,
+                        "entry_bar": intent.entry_bar, "exit_plan": exit_plan_payload(intent.exit_plan)}}
 
 
 def exit_action_from_snapshot(raw: Mapping[str, object]) -> ExitAction:
@@ -234,8 +252,9 @@ def exit_action_from_snapshot(raw: Mapping[str, object]) -> ExitAction:
                         OrderSide(str(intent_raw["side"])), int(intent_raw["quantity"]),
                         role=OrderRole(str(intent_raw["role"])), reason=str(intent_raw.get("reason", "")),
                         entry_order_id=intent_raw.get("entry_order_id") if isinstance(intent_raw.get("entry_order_id"), str) else None,
-                        vehicle=str(intent_raw.get("vehicle", "futures")), exit_mode=intent_raw.get("exit_mode") if isinstance(intent_raw.get("exit_mode"), str) else None,
-                        entry_bar=int(intent_raw["entry_bar"]) if isinstance(intent_raw.get("entry_bar"), int) else None)
+                         vehicle=str(intent_raw.get("vehicle", "futures")), exit_mode=intent_raw.get("exit_mode") if isinstance(intent_raw.get("exit_mode"), str) else None,
+                         entry_bar=int(intent_raw["entry_bar"]) if isinstance(intent_raw.get("entry_bar"), int) else None,
+                         exit_plan=exit_plan_from_payload(intent_raw.get("exit_plan")))
     cell = cast(str, raw["cell"]) if isinstance(raw.get("cell"), str) else None
     return ExitAction(str(raw["reason"]), float(cast(int | float, raw["price"])), intent,
                       cell, int(cast(int, raw.get("bars_held", 0))),

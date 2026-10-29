@@ -907,12 +907,14 @@ class ReplayWorker:
                                     order, available_at=futures_bar.timestamp.isoformat(),
                                     reason="next_observed_bar",
                                 )
+                                coordinator.release_deferred_entry(order)
                                 continue
                             if order.setup_availability is not None and futures_bar.timestamp.isoformat() <= order.setup_availability:
                                 self.lifecycle.defer_entry(
                                     order, available_at=futures_bar.timestamp.isoformat(),
                                     reason="setup_not_yet_available",
                                 )
+                                coordinator.release_deferred_entry(order)
                                 continue
                             try:
                                 account.authorize_and_reserve(order)
@@ -1176,12 +1178,14 @@ class ReplayWorker:
                                 order, available_at=futures_bar.timestamp.isoformat(),
                                 reason="next_observed_bar",
                             )
+                            coordinator.release_deferred_entry(order)
                             continue
                         if order.setup_availability is not None and futures_bar.timestamp.isoformat() <= order.setup_availability:
                             self.lifecycle.defer_entry(
                                 order, available_at=futures_bar.timestamp.isoformat(),
                                 reason="setup_not_yet_available",
                             )
+                            coordinator.release_deferred_entry(order)
                             continue
                         entry_bar = futures_bar
                         entry_timestamp = entry_bar.timestamp.isoformat()
