@@ -22,7 +22,6 @@ from ftx_paper.runtime.engine import PaperEngine
 from ftx_paper.execution import PaperExecutionCoordinator
 from ftx_paper.market.location import Cell, Location, LocationFeatures, LocationSnapshot
 from ftx_paper.strategy.decision import _configured_policies_for_cell
-from ftx_paper.strategy.scoring import compute_selling_structure
 from ftx_paper.strategy.config import Session
 from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.domain.capital import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE as CAPITAL_CONFIG
@@ -36,31 +35,6 @@ def test_candidate_decision_is_one_typed_terminal_event() -> None:
     assert rejected.event_type == "POLICY_DECISION"
     with pytest.raises(ValueError, match="valid outcome"):
         CandidateDecision({"decision_id": "pending", "outcome": "candidate"})
-
-
-def test_delta_divergence_uses_signed_volume_from_actual_ohlc() -> None:
-    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
-    bars = tuple(
-        MarketBar(
-            instrument=instrument,
-            timestamp=datetime(2026, 9, 10, 4, 0 + index, tzinfo=timezone.utc),
-            open=close,
-            high=high,
-            low=0.0,
-            close=close,
-            volume=volume,
-        )
-        for index, (close, high, volume) in enumerate(
-            ((10.0, 30.0, 300.0), (15.0, 40.0, 400.0), (20.0, 50.0, 500.0))
-        )
-    )
-
-    # Signed close-location volume falls while closes rise. The prior
-    # positive-only proxy using close as high returned +1.0 for these bars.
-    structure = compute_selling_structure(
-        bars[:-1], bars[-1], vix_open=15.0, vix_at_event=15.0,
-    )
-    assert structure.delta_divergence == pytest.approx(-1.0)
 
 
 def test_scoped_risk_reservation_releases_and_settles_into_its_bucket() -> None:

@@ -175,20 +175,6 @@ TRADE_EXITS: Mapping[str, TradeExit] = {
 }
 
 
-def _template(
-    template_id: str, location: LocationTemplate, direction: Direction,
-    response_type: ResponseType, trigger: TriggerType,
-    *, conflict: str | None = None, stop: StopPolicy = StopPolicy.STRUCTURAL_TRAILING,
-    exits: tuple[TradeExit, ...] = (),
-) -> TradeTemplate:
-    return TradeTemplate(
-        template_id=template_id, version="1", thesis=template_id,
-        locations=(location,), direction=direction, response_type=response_type,
-        response_timeframe="5m", carry_sessions=1, trigger_type=trigger,
-        stop_policy=stop, exits=exits, execution_conflict_group=conflict,
-    )
-
-
 LONG_RECOVERY_LOW = TradeTemplate(
     template_id="long-recovery-breakout-low", version="1",
     thesis="long recovery_breakout at low locations",
@@ -202,18 +188,94 @@ LONG_RECOVERY_LOW = TradeTemplate(
 
 
 TRADE_TEMPLATES: Mapping[tuple[str, str], TradeTemplate] = {
-    ("5m_recovery_breakout", "OR_HIGH"): _template("or_high-short-recovery_breakout", LocationTemplate.OR_HIGH, Direction.SHORT, ResponseType.REJECTION, TriggerType.BREAKOUT, conflict="high-short-recovery"),
+    ("5m_recovery_breakout", "OR_HIGH"): TradeTemplate(
+        template_id="or_high-short-recovery_breakout", version="1",
+        thesis="short recovery_breakout at OR_HIGH", locations=(LocationTemplate.OR_HIGH,),
+        direction=Direction.SHORT, response_type=ResponseType.REJECTION,
+        response_timeframe="5m", carry_sessions=1,
+        trigger_type=TriggerType.BREAKOUT,
+        exits=(),
+        execution_conflict_group="high-short-recovery",
+    ),
     ("5m_recovery_breakout", "OR_LOW"): LONG_RECOVERY_LOW,
-    ("5m_recovery_breakout", "PD_HIGH"): _template("pd_high-short-recovery_breakout", LocationTemplate.PD_HIGH, Direction.SHORT, ResponseType.REJECTION, TriggerType.PULLBACK, exits=(TRADE_EXITS["pd_high_short"],)),
-    ("5m_recovery_breakout", "PD_LOW"): _template("pd_low-long-recovery_breakout", LocationTemplate.PD_LOW, Direction.LONG, ResponseType.REJECTION, TriggerType.PULLBACK, exits=(TRADE_EXITS["pd_low_long"],)),
-    ("5m_recovery_breakout", "SESSION_HIGH"): _template("session_high-short-recovery_breakout", LocationTemplate.SESSION_HIGH, Direction.SHORT, ResponseType.REJECTION, TriggerType.BREAKOUT, conflict="high-short-recovery", exits=(TRADE_EXITS["short_to_or_low"],)),
+    ("5m_recovery_breakout", "PD_HIGH"): TradeTemplate(
+        template_id="pd_high-short-recovery_breakout", version="1",
+        thesis="short recovery_breakout at PD_HIGH", locations=(LocationTemplate.PD_HIGH,),
+        direction=Direction.SHORT, response_type=ResponseType.REJECTION,
+        response_timeframe="5m", carry_sessions=1,
+        trigger_type=TriggerType.PULLBACK,
+        exits=(TRADE_EXITS["pd_high_short"],),
+    ),
+    ("5m_recovery_breakout", "PD_LOW"): TradeTemplate(
+        template_id="pd_low-long-recovery_breakout", version="1",
+        thesis="long recovery_breakout at PD_LOW", locations=(LocationTemplate.PD_LOW,),
+        direction=Direction.LONG, response_type=ResponseType.REJECTION,
+        response_timeframe="5m", carry_sessions=1,
+        trigger_type=TriggerType.PULLBACK,
+        exits=(TRADE_EXITS["pd_low_long"],),
+    ),
+    ("5m_recovery_breakout", "SESSION_HIGH"): TradeTemplate(
+        template_id="session_high-short-recovery_breakout", version="1",
+        thesis="short recovery_breakout at SESSION_HIGH", locations=(LocationTemplate.SESSION_HIGH,),
+        direction=Direction.SHORT, response_type=ResponseType.REJECTION,
+        response_timeframe="5m", carry_sessions=1,
+        trigger_type=TriggerType.BREAKOUT,
+        exits=(TRADE_EXITS["short_to_or_low"],),
+        execution_conflict_group="high-short-recovery",
+    ),
     ("5m_recovery_breakout", "SESSION_LOW"): LONG_RECOVERY_LOW,
-    ("5m_acceptance_breakout", "PD_HIGH"): _template("pd_high-short-acceptance_breakout", LocationTemplate.PD_HIGH, Direction.SHORT, ResponseType.ACCEPTANCE, TriggerType.PULLBACK, exits=(TRADE_EXITS["pd_high_short"],)),
-    ("5m_acceptance_breakout", "PD_LOW"): _template("pd_low-long-acceptance_breakout", LocationTemplate.PD_LOW, Direction.LONG, ResponseType.ACCEPTANCE, TriggerType.PULLBACK, exits=(TRADE_EXITS["pd_low_long"],)),
-    ("5m_acceptance_breakout", "OR_HIGH"): _template("or_high-long-acceptance_breakout", LocationTemplate.OR_HIGH, Direction.LONG, ResponseType.ACCEPTANCE, TriggerType.BREAKOUT, stop=StopPolicy.OR_VWAP),
-    ("5m_acceptance_breakout", "OR_LOW"): _template("or_low-short-acceptance_breakout", LocationTemplate.OR_LOW, Direction.SHORT, ResponseType.ACCEPTANCE, TriggerType.BREAKOUT, stop=StopPolicy.OR_VWAP),
-    ("5m_acceptance_breakout", "SESSION_HIGH"): _template("session_high-long-acceptance_breakout", LocationTemplate.SESSION_HIGH, Direction.LONG, ResponseType.ACCEPTANCE, TriggerType.BREAKOUT, stop=StopPolicy.OR_VWAP, exits=(TRADE_EXITS["short_to_or_low"],)),
-    ("5m_acceptance_breakout", "SESSION_LOW"): _template("session_low-short-acceptance_breakout", LocationTemplate.SESSION_LOW, Direction.SHORT, ResponseType.ACCEPTANCE, TriggerType.BREAKOUT, stop=StopPolicy.OR_VWAP, exits=(TRADE_EXITS["long_to_or_high"],)),
+    ("5m_acceptance_breakout", "OR_HIGH"): TradeTemplate(
+        template_id="or_high-long-acceptance_breakout", version="1",
+        thesis="long acceptance_breakout at OR_HIGH", locations=(LocationTemplate.OR_HIGH,),
+        direction=Direction.LONG, response_type=ResponseType.ACCEPTANCE,
+        response_timeframe="5m", carry_sessions=1,
+        trigger_type=TriggerType.BREAKOUT,
+        exits=(),
+        stop_policy=StopPolicy.OR_VWAP,
+    ),
+    ("5m_acceptance_breakout", "OR_LOW"): TradeTemplate(
+        template_id="or_low-short-acceptance_breakout", version="1",
+        thesis="short acceptance_breakout at OR_LOW", locations=(LocationTemplate.OR_LOW,),
+        direction=Direction.SHORT, response_type=ResponseType.ACCEPTANCE,
+        response_timeframe="5m", carry_sessions=1,
+        trigger_type=TriggerType.BREAKOUT,
+        exits=(),
+        stop_policy=StopPolicy.OR_VWAP,
+    ),
+    ("5m_acceptance_breakout", "PD_HIGH"): TradeTemplate(
+        template_id="pd_high-short-acceptance_breakout", version="1",
+        thesis="short acceptance_breakout at PD_HIGH", locations=(LocationTemplate.PD_HIGH,),
+        direction=Direction.SHORT, response_type=ResponseType.ACCEPTANCE,
+        response_timeframe="5m", carry_sessions=1,
+        trigger_type=TriggerType.PULLBACK,
+        exits=(TRADE_EXITS["pd_high_short"],),
+    ),
+    ("5m_acceptance_breakout", "PD_LOW"): TradeTemplate(
+        template_id="pd_low-long-acceptance_breakout", version="1",
+        thesis="long acceptance_breakout at PD_LOW", locations=(LocationTemplate.PD_LOW,),
+        direction=Direction.LONG, response_type=ResponseType.ACCEPTANCE,
+        response_timeframe="5m", carry_sessions=1,
+        trigger_type=TriggerType.PULLBACK,
+        exits=(TRADE_EXITS["pd_low_long"],),
+    ),
+    ("5m_acceptance_breakout", "SESSION_HIGH"): TradeTemplate(
+        template_id="session_high-long-acceptance_breakout", version="1",
+        thesis="long acceptance_breakout at SESSION_HIGH", locations=(LocationTemplate.SESSION_HIGH,),
+        direction=Direction.LONG, response_type=ResponseType.ACCEPTANCE,
+        response_timeframe="5m", carry_sessions=1,
+        trigger_type=TriggerType.BREAKOUT,
+        exits=(TRADE_EXITS["short_to_or_low"],),
+        stop_policy=StopPolicy.OR_VWAP,
+    ),
+    ("5m_acceptance_breakout", "SESSION_LOW"): TradeTemplate(
+        template_id="session_low-short-acceptance_breakout", version="1",
+        thesis="short acceptance_breakout at SESSION_LOW", locations=(LocationTemplate.SESSION_LOW,),
+        direction=Direction.SHORT, response_type=ResponseType.ACCEPTANCE,
+        response_timeframe="5m", carry_sessions=1,
+        trigger_type=TriggerType.BREAKOUT,
+        exits=(TRADE_EXITS["long_to_or_high"],),
+        stop_policy=StopPolicy.OR_VWAP,
+    ),
 }
 
 # Keep the canonical default subset rule even though every current template

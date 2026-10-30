@@ -78,11 +78,6 @@ def admission_result(features: dict[str, bool | None], hypothesis: str) -> tuple
         return True, None
     for name, expected in requirements.items():
         value = features.get(name)
-        if value is None:
-            # Missing inputs are not negative predicates.  Keep admission
-            # fail-closed, but avoid exposing a predicate-specific reason when
-            # canonical evaluation can only report generic rejection.
-            return False, "admission_rejected"
         if value is not expected:
             return False, f"{hypothesis}_{name}_required_{expected}"
     return True, None
