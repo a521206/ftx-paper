@@ -4,6 +4,23 @@ This document is the implementation roadmap for the native FTX Paper orderflow
 strategy. It defines the order in which the system is built, the contracts each
 stage must provide, and the tests required before the next stage starts.
 
+## Reading Guide
+
+Use this document in the following order:
+
+1. **Goals And Guardrails** defines the non-negotiable behavior and ownership
+   rules.
+2. **Scope And Status** records what is in scope, what is explicitly opt-in, and
+   how Paper maps the canonical behavior.
+3. **Architecture And Causal Contract** describes runtime ownership and the
+   per-bar ordering that every implementation must preserve.
+4. **Implementation Phases** is the execution roadmap. Each phase includes
+   required behavior, exit criteria, and conformance tests.
+5. **Reference And Ownership Maps** identifies read-only behavioral references
+   and Paper implementation owners.
+6. **Validation And Pending Work** defines the delivery workflow and the work
+   still required for completion.
+
 Behavioral research from `C:\Users\agraw\Python\NiftyZoning\src\orderflow`
 may inform design decisions, but FTX Paper owns its implementation, fixtures,
 runtime state, and tests. It must not import NiftyZoning, read its runtime state,
@@ -181,12 +198,14 @@ default and is not Phase 9 release-complete until the remaining execution,
 paired-replay, and lifecycle acceptance criteria pass. No environment or
 implicit eligibility path may switch it on.
 
-## Phase 9 Scope Decisions
+## Scope And Status
+
+### Phase 9 Scope Decisions
 
 These decisions resolve the remaining P9 scope while aligning VWAP stop behavior
 with the causal NiftyZoning reference pipeline.
 
-### Authoritative Executable Scope
+#### Authoritative Executable Scope
 
 The authoritative scope is the executable behavior already represented by
 NiftyZoning's causal orderflow pipeline. Paper may read those modules and tests as a behavioral reference only;
@@ -201,7 +220,7 @@ If the reference does not define a policy, transition, fill rule, or accounting
 result, Paper records an explicit unavailable reason and does not infer a
 replacement rule.
 
-### Validated NiftyZoning Behavior
+#### Validated NiftyZoning Behavior
 
 The read-only validation against `C:\Users\agraw\Python\NiftyZoning` found the
 following executable contracts to reproduce:
@@ -228,7 +247,7 @@ following executable contracts to reproduce:
   `OR_VWAP` stop policy for the corresponding structural acceptance templates,
   while retaining VWAP location observations and responses.
 
-### Paper Execution Opt-In
+#### Paper Execution Opt-In
 
 Executable orderflow is enabled only by constructing the existing
 `OrderflowConfig` with `execution_mode=ExecutionMode.EXECUTABLE` and passing
@@ -244,7 +263,7 @@ execution state. Pending-entry portfolio, sizing, risk, and execution-group
 authorization must remain owned by the execution boundary before Phase 9 is
 marked complete.
 
-### Parity Coverage
+#### Parity Coverage
 
 Paired replay validation covers the complete defined Paper projection, not just
 decision labels: canonical decisions and predicates, diagnostic eligibility
@@ -268,7 +287,9 @@ selected/completed/gap/processed counts, then compares causal phases from source
 through execution. This Paper-internal validation does not replace the
 producer-neutral four-layer artifact comparison.
 
-## Runtime Shape
+## Architecture And Causal Contract
+
+### Runtime Shape
 
 The strategy is built as a causal live decision engine around these layers:
 
@@ -291,7 +312,7 @@ source rows
 The layers are dependency boundaries, not mandatory modules. A later layer may
 consume only the completed, available contracts published by earlier layers.
 
-### Live Ownership Boundary
+#### Live Ownership Boundary
 
 This plan applies to the live Paper runtime. `RuntimeSession` remains the one
 in-process application/runtime owner, and `OrderflowPolicy` remains the live
@@ -327,7 +348,7 @@ producer, shared coordinator, and policy calls; the policy must preserve its
 orderflow lifecycle sub-order without adopting replay-only input loading,
 replay clocks, or replay ownership.
 
-### Refactor Ownership Boundaries
+#### Refactor Ownership Boundaries
 
 Refactor `src/ftx_paper/strategies/orderflow/orderflow.py` in place. The ownership rules in
 the preceding sections and the causal order below are authoritative; the
@@ -359,7 +380,7 @@ without completing the reference-fidelity protocol. If an extracted boundary
 cannot prove its evidence or ownership, retain an explicit `unavailable`
 result and defer the change.
 
-## Causal Per-Bar Contract
+### Causal Per-Bar Contract
 
 Every completed live bar follows this causal order across the existing runtime
 components. `OrderflowPolicy.evaluate()` owns only the policy lifecycle steps;
@@ -737,13 +758,6 @@ Phase 5 conformance tests:
 - `test_closes_for_cross_band_same_side_outside_band_session_gap_and_replacement`
 - `test_duplicate_observation_does_not_duplicate_interaction`
 
-Remaining implementation work:
-
-- Add live rollover regressions for carried and terminated generations,
-  including interactions that are active at the boundary. The detector already
-  uses completed-candle high/low band intersection, and the policy already owns
-  generation advancement and interaction closure.
-
 ### Phase 6: Response Policies
 
 Implement response hypotheses as policy-owned evaluation over completed candles.
@@ -779,16 +793,6 @@ Phase 6 conformance tests:
 - `test_rejection_acceptance_cross_band_invalidation_and_expiry_are_distinct`
 - `test_pre_event_context_is_required_when_policy_disallows_event_close`
 - `test_response_unavailable_is_not_reported_as_neutral_or_confirmed`
-
-Remaining implementation work:
-
-- Persist and publish the complete per-hypothesis state, including arming,
-  direction, evidence IDs, confirmation availability, and expected availability
-  boundaries. The live policy already retains this state in memory.
-- Complete location-specific prior-day policies and pre-event-context wiring;
-  the generic response adapter is not a substitute for those policies.
-- Add conformance coverage proving every newly available pending or unavailable
-  outcome is retained at the runtime persistence boundary.
 
 ### Phase 7: Opportunities And Structural Setups
 
@@ -833,15 +837,6 @@ Phase 7 conformance tests:
 - `test_timeout_expires_before_same_bar_structure_formation`
 - `test_filled_execution_group_denies_later_candidate_but_unfilled_candidates_remain_diagnostic`
 - `test_setup_cannot_outlive_source_interaction_or_context_without_transition`
-
-Remaining implementation work:
-
-- Complete live orchestration for retest waiting, supersession, and replacement
-  selection. The opportunity model already supports these transitions and live
-  source invalidation.
-- Persist denied candidates and execution-group claims as detached diagnostic
-  facts at the runtime event boundary. Canonical template conflict groups and
-  template/policy identity are already part of opportunity construction.
 
 ### Phase 8: Admission, Intent, And Trigger Eligibility
 
@@ -1057,13 +1052,15 @@ Phase 10 conformance tests:
 - `test_reports_preserve_unavailable_fields_and_reasons`
 - `test_multi_session_reports_have_deterministic_schema_and_order`
 
-## Canonical Reference Map
+## Reference And Ownership Maps
+
+### Canonical Reference Map
 
 The following are absolute read-only references in the current project. Paper
 must reproduce the contracts and behavior independently; it must not import,
 execute, or modify these files.
 
-### Generic Decision, Event, And Artifact References
+#### Generic Decision, Event, And Artifact References
 
 These references inform the strategy-neutral runtime event and decision
 contracts added in Phase 10. They are design references only; they do not make
@@ -1097,7 +1094,7 @@ Paper live path.
   delayed availability, causal timestamp ordering, rejected/unavailable
   outcomes, and replay regression coverage.
 
-### Phase 0: Foundation
+#### Phase 0: Foundation
 
 - `C:\Users\agraw\Python\NiftyZoning\src\orderflow\config.py` — replay,
   execution, and capture configuration.
@@ -1111,7 +1108,7 @@ Paper live path.
 - `C:\Users\agraw\Python\NiftyZoning\tests\test_orderflow_state_machine_types.py` —
   typed invariants and serialization expectations.
 
-### Phase 1: Replay Input And Source Identity
+#### Phase 1: Replay Input And Source Identity
 
 - `C:\Users\agraw\Python\NiftyZoning\src\orderflow\state_machine_source.py` —
   `source_fingerprint()` and `source_metadata()`.
@@ -1126,7 +1123,7 @@ Paper live path.
 - `C:\Users\agraw\Python\NiftyZoning\tests\test_orderflow_replay_regressions.py` —
   real-session input and causal replay regressions.
 
-### Phase 2: Causal Market Observations
+#### Phase 2: Causal Market Observations
 
 - `C:\Users\agraw\Python\NiftyZoning\src\orderflow\market_observation.py` —
   `rows_available_for_observation()`, `observe_market()`,
@@ -1143,7 +1140,7 @@ Paper live path.
 - `C:\Users\agraw\Python\NiftyZoning\tests\test_orderflow_vwap.py` —
   independent timeframe prefixes and non-executable observation behavior.
 
-### Phase 3: Context, Values, And Permissions
+#### Phase 3: Context, Values, And Permissions
 
 - `C:\Users\agraw\Python\NiftyZoning\src\orderflow\market_context_history.py` —
   as-of context intervals and immutable projections.
@@ -1162,7 +1159,7 @@ Paper live path.
 - `C:\Users\agraw\Python\NiftyZoning\tests\test_orderflow_hierarchy.py` —
   context lineage, permissions, and trigger observations.
 
-### Phase 4: Location Registry And As-Of Resolution
+#### Phase 4: Location Registry And As-Of Resolution
 
 - `C:\Users\agraw\Python\NiftyZoning\src\orderflow\state_machine_types.py` —
   `LocationRecord`, `LocationRegistry`, `LocationStatus`, and generations.
@@ -1173,7 +1170,7 @@ Paper live path.
 - `C:\Users\agraw\Python\NiftyZoning\tests\test_orderflow_state_machine_types.py` —
   registry, generation, and typed location invariants.
 
-### Phase 5: Observations And Interaction Episodes
+#### Phase 5: Observations And Interaction Episodes
 
 - `C:\Users\agraw\Python\NiftyZoning\src\orderflow\interaction_detector.py` —
   `InteractionDetector` and `InteractionTransition`.
@@ -1187,7 +1184,7 @@ Paper live path.
 - `C:\Users\agraw\Python\NiftyZoning\tests\test_orderflow_vwap_acceptance_delay.py` —
   direction-aware delayed acceptance evidence.
 
-### Phase 6: Response Policies
+#### Phase 6: Response Policies
 
 - `C:\Users\agraw\Python\NiftyZoning\src\orderflow\response.py` —
   response status, windows, hypotheses, and causal evaluation.
@@ -1200,7 +1197,7 @@ Paper live path.
 - `C:\Users\agraw\Python\NiftyZoning\tests\test_orderflow_templates.py` —
   template and response contract tests.
 
-### Phase 7: Opportunities And Structural Setups
+#### Phase 7: Opportunities And Structural Setups
 
 - `C:\Users\agraw\Python\NiftyZoning\src\orderflow\opportunity_coordinator.py` —
   structure, opening interaction, and response-generation coordination.
@@ -1217,7 +1214,7 @@ Paper live path.
 - `C:\Users\agraw\Python\NiftyZoning\tests\test_orderflow_entry_features.py` —
   causal entry-time feature lineage.
 
-### Phase 8: Admission, Intent, And Trigger Eligibility
+#### Phase 8: Admission, Intent, And Trigger Eligibility
 
 - `C:\Users\agraw\Python\NiftyZoning\src\orderflow\intent_policy.py` —
   `ExecutionPolicy.evaluate_entry()`, causal context, and decision evidence.
@@ -1232,7 +1229,7 @@ Paper live path.
 - `C:\Users\agraw\Python\NiftyZoning\tests\test_orderflow_execution.py` —
   admission, triggers, intents, management, and execution ownership.
 
-### Phase 9: Execution And Accounting
+#### Phase 9: Execution And Accounting
 
 - `C:\Users\agraw\Python\NiftyZoning\src\orderflow\execution.py` —
   `ExecutionCoordinator.handle_management()`, `handle_execution()`,
@@ -1246,7 +1243,7 @@ Paper live path.
 - `C:\Users\agraw\Python\NiftyZoning\tests\test_orderflow_replay_regressions.py` —
   real-session management and confirmation regressions.
 
-### Phase 10: Capture And Reporting
+#### Phase 10: Capture And Reporting
 
 - `C:\Users\agraw\Python\NiftyZoning\src\orderflow\state_engine.py` —
   detached replay records and capture modes.
@@ -1266,7 +1263,7 @@ this implementation roadmap:
 - `C:\Users\agraw\Python\NiftyZoning\tests\test_orderflow_parity_artifacts.py`
 - `C:\Users\agraw\Python\NiftyZoning\tests\test_orderflow_parity_comparison.py`
 
-## NiftyZoning To FTX Paper File Mapping
+### NiftyZoning To FTX Paper File Mapping
 
 This is a responsibility mapping, not an import or code-copying map. The
 NiftyZoning paths are read-only behavioral references. The Paper paths are the
@@ -1277,7 +1274,7 @@ criteria and verified gaps above remain authoritative.
 Paper source paths below are relative to `src/`; Paper documentation paths are
 relative to the repository root.
 
-### Foundation, Input, And Observations
+#### Foundation, Input, And Observations
 
 - `NiftyZoning/src/orderflow/config.py`, `state_machine_types.py` ->
   `ftx_paper/strategies/orderflow/orderflow_config.py`,
@@ -1304,7 +1301,7 @@ relative to the repository root.
   VWAP participates in opportunity formation, while structural acceptance
   templates may use the executable `OR_VWAP` protective stop.
 
-### Context, Locations, And Interactions
+#### Context, Locations, And Interactions
 
 - `NiftyZoning/src/orderflow/market_context_history.py`,
   `value_publication.py`, `opening_gap_policy.py`, `regime_classification.py`,
@@ -1320,7 +1317,7 @@ relative to the repository root.
   interaction clocks, frozen contact lineage, lifecycle transitions, and
   close reasons.
 
-### Responses, Opportunities, And Admission
+#### Responses, Opportunities, And Admission
 
 - `NiftyZoning/src/orderflow/response.py`, `policies/`, `templates.py` ->
   `ftx_paper/strategies/orderflow/orderflow_response.py` and `strategies/shared/templates.py`:
@@ -1341,7 +1338,7 @@ relative to the repository root.
   strategy layer; active-position, allocation, sizing, risk, reservations,
   and proposal arbitration are evaluated by execution/account ownership.
 
-### Execution, Persistence, And Reporting
+#### Execution, Persistence, And Reporting
 
 - `NiftyZoning/src/orderflow/execution.py`, `lifecycle.py`, `hierarchy.py` ->
   `ftx_paper/execution/coordinator.py`, `execution/service.py`,
@@ -1366,7 +1363,7 @@ relative to the repository root.
   runtime coordination, and persistence; no single Paper file replaces the
   reference state machine.
 
-### Reference-Only Or Intentionally Unmapped Areas
+#### Reference-Only Or Intentionally Unmapped Areas
 
 - `NiftyZoning/src/orderflow/parity_artifacts.py` and its parity tests map to
   the separate Paper parity deliverables in
@@ -1380,12 +1377,12 @@ relative to the repository root.
   equivalent. Paper preserves separate ownership between `OrderflowPolicy`,
   `ReplayMachine`, `RuntimeSession`, and `PaperExecutionCoordinator`.
 
-## Cross-Project Omissions And Paper-Only Responsibilities
+### Cross-Project Omissions And Paper-Only Responsibilities
 
 The mapping above can hide important asymmetries. These are the omissions and
 additional responsibilities that must remain visible when assessing parity.
 
-### Paper Omissions Relative To NiftyZoning
+#### Paper Omissions Relative To NiftyZoning
 
 - There is no Paper equivalent of NiftyZoning's dedicated
   `entry_features.py`. Entry-time feature construction and lineage are not yet
@@ -1419,7 +1416,7 @@ additional responsibilities that must remain visible when assessing parity.
   settlement must still provide one authoritative idempotent lifecycle before
   Phase 9 can be accepted.
 
-### Paper Responsibilities Without A NiftyZoning Counterpart
+#### Paper Responsibilities Without A NiftyZoning Counterpart
 
 - `ftx_paper/runtime/session.py`, `runtime/engine.py`, `runtime/store.py`, and
   `application/` own the loopback runtime lifecycle, recovery, leases, and
@@ -1443,7 +1440,9 @@ additional responsibilities that must remain visible when assessing parity.
   deployment concern even where the NiftyZoning reference assumes a prepared
   replay series.
 
-## Test And Delivery Workflow
+## Validation And Pending Work
+
+### Test And Delivery Workflow
 
 For each phase:
 
@@ -1465,96 +1464,32 @@ produced producer-neutral artifacts, but those artifact comparisons must not
 change the implementation contracts or be used as a substitute for the paired
 replay tests defined in Phase 9.
 
-## Verified Implementation Gaps
+### Pending TODOs
 
-The roadmap is not complete through Phase 10. The following gaps are verified
-against the current Paper source and must be resolved before the corresponding
-phase can be marked complete:
+Completed implementation notes are intentionally omitted. The following items
+are the remaining work required before the roadmap can be marked complete:
 
-- The causal policy now emits trigger observations for formed opportunities and
-  advances opportunity timeout evidence before same-bar response formation. It
-  still emits lifecycle/status transitions rather than the full recorded
-  hypothesis stream; repeated pending and unavailable outcomes remain
-  selectively published.
-- Incomplete in-session source rows are retained as explicit observation issues
-  while remaining unavailable to aggregation. Recovery VWAP state is advanced
-  only when the current completed bar closes an aligned five-minute window; it
-  no longer scans future rows to decide an earlier observation.
-- Response hypotheses now retain their existing per-hypothesis state while
-  publishing newly available pending and unavailable outcomes instead of
-  suppressing unchanged causal evidence.
-- Active opportunities sourced from an interaction are explicitly invalidated
-  when that interaction ends, with the interaction close reason and source
-  observation retained in the transition.
-- Runtime order handling now passes executable proposals through the existing
-  `PaperExecutionCoordinator` before authorization. Denied proposals are
-  persisted as explicit `ORDER_DENIED` events instead of disappearing between
-  policy output and execution. The public
-  `evaluate_admission()` helper now evaluates the same gates without creating
-  execution state; remaining work is predicate metadata and trigger-persistence
-  coverage.
-- Execution-group identity is now carried as proposal metadata only. The live
-  policy no longer owns an execution-group registry or emits executable order
-  intents; fill-time group ownership remains in `PaperExecutionCoordinator`.
-- Interaction, response, opportunity, admission, execution-group, and pending
-  intent state are serialized as detached causal facts. Restored positions
-  rebind their exit interactions from restored detector state before the next
-  evaluation.
-- Opening-gap state advances through candidate, accepted, return-to-value, and
-  expiry transitions only from completed, causally available 1m evidence; the
-  published context retains the reference and evidence IDs.
-- Location generations and carry policy are integrated with the live session
-  rollover path; remaining work is focused regression coverage for carried and
-  terminated interactions at the boundary.
-- Phase 9 is no longer wholly deferred: executable proposals, fills, exits, and
-  settlement are available only through explicit opt-in mode. Diagnostic mode
-  must continue to create no executable intents, reservations, fills, exits, or
-  portfolio mutations. Paired replay and full lifecycle conformance remain
-  required before the phase is complete.
+- Complete per-hypothesis response persistence, including repeated pending and
+  unavailable outcomes, evidence IDs, confirmation availability, and expected
+  availability boundaries.
+- Implement the location-specific prior-day response policies and pre-event
+  context rules required by Phase 6.
+- Add persistence-boundary tests proving that every newly available, pending,
+  and unavailable response outcome is retained.
+- Complete opportunity retest-waiting, supersession, replacement selection, and
+  detached persistence of denied candidates and execution-group claims.
+- Complete source-selection, incomplete-parent, and candidate-rejection
+  diagnostics on the live producer path, preserving reason, boundary, lineage,
+  and identity.
+- Add admission predicate metadata and trigger-persistence coverage for denied
+  and unavailable decisions.
+- Add live rollover regression coverage for carried and terminated interactions,
+  including interactions active at the session boundary.
+- Complete the single-coordinator execution turn, paired replay validation, and
+  full lifecycle conformance for entries, exits, fills, settlement, and ledger
+  results.
+- Complete generic event-repository and API-facing persistence guarantees, then
+  finish the remaining Phase 10 conformance tests.
 
-### Resolved Gaps
-
-- Phase 10 runtime decision views now reject missing outcomes instead of mapping
-  them to `recorded`, preserve unavailable expected-availability boundaries, and
-  recursively detach nested evidence before persistence and publication.
-- Runtime persistence now validates the versioned event envelope, uses a
-  collision-safe retry key containing strategy/session/source/event/bundle/
-  decision identity, and exposes deterministic causal ordering with explicit
-  tie-breakers rather than SQLite insertion order alone.
-- Replay reporting now sorts records and same-timestamp facts deterministically
-  and keeps multi-session aggregation ordered by session date. Focused
-  regression tests cover status distinction, detachment, retry idempotency,
-  schema rejection, causal ties, and report ordering.
-- Normalized parity fingerprints now reject malformed timestamps and incomplete
-  OHLC data and sort normalized rows by canonical content, while preserving
-  optional volume handling used by existing Paper bars.
-- Legacy source fingerprints and replay fields are no longer adapted into
-  canonical parity/replay artifacts; canonical boundaries reject them instead.
-- Live producer diagnostics now retain incomplete and duplicate source rows in
-  the immutable `OrderflowContext` while excluding them from published
-  aggregates. Incomplete-parent and source-candidate diagnostics remain open.
-
-- Trigger eligibility is now projected through `orderflow_trigger.py` from the
-  live policy path; executable authorization requires that projection while
-  diagnostic decisions retain the same causal result without creating orders.
-- Executable entry construction is now deferred to the shared execution
-  boundary. The policy emits a detached `execution_proposal`; the coordinator
-  applies current margin sizing and constructs an `OrderIntent` only in explicit
-  executable mode.
-- Opportunity timeout advancement now runs once per completed observation before
-  response and opportunity formation, preserving the required same-bar order.
-- Replay no longer constructs the legacy `market.location.LocationDetector` or
-  emits per-bar `trace` records. The legacy trace and events endpoints are
-  removed from the API and OpenAPI contract.
-- Replay artifacts no longer expose `candidate_trace`; decision projections are
-  derived only from the canonical causal decision stream.
-- Phase 10 is still not complete: the generic event repository and API-facing
-  persistence path need the same persisted-fact envelope guarantees as the
-  runtime store, and the remaining Phase 10 conformance tests are not all
-  implemented. The API projection and replay reporting paths already exist.
-
-The current implementation therefore provides a substantial Phase 0-8
-foundation, an opt-in Phase 9 execution path, and substantial Phase 10 runtime
-event/reporting behavior. It must not be described as a complete Phase 0-10
-implementation until the remaining admission, live-producer diagnostics,
-persistence, paired-replay, and Paper-owned conformance gaps are verified.
+The implementation must not be described as complete through Phase 10 until
+these TODOs and all phase exit criteria are verified.
