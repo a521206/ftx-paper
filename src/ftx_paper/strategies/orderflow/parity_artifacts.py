@@ -137,9 +137,33 @@ def compare_phase4_manifests(canonical: Mapping[str, Any], paper: Mapping[str, A
         paper_values = paper_records(stream)
         for index, (canonical_value, paper_value) in enumerate(zip(canonical_values, paper_values)):
             if canonical_value != paper_value:
-                return {"status": "MISMATCHED", "stream": stream, "index": index, "canonical_record": canonical_value, "paper_record": paper_value}
+                path, left_value, right_value = _first_mismatch(canonical_value, paper_value)
+                return {
+                    "status": "MISMATCHED", "stream": stream, "index": index,
+                    "field": path, "canonical_value": left_value,
+                    "paper_value": right_value,
+                    "canonical_record": canonical_value, "paper_record": paper_value,
+                }
         return {"status": "MISMATCHED", "stream": stream, "reason": "count", "canonical_count": len(canonical_values), "paper_count": len(paper_values)}
     return {"status": "MATCHED"}
+
+
+def _first_mismatch(left: Any, right: Any, path: str = "") -> tuple[str, Any, Any]:
+    """Return the deterministic first differing field in two normalized facts."""
+    if isinstance(left, Mapping) and isinstance(right, Mapping):
+        for key in sorted(set(left) | set(right), key=str):
+            child = f"{path}.{key}" if path else str(key)
+            if key not in left or key not in right:
+                return child, left.get(key), right.get(key)
+            if left[key] != right[key]:
+                return _first_mismatch(left[key], right[key], child)
+        return path, left, right
+    if isinstance(left, (list, tuple)) and isinstance(right, (list, tuple)):
+        for index, (left_item, right_item) in enumerate(zip(left, right)):
+            if left_item != right_item:
+                return _first_mismatch(left_item, right_item, f"{path}[{index}]")
+        return f"{path}[{min(len(left), len(right))}]", left, right
+    return path, left, right
 
 
 __all__ = ["PHASE_STREAMS", "build_phase4_artifact", "canonical_hash", "compare_phase4_manifests", "normalize_phase_record", "phase_facts_from_payload"]

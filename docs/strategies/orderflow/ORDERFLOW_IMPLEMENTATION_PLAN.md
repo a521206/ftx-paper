@@ -467,6 +467,9 @@ Phase 4 parity verification record:
 Validate canonical observations, interaction episodes, response hypotheses, and
 response outcomes before opportunity formation.
 
+Status: Complete for the deterministic canonical contract gate. Paper runtime and
+database parity remains incomplete and is deferred to Phase 9.
+
 Port only the canonical interaction and response modules and their newly required
 direct dependencies. Do not preserve the deleted Paper interaction or response
 implementation as an adapter.
@@ -493,6 +496,19 @@ Parity gate:
 - No response outcome is inferred from a terminal interaction state.
 - Live and replay invoke the same ported interaction and response implementation;
   replay-only batch boundaries cannot create a second implementation path.
+
+Phase 5 verification record:
+
+- Canonical `tests/test_orderflow_interactions.py` passes (3 tests) at the pinned
+  baseline.
+- Paper Phase 5 interaction/response and existing orderflow tests pass (51 tests).
+- Independent 1m/5m episode state, causal observation validation, frozen
+  reference/source lineage, duplicate idempotence, response arming and terminal
+  outcomes, explicit incomplete evidence, and deterministic first-field mismatch
+  diagnostics are covered by focused tests.
+- Paper runtime/database context-location and interaction/response parity remain
+  `INCOMPLETE` until Phase 9 wires the canonical runtime owner and persistence
+  boundary; no DB-backed parity claim is made.
 
 ## Phase 6: Port And Verify Opportunities And Setup Lifecycle
 

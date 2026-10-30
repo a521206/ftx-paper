@@ -77,3 +77,16 @@ def test_first_record_mismatch_is_reported_after_manifest_mismatch() -> None:
     assert result["status"] == "MISMATCHED"
     assert result["stream"] == "context_location"
     assert result["index"] == 0
+    assert result["field"] == "identity"
+    assert result["canonical_value"] == "ctx-left"
+    assert result["paper_value"] == "ctx-right"
+
+
+def test_interaction_response_stream_preserves_explicit_incomplete_evidence() -> None:
+    records, coverage = phase_facts_from_payload(
+        {"interaction_response": [{"kind": "interaction", "occurred_at": "bad"}]},
+        "interaction_response",
+    )
+    assert records == ()
+    assert coverage["status"] == "INCOMPLETE"
+    assert coverage["observed"] is True
