@@ -60,6 +60,43 @@ from .orderflow_helpers import (
 )
 
 
+_NON_TERMINAL_TRIGGER_REASONS = frozenset({
+    "entry boundary not crossed",
+    "entry boundary touched; awaiting rejection",
+    "retest_confirmation_required",
+})
+
+
+def _admission_projection(admission: Any) -> dict[str, object]:
+    """Expose the first causal gate failure without replacing the audit trail."""
+    predicates = tuple(admission.predicates)
+    first_blocker = next(
+        (item for item in predicates if item.status.value != "PASSED"), None,
+    )
+    blocked = [
+        item.predicate_id.removeprefix("blocked_by:")
+        for item in predicates
+        if item.reason is not None and item.reason.startswith("blocked_by:")
+    ]
+    status = admission.status.value
+    return {
+        "admission_status": status,
+        "admission_reason": admission.reason,
+        "admission_causal_reason": (
+            first_blocker.reason if first_blocker is not None else admission.reason
+        ),
+        "admission_first_failed_predicate": (
+            first_blocker.predicate_id if first_blocker is not None else None
+        ),
+        "admission_blocked_predicates": blocked,
+        "admission_outcome": (
+            "accepted" if status == "PASSED"
+            else "unavailable" if status == "UNAVAILABLE"
+            else "rejected"
+        ),
+    }
+
+
 class OrderflowPolicy:
     def __init__(self, config: OrderflowConfig = OrderflowConfig()) -> None:
         self.config = config
@@ -896,6 +933,24 @@ class OrderflowPolicy:
             pending = replace(pending, retest_touched=trigger.retest_touched)
             self._pending_triggers[lifecycle_id] = pending
             if not trigger.eligible:
+                if trigger.ineligible_reason not in _NON_TERMINAL_TRIGGER_REASONS:
+                    events.append(PolicyDecision({
+                        **base,
+                        "decision_stage": "trigger",
+                        "outcome": "rejected",
+                        "reason": "trigger_observation",
+                        "trigger_causal_reason": trigger.ineligible_reason,
+                        "decision_id": _decision_id(
+                            "trigger_denied", lifecycle_id, observation.observation_id,
+                        ),
+                        "opportunity_id": lifecycle_id,
+                        "setup_id": opportunity.setup.setup_id,
+                        "interaction_id": interaction.interaction_id,
+                        "trigger": detached_asdict(trigger),
+                        "source_observation_ids": [observation.observation_id],
+                        "observed_at": trigger.observed_at,
+                        "available_at": trigger.available_at,
+                    }))
                 continue
             intent = record_trigger(intent=intent, observation=trigger)
             direction_allowed = permission is not None and permission.permits(direction)
@@ -918,6 +973,7 @@ class OrderflowPolicy:
                 observation=observation, opportunity=opportunity,
                 template=template, interaction=interaction, context=context, futures=futures,
             )
+            admission_projection = _admission_projection(admission)
             common = {
                 **base, "opportunity_id": lifecycle_id,
                 "setup_id": opportunity.setup.setup_id,
@@ -925,6 +981,18 @@ class OrderflowPolicy:
                 "location": interaction.location_alias, "direction": direction,
                 "source_observation_ids": [observation.observation_id],
             }
+            admission_event = PolicyDecision({
+                **common, "decision_stage": "admission",
+                "outcome": admission_projection["admission_outcome"],
+                "reason": "admission_decided",
+                "decision_id": admission.decision_id,
+                "admission_predicates": [detached_asdict(item) for item in admission.predicates],
+                "trigger": detached_asdict(trigger), "trigger_eligible": True,
+                "intent": detached_asdict(intent),
+                "execution_proposal": proposal, "observed_at": trigger.observed_at,
+                "available_at": trigger.available_at,
+                **admission_projection,
+            })
             events.extend((
                 PolicyDecision({
                     **common, "decision_stage": "trigger", "outcome": "accepted",
@@ -933,18 +1001,22 @@ class OrderflowPolicy:
                     "trigger": detached_asdict(trigger), "observed_at": trigger.observed_at,
                     "available_at": trigger.available_at,
                 }),
-                PolicyDecision({
-                    **common, "decision_stage": "admission",
-                    "outcome": "accepted" if admission.status.value == "PASSED" else "rejected",
-                    "reason": "orderflow_admission", "admission_reason": admission.reason,
-                    "decision_id": admission.decision_id,
-                    "admission_predicates": [detached_asdict(item) for item in admission.predicates],
-                    "trigger": detached_asdict(trigger), "trigger_eligible": True,
-                    "intent": detached_asdict(intent),
-                    "execution_proposal": proposal, "observed_at": trigger.observed_at,
-                    "available_at": trigger.available_at,
-                }),
+                admission_event,
             ))
+            if proposal.get("eligible"):
+                events.append(PolicyDecision({
+                    **common,
+                    "decision_stage": "trigger",
+                    "outcome": "accepted",
+                    "reason": "execution_proposal_selected",
+                    "decision_id": _decision_id(
+                        "execution_proposal", lifecycle_id, observation.observation_id,
+                    ),
+                    "execution_proposal": proposal,
+                    "causal_parent_id": admission.decision_id,
+                    "observed_at": trigger.observed_at,
+                    "available_at": trigger.available_at,
+                }))
             self._pending_triggers.pop(lifecycle_id, None)
         return tuple(events)
 
@@ -1380,7 +1452,12 @@ class OrderflowPolicy:
                 direction=direction, template=template, interaction=interaction,
                 retest_touched=trigger.retest_touched, intent=intent,
             )
-        proposal = None
+        proposal = self._execution_proposal(
+            accepted=accepted, direction=direction, observation=trigger_observation,
+            opportunity=opportunity, template=template, interaction=interaction,
+            context=context, futures=futures,
+        )
+        admission_projection = _admission_projection(admission)
         return (
             PolicyDecision({**base, "decision_stage": "opportunity", "outcome": "recorded", "reason": "setup_candidate_formed",
                 "decision_id": _decision_id("candidate", opportunity.lifecycle_id), "opportunity_id": opportunity.lifecycle_id,
@@ -1394,16 +1471,30 @@ class OrderflowPolicy:
                 "interaction_id": interaction.interaction_id, "location": interaction.location_alias, "direction": direction,
                 "trigger": detached_asdict(trigger), "source_observation_ids": list(evidence_ids),
                 "observed_at": trigger.observed_at, "available_at": trigger.available_at}),
-            PolicyDecision({**base, "decision_stage": "admission", "outcome": "accepted" if accepted else "rejected",
-                "reason": "orderflow_admission", "decision_id": admission.decision_id, "opportunity_id": opportunity.lifecycle_id,
+            PolicyDecision({**base, "decision_stage": "admission", "outcome": admission_projection["admission_outcome"],
+                "reason": "admission_decided", "decision_id": admission.decision_id, "opportunity_id": opportunity.lifecycle_id,
                 "setup_id": opportunity.setup.setup_id, "interaction_id": interaction.interaction_id,
                 "location": interaction.location_alias, "direction": direction, "template_id": template.template_id,
-                "admission_status": admission.status.value, "admission_reason": admission.reason,
+                **admission_projection,
                 "admission_predicates": [detached_asdict(item) for item in admission.predicates],
                 "formation_context": detached_asdict(opportunity.formation_context) if opportunity.formation_context else None,
                 "decision_context": detached_asdict(opportunity.decision_context) if opportunity.decision_context else None,
                 "trigger": detached_asdict(trigger), "trigger_eligible": trigger.eligible,
                 "source_observation_ids": list(evidence_ids), "execution_proposal": proposal}),
+            *((PolicyDecision({
+                **base, "decision_stage": "trigger", "outcome": "accepted",
+                "reason": "execution_proposal_selected",
+                "decision_id": _decision_id(
+                    "execution_proposal", opportunity.lifecycle_id, trigger_observation.observation_id,
+                ),
+                "opportunity_id": opportunity.lifecycle_id,
+                "setup_id": opportunity.setup.setup_id,
+                "interaction_id": interaction.interaction_id,
+                "location": interaction.location_alias, "direction": direction,
+                "execution_proposal": proposal, "causal_parent_id": admission.decision_id,
+                "source_observation_ids": list(evidence_ids),
+                "observed_at": trigger.observed_at, "available_at": trigger.available_at,
+            }),) if proposal["eligible"] else ()),
         )
 
     def evaluate(self, bundle: DecisionBundle, context: DecisionContext) -> tuple[PolicyDecision, ...]:

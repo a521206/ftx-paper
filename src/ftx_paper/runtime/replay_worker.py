@@ -79,7 +79,8 @@ CANONICAL_INTERACTION_LOCATIONS = frozenset({
 
 _EXECUTION_EVENT_TYPES = frozenset({
     "ORDER_INTENT", "ORDER_AUTHORIZED", "ORDER_ACK", "FILL",
-    "ORDER_UNFILLED", "ORDER_SUPPRESSED", "RISK_REJECTED",
+    "ORDER_UNFILLED", "EXECUTION_PROPOSAL_SUPPRESSED", "ENTRY_BLOCKED_RISK",
+    "EXECUTION_GROUP_CANDIDATE_DENIED", "TRIGGER_DENIED_PORTFOLIO",
     "RESERVATION", "AUTHORIZATION", "SUBMISSION", "PENDING_EXIT",
     "EXIT_FILL", "CANCELLATION", "SETTLEMENT",
 })
@@ -919,7 +920,7 @@ class ReplayWorker:
                             try:
                                 account.authorize_and_reserve(order)
                             except ValueError as exc:
-                                all_events.append({"event_type": "RISK_REJECTED", "decision_id": order.client_order_id,
+                                all_events.append({"event_type": "ENTRY_BLOCKED_RISK", "decision_id": order.client_order_id,
                                                    "reason": str(exc), "timestamp": futures_bar.timestamp.isoformat(),
                                                    "source": "replay", "session_date": date})
                                 continue
@@ -1144,15 +1145,18 @@ class ReplayWorker:
                 for denied in candidate_orders:
                     if denied.client_order_id in selected_ids:
                         continue
+                    denial_reason = coordinator.denied_proposals.get(
+                        denied.client_order_id, "proposal_not_selected",
+                    )
                     all_events.append({
-                        "event_type": "ORDER_DENIED",
+                        "event_type": (
+                            "EXECUTION_GROUP_CANDIDATE_DENIED"
+                            if denial_reason == "execution_group_already_claimed"
+                            else "TRIGGER_DENIED_PORTFOLIO"
+                        ),
                         "decision_id": denied.client_order_id,
                         "client_order_id": denied.client_order_id,
-                        "strategy_id": denied.strategy_id,
-                        "account_id": denied.account_id,
-                        "reason": coordinator.denied_proposals.get(
-                            denied.client_order_id, "proposal_not_selected",
-                        ),
+                        "reason": denial_reason,
                         "decision_at": futures_bar.timestamp.isoformat(),
                         "source": "replay",
                         "session_date": date,
@@ -1193,14 +1197,10 @@ class ReplayWorker:
                             try:
                                 account.authorize_and_reserve(order)
                             except ValueError as exc:
-                                all_events.append({"event_type": "RISK_REJECTED",
+                                all_events.append({"event_type": "ENTRY_BLOCKED_RISK",
                                                     "decision_id": order.client_order_id,
                                                     "reason": str(exc), "timestamp": futures_bar.timestamp.isoformat(),
                                                     "source": "replay", "session_date": date})
-                                all_events.append({"event_type": "ORDER_SUPPRESSED", "decision_id": order.client_order_id,
-                                                   "vehicle": order.vehicle, "timestamp": futures_bar.timestamp.isoformat(),
-                                                   "source": "replay", "session_date": date, "execution_allowed": False,
-                                                   "reason": str(exc)})
                                 continue
                             reservation_event = {"event_type": "RESERVATION", "decision_id": order.client_order_id,
                                                  "client_order_id": order.client_order_id,

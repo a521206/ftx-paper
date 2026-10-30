@@ -327,7 +327,7 @@ _STRUCTURAL_STAGE_BY_REASON = {
     "opportunity_invalidated_by_source_gap": "setup_invalidation",
     "setup_invalidated": "setup_invalidation",
     "invalidated": "setup_invalidation",
-    "orderflow_admission": "admission",
+    "admission_decided": "admission",
     "admission": "admission",
 }
 _TERMINAL_STRUCTURAL_STAGES = frozenset({"setup_expiry", "setup_invalidation", "admission"})
@@ -631,7 +631,7 @@ def build_parity_artifact(
                 projection_issues.append(f"missing_parent_link:decision:{index}")
         projected["sequence"] = len(decisions)
         decisions.append(projected)
-    execution_types = {"ORDER_INTENT", "ORDER_AUTHORIZED", "ORDER_ACK", "FILL", "ORDER_UNFILLED", "ORDER_SUPPRESSED", "RISK_REJECTED", "RESERVATION", "AUTHORIZATION", "SUBMISSION", "PENDING_EXIT", "EXIT_FILL", "CANCELLATION", "SETTLEMENT"}
+    execution_types = {"ORDER_INTENT", "ORDER_AUTHORIZED", "ORDER_ACK", "FILL", "ORDER_UNFILLED", "EXECUTION_PROPOSAL_SUPPRESSED", "ENTRY_BLOCKED_RISK", "EXECUTION_GROUP_CANDIDATE_DENIED", "TRIGGER_DENIED_PORTFOLIO", "RESERVATION", "AUTHORIZATION", "SUBMISSION", "PENDING_EXIT", "EXIT_FILL", "CANCELLATION", "SETTLEMENT"}
     source_execution = [event for event in layer_records.get("execution_settlement", ())
                         if str(event.get("event_type", "")).upper() in execution_types
                         or str(event.get("event_type", "")).upper() in {"EXIT", "CLOSE"}]
@@ -646,7 +646,10 @@ def build_parity_artifact(
                        "EXIT_FILL": "exit_fill", "PENDING_EXIT": "pending_exit",
                        "CANCELLATION": "cancellation", "SETTLEMENT": "settlement",
                        "EXIT": "exit", "CLOSE": "exit", "ORDER_UNFILLED": "cancellation",
-                       "ORDER_SUPPRESSED": "cancellation", "RISK_REJECTED": "cancellation"}
+                       "EXECUTION_PROPOSAL_SUPPRESSED": "execution_proposal_suppressed",
+                       "ENTRY_BLOCKED_RISK": "entry_blocked_risk",
+                       "EXECUTION_GROUP_CANDIDATE_DENIED": "execution_group_candidate_denied",
+                       "TRIGGER_DENIED_PORTFOLIO": "trigger_denied_portfolio"}
     execution = []
     for index, event in enumerate(source_execution):
         parent = _parent_identity(event, local_identities)

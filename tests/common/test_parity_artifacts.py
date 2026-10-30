@@ -298,7 +298,7 @@ def test_run_scope_uses_deterministic_local_session_boundary() -> None:
 
 def test_causal_lifecycle_diff_reports_duplicate_terminal_structural_stages() -> None:
     decisions = []
-    for reason in ("setup_invalidated", "setup_invalidated", "orderflow_admission", "orderflow_admission"):
+    for reason in ("setup_invalidated", "setup_invalidated", "admission_decided", "admission_decided"):
         decisions.append({
             "event_type": "POLICY_DECISION", "decision_at": "2026-01-05T14:30:00Z",
             "outcome": "rejected", "reason": reason, "opportunity_id": "opp-1",

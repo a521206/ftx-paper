@@ -738,19 +738,23 @@ class RuntimeSession:
                     if denied.client_order_id in selected_ids:
                         continue
                     reason = self.coordinator.denied_proposals.get(denied.client_order_id, "proposal_not_selected") if self.coordinator is not None else "proposal_not_selected"
+                    denial_event = (
+                        "EXECUTION_GROUP_CANDIDATE_DENIED"
+                        if reason == "execution_group_already_claimed"
+                        else "TRIGGER_DENIED_PORTFOLIO"
+                    )
                     self.store.append_event(
-                        "ORDER_DENIED",
+                        denial_event,
                         {
+                            "decision_id": denied.client_order_id,
                             "client_order_id": denied.client_order_id,
-                            "strategy_id": denied.strategy_id,
-                            "account_id": denied.account_id,
-                            "role": denied.role.value,
                             "reason": reason,
+                            "decision_at": timestamp,
                             "decision_source": source,
                             "session_date": bundle.trading_date,
                             "execution_allowed": source == "live",
                         },
-                        f"order_denied:{source}:{bundle.bundle_id}:{denied.client_order_id}",
+                        f"{denial_event.lower()}:{source}:{bundle.bundle_id}:{denied.client_order_id}",
                         timestamp=timestamp,
                     )
                 for order in selected:
@@ -788,7 +792,7 @@ class RuntimeSession:
                         "account_id": order.account_id,
                     }, f"order_intent:{source}:{bundle.bundle_id}:{order.client_order_id}", timestamp=timestamp)
                     if source == "replay":
-                        self.store.append_event("ORDER_SUPPRESSED", {
+                        self.store.append_event("EXECUTION_PROPOSAL_SUPPRESSED", {
                             "decision_id": order.client_order_id,
                             "client_order_id": order.client_order_id,
                             "vehicle": order.vehicle,
@@ -796,7 +800,7 @@ class RuntimeSession:
                             "session_date": bundle.trading_date,
                             "execution_allowed": False,
                             "reason": "startup_recovery",
-                        }, f"order_suppressed:{bundle.trading_date}:{order.client_order_id}", timestamp=timestamp)
+                        }, f"execution_proposal_suppressed:{bundle.trading_date}:{order.client_order_id}", timestamp=timestamp)
                     else:
                         futures_bar = bundle.bars.get(MarketRole.FUTURES)
                         self._settle_live_order(order, session_date=bundle.trading_date,
@@ -913,9 +917,9 @@ class RuntimeSession:
                 self.order_manager.authorize(order, payload=context, timestamp=timestamp)
             except ValueError as exc:
                 self.store.append_event(
-                    "RISK_REJECTED",
-                    {**context, "outcome": "risk_rejected", "reason": str(exc)},
-                    f"risk_rejected:{order.client_order_id}", timestamp=timestamp,
+                    "ENTRY_BLOCKED_RISK",
+                    {**context, "outcome": "rejected", "reason": str(exc)},
+                    f"entry_blocked_risk:{order.client_order_id}", timestamp=timestamp,
                 )
                 return False
             self._persist_strategy_state()

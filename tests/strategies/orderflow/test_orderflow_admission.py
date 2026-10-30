@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from ftx_paper.strategy import PredicateStatus, SetupOpportunity, evaluate_admission
+from ftx_paper.strategy.orderflow import _admission_projection
 
 
 def _opportunity() -> SetupOpportunity:
@@ -35,6 +36,37 @@ def test_admission_preserves_unavailable_gate_reason() -> None:
     assert decision.reason == "evidence_unavailable"
     assert len(decision.predicates) == 7
     assert all(item.status is PredicateStatus.UNAVAILABLE for item in decision.predicates[1:])
+
+    projection = _admission_projection(decision)
+    assert projection["admission_outcome"] == "unavailable"
+    assert projection["admission_first_failed_predicate"] == "opening_gap_permission"
+    assert projection["admission_blocked_predicates"] == [
+        "active_position_gate", "exposure_gate", "allocation_gate",
+        "sizing_gate", "risk_gate",
+    ]
+
+
+def test_admission_projection_distinguishes_passed_and_failed_causes() -> None:
+    passed = evaluate_admission(
+        _opportunity(), context_available=True,
+        opening_gap_allowed=True, active_position_allowed=True,
+        evaluate_portfolio_gates=False,
+    )
+    failed = evaluate_admission(
+        _opportunity(), context_available=True,
+        opening_gap_allowed=False, active_position_allowed=True,
+        evaluate_portfolio_gates=False,
+    )
+
+    assert _admission_projection(passed)["admission_outcome"] == "accepted"
+    assert _admission_projection(failed) == {
+        "admission_status": "FAILED",
+        "admission_reason": "gate_denied",
+        "admission_causal_reason": "gate_denied",
+        "admission_first_failed_predicate": "opening_gap_permission",
+        "admission_blocked_predicates": ["active_position_gate"],
+        "admission_outcome": "rejected",
+    }
 
 
 def test_admission_rejects_stale_setup_and_context_versions() -> None:

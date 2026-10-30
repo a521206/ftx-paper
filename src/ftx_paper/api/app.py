@@ -503,12 +503,14 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             if execution is not None:
                 execution_type = str(execution["event_type"]).upper()
                 status = {
-                    "ORDER_SUPPRESSED": "replayed",
+                    "EXECUTION_PROPOSAL_SUPPRESSED": "replayed",
+                    "EXECUTION_GROUP_CANDIDATE_DENIED": "entry_rejected",
+                    "TRIGGER_DENIED_PORTFOLIO": "entry_rejected",
                     "ORDER_ACK": "acknowledged",
                     "FILL": "filled",
                     "ORDER_UNFILLED": "unfilled",
                     "EXECUTION_ERROR": "execution_error",
-                    "RISK_REJECTED": "risk_rejected",
+                    "ENTRY_BLOCKED_RISK": "risk_rejected",
                 }.get(execution_type, "unknown")
                 payload["execution_status"] = status
                 payload["execution_event_type"] = execution_type

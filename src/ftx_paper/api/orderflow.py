@@ -119,7 +119,12 @@ def build_orderflow_projection(
             row_state = _mapping(row_evidence.get("state"))
             row_policy = _mapping(row_view.get("policy"))
             event_type = str(row.get("event_type") or "").upper()
-            lifecycle_transition = {"FILL": "entry accepted", "ORDER_SUPPRESSED": "entry rejected", "RISK_REJECTED": "entry rejected"}.get(event_type)
+            lifecycle_transition = {
+                "FILL": "entry accepted",
+                "ENTRY_BLOCKED_RISK": "entry rejected",
+                "TRIGGER_DENIED_PORTFOLIO": "entry rejected",
+                "EXECUTION_GROUP_CANDIDATE_DENIED": "entry rejected",
+            }.get(event_type)
             decision_time = _first(row_view.get("at"), payload.get("decision_at"), row.get("created_at"))
             bar = _five_minute_bar(decision_time)
             if bar is None:
