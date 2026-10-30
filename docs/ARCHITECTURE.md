@@ -210,7 +210,7 @@ Ownership is divided as follows:
   strategy-specific context and evidence, evaluation, snapshots, and execution
   notification handling. Strategies must not read SQLite, call brokers, own the
   clock, authorize orders, or mutate the portfolio.
-- `runtime` owns feed lifecycle, feature ingestion, bundle dispatch, account
+- `runtime` owns feed lifecycle, bar ingestion, bundle dispatch, account
   context, shared portfolio state, authorization, execution, settlement,
   persistence, recovery, and health. It must not branch on strategy names or
   instantiate strategy-specific producers, context stores, or report builders.
@@ -221,8 +221,8 @@ Ownership is divided as follows:
   diagnostics, replay runs, and shared positions/capital. Strategy-specific
   views are optional projections and must not be required for execution.
 - The composition root is the only place that maps configured strategy names to
-  constructors and unions generic strategy requirements before constructing the
-  market clock.
+  constructors. Market construction uses explicit role mappings and does not
+  consume strategy requirements.
 
 Shared contracts must remain strategy-neutral. Strategies receive the completed
 bundle and own feature calculation, historical warmup, feature caches, and
@@ -254,7 +254,7 @@ strategies.
 The application composition root builds a catalog from definitions:
 
 ```text
-StrategyDefinition(strategy_id, factory, requirements, metadata)
+StrategyDefinition(strategy_id, factory)
     -> StrategyCatalog
     -> live MultiStrategyEngine
     -> replay StrategySelector
@@ -262,9 +262,8 @@ StrategyDefinition(strategy_id, factory, requirements, metadata)
 ```
 
 The catalog is the only component that maps configured strategy IDs to concrete
-factories. It provides strategy creation, enabled-strategy metadata, and the
-union of neutral requirements needed to construct the market clock. The same
-catalog or selector is injected into live and replay construction.
+factories. It provides strategy creation and enabled-strategy metadata. The
+same catalog or selector is injected into live and replay construction.
 
 `api.create_app()` must receive already-composed runtime and replay dependencies;
 it must not instantiate a registry or import concrete strategy factories.
@@ -289,23 +288,23 @@ notifications.
 Implement the redesign in ordered phases. Each phase must pass its exit gate
 before the next phase changes behavior.
 
-#### Phase 1: Freeze generic contracts
+#### Phase 1: Freeze generic contracts (implemented)
 
 - Remove feature snapshots, feature services, and feature providers from
   `DecisionBundle` and the market aggregator.
 - Move feature requirements, calculation, cache, and warmup protocols into each
   strategy package.
-- Preserve generic bar normalization, bundle timing, incomplete-input handling,
-  and feature ingestion.
+- Preserve generic bar normalization, bundle timing, and incomplete-input
+  handling. Feature calculation is strategy-owned.
 - Restore generic replay summary fields and result validation.
 
 Exit gate: market and generic replay tests pass without importing a concrete
 strategy package.
 
-#### Phase 2: Establish the composition catalog
+#### Phase 2: Establish the composition catalog (implemented)
 
-- Define `StrategyDefinition`, `StrategyCatalog`, `StrategyFactory`, and neutral
-  `StrategyRequirements` in application/shared ports.
+- Define `StrategyDefinition`, `StrategyCatalog`, and `StrategyFactory` in the
+  application composition layer.
 - Make research and orderflow factories package-local and sibling-independent.
 - Register enabled definitions only in application composition.
 - Inject the same catalog/selector into live and replay construction.
@@ -313,7 +312,7 @@ strategy package.
 Exit gate: API, runtime, and replay construct no concrete strategy factory and a
 test strategy can be added or removed by changing composition only.
 
-#### Phase 3: Remove host policy ownership
+#### Phase 3: Remove host policy ownership (implemented)
 
 - Move all feature calculation, ATR/context warmup, source preparation, and
   policy state behind strategy-owned adapters.
@@ -326,7 +325,7 @@ test strategy can be added or removed by changing composition only.
 Exit gate: deleting a strategy package and its composition definition leaves
   generic live and replay behavior unchanged.
 
-#### Phase 4: Make replay and API generic
+#### Phase 4: Make replay and API generic (implemented)
 
 - Make replay artifacts and summaries strategy-neutral with attribution only.
 - Move optional strategy reports behind an injected report adapter.
@@ -337,7 +336,7 @@ Exit gate: deleting a strategy package and its composition definition leaves
 Exit gate: replay and API tests pass with a minimal test strategy and no
 strategy-specific imports in generic workers or routes.
 
-#### Phase 5: Verify, simplify, and remove legacy traces
+#### Phase 5: Verify, simplify, and remove legacy traces (implemented for backend)
 
 - Run architecture-boundary checks, focused tests, Ruff, and Pyright.
 - Review all changed code for duplicate factories, compatibility shims, stale
@@ -348,6 +347,24 @@ strategy-specific imports in generic workers or routes.
 Final gate: adding or removing a strategy changes only its package, composition
 definitions, and strategy/host tests; no legacy strategy traces remain in common
 market, runtime, replay, API, or contracts code.
+
+### Current Implementation Status
+
+The boundary migration is implemented in the current runtime:
+
+- `market` owns only normalized bars, explicit role mapping, completed-bar
+  aggregation, and decision-clock timing.
+- Research feature calculation and location detection live under
+  `strategies/research`.
+- Orderflow templates and policy helpers live under `strategies/orderflow`.
+- Feature snapshot persistence and the shared feature-cache schema were removed.
+- `StrategyCatalog` is composed by the application/CLI and injected into live
+  and replay hosts.
+- Replay summaries and API projections use generic attribution and no longer
+  require orderflow-specific metrics.
+- The acceptance suite covers strategy-boundary imports, live/replay bundle
+  processing, replay contracts, API composition, and obsolete feature
+  infrastructure removal.
 
 ## Broker Extension
 
