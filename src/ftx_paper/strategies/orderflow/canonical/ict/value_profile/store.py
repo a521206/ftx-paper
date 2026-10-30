@@ -73,8 +73,6 @@ class DailyProfileStore(Protocol):
 
 
 class DatabaseDailyProfileStore:
-    """Daily profile store backed by the project's slim DuckDB database."""
-
     def __init__(self, path: str | Path) -> None:
         self._repo = SqliteDailyProfileRepository(path)
         self._repo.ensure_schema()
