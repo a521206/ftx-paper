@@ -118,12 +118,6 @@ def _native_kind(record: Mapping[str, Any], *, kind: str) -> str:
     return str(stage or kind).lower()
 
 
-def _is_structural_decision(record: Mapping[str, Any]) -> bool:
-    """Exclude interaction reference closures from comparable decisions."""
-    reason = _decision_value(record, "reason") or _decision_value(record, "reason_code")
-    return str(reason).upper() != "REFERENCE_REPLACED"
-
-
 def strategy_payload_hash(strategy: Mapping[str, Any] | None) -> tuple[dict[str, Any], str]:
     payload = {str(key): _jsonable(value) for key, value in (strategy or {}).items()}
     return payload, hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
@@ -597,7 +591,6 @@ def build_parity_artifact(
     request = request or {}
     layer_records = layer_records or {}
     source_decisions = list(layer_records.get("decision", ()))
-    source_decisions = [event for event in source_decisions if _is_structural_decision(event)]
     projection_issues: list[str] = []
     decisions = []
     local_identities: dict[str, str] = {}

@@ -249,7 +249,7 @@ def test_ledger_projection_does_not_invent_closeout() -> None:
     assert artifact["layers"]["portfolio_ledger"] == []
 
 
-def test_projection_excludes_reference_replacement_and_preserves_native_reason() -> None:
+def test_projection_preserves_reference_replacement_and_native_reason() -> None:
     decisions = [
         {
             "event_type": "POLICY_DECISION",
@@ -275,8 +275,10 @@ def test_projection_excludes_reference_replacement_and_preserves_native_reason()
     )
 
     records = artifact["layers"]["decision"]
-    assert len(records) == 1
-    assert records[0]["native_kind"] == "setup_expired"
+    assert len(records) == 2
+    assert [record["native_kind"] for record in records] == [
+        "reference_replaced", "setup_expired",
+    ]
 
 
 def test_run_scope_record_identity_remains_strict() -> None:
@@ -366,8 +368,10 @@ def test_projection_reads_reason_and_outcome_from_canonical_policy_view() -> Non
     )
 
     records = artifact["layers"]["decision"]
-    assert len(records) == 1
-    assert records[0]["native_kind"] == "setup_expired"
+    assert len(records) == 2
+    assert [record["native_kind"] for record in records] == [
+        "reference_replaced", "setup_expired",
+    ]
 
 
 def test_neutral_projection_uses_stage_outcome_and_utc_identity() -> None:

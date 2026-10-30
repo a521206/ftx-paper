@@ -448,7 +448,7 @@ def test_policy_snapshot_rejects_obsolete_single_detector_state() -> None:
         OrderflowPolicy.from_snapshot(current)
 
 
-def test_generation_change_preserves_old_interaction_and_opens_new_generation() -> None:
+def test_generation_change_keeps_alias_timeframe_interaction_active() -> None:
     strategy = OrderflowStrategy()
     bundle, account = _context()
     strategy.evaluate(bundle, account)
@@ -461,6 +461,10 @@ def test_generation_change_preserves_old_interaction_and_opens_new_generation() 
     observed = [event for event in events if event.payload.get("reason") == "location_interaction_observed"]
     assert observed
     assert any("2026-01-01T10:00:00+00:00" in str(event.payload["interaction_id"]) for event in observed)
+    detector = strategy.policy._location_detectors["5m"]
+    assert len(detector.active_interactions) == 1
+    assert detector.active_interactions[0].reference_generation == 1
+    assert detector.closed_interactions == ()
 
 
 def test_non_contact_location_observation_does_not_start_interaction() -> None:
