@@ -8,7 +8,8 @@ import hashlib
 import json
 from typing import Any
 
-from ftx_paper.config import IST, NIFTY_LOT_SIZE
+from ftx_paper.config import IST, NIFTY_LOT_SIZE, SESSION_OPEN_MINUTES
+from ftx_paper.strategies.research.config import AFTERNOON_ENTRY_MINUTES, MORNING_ENTRY_MINUTES
 from ftx_paper.contracts import TradePayload, build_decision_view, validate_decision_view
 from ftx_paper.contracts.replay import (
     ExecutionScope, ReplayEvent, REPLAY_SCHEMA_VERSION, detach_replay_value,
@@ -102,11 +103,18 @@ def normalize_trade(trade: Mapping[str, Any]) -> TradePayload:
     risk_rs = (float(trade["initial_risk_rs"]) if trade.get("initial_risk_rs") is not None
                else risk_points * NIFTY_LOT_SIZE * float(trade.get("quantity", 0.0))
                if risk_points is not None else None)
+    entry_minutes = entry_ist.hour * 60 + entry_ist.minute - SESSION_OPEN_MINUTES
+    session = (
+        "morning" if MORNING_ENTRY_MINUTES[0] <= entry_minutes < MORNING_ENTRY_MINUTES[1]
+        else "afternoon" if AFTERNOON_ENTRY_MINUTES[0] <= entry_minutes < AFTERNOON_ENTRY_MINUTES[1]
+        else "unknown"
+    )
     reason = str(trade.get("exit_reason")) if trade.get("exit_reason") is not None else None
     if reason == "trailing_stop":
         reason = "trail_stop"
     return {
         "status": str(trade.get("status", "open")), "date": entry_ist.date().isoformat(),
+        "session": session,
         "vehicle": str(trade.get("vehicle", "synthetic")), "cell": str(trade.get("cell", "")),
         "direction": "long" if str(trade.get("side", "")).upper() == "BUY" else "short",
         "entry_time": entry_ist.strftime("%H:%M"), "exit_time": exit_ist.strftime("%H:%M") if exit_ist else "",

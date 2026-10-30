@@ -10,6 +10,7 @@ class TradePayload(TypedDict):
 
     status: str
     date: str
+    session: str
     vehicle: str
     cell: str
     direction: str

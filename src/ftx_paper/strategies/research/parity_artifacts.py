@@ -576,10 +576,10 @@ def build_parity_artifact(
                 projection_issues.append(f"missing_parent_link:decision:{index}")
         projected["sequence"] = len(decisions)
         decisions.append(projected)
-    execution_types = {"ORDER_INTENT", "ORDER_AUTHORIZED", "ORDER_ACK", "FILL", "ORDER_UNFILLED", "EXECUTION_PROPOSAL_SUPPRESSED", "ENTRY_BLOCKED_RISK", "EXECUTION_GROUP_CANDIDATE_DENIED", "TRIGGER_DENIED_PORTFOLIO", "RESERVATION", "AUTHORIZATION", "SUBMISSION", "PENDING_EXIT", "EXIT_FILL", "CANCELLATION", "SETTLEMENT"}
+    execution_types = {"ORDER_INTENT", "ORDER_AUTHORIZED", "ORDER_ACK", "FILL", "ORDER_UNFILLED", "EXECUTION_PROPOSAL_SUPPRESSED", "ENTRY_BLOCKED_RISK", "ENTRY_BLOCKED_EXIT_PLAN", "EXECUTION_ERROR", "EXECUTION_GROUP_CANDIDATE_DENIED", "TRIGGER_DENIED_PORTFOLIO", "RESERVATION", "AUTHORIZATION", "SUBMISSION", "PENDING_EXIT", "EXIT_FILL", "CANCELLATION", "SETTLEMENT"}
     source_execution = [event for event in layer_records.get("execution_settlement", ())
                         if str(event.get("event_type", "")).upper() in execution_types
-                        or str(event.get("event_type", "")).upper() in {"EXIT", "CLOSE"}]
+                         or str(event.get("event_type", "")).upper() in {"EXITDECISION", "EXIT", "CLOSE"}]
     projection_issues.extend(
         f"missing_event_key:execution:{index}"
         for index, event in enumerate(source_execution)
@@ -594,7 +594,9 @@ def build_parity_artifact(
                        "EXECUTION_PROPOSAL_SUPPRESSED": "execution_proposal_suppressed",
                        "ENTRY_BLOCKED_RISK": "entry_blocked_risk",
                        "EXECUTION_GROUP_CANDIDATE_DENIED": "execution_group_candidate_denied",
-                       "TRIGGER_DENIED_PORTFOLIO": "trigger_denied_portfolio"}
+                       "TRIGGER_DENIED_PORTFOLIO": "trigger_denied_portfolio",
+                       "EXITDECISION": "exit", "ENTRY_BLOCKED_EXIT_PLAN": "cancellation",
+                       "EXECUTION_ERROR": "cancellation"}
     execution = []
     for index, event in enumerate(source_execution):
         parent = _parent_identity(event, local_identities)

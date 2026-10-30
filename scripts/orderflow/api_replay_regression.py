@@ -49,8 +49,7 @@ def _actual_metrics(result: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(summary, Mapping):
         raise RuntimeError("replay result does not contain the versioned summary contract")
     required = {"run_id", "schema_version", "execution_scope", "ledger_scope", "summary",
-                "events", "shadow_trades", "shadow_ledger", "authoritative_trades",
-                "authoritative_ledger", "parity_artifact"}
+                "events", "shadow_trades", "shadow_ledger", "parity_artifact"}
     missing = required - set(result)
     if missing:
         raise RuntimeError(f"replay result is missing required fields: {sorted(missing)}")

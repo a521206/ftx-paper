@@ -40,6 +40,7 @@ from ftx_paper.config import NIFTY_LOT_SIZE
 _EXECUTION_EVENT_TYPES = frozenset({
     "ORDER_INTENT", "ORDER_AUTHORIZED", "ORDER_ACK", "FILL",
     "ORDER_UNFILLED", "EXECUTION_PROPOSAL_SUPPRESSED", "ENTRY_BLOCKED_RISK",
+    "ENTRY_BLOCKED_EXIT_PLAN", "EXECUTION_ERROR",
     "EXECUTION_GROUP_CANDIDATE_DENIED", "TRIGGER_DENIED_PORTFOLIO",
     "RESERVATION", "AUTHORIZATION", "SUBMISSION", "PENDING_EXIT",
     "EXIT_FILL", "CANCELLATION", "SETTLEMENT",
@@ -230,6 +231,8 @@ class ReplayWorker:
         include_parity_layers = request.get("include_parity_layers", False)
         if not isinstance(include_parity_layers, bool):
             raise ValueError("include_parity_layers must be a boolean")
+        if include_parity_layers and self.parity_projector is None:
+            raise RuntimeError("parity projector is required when parity layers are requested")
         dates = [session_date]
         run_id = str(request.get("run_id") or uuid4().hex)
         scope = cast(ExecutionScope, mode)
