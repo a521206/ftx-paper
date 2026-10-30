@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 import hashlib
 import json
+import traceback
 from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread, current_thread
 from collections.abc import Mapping, Sequence
@@ -400,10 +401,10 @@ class ReplayWorker:
                 run = self.store.read_replay_run(run_id)
                 if run is not None and run.get("status") != "cancelled":
                     self.store.update_replay_run(run_id, status="completed", result=result)
-            except Exception as exc:
+            except Exception:
                 run = self.store.read_replay_run(run_id)
                 if run is not None and run.get("status") != "cancelled":
-                    self.store.update_replay_run(run_id, status="failed", error=str(exc))
+                    self.store.update_replay_run(run_id, status="failed", error=traceback.format_exc())
             finally:
                 with self._lock:
                     self._cancel.pop(run_id, None)
