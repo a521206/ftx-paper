@@ -1,0 +1,80 @@
+"""Canonical causal market observations for Layer 1."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from types import MappingProxyType
+from typing import Any, Mapping, Sequence
+
+from .orderflow_common import Aggregate, ObservationIssue, ObservationIssueKind, build_aggregate_result, canonical_timestamp
+from .state_machine_source import source_fingerprint
+from .state_machine_types import SessionLevels
+
+MARKET_CLOSE_TIME = "15:30"
+
+
+def rows_available_for_observation(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [row for row in rows if str(row["time"]).split("T")[-1][:5] <= MARKET_CLOSE_TIME]
+
+
+def _row_timestamp(row: Mapping[str, Any]) -> str:
+    return canonical_timestamp(f"{row['session_date']}T{str(row['time']).split('T')[-1][:5]}")
+
+
+def derive_session_levels(aggregates5: Sequence[Aggregate], prior_rows: Sequence[Mapping[str, Any]], session_date: str) -> SessionLevels:
+    first = next((item for item in aggregates5 if item.available_at), None)
+    if first is None:
+        raise ValueError(f"no completed 5m context available for {session_date}")
+    return SessionLevels(float(first.low), float(first.high), min((float(row["low"]) for row in prior_rows), default=None),
+        max((float(row["high"]) for row in prior_rows), default=None), first.available_at, f"{session_date}T09:15")
+
+
+@dataclass(frozen=True, slots=True)
+class ObservationGap:
+    index: int
+    previous_time: str
+    next_time: str
+
+
+@dataclass(frozen=True, slots=True)
+class MarketObservation:
+    aggregates: Mapping[str, tuple[Aggregate, ...]]
+    source_gaps: tuple[ObservationGap, ...]
+    session_boundaries: Mapping[int, tuple[str, str]]
+    source_fingerprint: str
+    issues: tuple[ObservationIssue, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "aggregates", MappingProxyType({key: tuple(value) for key, value in self.aggregates.items()}))
+        object.__setattr__(self, "source_gaps", tuple(self.source_gaps))
+        object.__setattr__(self, "session_boundaries", MappingProxyType(dict(self.session_boundaries)))
+        object.__setattr__(self, "issues", tuple(self.issues))
+
+
+def observe_market(rows: list[dict[str, Any]]) -> MarketObservation:
+    observed_rows = rows_available_for_observation(rows)
+    previous: str | None = None
+    for row in observed_rows:
+        timestamp = _row_timestamp(row)
+        if previous is not None and timestamp <= previous:
+            raise ValueError("market observation rows must be strictly ordered")
+        previous = timestamp
+    results = {timeframe: build_aggregate_result(observed_rows, timeframe) for timeframe in (1, 5)}
+    issues = [issue for result in results.values() for issue in result.issues]
+    gaps: list[ObservationGap] = []
+    boundaries: dict[int, tuple[str, str]] = {}
+    for index, (prior, current) in enumerate(zip(observed_rows, observed_rows[1:], strict=False), 1):
+        prior_date, current_date = str(prior["session_date"]), str(current["session_date"])
+        if current_date != prior_date:
+            boundaries[index] = (prior_date, current_date)
+            continue
+        delta = datetime.strptime(_row_timestamp(current), "%Y-%m-%dT%H:%M") - datetime.strptime(_row_timestamp(prior), "%Y-%m-%dT%H:%M")
+        if delta.total_seconds() > 60:
+            gaps.append(ObservationGap(index, str(prior["time"]), str(current["time"])))
+            covered = any(issue.kind == ObservationIssueKind.MISSING_SOURCE_BAR and issue.session_date == current_date
+                and issue.group_start and issue.group_end and canonical_timestamp(f"{current_date}T{issue.group_start}") <= _row_timestamp(prior) <= canonical_timestamp(f"{current_date}T{issue.group_end}") for issue in issues)
+            if not covered:
+                issues.append(ObservationIssue(ObservationIssueKind.MISSING_SOURCE_BAR, current_date, None,
+                    str(prior["time"])[:5], str(current["time"])[:5], "internal source-bar gap"))
+    return MarketObservation({f"{timeframe}m": result.aggregates for timeframe, result in results.items()}, tuple(gaps), boundaries, source_fingerprint(observed_rows), tuple(issues))

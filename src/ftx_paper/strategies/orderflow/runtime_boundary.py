@@ -40,7 +40,7 @@ def _freeze(value: JSONValue) -> FrozenJSONValue:
         return value
     if isinstance(value, list):
         return tuple(_freeze(item) for item in value)
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return MappingProxyType({key: _freeze(item) for key, item in value.items()})
     raise TypeError("boundary values must be JSON-compatible")
 
