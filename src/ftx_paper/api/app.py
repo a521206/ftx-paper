@@ -532,6 +532,32 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             "next_cursor": next_cursor,
         }))
 
+    @app.get("/api/v1/activity")
+    def activity():
+        """Return the common runtime activity stream with server-side filters."""
+        selected = strategy_filter()
+        if selected is INVALID_STRATEGY:
+            return jsonify(error_payload("invalid_strategy", "strategy_id is not configured")), 400
+        category = request.args.get("category", "").strip().lower()
+        event_type = request.args.get("event_type", "").strip().upper()
+        selected_date = request.args.get("date", "").strip()
+        if category and category not in {"decision", "risk", "execution", "runtime"}:
+            return jsonify(error_payload("invalid_category", "category must be decision, risk, execution, or runtime")), 400
+        if selected_date:
+            try:
+                parsed_date = datetime.strptime(selected_date, "%Y-%m-%d").date()
+            except ValueError:
+                return jsonify(error_payload("invalid_date", "date must be YYYY-MM-DD")), 400
+            if parsed_date.isoformat() != selected_date:
+                return jsonify(error_payload("invalid_date", "date must be YYYY-MM-DD")), 400
+        rows = filter_attributed(store.read_events(1000), selected)
+        rows = [row for row in rows if (
+            (not category or str(row.get("category", "")).lower() == category)
+            and (not event_type or str(row.get("event_type", "")).upper() == event_type)
+            and (not selected_date or str(row.get("payload", {}).get("session_date", ""))[:10] == selected_date)
+        )]
+        return jsonify(json_safe({"events": rows}))
+
     @app.get("/api/v1/positions")
     def positions():
         status = store.read_status()

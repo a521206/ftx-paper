@@ -387,6 +387,37 @@
       width: auto;
     }
 
+    .strategy-context {
+      display: flex;
+      align-items: baseline;
+      flex-wrap: wrap;
+      gap: 8px 12px;
+      margin: 0 0 14px;
+      padding: 12px 14px;
+      border-left: 3px solid var(--md-primary);
+      border-radius: 8px;
+      background: var(--md-primary-container);
+      color: var(--md-on-primary-container);
+    }
+
+    .strategy-context strong { font-size: 16px; }
+    .strategy-context > span:last-child { font-size: 13px; opacity: .86; }
+
+    .strategy-picker { max-width: 940px; margin: 28px auto; overflow: hidden; }
+    .strategy-picker-hero { padding: 26px; background: linear-gradient(135deg, var(--md-primary-container), #f5f1ff); }
+    .strategy-picker-hero h1 { margin: 7px 0 8px; font-size: clamp(28px, 4vw, 42px); line-height: 1.05; letter-spacing: -.03em; }
+    .strategy-picker-hero p { max-width: 560px; margin: 0; color: var(--md-on-primary-container); line-height: 1.55; }
+    .strategy-picker-body { padding: 22px 26px 26px; }
+    .strategy-picker-body > .label { margin-bottom: 10px; }
+    .strategy-picker-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+    .strategy-picker-list a { position: relative; display: block; min-height: 112px; padding: 17px; border: 1px solid var(--md-outline-variant); border-radius: 12px; background: var(--md-surface); color: var(--md-on-surface); text-decoration: none; transition: transform 120ms ease, border-color 120ms ease, box-shadow 120ms ease; }
+    .strategy-picker-list a::after { content: 'Open →'; position: absolute; right: 15px; bottom: 14px; color: var(--md-primary); font-size: 12px; font-weight: 700; }
+    .strategy-picker-list a:hover { border-color: var(--md-primary); box-shadow: 0 5px 18px rgba(65, 95, 145, .14); transform: translateY(-2px); }
+    .strategy-picker-list strong { display: block; max-width: 80%; font-size: 17px; }
+    .strategy-picker-list small { display: block; margin-top: 7px; color: var(--md-on-surface-variant); font: 12px ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .strategy-picker-list .badge { margin-top: 12px; }
+    @media (max-width: 640px) { .strategy-picker-hero { padding: 20px; } .strategy-picker-body { padding: 18px 20px 20px; } }
+
     .decision-filters {
       display: flex;
       flex-wrap: wrap;
@@ -409,7 +440,8 @@
       font-weight: 600;
     }
 
-    .decision-strategy-control select {
+    .decision-strategy-control select,
+    .decision-strategy-control input {
       min-height: 40px;
       padding: 8px 36px 8px 12px;
       border: 1px solid var(--md-outline-variant);
@@ -1203,6 +1235,7 @@
 
     let selectedDecisionSession = new URLSearchParams(location.search).get('session');
     const selectedStrategy = new URLSearchParams(location.search).get('strategy_id') || '';
+    const strategyScopedPages = new Set(['decisions', 'trades', 'activity', 'replay']);
     const decisionDate = new URLSearchParams(location.search).get('date') || new Intl.DateTimeFormat('en-CA', {
       timeZone: 'Asia/Kolkata',
     }).format(new Date());
@@ -1227,11 +1260,24 @@
       const separator = path.includes('?') ? '&' : '?';
       return `${path}${separator}strategy_id=${encodeURIComponent(selectedStrategy)}`;
     }
+    function selectedStrategyName(strategies = sharedData.strategies) {
+      if (!selectedStrategy) return 'All strategies';
+      return strategies.find((item) => item.strategy_id === selectedStrategy)?.name || selectedStrategy;
+    }
     function replayStrategyId(strategyId) {
       return strategyId || '';
     }
     let replaySelectionInFlight = false;
     const replaySearch = new URLSearchParams(location.search);
+    let replayFilterState = {
+      search: replaySearch.get('search') || '',
+      date: replaySearch.get('replay_date') || '',
+      session: replaySearch.get('replay_session') || '',
+      type: replaySearch.get('replay_type') || 'key',
+      direction: replaySearch.get('direction') || '',
+      status: replaySearch.get('status') || '',
+      run: replaySearch.get('run') || '',
+    };
     let replayRangeState = {
       from: replaySearch.get('date_from') || '',
       to: replaySearch.get('date_to') || '',
@@ -1377,6 +1423,15 @@
         </div>
         <div id="activity-list">${activityStream(rows)}</div>
       </div>`;
+    }
+
+    function strategyPickerPage(targetPage, strategies) {
+      const title = targetPage === 'decisions' ? 'Review decisions' : 'Run replay';
+      const description = targetPage === 'decisions' ? 'Choose a strategy to review.' : 'Choose a strategy to replay.';
+      const options = strategies.length
+        ? strategies.map((item) => `<a href="/${targetPage}?strategy_id=${encodeURIComponent(item.strategy_id)}"><strong>${esc(item.name || item.strategy_id)}</strong><small>${esc(item.strategy_id)} · v${esc(item.version || 'unversioned')}</small>${badge(item.enabled === false ? 'Disabled' : 'Ready', item.enabled === false ? 'warn' : 'good')}</a>`).join('')
+        : '<div class="empty">No configured research strategies are available.</div>';
+      return `<section class="card strategy-picker"><div class="strategy-picker-hero"><div><div class="label">Strategy</div><h1>${title}</h1><p>${description}</p></div></div><div class="strategy-picker-body"><div class="label">Available strategies</div><div class="strategy-picker-list">${options}</div></div></section>`;
     }
 
     function orderflowContextPage(model) {
@@ -1848,6 +1903,7 @@
     }
 
     function performancePage(runs, runtime = {}, broker = {}, marketDates = []) {
+      runs = (runs || []).filter((run) => !selectedStrategy || replayStrategyId(run.request?.strategy_id) === selectedStrategy);
       const completed = (runs || []).filter((run) => String(run.status).toLowerCase() === 'completed');
       const requestedDate = new URLSearchParams(window.location.search).get('date') || '';
       const activeDate = requestedDate || marketDates[marketDates.length - 1] || replayRunDate(completed[0] || runs?.[0] || {});
@@ -1915,11 +1971,11 @@
       const brokerLabel = rawBrokerName.charAt(0).toUpperCase() + rawBrokerName.slice(1);
       const connectText = brokerObj.authenticated ? `${brokerLabel} Connected` : `Connect ${brokerLabel}`;
 
-      const top = `<div class="card">
+      const top = ['decisions', 'replay'].includes(page) ? '' : `<div class="card">
         <div class="toolbar">
           <strong>Runtime controls</strong>
           <div>
-            ${page === 'decisions' ? '' : strategies.map((item) => `<label class="strategy-filter"><input type="checkbox" aria-label="Filter by ${esc(item.name || item.strategy_id)}" data-strategy-id="${esc(item.strategy_id)}"${selectedStrategy === item.strategy_id ? ' checked' : ''}>${esc(item.name || item.strategy_id)}</label>`).join('')}
+            ${strategyScopedPages.has(page) && selectedStrategy && page !== 'decisions' ? strategies.map((item) => `<label class="strategy-filter"><input type="checkbox" aria-label="Filter by ${esc(item.name || item.strategy_id)}" data-strategy-id="${esc(item.strategy_id)}"${selectedStrategy === item.strategy_id ? ' checked' : ''}>${esc(item.name || item.strategy_id)}</label>`).join('') : ''}
             <button id="connect">${esc(connectText)}</button>
             <button data-cmd="restart" class="secondary">Restart</button>
             <button data-cmd="stop" class="danger">Stop</button>
@@ -1975,7 +2031,9 @@
 
       let body = '';
 
-      if (page === 'replay') {
+      if (strategyScopedPages.has(page) && !selectedStrategy) {
+        body = strategyPickerPage(page, strategies);
+      } else if (page === 'replay') {
         body = performancePage(data.replays.runs || [], runtime, data.broker || {}, data.replayDates || []);
       } else if (page === 'dashboard') {
         body = `<div class="card">
@@ -2022,20 +2080,22 @@
         const openPositions = data.positions?.positions?.length || 0;
         body = `<div class="card">
            <div class="trader-hero">
-             <div class="hero-copy"><div class="label">${esc(data.decisions.date || decisionDate)}</div><h1>Trading activity</h1><p>Follow every idea from setup approval to order, fill, and position. Setup approval is not a fill.</p></div>
+               <div class="hero-copy"><div class="label">${esc(data.decisions.date || decisionDate)}</div><h1>Decisions</h1><p>Strategy evidence and paper-trading outcomes.</p></div>
              <div class="trader-metric"><div class="label">Setups approved</div><strong>${approved}</strong><small>Entry conditions met</small></div>
              <div class="trader-metric"><div class="label">Orders placed</div><strong>${orders}</strong><small>Working or completed</small></div>
              <div class="trader-metric"><div class="label">Fills</div><strong>${filled}</strong><small>Executed in paper runtime</small></div>
              <div class="trader-metric"><div class="label">Open positions</div><strong>${openPositions}</strong><small>Shared portfolio</small></div>
            </div>
            <div class="decision-filters">
-            <label class="decision-strategy-control" for="decision-strategy-filter">Strategy
-              <select id="decision-strategy-filter" aria-label="Filter decisions by strategy">
-                <option value=""${selectedStrategy ? '' : ' selected'}>All strategies</option>
-                ${strategies.map((item) => `<option value="${esc(item.strategy_id)}"${selectedStrategy === item.strategy_id ? ' selected' : ''}>${esc(item.name || item.strategy_id)}</option>`).join('')}
-              </select>
-            </label>
-            <p class="decision-filter-hint">Choose a strategy to focus the session totals and recent decisions. The selected strategy stays active while you change sessions.</p>
+             <label class="decision-strategy-control" for="decision-strategy-filter">Strategy
+               <select id="decision-strategy-filter" aria-label="Filter decisions by strategy">
+                 ${strategies.map((item) => `<option value="${esc(item.strategy_id)}"${selectedStrategy === item.strategy_id ? ' selected' : ''}>${esc(item.name || item.strategy_id)}</option>`).join('')}
+               </select>
+             </label>
+             <label class="decision-strategy-control" for="decision-date-filter">Review date
+               <input id="decision-date-filter" type="date" value="${esc(decisionDate)}" aria-label="Choose decision review date">
+             </label>
+             <p class="decision-filter-hint">Filter by strategy and date.</p>
           </div>
           <div class="session-grid">
             ${decisionSessions
@@ -2053,7 +2113,7 @@
               })
               .join('')}
           </div>
-           <div class="stage-key"><span class="badge good">Setup approved = admission passed</span><span class="badge warn">Order / fill = execution activity</span><span class="badge">${rejected} blocked or rejected</span></div>
+            <div class="stage-key"><span class="badge good">Approved</span><span class="badge warn">Execution</span><span class="badge">${rejected} rejected</span></div>
            <div class="review-summary">
              ${[
                [selectedDecisionSession || 'Today', selectedDecisionSession ? 'selected session' : 'selected day'],
@@ -2066,7 +2126,7 @@
            </div>
          </div>
          <div class="card">
-           <div class="section-head"><div><h2>Setup and execution history</h2><div class="label">Each row shows the current stage and what happens next.</div></div><span class="label">${data.decisions.has_more ? `Latest ${visibleDecisionRows.length}` : `${visibleDecisionRows.length} recent`}</span></div>
+            <div class="section-head"><div><h2>Decision history</h2><div class="label">${data.decisions.has_more ? `Latest ${visibleDecisionRows.length}` : `${visibleDecisionRows.length} recent`}</div></div></div>
           ${decisions(visibleDecisionRows)}
           ${data.decisions.has_more ? '<button id="load-more-decisions" class="secondary">Load older decisions</button>' : ''}
         </div>`;
@@ -2109,7 +2169,10 @@
         </div>`;
       }
 
-      document.getElementById('app').innerHTML = top + body;
+      const strategyContext = strategyScopedPages.has(page) && selectedStrategy
+         ? `<div class="strategy-context"><span class="label">Strategy</span><strong>${esc(selectedStrategyName(strategies))}</strong></div>`
+        : '';
+      document.getElementById('app').innerHTML = top + strategyContext + body;
       wire();
       if (page === 'activity') wireActivityPage();
       if (page === 'replay') wireReplayDetailLoading();
@@ -2120,6 +2183,12 @@
         const query = new URLSearchParams(location.search);
         if (event.target.value) query.set('strategy_id', event.target.value);
         else query.delete('strategy_id');
+        location.search = query.toString();
+      });
+      document.getElementById('decision-date-filter')?.addEventListener('change', (event) => {
+        const query = new URLSearchParams(location.search);
+        if (event.target.value) query.set('date', event.target.value);
+        else query.delete('date');
         location.search = query.toString();
       });
       document.querySelectorAll('.strategy-filter input').forEach((input) => {
@@ -2210,7 +2279,8 @@
             return !run || ['failed', 'rejected', 'cancelled'].includes(String(run.status || '').toLowerCase());
           });
           await Promise.all(missing.map((session_date) => get('/api/v1/replay', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({session_date, strategy_id: replayStrategyId(selectedStrategy), vehicles: ['futures', 'synthetic'], mode: 'replay', include_parity_layers: false})})));
-          const query = new URLSearchParams({ date: from, date_from: from, date_to: to });
+           const query = new URLSearchParams({ date: from, date_from: from, date_to: to });
+           if (selectedStrategy) query.set('strategy_id', selectedStrategy);
           history.replaceState({}, '', `/replay?${query.toString()}`);
           flash(missing.length ? `${missing.length} missing day${missing.length === 1 ? '' : 's'} queued` : 'Loaded cached replay days');
           refresh();
@@ -2249,8 +2319,22 @@
     async function refresh() {
       if (refreshInFlight) return;
       refreshInFlight = true;
-      void refreshSharedData();
       try {
+        await refreshSharedData();
+        if (strategyScopedPages.has(page) && !selectedStrategy) {
+          render({
+            ...sharedData,
+            strategies: sharedData.strategies,
+            capital: {},
+            positions: { positions: [] },
+            trades: { trades: [] },
+            decisions: { decisions: [] },
+            events: { events: [] },
+            replays: { runs: [] },
+            replayDates: [],
+          });
+          return;
+        }
         const pageRequests = page === 'decisions' ? {
           decisions: strategyQuery(`/api/v1/decisions?${new URLSearchParams({ date: decisionDate, limit: '50', ...(selectedDecisionSession ? { session: selectedDecisionSession } : {}) }).toString()}`),
           positions: '/api/v1/positions',
@@ -2267,7 +2351,7 @@
             replays: '/api/v1/replay',
           },
           activity: {
-            decisions: strategyQuery(`/api/v1/decisions?${new URLSearchParams({ date: decisionDate, limit: '100' }).toString()}`),
+            events: strategyQuery('/api/v1/activity'),
           },
         }[page] || {};
 
@@ -2286,14 +2370,7 @@
         const positions = responseData.positions || { positions: [] };
         const trades = responseData.trades || { trades: [] };
         const decisionsData = responseData.decisions || { decisions: [] };
-        const events = page === 'activity'
-          ? { events: (decisionsData.decisions || []).map((item) => ({
-              event_type: 'POLICY_DECISION',
-              ...item.payload,
-              payload: item.payload,
-              decision_view: item.decision_view,
-            })) }
-          : { events: [] };
+        const events = page === 'activity' ? (responseData.events || { events: [] }) : { events: [] };
         const replays = responseData.replays || { runs: [] };
         const replayDates = { dates: (replays.runs || []).map((run) => run.request?.session_date).filter(Boolean) };
 

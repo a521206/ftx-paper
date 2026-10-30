@@ -72,6 +72,24 @@ def test_legacy_event_routes_are_not_exposed(tmp_path) -> None:
     assert "/api/v1/events" not in paths
 
 
+def test_activity_endpoint_supports_common_filters(tmp_path) -> None:
+    store = RuntimeStore(tmp_path)
+    store.append_event("ORDER_INTENT", {
+        "strategy_id": "ftx-paper-orderflow",
+        "session_date": "2026-01-05",
+        "message": "candidate order",
+    })
+    client = create_app(store, replay_worker=ReplayWorker(store)).test_client()
+
+    response = client.get("/api/v1/activity?category=execution&date=2026-01-05")
+
+    assert response.status_code == 200
+    events = response.get_json()["events"]
+    assert len(events) == 1
+    assert events[0]["event_type"] == "ORDER_INTENT"
+    assert client.get("/api/v1/activity?category=unknown").status_code == 400
+
+
 def test_historical_date_cannot_start_live_runtime(tmp_path) -> None:
     class Operations:
         started = False
