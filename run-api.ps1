@@ -32,23 +32,41 @@ if (Test-Path -LiteralPath $envFile) {
 }
 
 $paperHome = if ($env:FTX_PAPER_HOME) { $env:FTX_PAPER_HOME } else { Join-Path $env:LOCALAPPDATA "ftx-paper" }
+$runtimeDatabase = Join-Path $paperHome "runtime\runtime.sqlite3"
 
 function Stop-ExistingApiProcess {
     param(
-        [Parameter(Mandatory)] [string]$PythonPath
+        [Parameter(Mandatory)] [string]$PythonPath,
+        [Parameter(Mandatory)] [string]$RuntimeDatabase
     )
 
-    # Restrict the WMI query to Python processes; enumerating every process is
-    # noticeably slower and is unnecessary for this project's API launcher.
+    $leasePid = $null
+    if (Test-Path -LiteralPath $RuntimeDatabase) {
+        $leaseQuery = 'import sqlite3, sys; c=sqlite3.connect(sys.argv[1]); row=c.execute("SELECT pid FROM process_leases WHERE service = ''api''").fetchone(); print(row[0] if row else "")'
+        $leaseValue = (& $PythonPath -c $leaseQuery $RuntimeDatabase | Select-Object -Last 1)
+        if ($null -ne $leaseValue -and $leaseValue.ToString().Trim() -match '^\d+$') {
+            $leasePid = [int]$leaseValue.ToString().Trim()
+        }
+    }
+
+    # The lease PID is authoritative because Windows virtualenv launchers can
+    # expose a child server with a normalized command line lacking $PythonPath.
+    # Command-line discovery remains a fallback for processes that started
+    # before the lease was written or have a stale/missing lease.
     $apiProcesses = @(
-        Get-CimInstance -ClassName Win32_Process -Filter "Name = 'python.exe'" |
+        Get-CimInstance -ClassName Win32_Process |
             Where-Object {
-                $_.CommandLine -and
-                $_.CommandLine -like "*$PythonPath*" -and
+                ($leasePid -and $_.ProcessId -eq $leasePid) -or
                 (
-                    $_.CommandLine -like "*from ftx_paper.cli import api_main*" -or
-                    $_.CommandLine -like "*ftx_paper.cli:api_main*" -or
-                    $_.CommandLine -like "*-m ftx_paper.cli api*"
+                    $_.CommandLine -and
+                    (
+                        $_.CommandLine -like "*$PythonPath*" -and
+                        (
+                            $_.CommandLine -like "*from ftx_paper.cli import api_main*" -or
+                            $_.CommandLine -like "*ftx_paper.cli:api_main*" -or
+                            $_.CommandLine -like "*-m ftx_paper.cli api*"
+                        )
+                    )
                 )
             }
     )
@@ -64,7 +82,7 @@ function Stop-ExistingApiProcess {
     }
 }
 
-Stop-ExistingApiProcess -PythonPath $venvPython
+Stop-ExistingApiProcess -PythonPath $venvPython -RuntimeDatabase $runtimeDatabase
 
 $env:PYTHONPATH = Join-Path $packageRoot "src"
 $env:FTX_PAPER_HOME = $paperHome
