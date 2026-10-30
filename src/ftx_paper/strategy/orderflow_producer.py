@@ -569,7 +569,7 @@ class CausalOrderflowProducer:
         return OrderflowContext(
             trading_date, cutoff, observations,
             {"1m": tuple(prefix), "5m": tuple(five_minute)},
-            tuple(self._source_issues),
+            tuple(self._source_issues), self._frozen_atr,
         )
 
 __all__ = ["CausalOrderflowProducer", "source_row_is_complete"]

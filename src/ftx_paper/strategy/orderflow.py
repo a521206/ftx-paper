@@ -689,6 +689,7 @@ class OrderflowPolicy:
         interaction = detector.observe(
             location,
             observation,
+            atr=observation.context.frozen_atr if observation.context is not None else None,
             band_contact=location_observation.band_contact,
             observation_id=location_key,
             projection_sources=projection_sources,
@@ -744,8 +745,6 @@ class OrderflowPolicy:
         self, observation: OrderflowObservation,
         observations: tuple[OrderflowObservation, ...],
     ) -> None:
-        if observation.timeframe != "5m":
-            return
         projection_sources = {
             timeframe: tuple(
                 item for item in observations
@@ -753,9 +752,10 @@ class OrderflowPolicy:
             )
             for timeframe in ("1m", "5m")
         }
-        detector5 = self._location_detectors["5m"]
-        detector5.advance_projections(projection_sources, as_of=observation.available_at)
-        for candidate in detector5.active_interactions:
+        detector = self._location_detectors[observation.timeframe]
+        detector.advance_active(observation)
+        detector.advance_projections(projection_sources, as_of=observation.available_at)
+        for candidate in detector.active_interactions:
             snapshots = dict(candidate.synthetic_snapshots).get("5m", ())
             if not snapshots:
                 continue
@@ -763,7 +763,7 @@ class OrderflowPolicy:
             long_score = scores[0] if scores is not None else None
             short_score = scores[1] if scores is not None else None
             if long_score is not None or short_score is not None:
-                detector5.record_score(
+                detector.record_score(
                     candidate.interaction_id, snapshot=snapshots[-1],
                     context_version=observation.context.generation if observation.context else None,
                     long_score=long_score, short_score=short_score,

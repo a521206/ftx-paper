@@ -1,4 +1,6 @@
 from datetime import datetime, timedelta, timezone
+import hashlib
+from types import SimpleNamespace
 
 import pytest
 
@@ -55,3 +57,35 @@ def test_vwap_stop_reports_unavailable_invalid_and_directional_candidates() -> N
     short_stop = calculate_vwap_stop(direction="short", entry_price=100, vwap=102, atr=2)
     assert long_stop.candidate == 97.9
     assert short_stop.candidate == 102.1
+
+
+def test_vwap_provider_excludes_incomplete_aggregates_and_uses_canonical_source_identity() -> None:
+    observed = datetime(2026, 1, 1, 3, 45, tzinfo=timezone.utc)
+    aggregate = SimpleNamespace(
+        aggregate_id="aggregate-1", observation_id="observation-1", timeframe="5m",
+        observed_at=observed, interval_end=observed + timedelta(minutes=5),
+        available_at=observed + timedelta(minutes=5),
+        features={"high": 103.0, "low": 97.0, "close": 101.0, "volume": 10.0},
+        context=SimpleNamespace(
+            session_id="2026-01-01",
+            replay_provenance={"source_fingerprint": "source-fingerprint"},
+        ),
+    )
+    incomplete = SimpleNamespace(
+        **{**vars(aggregate), "aggregate_id": "aggregate-incomplete",
+           "available_at": observed + timedelta(minutes=4)},
+    )
+
+    measurements = VwapLocationProvider().publish(
+        (incomplete, aggregate), cutoff=aggregate.available_at,
+    )
+
+    assert len(measurements) == 1
+    value = (103.0 + 97.0 + 101.0) / 3.0
+    identity = (
+        f"source-fingerprint:2026-01-01:5m:{observed.isoformat()}:"
+        f"vwap_typical_price_volume_v1:{value:.12g}:10"
+    )
+    assert measurements[0].source_observation_id == hashlib.sha256(
+        identity.encode("utf-8"),
+    ).hexdigest()[:24]

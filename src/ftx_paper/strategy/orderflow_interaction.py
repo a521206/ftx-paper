@@ -265,22 +265,20 @@ def _close_side(close: float, lower: float, upper: float) -> str:
 
 
 def _pre_contact_side(
-    observation: OrderflowObservation,
+    previous: OrderflowObservation | None,
     location: LocationRecord,
 ) -> str | None:
-    previous_high = observation.features.get("previous_high")
-    previous_low = observation.features.get("previous_low")
+    if previous is None:
+        return None
+    previous_high = previous.features.get("high")
+    previous_low = previous.features.get("low")
     if (
         not isinstance(previous_high, (int, float))
         or isinstance(previous_high, bool)
         or not isinstance(previous_low, (int, float))
         or isinstance(previous_low, bool)
     ):
-        previous_close = observation.features.get("previous_close")
-        if not isinstance(previous_close, (int, float)) or isinstance(previous_close, bool):
-            return None
-        side = _close_side(float(previous_close), location.band.low, location.band.high)
-        return side if side != "INSIDE_BAND" else None
+        return None
     if float(previous_low) > location.band.high:
         return "ABOVE"
     if float(previous_high) < location.band.low:
@@ -343,6 +341,7 @@ class InteractionDetector:
         location: LocationRecord,
         observation: OrderflowObservation,
         *,
+        atr: float | None = None,
         band_contact: bool | None = None,
         observation_id: str | None = None,
         projection_sources: Mapping[str, tuple[OrderflowObservation, ...]] | None = None,
@@ -448,8 +447,20 @@ class InteractionDetector:
                 return None
             if not contact:
                 return None
-            if location.frozen_atr is None:
+            record_atr = location.frozen_atr if location.frozen_atr is not None else atr
+            if record_atr is None:
                 return None
+            previous = max(
+                (
+                    item for item in (projection_sources or {}).get(self.timeframe, ())
+                    if item.observed_at < observation.observed_at
+                    and item.available_at <= observation.available_at
+                    and item.context is not None
+                    and item.context.session_id == session_id
+                ),
+                key=lambda item: (item.observed_at, item.available_at, item.observation_id),
+                default=None,
+            )
             interaction = LocationInteraction(
                 ":".join((
                     observation.instrument,
@@ -461,7 +472,7 @@ class InteractionDetector:
                 self.timeframe, location.location_id, location.alias,
                 location.price, location.generation, observation.observation_id,
                 observation.observed_at, InteractionStatus.ACTIVE, (candle,),
-                atr=location.frozen_atr,
+                atr=record_atr,
                 band_lower=location.band.low, band_upper=location.band.high,
                 location_type="diagnostic_reference" if is_diagnostic_location(location.alias) else "session_reference",
                 reference_provenance={
@@ -469,7 +480,7 @@ class InteractionDetector:
                     "source_aggregate_id": location.source_aggregate_id or observation.observation_id,
                     "source_timeframe": location.timeframe or observation.timeframe,
                 },
-                pre_contact_side=_pre_contact_side(observation, location),
+                pre_contact_side=_pre_contact_side(previous, location),
             )
             seeded = projection_sources or {}
             for source_timeframe, sources in seeded.items():
@@ -568,6 +579,35 @@ class InteractionDetector:
             if current != interaction:
                 self._active[key] = current
                 updated.append(current)
+        return tuple(updated)
+
+    def advance_active(self, observation: OrderflowObservation) -> tuple[LocationInteraction, ...]:
+        """Apply the registry reference to active episodes without location facts."""
+        updated: list[LocationInteraction] = []
+        for interaction in tuple(self._active.values()):
+            if interaction.timeframe != observation.timeframe:
+                continue
+            location = self._registry.resolve(interaction.location_id) if self._registry else None
+            if location is None or location.available_at > observation.available_at:
+                continue
+            close = observation.features.get("close")
+            high = observation.features.get("high", close)
+            low = observation.features.get("low", close)
+            if any(
+                not isinstance(value, (int, float)) or isinstance(value, bool)
+                for value in (close, high, low)
+            ):
+                continue
+            result = self.observe(
+                location, observation,
+                atr=observation.context.frozen_atr if observation.context is not None else None,
+                band_contact=location.band.intersects(
+                    high=float(cast(float, high)), low=float(cast(float, low)),
+                ),
+                observation_id=f"registry:{observation.observation_id}:{location.location_id}",
+            )
+            if result is not None:
+                updated.append(result)
         return tuple(updated)
 
     def record_score(

@@ -149,6 +149,7 @@ class OrderflowContext:
     observations: tuple[OrderflowObservation, ...] = ()
     prefixes: Mapping[str, tuple[OrderflowObservation, ...]] = MappingProxyType({})
     source_issues: tuple[Mapping[str, object], ...] = ()
+    daily_atr: float | None = None
 
     def __post_init__(self) -> None:
         if not self.session_id.strip():

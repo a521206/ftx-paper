@@ -195,18 +195,7 @@ class OrderflowEvidenceAssembler:
                 )),
                 cutoff=min(context.as_of, orderflow.cutoff),
             )
-            atr = next(
-                (
-                    item.context.frozen_atr if item.context is not None else None
-                    for item in reversed(observations)
-                    if item.timeframe == "5m"
-                    and item.available_at <= min(context.as_of, orderflow.cutoff)
-                    and item.context is not None
-                    and item.context.frozen_atr is not None
-                    and item.context.frozen_atr > 0
-                ),
-                None,
-            )
+            atr = orderflow.daily_atr
             from .orderflow_vwap import publish_vwap_locations
             vwap_locations = publish_vwap_locations(
                 location_registry,

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+import hashlib
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
@@ -90,6 +91,17 @@ def _available_at(aggregate: Any) -> datetime:
     return available if available is not None else aggregate.timestamp
 
 
+def _interval_end(aggregate: Any) -> datetime:
+    return getattr(aggregate, "interval_end", _observed_at(aggregate))
+
+
+def _source_fingerprint(aggregate: Any) -> str:
+    context = getattr(aggregate, "context", None)
+    provenance = getattr(context, "replay_provenance", {}) if context is not None else {}
+    value = provenance.get("source_fingerprint")
+    return str(value) if value else str(getattr(aggregate, "source_observation_id", aggregate.aggregate_id))
+
+
 def calculate_session_vwap(
     aggregates: Sequence[Any], *, cutoff: datetime,
     timezone: str = "Asia/Kolkata", session_start: str = "09:15",
@@ -147,7 +159,11 @@ class VwapLocationProvider:
     ) -> tuple[VwapMeasurement, ...]:
         by_timeframe: dict[tuple[str, str], list[MarketAggregate]] = {}
         for aggregate in aggregates:
-            if aggregate.available_at <= cutoff and aggregate.context is not None:
+            if (
+                aggregate.available_at <= cutoff
+                and aggregate.available_at >= _interval_end(aggregate)
+                and aggregate.context is not None
+            ):
                 key = (aggregate.timeframe, aggregate.context.session_id)
                 by_timeframe.setdefault(key, []).append(aggregate)
 
@@ -178,16 +194,20 @@ class VwapLocationProvider:
                 volume = max(0.0, volume)
                 state.cumulative_volume += volume
                 state.cumulative_value += ((high + low + close) / 3.0) * volume
+                value = (
+                    state.cumulative_value / state.cumulative_volume
+                    if state.cumulative_volume else (high + low + close) / 3.0
+                )
+                source_identity = (
+                    f"{_source_fingerprint(aggregate)}:{session_id}:{timeframe}:"
+                    f"{aggregate.observed_at.isoformat()}:{self.config.calculation_version}:"
+                    f"{value:.12g}:{volume:.12g}"
+                )
                 state.measurements.append(VwapMeasurement(
                     timeframe, session_id,
                     aggregate.aggregate_id,
-                    stable_orderflow_id(
-                        "vwap_measurement", timeframe, session_id,
-                        aggregate.aggregate_id, self.config.calculation_version,
-                    ),
-                    aggregate.observed_at, aggregate.available_at,
-                    state.cumulative_value / state.cumulative_volume
-                    if state.cumulative_volume else (high + low + close) / 3.0,
+                    hashlib.sha256(source_identity.encode("utf-8")).hexdigest()[:24],
+                    _interval_end(aggregate), aggregate.available_at, value,
                     self.config.calculation_version,
                 ))
             measurements.extend(state.measurements)

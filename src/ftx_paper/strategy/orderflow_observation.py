@@ -77,7 +77,10 @@ class MarketObservation:
             item for item in self.context.observations
             if item.observation_id in published_ids
         )
-        return OrderflowContext(self.session_date, cutoff, observations, prefixes)
+        return OrderflowContext(
+            self.session_date, cutoff, observations, prefixes,
+            daily_atr=self.context.daily_atr,
+        )
 
 
 def _source_gaps(
@@ -192,7 +195,8 @@ def observe_market(replay: OrderflowReplayInput) -> MarketObservation:
         context = OrderflowContext(
             context.session_id, context.cutoff, observations,
             {timeframe: tuple(item for item in observations if item.timeframe == timeframe)
-             for timeframe in context.prefixes},
+              for timeframe in context.prefixes},
+            daily_atr=context.daily_atr,
         )
     ordered = tuple(sorted(context.observations, key=lambda item: item.observed_at))
     boundary = ObservationBoundary(
