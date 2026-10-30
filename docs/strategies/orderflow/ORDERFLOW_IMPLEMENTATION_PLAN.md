@@ -420,10 +420,12 @@ remain follow-up work.
 
 ## Phase 4: Port And Verify Layer 2 - Context, Values, Permissions, And Locations
 
-Status: Deterministic contracts and the runtime-neutral replay shell are
-ported. Phase 3.5 evidence publication and producer wiring remain incomplete;
-persisted host runtime parity remains deferred to Phase 9. Phase 4 consumes the
-Phase 3.5 evidence publication and assembles its replay inputs.
+Status: Phase 4A evidence publication, chronological Phase 4B replay, and the
+combined Phase 4C harness are implemented. Source-observation parity is
+matched; context/location comparison currently reports the documented ATR
+source-history input variance. Persisted host runtime parity remains deferred
+to Phase 9. Phase 4 consumes the Phase 3.5 evidence publication and assembles
+its replay inputs.
 
 Port and validate the canonical context and location contracts using exact
 Layer 1-shaped inputs. This phase does not claim Paper runtime or DB-backed
@@ -698,9 +700,21 @@ Phase 4 parity verification record:
   `2026-10-01`; `2026-10-29` is excluded because its source is mismatched.
 - The runtime-neutral replay boundary can emit explicit causal
   `source_observation` and `context_location` streams when Phase 4 evidence
-  publications are supplied. Paper does not yet provide those publications
-  from its host runtime, so DB-backed context/location parity remains
-  `UNAVAILABLE` rather than `MATCHED`.
+  publications are supplied. The canonical replay now publishes the same
+  streams through its explicit parity recorder and Phase 4 projection.
+- The combined `compare_canonical_replay.py` entry point runs Phase 3, Phase
+  3.5, and Phase 4B without a manually prepared Paper facts artifact.
+- Phase 4B uses one shared completed-observation clock. Aggregates whose
+  `available_at` is after the final source clock are excluded; this resolved
+  the prior `448` versus `450` source-observation discrepancy.
+- For `2026-09-15`, `source_observation` identities and counts match. The
+  `context_location` stream reaches comparison and reports the expected ATR
+  source-history variance: canonical ATR-dependent locations are available,
+  while Paper preserves explicit ATR-unavailable evidence.
+- Focused Paper Phase 4 replay tests pass (`4 passed`), Ruff and Pyright pass
+  for the changed Paper replay files, and canonical Phase 4 projection lint
+  passes. Two pre-existing canonical `InteractionDetector` test failures are
+  unrelated to this phase.
 
 Phase 4 implementation record:
 
@@ -724,9 +738,19 @@ contracts and Phase 5 event-stream parity. It adds no interaction or response
 policy; it supplies the chronological orchestration required to exercise the
 already ported domain contracts.
 
-Status: Pending. Deterministic interaction/response primitives are ported, but
-canonical policy dispatch and chronological event parity are blocked until this
-layer exists.
+Status: Next phase. Deterministic interaction/response primitives are ported,
+but canonical policy dispatch and chronological event parity remain blocked
+until this layer exists. Phase 4B/4C now supplies the completed aggregate and
+causal context/location streams required as its input.
+
+Next implementation slice:
+
+- Add one runtime-neutral interaction replay boundary consuming the explicit
+  Phase 4B streams, with independent `1m` and `5m` detector state.
+- Advance only newly available response-timeframe evidence and emit explicit
+  interaction transition facts before wiring opportunity lifecycle behavior.
+- Port the canonical PD policy dispatch at that boundary; do not select
+  templates from location matches in the orchestration shell.
 
 Required work:
 

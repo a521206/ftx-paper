@@ -21,7 +21,7 @@ from datetime import date, datetime
 import json
 import math
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 from ftx_paper.config import PaperConfig
@@ -31,9 +31,12 @@ from ftx_paper.strategies.orderflow import observe_market
 from ftx_paper.strategies.orderflow.state_machine import ReplayMachine
 from ftx_paper.strategies.orderflow.evidence import (
     PaperFeatureAdapter,
+    SerializedEvidenceAdapter,
     evidence_payload,
     produce_evidence,
 )
+from ftx_paper.strategies.orderflow.context_location_replay import replay_context_location_artifact
+from ftx_paper.strategies.orderflow.evidence_publication import EvidencePublication
 from ftx_paper.strategies.orderflow.canonical.orderflow.value_publication import (
     prior_profile_is_complete,
     publish_value_references,
@@ -287,6 +290,18 @@ class OrderflowReplayEngine:
             "contract_type": rows[0]["contract_type"],
             "source_fingerprint": artifact["source_fingerprint"],
         }
+        phase3_artifact = artifact
+        phase4_evidence = cast(EvidencePublication, produce_evidence(
+            phase3_artifact,
+            session_date=session_date,
+            adapter=SerializedEvidenceAdapter({"evidence": final_evidence}),
+        )["publication"])
+        phase4_replay = replay_context_location_artifact(
+            phase3_artifact,
+            session_date=session_date,
+            evidence=phase4_evidence,
+            replay_clock=f"{session_date}T{str(rows[-1]['time']).split('T')[-1][:5]}",
+        )
 
         return {
             "artifact_type": "canonical_phase3_5_replay",
@@ -304,12 +319,14 @@ class OrderflowReplayEngine:
                 },
                 "source_fingerprint": artifact["source_fingerprint"],
             },
+            "phase3_artifact": phase3_artifact,
             "replay_records": replay_records,
             "registered_locations": locations,
             "prior_value": final_evidence["prior_value"],
             "context_stream_id": final_evidence["context_stream_id"],
             "parity_phase_facts": {
                 "context_publication": list(final_state.context_publications),
+                **phase4_replay.parity_phase_facts(),
             },
             "evidence": final_evidence,
         }

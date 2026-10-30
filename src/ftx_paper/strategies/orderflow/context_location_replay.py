@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import math
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .evidence_publication import EvidencePublication
 from .hierarchy import MarketContext
@@ -23,7 +24,10 @@ from .state_machine_types import LocationRecord, LocationRegistry, MarketContext
 
 
 def _instant(value: str) -> datetime:
-    return datetime.strptime(value, "%Y-%m-%dT%H:%M").replace(tzinfo=timezone.utc)
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+    return parsed
 
 
 def _timestamp(value: datetime) -> str:
@@ -135,6 +139,13 @@ def replay_context_location(
     """Replay completed aggregates and emit point-in-time causal facts."""
     return _replay_market(
         observe_market(rows), session_date=session_date, evidence=evidence,
+        replay_clock=max(
+            (
+                f"{session_date}T{str(row['time']).split('T')[-1][:5]}"
+                for row in rows
+            ),
+            default="",
+        ),
     )
 
 
@@ -143,6 +154,7 @@ def replay_context_location_artifact(
     *,
     session_date: str,
     evidence: EvidencePublication,
+    replay_clock: str | None = None,
 ) -> ContextLocationReplay:
     """Replay the completed aggregate sections emitted by Phase 3."""
     raw_aggregates = payload.get("aggregates")
@@ -183,6 +195,7 @@ def replay_context_location_artifact(
     market = MarketObservation(aggregates, (), {}, source_fingerprint)
     return _replay_market(
         market, session_date=session_date, evidence=evidence,
+        replay_clock=replay_clock,
     )
 
 
@@ -191,8 +204,11 @@ def _replay_market(
     *,
     session_date: str,
     evidence: EvidencePublication,
+    replay_clock: str | None,
 ) -> ContextLocationReplay:
-    observations = _completed_observations(market.aggregates, session_date=session_date)
+    observations = _completed_observations(
+        market.aggregates, session_date=session_date, replay_clock=replay_clock,
+    )
     source = ReplayInputAdapter()
     source.process(observations)
     store = MarketContextStore()
@@ -202,7 +218,12 @@ def _replay_market(
     for location in evidence.locations:
         registry.register(location)
     aggregates = sorted(
-        (item for timeframe in ("1m", "5m") for item in market.aggregates[timeframe] if item.session_date == session_date),
+        (
+            item for timeframe in ("1m", "5m")
+            for item in market.aggregates[timeframe]
+            if item.session_date == session_date
+            and (replay_clock is None or item.available_at <= replay_clock)
+        ),
         key=lambda item: (item.available_at, item.timeframe, item.time),
     )
     facts: list[dict[str, Any]] = []
@@ -255,16 +276,27 @@ def _replay_market(
             else ()
         )
         facts.append(_context_fact(aggregate, context, location_values, unavailable))
-    return ContextLocationReplay(tuple(item.to_dict() for item in source.state.events), tuple(facts))
+    lineage_by_identity = {item.identity: list(item.lineage) for item in observations}
+    source_facts = []
+    for event in source.state.events:
+        fact = event.to_dict()
+        fact["lineage"] = lineage_by_identity.get(event.identity, [])
+        source_facts.append(fact)
+    return ContextLocationReplay(tuple(source_facts), tuple(facts))
 
 
-def _completed_observations(aggregates: Mapping[str, Sequence[Aggregate]], *, session_date: str) -> tuple[CompletedObservation, ...]:
+def _completed_observations(
+    aggregates: Mapping[str, Sequence[Aggregate]], *, session_date: str, replay_clock: str | None,
+) -> tuple[CompletedObservation, ...]:
     one_minute = aggregates["1m"]
     identities = {aggregate.time: f"aggregate:1m:{aggregate.time}" for aggregate in one_minute}
     result: list[CompletedObservation] = []
     for timeframe in ("1m", "5m"):
         for aggregate in aggregates[timeframe]:
-            if aggregate.session_date != session_date:
+            if (
+                aggregate.session_date != session_date
+                or (replay_clock is not None and aggregate.available_at > replay_clock)
+            ):
                 continue
             children = _causal_children(aggregate, one_minute)
             if timeframe == "5m" and len(children) != 5:

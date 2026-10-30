@@ -22,7 +22,10 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from ftx_paper.config import PaperConfig
-
+from ftx_paper.strategies.orderflow.parity_artifacts import (
+    build_phase4_artifact,
+    compare_phase4_manifests,
+)
 
 PHASE35_FIELDS = (
     "atr", "locations", "vwap_measurements", "prior_value", "contexts",
@@ -35,6 +38,7 @@ PHASE35_ATR_INDEPENDENT_FIELDS = tuple(
 PHASE3_FIELDS = (
     "source_fingerprint", "aggregates", "source_gaps", "issues", "session_boundaries",
 )
+PHASE4_STREAMS = ("source_observation", "context_location")
 
 
 def _digest(value: Any) -> str:
@@ -196,6 +200,30 @@ def _paper_phase35_projection(session_result: dict[str, Any]) -> dict[str, Any]:
         "context_stream_id": raw.get("context_stream_id"),
         "location_stream_id": raw.get("location_stream_id"),
     }
+
+
+def _compare_phase4(canonical_path: Path, paper: dict[str, Any], session_date: str) -> dict[str, Any]:
+    """Compare explicit causal source/context streams after Phase 4B replay."""
+    try:
+        canonical_payload = json.loads(canonical_path.read_text(encoding="utf-8"))
+        canonical_session = canonical_payload["sessions"][session_date]
+        canonical_facts = canonical_session.get("parity_phase_facts", {})
+        paper_facts = paper.get("parity_phase_facts", {})
+        canonical = build_phase4_artifact(
+            run_id=f"canonical-{session_date}", producer={"name": "NiftyZoning"},
+            scope={"date": session_date}, payload={"parity_phase_facts": canonical_facts},
+        )
+        paper_artifact = build_phase4_artifact(
+            run_id=f"paper-{session_date}", producer={"name": "ftx-paper"},
+            scope={"date": session_date}, payload={"parity_phase_facts": paper_facts},
+        )
+        return compare_phase4_manifests(
+            canonical, paper_artifact, streams=PHASE4_STREAMS,
+            canonical_records=lambda stream: canonical["phase_streams"][stream],
+            paper_records=lambda stream: paper_artifact["phase_streams"][stream],
+        )
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return {"status": "INCOMPLETE", "stream": "source_observation", "reason": str(exc)}
 
 
 def _environment(root: Path, *, paper_root: Path | None = None) -> dict[str, str]:
@@ -430,10 +458,16 @@ def compare_date(
             phase35 = _compare_phase35(
                 canonical_projection, paper_replay,
             )
+        phase4 = (
+            _compare_phase4(canonical_path, paper_replay, session_date)
+            if canonical_path is not None and paper_replay is not None
+            else {"status": "INCOMPLETE", "stream": "source_observation", "reason": "replay artifact unavailable"}
+        )
         return {
             "date": session_date,
             "phase3": phase3,
             "phase3_5": phase35,
+            "phase4": phase4,
             "canonical_replay": {"status": "MATCHED" if canonical_projection else "INCOMPLETE"},
             "paper_replay": {"status": "MATCHED" if paper_replay else "INCOMPLETE"},
         }
@@ -473,6 +507,7 @@ def main(argv: list[str] | None = None) -> int:
         item.get("phase3", {}).get("status") == "MATCHED"
         and
         item.get("phase3_5", {}).get("status") in {"MATCHED", "INPUT_VARIANCE"}
+        and item.get("phase4", {}).get("status") == "MATCHED"
         for item in results
     ) else 1
 
