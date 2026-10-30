@@ -6,7 +6,7 @@ import math
 
 from ftx_paper.contracts import Instrument, OptionType, OrderSide
 from ftx_paper.domain.portfolio import PortfolioState
-from .exits import ExitStateMachine, PositionState
+from ftx_paper.strategies.shared.exits import ExitStateMachine, PositionState
 from .risk import VehicleRiskLimits
 from .config import (
     AFTERNOON_ENTRY_MINUTES,

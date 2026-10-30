@@ -15,7 +15,7 @@ from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.runtime.futures_source import FuturesSessionSourceResolver
 from ftx_paper.runtime import RuntimeSession, RuntimeStore
 from ftx_paper.domain.capital import ResearchCapitalProfile
-from ftx_paper.strategy import ConfiguredLiveStrategy
+from ftx_paper.strategies.research import ConfiguredLiveStrategy
 import ftx_paper.broker.zerodha as zerodha
 import ftx_paper.runtime.session as session_module
 

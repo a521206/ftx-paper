@@ -2,8 +2,8 @@ from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
 
 from ftx_paper.contracts import Instrument, MarketBar
-from ftx_paper.strategy.orderflow_capture import ReplayRecord, detached_asdict
-from ftx_paper.strategy.orderflow_contract import OrderflowObservation, OrderflowObservationContext
+from ftx_paper.strategies.orderflow.orderflow_capture import ReplayRecord, detached_asdict
+from ftx_paper.strategies.orderflow.orderflow_contract import OrderflowObservation, OrderflowObservationContext
 from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.runtime.store import RuntimeStore
 

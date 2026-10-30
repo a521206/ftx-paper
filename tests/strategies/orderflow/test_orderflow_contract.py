@@ -5,7 +5,7 @@ import pytest
 
 from ftx_paper.market import AggregatorConfig, DecisionBundle
 from ftx_paper.contracts import MarketRole
-from ftx_paper.strategy import (
+from ftx_paper.strategies.orderflow import (
     ExecutionMode,
     FeatureRequirement,
     OrderflowContext,

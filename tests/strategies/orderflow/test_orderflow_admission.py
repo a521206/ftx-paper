@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
-from ftx_paper.strategy import PredicateStatus, SetupOpportunity, evaluate_admission
-from ftx_paper.strategy.orderflow import _admission_projection
+from ftx_paper.strategies.orderflow import PredicateStatus, SetupOpportunity, evaluate_admission
+from ftx_paper.strategies.orderflow import _admission_projection
 
 
 def _opportunity() -> SetupOpportunity:

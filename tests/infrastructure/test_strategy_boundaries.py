@@ -7,7 +7,9 @@ from ftx_paper.domain import (
     AccountAggregate, CapitalRuntimeContext, DecisionContext, PortfolioState,
     RESEARCH_CAPITAL_PROFILE,
 )
-from ftx_paper.strategy import ConfiguredStrategyFactory
+from ftx_paper.strategies.research import ConfiguredStrategyFactory
+from ftx_paper.strategies import orderflow as orderflow_entry
+from ftx_paper.strategies import research as research_entry
 
 
 def _order(order_id: str, quantity: int = 1) -> OrderIntent:
@@ -74,3 +76,9 @@ def test_strategy_factory_selects_orderflow_explicitly() -> None:
 
     assert strategy.metadata.name == "ftx-paper-orderflow"
     assert strategy.metadata.version == "0.1.0"
+
+
+def test_strategy_entry_points_are_explicitly_separate() -> None:
+    assert research_entry.STRATEGY_ID == "ftx-paper-research"
+    assert orderflow_entry.STRATEGY_ID == "orderflow-research"
+    assert research_entry.ConfiguredLiveStrategy is not orderflow_entry.OrderflowStrategy

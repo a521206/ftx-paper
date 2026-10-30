@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from ftx_paper.strategy import (
+from ftx_paper.strategies.orderflow import (
     EntryPolicy,
     OrderflowObservation,
     OrderflowObservationContext,
@@ -73,7 +73,7 @@ def test_setup_availability_precedes_trigger_eligibility() -> None:
 
 def test_trigger_evidence_requires_causal_availability() -> None:
     with pytest.raises(ValueError, match="causally available"):
-        from ftx_paper.strategy.orderflow_trigger import TriggerObservation
+        from ftx_paper.strategies.orderflow.orderflow_trigger import TriggerObservation
 
         TriggerObservation(
             intent_id="intent", observed_at="2026-01-01T10:01:00+00:00",

@@ -1,5 +1,6 @@
 """Snapshot validation and restoration for the orderflow strategy."""
 
+
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -11,7 +12,7 @@ from .orderflow_codec import (
     exit_action_from_snapshot,
     position_from_snapshot,
 )
-from .exits import ExitStateMachine
+from ftx_paper.strategies.shared.exits import ExitStateMachine
 from .orderflow_config import OrderflowConfig
 from .orderflow_capture import CaptureMode
 from .orderflow_context import ContextHistory, ContextVersionRef
@@ -20,12 +21,12 @@ from .orderflow_location import LocationRegistry
 from .orderflow_opportunity import IntentStatus, PendingTrigger, SetupOpportunity, TradeIntent
 from .orderflow_trigger import EntryPolicy
 from .orderflow_position_manager import OrderflowPositionManager
-from .templates import TRADE_TEMPLATES
-from .policy_contract import ExecutionMode
-from .snapshot_envelope import unwrap_snapshot
+from ftx_paper.strategies.shared.templates import TRADE_TEMPLATES
+from ftx_paper.strategies.shared.policy_contract import ExecutionMode
+from ftx_paper.strategies.shared.snapshot_envelope import unwrap_snapshot
 
 if TYPE_CHECKING:
-    from .orderflow import OrderflowPolicy, OrderflowStrategy
+    from ftx_paper.strategies.orderflow.policy import OrderflowPolicy, OrderflowStrategy
 
 
 def _intent_from_snapshot(raw: Mapping[str, object]) -> TradeIntent:
@@ -227,11 +228,11 @@ def policy_from_snapshot(
 def strategy_from_snapshot(
     cls: type[OrderflowStrategy], snapshot: Mapping[str, object],
 ) -> OrderflowStrategy:
-    from .coordinator import SharedDecisionCoordinator
+    from ftx_paper.strategies.shared.coordinator import SharedDecisionCoordinator
 
     _, payload = unwrap_snapshot(snapshot)
     strategy = cls.__new__(cls)
-    from .orderflow import OrderflowPolicy
+    from ftx_paper.strategies.orderflow.policy import OrderflowPolicy
 
     strategy.policy = policy_from_snapshot(OrderflowPolicy, payload)
     strategy.coordinator = SharedDecisionCoordinator(strategy.policy)

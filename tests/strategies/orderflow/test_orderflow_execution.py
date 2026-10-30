@@ -1,6 +1,8 @@
 from datetime import UTC, datetime
 from math import inf, nan
 
+import pytest
+
 from ftx_paper.contracts import Instrument, OrderIntent, OrderRole, OrderSide
 from ftx_paper.config import NIFTY_LOT_SIZE
 from ftx_paper.domain.capital import CapitalRuntimeContext, RESEARCH_CAPITAL_PROFILE
@@ -8,7 +10,8 @@ from ftx_paper.domain.decision_context import (
     CapitalSnapshot, DecisionContext, ExposureSnapshot, MarginSnapshot,
 )
 from ftx_paper.domain.portfolio import PortfolioState
-from ftx_paper.execution import PaperExecutionCoordinator
+from ftx_paper.execution import PaperExecutionCoordinator, entry_fill_decision, validate_exit_plan
+from ftx_paper.contracts import ExitPlanRule
 from ftx_paper.execution.order_proposal import build_entry_order
 
 
@@ -22,12 +25,52 @@ def _decision_context(*, available: float = 1000.0) -> DecisionContext:
     )
 
 
+def test_entry_fill_uses_trigger_and_adjusts_initial_risk() -> None:
+    long_fill = entry_fill_decision(
+        direction="long", trigger_price=100.0, requested_fill_price=100.0,
+        bar_open=102.0, failure_boundary=98.0,
+    )
+    short_fill = entry_fill_decision(
+        direction="short", trigger_price=100.0, requested_fill_price=100.0,
+        bar_open=98.0, failure_boundary=102.0,
+    )
+
+    assert long_fill.fill_price == 102.0
+    assert long_fill.hard_stop == 98.0
+    assert long_fill.risk_metrics["actual_risk_bp"] == pytest.approx(392.156862745098)
+    assert short_fill.fill_price == 98.0
+    assert short_fill.hard_stop == 102.0
+
+
+def test_entry_fill_rejects_failure_boundary_that_does_not_protect_gap_fill() -> None:
+    decision = entry_fill_decision(
+        direction="long", trigger_price=100.0, requested_fill_price=100.0,
+        bar_open=102.0, failure_boundary=103.0,
+    )
+
+    assert decision.fill_price == 102.0
+    assert decision.hard_stop is None
+
+
+def test_exit_plan_is_revalidated_against_actual_fill() -> None:
+    rule = ExitPlanRule(
+        rule_id="target", location="OR_HIGH", mode="fixed_target", required=True,
+        trigger="touch", level=101.0,
+    )
+
+    decision = validate_exit_plan((rule,), direction="long", fill_price=102.0)
+
+    assert decision.accepted == ()
+    assert decision.required_rejections == (rule,)
+
+
 def test_execution_boundary_builds_entry_from_diagnostic_proposal() -> None:
     instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
     order = build_entry_order(
         {
             "eligible": True, "direction": "long", "instrument": instrument.symbol,
             "lifecycle_id": "lifecycle-1", "stop_price": 99.0,
+            "trigger_price": 100.0, "requested_fill_price": 101.0,
             "execution_group_id": "group-1", "strategy_id": "orderflow",
         },
         instrument=instrument,
@@ -38,6 +81,8 @@ def test_execution_boundary_builds_entry_from_diagnostic_proposal() -> None:
     assert order.quantity == 1
     assert order.execution_group_id == "group-1"
     assert order.stop_price == 99.0
+    assert order.trigger_price == 100.0
+    assert order.requested_fill_price == 101.0
 
 
 def test_execution_boundary_does_not_build_without_current_margin() -> None:

@@ -1,13 +1,14 @@
 """Configuration and stable constants for the orderflow strategy."""
 
+
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import hashlib
 import json
 
-from .orderflow_capture import CaptureMode
-from .policy_contract import ExecutionMode
+from ftx_paper.strategies.orderflow.orderflow_capture import CaptureMode
+from ftx_paper.strategies.shared.policy_contract import ExecutionMode
 
 
 ORDERFLOW_NAME = "ftx-paper-orderflow"

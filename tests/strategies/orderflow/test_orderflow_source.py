@@ -4,7 +4,7 @@ from dataclasses import replace
 import pytest
 
 from ftx_paper.contracts import Instrument, MarketBar
-from ftx_paper.strategy import (
+from ftx_paper.strategies.orderflow import (
     normalize_session_date,
     prepare_replay_input,
 )

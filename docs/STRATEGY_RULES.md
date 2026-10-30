@@ -1,5 +1,9 @@
 # FTX Paper Research Strategy Rules
 
+This document covers only `ftx-paper-research`. Orderflow is a separate
+strategy with its own entry point and contracts; see
+[Strategy boundaries](STRATEGY_BOUNDARIES.md).
+
 This document specifies the behavior of the `ftx-paper-research` strategy:
 locations, entry and exit policies, admission filters, sizing, and session
 boundaries. It is a research and review contract, not an installation guide or

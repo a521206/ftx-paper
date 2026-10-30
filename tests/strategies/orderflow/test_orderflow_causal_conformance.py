@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from ftx_paper.contracts import Instrument, MarketBar
-from ftx_paper.strategy import (
+from ftx_paper.strategies.orderflow import (
     OrderflowObservation, OrderflowObservationContext, CausalOrderflowProducer,
     observe_trigger,
 )

@@ -22,8 +22,8 @@ from ftx_paper.contracts import (
 from ftx_paper.market import AggregatorConfig, CompletedBarAggregator, FeatureService, InstrumentKey, LiveMarketNormalizer
 from ftx_paper.domain import AccountAggregate
 from ftx_paper.execution.events import ExecutionNotification
-from ftx_paper.strategy.protocol import Strategy
-from ftx_paper.strategy.orderflow_producer import CausalOrderflowProducer
+from ftx_paper.strategies.shared.protocol import Strategy
+from ftx_paper.strategies.orderflow.orderflow_producer import CausalOrderflowProducer
 from ftx_paper.market.requirements import feature_union
 from ftx_paper.execution.cost import futures_cost
 from ftx_paper.execution.settlement import ExitValidationError, validate_exit_order

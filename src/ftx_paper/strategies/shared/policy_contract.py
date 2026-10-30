@@ -14,7 +14,7 @@ from ftx_paper.market.requirements import FeatureRequirement, feature_union
 
 if TYPE_CHECKING:
     from ftx_paper.market.bundles import DecisionBundle
-    from ftx_paper.strategy.decision import DecisionEvent
+    from ftx_paper.strategies.research.decision import DecisionEvent
 
 
 class ExecutionMode(StrEnum):

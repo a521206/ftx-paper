@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from ftx_paper.contracts import Instrument, MarketBar
-from ftx_paper.strategy import CausalOrderflowProducer, source_fingerprint
+from ftx_paper.strategies.orderflow import CausalOrderflowProducer, source_fingerprint
 
 
 def test_causal_producer_builds_complete_five_minute_context() -> None:

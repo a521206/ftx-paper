@@ -2,10 +2,10 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from ftx_paper.contracts import Instrument, MarketBar, OrderIntent, OrderRole, OrderSide
-from ftx_paper.strategy.response import ResponseCandle, build_response_spec, evaluate_response_window
+from ftx_paper.strategies.shared.response import ResponseCandle, build_response_spec, evaluate_response_window
 import pytest
 
-from ftx_paper.strategy.templates import (
+from ftx_paper.strategies.shared.templates import (
     Direction,
     ExitExecutionTiming,
     ExitMode,
@@ -15,9 +15,9 @@ from ftx_paper.strategy.templates import (
     TradeExit,
     TRADE_TEMPLATES,
 )
-from ftx_paper.strategy.orderflow_exit import evaluate_exit_plan_rule, exit_plan_from_template
-from ftx_paper.strategy.orderflow_config import OrderflowConfig
-from ftx_paper.strategy.orderflow_position_manager import OrderflowPositionManager
+from ftx_paper.strategies.orderflow.orderflow_exit import evaluate_exit_plan_rule, exit_plan_from_template
+from ftx_paper.strategies.orderflow.orderflow_config import OrderflowConfig
+from ftx_paper.strategies.orderflow.orderflow_position_manager import OrderflowPositionManager
 
 
 def test_template_registry_derives_direction_and_response_geometry() -> None:

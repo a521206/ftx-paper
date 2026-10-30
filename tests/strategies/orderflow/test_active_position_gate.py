@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from ftx_paper.strategy.active_position_gate import ActivePositionGate
+from ftx_paper.strategies.research.active_position_gate import ActivePositionGate
 
 
 def _bar(available_at: str, close: float, volume: float = 10.0) -> SimpleNamespace:

@@ -8,11 +8,11 @@ from typing import cast
 
 from ftx_paper.contracts import MarketBar, OrderIntent
 from ftx_paper.market.bundles import DecisionBundle
-from ftx_paper.strategy.protocol import Strategy, StrategyMetadata
-from ftx_paper.strategy.decision import DecisionEvent
+from ftx_paper.strategies.shared.protocol import Strategy, StrategyMetadata
+from ftx_paper.strategies.research.decision import DecisionEvent
 from ftx_paper.domain.decision_context import DecisionContext
 from ftx_paper.execution.events import ExecutionNotification
-from ftx_paper.strategy.exits import ExitAction
+from ftx_paper.strategies.shared.exits import ExitAction
 
 
 @dataclass(frozen=True, slots=True)

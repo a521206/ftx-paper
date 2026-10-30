@@ -2,8 +2,8 @@ import pytest
 
 from datetime import datetime, timezone
 
-from ftx_paper.strategy.orderflow_capture import ReplayRecord
-from ftx_paper.strategy.orderflow_reporting import (
+from ftx_paper.strategies.orderflow.orderflow_capture import ReplayRecord
+from ftx_paper.strategies.orderflow.orderflow_reporting import (
     build_multi_session_report,
     build_session_summary,
     causal_actions,

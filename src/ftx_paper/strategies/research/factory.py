@@ -6,9 +6,9 @@ from collections.abc import Callable
 from typing import Protocol
 
 from ftx_paper.domain.capital import RESEARCH_CAPITAL_PROFILE, ResearchCapitalProfile
-from .protocol import Strategy
+from ftx_paper.strategies.shared.protocol import Strategy
 
-from .live import ConfiguredLiveStrategy
+from ftx_paper.strategies.research import ConfiguredLiveStrategy
 
 
 class StrategyFactory(Protocol):
@@ -28,7 +28,7 @@ class ConfiguredStrategyFactory:
         if not isinstance(selected, str):
             raise TypeError("strategy selection must be a string")
         if selected == "ftx-paper-orderflow":
-            from .orderflow import OrderflowConfig, OrderflowStrategy
+            from ftx_paper.strategies.orderflow import OrderflowConfig, OrderflowStrategy
 
             config = kwargs.pop("config", None)
             for key in (

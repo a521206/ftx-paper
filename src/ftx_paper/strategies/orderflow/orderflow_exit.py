@@ -7,8 +7,8 @@ from dataclasses import dataclass
 
 from ftx_paper.contracts import ExitPlanRule, MarketBar, OrderSide, exit_plan_from_payload
 
-from .response import ResponseCandle, ResponseSpec, ResponseOutcomeStatus, evaluate_response_window
-from .templates import Direction, ResponseType, TradeExit
+from ftx_paper.strategies.shared.response import ResponseCandle, ResponseSpec, ResponseOutcomeStatus, evaluate_response_window
+from ftx_paper.strategies.shared.templates import Direction, ResponseType, TradeExit
 
 
 def exit_plan_from_template(

@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from ftx_paper.strategy import (
+from ftx_paper.strategies.orderflow import (
     ContextHistory, ContextVersionRef, MarketContext, OpeningGapState,
     Permission, RegimePermission, SessionLevels, ValueReference, advance_opening_gap,
     classify_context_relation,

@@ -27,11 +27,11 @@ from ftx_paper.runtime.engine import PaperEngine
 from ftx_paper.runtime.decision_turn import DecisionTurn, evaluate_turn
 from ftx_paper.runtime.orderflow_pipeline import ingest_orderflow_bar
 from ftx_paper.runtime.events import is_decision_event
-from ftx_paper.strategy.orderflow_contract import feature_values_to_dict, stable_orderflow_id
-from ftx_paper.strategy.orderflow_observation import observe_market
-from ftx_paper.strategy.orderflow_producer import CausalOrderflowProducer
-from ftx_paper.strategy.orderflow_replay import ReplayMachine
-from ftx_paper.strategy.orderflow_source import prepare_replay_input
+from ftx_paper.strategies.orderflow.orderflow_contract import feature_values_to_dict, stable_orderflow_id
+from ftx_paper.strategies.orderflow.orderflow_observation import observe_market
+from ftx_paper.strategies.orderflow.orderflow_producer import CausalOrderflowProducer
+from ftx_paper.strategies.orderflow.orderflow_replay import ReplayMachine
+from ftx_paper.strategies.orderflow.orderflow_source import prepare_replay_input
 from ftx_paper.runtime.futures_source import (
     FuturesSessionSourceResolver, materialize_orderflow_daily_atr, virtual_continuous_bar,
 )
@@ -48,19 +48,20 @@ from ftx_paper.execution.lifecycle import (
 )
 from ftx_paper.execution.cost import futures_cost, synthetic_futures_cost
 from ftx_paper.execution import PaperExecutionCoordinator
+from ftx_paper.execution.entry_fill import entry_fill_decision, validate_exit_plan
 from ftx_paper.execution.settlement import ExitValidationError, validate_exit_order
-from ftx_paper.strategy.exits import ExitAction
-from ftx_paper.strategy import ConfiguredStrategyFactory, StrategyFactory
-from ftx_paper.strategy.orderflow import OrderflowConfig
-from ftx_paper.strategy.orderflow_capture import CaptureMode, ReplayRecord
-from ftx_paper.strategy.orderflow_reporting import (
+from ftx_paper.strategies.shared.exits import ExitAction
+from ftx_paper.strategies.research import ConfiguredStrategyFactory, StrategyFactory
+from ftx_paper.strategies.orderflow import OrderflowConfig
+from ftx_paper.strategies.orderflow.orderflow_capture import CaptureMode, ReplayRecord
+from ftx_paper.strategies.orderflow.orderflow_reporting import (
     build_session_summary,
     build_replay_summary,
     compare_paired_replay,
     detached_replay_records,
 )
-from ftx_paper.strategy.policy_contract import ExecutionMode
-from ftx_paper.strategy.config import (
+from ftx_paper.strategies.shared.policy_contract import ExecutionMode
+from ftx_paper.strategies.research.config import (
     AFTERNOON_ENTRY_MINUTES,
     MORNING_ENTRY_MINUTES,
 )
@@ -936,12 +937,44 @@ class ReplayWorker:
                                                    "reason": "missing_synthetic_future_quote", "source": "replay",
                                                    "session_date": date})
                                 continue
-                            fill_price = entry_quote.price if entry_quote is not None else futures_bar.open
+                            execution_order = order
+                            if entry_quote is None:
+                                requested_fill = order.requested_fill_price or order.limit_price or futures_bar.open
+                                trigger_price = order.trigger_price or order.limit_price or requested_fill
+                                fill_decision = entry_fill_decision(
+                                    direction="long" if order.side is OrderSide.BUY else "short",
+                                    trigger_price=trigger_price,
+                                    requested_fill_price=requested_fill,
+                                    bar_open=futures_bar.open,
+                                    failure_boundary=float(order.stop_price) if order.stop_price is not None else futures_bar.open,
+                                )
+                                if fill_decision.hard_stop is None:
+                                    all_events.append({"event_type": "ENTRY_BLOCKED_RISK", "decision_id": order.client_order_id,
+                                                       "reason": "failure_boundary_not_protective", "timestamp": futures_bar.timestamp.isoformat(),
+                                                       "source": "replay", "session_date": date})
+                                    continue
+                                execution_order = replace(order, stop_price=fill_decision.hard_stop)
+                                fill_price = fill_decision.fill_price
+                            else:
+                                fill_price = entry_quote.price
+                            exit_decision = validate_exit_plan(
+                                order.exit_plan,
+                                direction="long" if order.side is OrderSide.BUY else "short",
+                                fill_price=fill_price,
+                            )
+                            if exit_decision.required_rejections:
+                                all_events.append({"event_type": "ENTRY_BLOCKED_EXIT_PLAN", "decision_id": order.client_order_id,
+                                                   "reason": "required_exit_plan_invalid", "rejected_rule_ids": tuple(
+                                                       rule.rule_id for rule in exit_decision.required_rejections
+                                                   ), "timestamp": futures_bar.timestamp.isoformat(),
+                                                   "source": "replay", "session_date": date})
+                                continue
+                            execution_order = replace(execution_order, exit_plan=exit_decision.accepted)
                             fill_id = f"replay-entry:{order.client_order_id}:{futures_bar.timestamp.isoformat()}"
                             self.lifecycle.apply_fill(fill_id, lambda: coordinator.fill(
-                                order, price=fill_price, timestamp=futures_bar.timestamp.isoformat(), fill_id=fill_id,
+                                execution_order, price=fill_price, timestamp=futures_bar.timestamp.isoformat(), fill_id=fill_id,
                             ))
-                            engine.register_entry(order, fill_price=fill_price,
+                            engine.register_entry(execution_order, fill_price=fill_price,
                                                   entry_fill_time=futures_bar.timestamp,
                                                   reference_price=futures_bar.close)
                             all_events.extend((
@@ -982,7 +1015,7 @@ class ReplayWorker:
                                                 "instrument": order.instrument.symbol, "side": order.side.value,
                                                 "quantity": order.quantity, "entry_timestamp": futures_bar.timestamp.isoformat(),
                                                 "entry_price": fill_price, "vehicle": order.vehicle,
-                                                "stop_price": order.stop_price, "cell": order.cell,
+                                                "stop_price": execution_order.stop_price, "cell": order.cell,
                                                 "entry_bar": order.entry_bar or engine.bars_seen})
                         elif order.role is OrderRole.EXIT:
                             try:
@@ -1243,15 +1276,39 @@ class ReplayWorker:
                             ledger_records.append({"event_type": "CANCELLATION", "decision_id": order.client_order_id,
                                                    "timestamp": futures_bar.timestamp.isoformat(), "reason": "missing_synthetic_future_quote"})
                             continue
-                        requested_fill = (
-                            float(order.limit_price)
-                            if order.limit_price is not None else entry_bar.open
+                        execution_order = order
+                        if entry_quote is not None:
+                            fill_price = entry_quote.price
+                        else:
+                            requested_fill = order.requested_fill_price or order.limit_price or entry_bar.open
+                            trigger_price = order.trigger_price or order.limit_price or requested_fill
+                            fill_decision = entry_fill_decision(
+                                direction="long" if order.side is OrderSide.BUY else "short",
+                                trigger_price=trigger_price,
+                                requested_fill_price=requested_fill,
+                                bar_open=entry_bar.open,
+                                failure_boundary=float(order.stop_price) if order.stop_price is not None else entry_bar.open,
+                            )
+                            if fill_decision.hard_stop is None:
+                                all_events.append({"event_type": "ENTRY_BLOCKED_RISK", "decision_id": order.client_order_id,
+                                                   "reason": "failure_boundary_not_protective", "timestamp": entry_timestamp,
+                                                   "source": "replay", "session_date": date})
+                                continue
+                            execution_order = replace(order, stop_price=fill_decision.hard_stop)
+                            fill_price = fill_decision.fill_price
+                        exit_decision = validate_exit_plan(
+                            order.exit_plan,
+                            direction="long" if order.side is OrderSide.BUY else "short",
+                            fill_price=fill_price,
                         )
-                        fill_price = entry_quote.price if entry_quote is not None else (
-                            max(requested_fill, entry_bar.open)
-                            if order.side is OrderSide.BUY
-                            else min(requested_fill, entry_bar.open)
-                        )
+                        if exit_decision.required_rejections:
+                            all_events.append({"event_type": "ENTRY_BLOCKED_EXIT_PLAN", "decision_id": order.client_order_id,
+                                               "reason": "required_exit_plan_invalid", "rejected_rule_ids": tuple(
+                                                   rule.rule_id for rule in exit_decision.required_rejections
+                                               ), "timestamp": entry_timestamp,
+                                               "source": "replay", "session_date": date})
+                            continue
+                        execution_order = replace(execution_order, exit_plan=exit_decision.accepted)
                         for event in reversed(all_events):
                             if event.get("decision_id") == order.client_order_id:
                                 event.update({"vehicle": order.vehicle, "entry_price": fill_price})
@@ -1269,14 +1326,14 @@ class ReplayWorker:
                         ledger_records.append({"event_type": "FILL", "decision_id": order.client_order_id,
                                                 "timestamp": entry_timestamp,
                                                "quantity": order.quantity, "price": fill_price})
-                        engine.register_entry(order, fill_price=fill_price,
+                        engine.register_entry(execution_order, fill_price=fill_price,
                                                entry_fill_time=entry_bar.timestamp,
                                                reference_price=entry_bar.close)
                         if order.vehicle == "futures":
                             self.lifecycle.apply_fill(
                                 order.client_order_id,
                                 lambda: coordinator.fill(
-                                    order, price=fill_price,
+                                    execution_order, price=fill_price,
                                     timestamp=entry_timestamp,
                                 ),
                             )
@@ -1293,12 +1350,12 @@ class ReplayWorker:
                                             "side": order.side.value, "quantity": order.quantity,
                                              "entry_timestamp": entry_timestamp,
                                             "entry_price": fill_price, "vehicle": order.vehicle,
-                                            "stop_price": order.stop_price,
-                                            "initial_risk_points": abs(fill_price - order.stop_price)
-                                            if order.stop_price is not None else None,
-                                            "initial_risk_rs": abs(fill_price - order.stop_price)
-                                            * NIFTY_LOT_SIZE * order.quantity
-                                            if order.stop_price is not None else None,
+                                            "stop_price": execution_order.stop_price,
+                                            "initial_risk_points": abs(fill_price - execution_order.stop_price)
+                                             if execution_order.stop_price is not None else None,
+                                            "initial_risk_rs": abs(fill_price - execution_order.stop_price)
+                                             * NIFTY_LOT_SIZE * order.quantity
+                                             if execution_order.stop_price is not None else None,
                                             "cell": order.cell,
                                             "entry_bar": order.entry_bar or engine.bars_seen})
                         if entry_quote is not None:

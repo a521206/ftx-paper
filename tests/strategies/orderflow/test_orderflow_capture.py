@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from ftx_paper.strategy import CaptureMode, ReplayRecord, ReplayRecorder
+from ftx_paper.strategies.orderflow import CaptureMode, ReplayRecord, ReplayRecorder
 
 
 UTC = timezone.utc

@@ -16,7 +16,7 @@ from .policy_contract import ExecutionMode, StrategyPolicy
 
 if TYPE_CHECKING:
     from ftx_paper.market.bundles import DecisionBundle
-    from ftx_paper.strategy.decision import DecisionEvent
+    from ftx_paper.strategies.research.decision import DecisionEvent
 
 
 class SharedDecisionCoordinator:
@@ -30,7 +30,7 @@ class SharedDecisionCoordinator:
         bundle: DecisionBundle,
         context: DecisionContext,
     ) -> tuple[DecisionEvent, ...]:
-        from ftx_paper.strategy.decision import CandidateDecision, LiveDecision
+        from ftx_paper.strategies.research.decision import CandidateDecision, LiveDecision
 
         decisions = self.policy.evaluate(bundle, context)
         result: list[DecisionEvent] = []

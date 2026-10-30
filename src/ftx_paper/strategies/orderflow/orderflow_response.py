@@ -6,14 +6,14 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, time, timezone
 
-from .response import (
+from ftx_paper.strategies.shared.response import (
     ResponseCandle,
     ResponseEvaluation as GeometryResponseEvaluation,
     ResponseOutcomeStatus as GeometryResponseOutcomeStatus,
     build_response_spec,
     evaluate_response_window as evaluate_geometry_response_window,
 )
-from .templates import Direction, ResponseType, TRADE_TEMPLATES, TradeTemplate
+from ftx_paper.strategies.shared.templates import Direction, ResponseType, TRADE_TEMPLATES, TradeTemplate
 from ftx_paper.config import IST
 
 

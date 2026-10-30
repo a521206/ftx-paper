@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from ftx_paper.runtime.engine import MultiStrategyEngine
-from ftx_paper.strategy.protocol import StrategyMetadata
+from ftx_paper.strategies.shared.protocol import StrategyMetadata
 
 
 class _Strategy:

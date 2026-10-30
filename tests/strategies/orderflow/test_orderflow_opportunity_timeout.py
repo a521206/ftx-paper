@@ -1,9 +1,9 @@
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-from ftx_paper.strategy.opportunity_timeout import advance_opportunity_timeout
-from ftx_paper.strategy.orderflow_interaction import InteractionStatus, ProjectionSnapshot
-from ftx_paper.strategy.orderflow_opportunity import SetupOpportunity
+from ftx_paper.strategies.research.opportunity_timeout import advance_opportunity_timeout
+from ftx_paper.strategies.orderflow.orderflow_interaction import InteractionStatus, ProjectionSnapshot
+from ftx_paper.strategies.orderflow.orderflow_opportunity import SetupOpportunity
 
 
 UTC = timezone.utc

@@ -8,8 +8,9 @@ from ftx_paper.domain.decision_context import DecisionContext
 from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.market.bundles import DecisionBundle
 
-from .decision import DecisionEvent, IndependentLiveDecisionEngine
-from .policy_contract import ExecutionMode, FeatureRequirement
+from .decision import IndependentLiveDecisionEngine
+from ftx_paper.strategies.research.decision import DecisionEvent
+from ftx_paper.strategies.shared.policy_contract import ExecutionMode, FeatureRequirement
 
 
 class ResearchPolicyAdapter:

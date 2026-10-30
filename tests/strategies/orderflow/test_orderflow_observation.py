@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from ftx_paper.contracts import Instrument, MarketBar
-from ftx_paper.strategy import observe_market, prepare_replay_input
+from ftx_paper.strategies.orderflow import observe_market, prepare_replay_input
 
 
 def _rows(count: int = 6) -> list[MarketBar]:

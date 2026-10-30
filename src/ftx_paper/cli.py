@@ -13,7 +13,7 @@ from ftx_paper.domain.portfolio import PortfolioState
 from ftx_paper.infrastructure.sqlite.runtime_store import ProcessAlreadyRunningError
 from ftx_paper.runtime.store import RuntimeStore
 from ftx_paper.runtime.replay_worker import ReplayWorker
-from ftx_paper.strategy import ConfiguredStrategyFactory
+from ftx_paper.strategies.research import ConfiguredStrategyFactory
 from ftx_paper.runtime.engine import MultiStrategyEngine
 from ftx_paper.ui import create_ui_app
 from ftx_paper.broker.shoonya import ShoonyaAuth

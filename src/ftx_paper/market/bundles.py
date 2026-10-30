@@ -12,8 +12,8 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ftx_paper.market.feature_cache import FeatureSnapshot
-    from ftx_paper.strategy.orderflow_contract import OrderflowContext
-    from ftx_paper.strategy.policy_contract import StrategyPolicy
+    from ftx_paper.strategies.orderflow.orderflow_contract import OrderflowContext
+    from ftx_paper.strategies.shared.policy_contract import StrategyPolicy
 
 
 class SupportingInputs(TypedDict, total=False):

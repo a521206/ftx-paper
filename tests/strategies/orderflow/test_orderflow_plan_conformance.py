@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from ftx_paper.contracts import Instrument, MarketBar
-from ftx_paper.strategy import SourceIdentity, observe_market, prepare_replay_input
+from ftx_paper.strategies.orderflow import SourceIdentity, observe_market, prepare_replay_input
 from ftx_paper.contracts import build_decision_view, validate_decision_view
 
 

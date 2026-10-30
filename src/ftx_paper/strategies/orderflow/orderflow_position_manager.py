@@ -1,5 +1,6 @@
 """Strategy-local position and protective-exit state for orderflow."""
 
+
 from __future__ import annotations
 
 from dataclasses import replace
@@ -11,7 +12,7 @@ from zoneinfo import ZoneInfo
 from ftx_paper.config import SESSION_EXIT_DEADLINE_TIME
 from ftx_paper.contracts import MarketBar, OrderIntent, OrderSide
 
-from .exits import ExitAction, ExitStateMachine, PositionState
+from ftx_paper.strategies.shared.exits import ExitAction, ExitStateMachine, PositionState
 from .orderflow_vwap import MarketAggregate, calculate_session_vwap, calculate_vwap_stop
 from .orderflow_exit import evaluate_exit_plan_rule
 

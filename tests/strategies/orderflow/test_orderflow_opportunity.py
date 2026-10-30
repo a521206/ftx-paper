@@ -2,11 +2,11 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from ftx_paper.execution.events import ExecutionNotification
-from ftx_paper.strategy import (
+from ftx_paper.strategies.orderflow import (
     IntentStatus, OpportunityStatus, SetupOpportunity, TradeIntent, arm_intent, record_trigger,
 )
-from ftx_paper.strategy.orderflow import OrderflowPolicy
-from ftx_paper.strategy.orderflow_trigger import TriggerObservation
+from ftx_paper.strategies.orderflow import OrderflowPolicy
+from ftx_paper.strategies.orderflow.orderflow_trigger import TriggerObservation
 
 
 UTC = timezone.utc

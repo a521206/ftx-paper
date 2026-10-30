@@ -8,7 +8,7 @@ from enum import StrEnum
 from typing import Any
 
 from .orderflow_contract import OrderflowObservation
-from .templates import Direction, TriggerType
+from ftx_paper.strategies.shared.templates import Direction, TriggerType
 
 
 class EntryPolicy(StrEnum):

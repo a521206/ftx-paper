@@ -14,7 +14,7 @@ from .orderflow_trigger import EntryPolicy, TriggerObservation
 
 if TYPE_CHECKING:
     from .orderflow_interaction import LocationInteraction
-    from .templates import TradeTemplate
+    from ftx_paper.strategies.shared.templates import TradeTemplate
 
 
 class OpportunityStatus(StrEnum):

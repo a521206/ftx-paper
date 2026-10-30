@@ -15,9 +15,9 @@ from ftx_paper.broker import PaperBroker
 from ftx_paper.domain import PortfolioState
 from ftx_paper.market import LiveMarketNormalizer
 from ftx_paper.runtime.engine import EngineResult, PaperEngine
-from ftx_paper.strategy.decision import LiveDecision
-from ftx_paper.strategy.protocol import StrategyMetadata
-from ftx_paper.strategy.exits import ExitAction
+from ftx_paper.strategies.research.decision import LiveDecision
+from ftx_paper.strategies.shared.protocol import StrategyMetadata
+from ftx_paper.strategies.shared.exits import ExitAction
 
 
 class Feed:

@@ -5,10 +5,10 @@ from types import SimpleNamespace
 import pytest
 
 from ftx_paper.contracts import Instrument, MarketBar
-from ftx_paper.strategy import (
+from ftx_paper.strategies.orderflow import (
     CausalOrderflowProducer, VwapLocationProvider,
 )
-from ftx_paper.strategy.orderflow_vwap import calculate_session_vwap, calculate_vwap_stop
+from ftx_paper.strategies.orderflow.orderflow_vwap import calculate_session_vwap, calculate_vwap_stop
 
 
 def test_vwap_provider_publishes_immutable_measurements_without_structural_features() -> None:

@@ -23,13 +23,13 @@ from .config import (
     STRATEGY_VERSION,
     StrategyConfig,
 )
-from .protocol import StrategyMetadata
-from .exits import ExitStateMachine, PositionState
+from ftx_paper.strategies.shared.protocol import StrategyMetadata
+from ftx_paper.strategies.shared.exits import ExitStateMachine, PositionState
 from .risk import VehicleRiskLimits
 from ftx_paper.market.bundles import DecisionBundle
 from .decision import IndependentLiveDecisionEngine
 from .snapshot import restore_strategy, snapshot_strategy
-from .coordinator import SharedDecisionCoordinator
+from ftx_paper.strategies.shared.coordinator import SharedDecisionCoordinator
 from .research_policy import ResearchPolicyAdapter
 
 

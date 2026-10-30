@@ -1,11 +1,12 @@
 """Diagnostic orderflow strategy for causal location observations."""
 
+
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 from ftx_paper.domain.decision_context import (
     CapitalSnapshot,
@@ -17,42 +18,42 @@ from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.contracts import MarketBar, MarketRole, OrderIntent
 from ftx_paper.market.bundles import DecisionBundle
 
-from .coordinator import SharedDecisionCoordinator
-from .orderflow_contract import OrderflowContext, OrderflowObservation, feature_values_to_dict
-from .orderflow_context import (
+from ftx_paper.strategies.shared.coordinator import SharedDecisionCoordinator
+from ftx_paper.strategies.orderflow.orderflow_contract import OrderflowContext, OrderflowObservation, feature_values_to_dict
+from ftx_paper.strategies.orderflow.orderflow_context import (
     ContextHistory, MarketContext, ContextVersionRef, OpeningGapState, SessionLevels,
     Permission, RegimePermission, advance_opening_gap, classify_context_relation, classify_opening_gap,
 )
-from .orderflow_opportunity import (
+from ftx_paper.strategies.orderflow.orderflow_opportunity import (
     IntentStatus, OpportunityStatus, PendingTrigger, SetupOpportunity, TradeIntent, record_trigger,
 )
-from .opportunity_timeout import advance_opportunity_timeout
-from .orderflow_admission import evaluate_admission
-from .orderflow_interaction import (
+from ftx_paper.strategies.research.opportunity_timeout import advance_opportunity_timeout
+from ftx_paper.strategies.orderflow.orderflow_admission import evaluate_admission
+from ftx_paper.strategies.orderflow.orderflow_interaction import (
     EvidenceLineage, HypothesisState, InteractionCloseReason, InteractionDetector,
     InteractionStatus, LocationInteraction,
 )
-from .orderflow_location import (
+from ftx_paper.strategies.orderflow.orderflow_location import (
     LocationBand, LocationObservation, LocationRecord, LocationRegistry,
     is_diagnostic_location,
 )
-from .orderflow_response import evaluate_policy_responses
-from .templates import TRADE_TEMPLATES, TradeTemplate
-from .orderflow_exit import exit_plan_from_template, exit_plan_payload
-from .orderflow_vwap import evaluate_vwap_diagnostic_response
-from .orderflow_trigger import EntryPolicy, observe_trigger
-from .policy_contract import ExecutionMode, FeatureRequirement, PolicyDecision
-from .protocol import StrategyMetadata
-from .snapshot_envelope import wrap_snapshot
-from .exits import ExitAction
-from .orderflow_position_manager import OrderflowPositionManager
-from .orderflow_evidence import OrderflowEvidenceAssembler
+from ftx_paper.strategies.orderflow.orderflow_response import evaluate_policy_responses
+from ftx_paper.strategies.shared.templates import TRADE_TEMPLATES, TradeTemplate
+from ftx_paper.strategies.orderflow.orderflow_exit import exit_plan_from_template, exit_plan_payload
+from ftx_paper.strategies.orderflow.orderflow_vwap import evaluate_vwap_diagnostic_response
+from ftx_paper.strategies.orderflow.orderflow_trigger import EntryPolicy, observe_trigger
+from ftx_paper.strategies.shared.policy_contract import ExecutionMode, FeatureRequirement, PolicyDecision
+from ftx_paper.strategies.shared.protocol import StrategyMetadata
+from ftx_paper.strategies.shared.snapshot_envelope import wrap_snapshot
+from ftx_paper.strategies.shared.exits import ExitAction
+from ftx_paper.strategies.orderflow.orderflow_position_manager import OrderflowPositionManager
+from ftx_paper.strategies.orderflow.orderflow_evidence import OrderflowEvidenceAssembler
 
-from .orderflow_codec import policy_snapshot_payload, strategy_snapshot_payload
-from .orderflow_capture import detached_asdict
-from .orderflow_snapshot import policy_from_snapshot, strategy_from_snapshot
-from .orderflow_config import ORDERFLOW_NAME, ORDERFLOW_VERSION, OrderflowConfig
-from .orderflow_helpers import (
+from ftx_paper.strategies.orderflow.orderflow_codec import policy_snapshot_payload, strategy_snapshot_payload
+from ftx_paper.strategies.orderflow.orderflow_capture import detached_asdict
+from ftx_paper.strategies.orderflow.orderflow_snapshot import policy_from_snapshot, strategy_from_snapshot
+from ftx_paper.strategies.orderflow.orderflow_config import ORDERFLOW_NAME, ORDERFLOW_VERSION, OrderflowConfig
+from ftx_paper.strategies.orderflow.orderflow_helpers import (
     decision_id as _decision_id,
     observation_number as _number,
     opening_gap_context_available_at,
@@ -1115,6 +1116,14 @@ class OrderflowPolicy:
             "trigger_price": (
                 opportunity.setup.entry_upper
                 if direction == "long" else opportunity.setup.entry_lower
+            ),
+            "requested_fill_price": (
+                cast(float, observation.features["close"])
+                if isinstance(observation.features.get("close"), (int, float))
+                else (
+                    opportunity.setup.entry_upper
+                    if direction == "long" else opportunity.setup.entry_lower
+                )
             ),
             "stop_policy": template.stop_policy.value,
             "exit_mode": self.config.exit_policy,

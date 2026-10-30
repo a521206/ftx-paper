@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from ftx_paper.contracts import Instrument, MarketBar
-from ftx_paper.strategy.admission import admission_result, build_admission_features
+from ftx_paper.strategies.research.admission import admission_result, build_admission_features
 
 
 def test_admission_contract_replaces_grinding_score_filter() -> None:

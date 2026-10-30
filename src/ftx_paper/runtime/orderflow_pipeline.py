@@ -6,7 +6,7 @@ from typing import Any
 
 from ftx_paper.contracts import MarketBar
 from ftx_paper.market import CompletedBarAggregator, FeatureService
-from ftx_paper.strategy.orderflow_producer import CausalOrderflowProducer
+from ftx_paper.strategies.orderflow.orderflow_producer import CausalOrderflowProducer
 from .futures_source import virtual_continuous_bar
 
 

@@ -1,5 +1,6 @@
 """Typed codecs for orderflow instrument, position, bar, and exit snapshots."""
 
+
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
@@ -9,7 +10,7 @@ from typing import Protocol, cast
 
 from ftx_paper.contracts import Instrument, MarketBar, OptionType, OrderIntent, OrderRole, OrderSide, exit_plan_from_payload
 
-from .exits import ExitAction, ExitStateMachine, PositionState
+from ftx_paper.strategies.shared.exits import ExitAction, ExitStateMachine, PositionState
 from .orderflow_config import OrderflowConfig
 from .orderflow_context import ContextHistory
 from .orderflow_capture import detached_asdict

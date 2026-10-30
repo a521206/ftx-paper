@@ -14,16 +14,15 @@ from ftx_paper.market import DecisionBundle
 from ftx_paper.contracts import Instrument, MarketBar, OrderIntent, OrderRole, OrderSide
 from ftx_paper.runtime.engine import MultiStrategyEngine, PaperEngine
 from ftx_paper.runtime.parity_artifacts import build_parity_artifact
-from ftx_paper.strategy import (
+from ftx_paper.strategies.orderflow import (
     LocationObservation,
     OrderflowContext,
     OrderflowObservation,
     OrderflowObservationContext,
     OrderflowStrategy,
 )
-from ftx_paper.strategy.orderflow import OrderflowConfig, OrderflowPolicy, _score_rejection
-from ftx_paper.strategy.orderflow_interaction import InteractionCloseReason
-from ftx_paper.strategy.orderflow_codec import (
+from ftx_paper.strategies.orderflow import OrderflowConfig, OrderflowPolicy, _score_rejection
+from ftx_paper.strategies.orderflow.orderflow_codec import (
     bar_from_snapshot,
     bar_snapshot,
     instrument_from_snapshot,
@@ -31,8 +30,8 @@ from ftx_paper.strategy.orderflow_codec import (
     position_from_snapshot,
     position_snapshot,
 )
-from ftx_paper.strategy.exits import PositionState
-from ftx_paper.strategy.policy_contract import ExecutionMode
+from ftx_paper.strategies.shared.exits import PositionState
+from ftx_paper.strategies.shared.policy_contract import ExecutionMode
 
 
 UTC = timezone.utc
@@ -449,7 +448,7 @@ def test_policy_snapshot_rejects_obsolete_single_detector_state() -> None:
         OrderflowPolicy.from_snapshot(current)
 
 
-def test_generation_change_closes_old_interaction_and_opens_new_generation() -> None:
+def test_generation_change_keeps_active_interaction_episode() -> None:
     strategy = OrderflowStrategy()
     bundle, account = _context()
     strategy.evaluate(bundle, account)
@@ -464,9 +463,10 @@ def test_generation_change_closes_old_interaction_and_opens_new_generation() -> 
     assert any("2026-01-01T10:00:00+00:00" in str(event.payload["interaction_id"]) for event in observed)
     detector = strategy.policy._location_detectors["5m"]
     assert len(detector.active_interactions) == 1
-    assert detector.active_interactions[0].reference_generation == 2
-    assert len(detector.closed_interactions) == 1
-    assert detector.closed_interactions[0].close_reason is InteractionCloseReason.REFERENCE_REPLACED
+    # Reference generations may change while the canonical interaction episode
+    # remains active against its original frozen band.
+    assert detector.active_interactions[0].reference_generation == 1
+    assert len(detector.closed_interactions) == 0
 
 
 def test_non_contact_location_observation_does_not_start_interaction() -> None:
@@ -741,7 +741,7 @@ def test_strategy_rejects_mismatched_location_timeframe() -> None:
 
 
 def test_late_parent_location_facts_do_not_replay_historical_children() -> None:
-    from ftx_paper.strategy import CausalOrderflowProducer
+    from ftx_paper.strategies.orderflow import CausalOrderflowProducer
 
     producer = CausalOrderflowProducer()
     producer.set_frozen_atr(10.0)
