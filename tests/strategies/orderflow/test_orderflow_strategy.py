@@ -451,7 +451,7 @@ def test_policy_snapshot_rejects_obsolete_single_detector_state() -> None:
         OrderflowPolicy.from_snapshot(current)
 
 
-def test_generation_change_keeps_active_interaction_episode() -> None:
+def test_generation_change_creates_a_distinct_active_interaction_episode() -> None:
     strategy = OrderflowStrategy()
     bundle, account = _context()
     strategy.evaluate(bundle, account)
@@ -465,8 +465,8 @@ def test_generation_change_keeps_active_interaction_episode() -> None:
     assert observed
     assert any("2026-01-01T10:00:00+00:00" in str(event.payload["interaction_id"]) for event in observed)
     detector = strategy.policy._location_detectors["5m"]
-    assert len(detector.active_interactions) == 1
-    assert detector.active_interactions[0].reference_generation == 1
+    assert len(detector.active_interactions) == 2
+    assert {item.reference_generation for item in detector.active_interactions} == {1, 2}
     assert len(detector.closed_interactions) == 0
 
 def test_non_contact_location_observation_does_not_start_interaction() -> None:
@@ -504,6 +504,22 @@ def test_opening_gap_uses_prior_reference_not_previous_close_for_parity() -> Non
     assert opening.payload["direction"] == "down"
     assert opening.payload["gap_points"] == pytest.approx(1.0)
     assert opening.payload["reference_level"] == pytest.approx(103.0)
+    assert opening.payload["state"] == "GAP_DOWN_CANDIDATE"
+
+
+def test_generation_change_creates_a_distinct_interaction_episode() -> None:
+    strategy = OrderflowStrategy()
+    bundle, account = _context()
+    strategy.evaluate(bundle, account)
+
+    replacement, replacement_account = _context(
+        observation_id="replacement", generation=2,
+    )
+    strategy.evaluate(replacement, replacement_account)
+
+    detector = strategy.policy._location_detectors["5m"]
+    assert len(detector.active_interactions) == 2
+    assert {item.reference_generation for item in detector.active_interactions} == {1, 2}
 
 
 def test_orderflow_executable_mode_emits_bounded_futures_entry() -> None:

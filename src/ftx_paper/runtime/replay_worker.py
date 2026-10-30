@@ -1700,16 +1700,29 @@ class ReplayWorker:
             replay_result["replay_records"] = runtime_replay_records or [
                 record.to_dict() for record in detached_replay_records(tuple(all_events), scope=detached_scope)
             ]
-        persisted_record_dicts = tuple(replay_result.get("replay_records", ()))
-        report_record_dicts = persisted_record_dicts or tuple(
+        captured_record_dicts = tuple(replay_result.get("replay_records", ()))
+        # Full replay records contain a complete before/after strategy and
+        # portfolio snapshot for every bar.  Parity capture projects the same
+        # causal evidence into the producer-neutral artifact, so retaining
+        # both streams in the persisted result can exceed SQLite limits.  Keep
+        # the records for report construction, but make the parity artifact the
+        # persisted source of full causal evidence.
+        persisted_record_dicts = () if include_parity_layers else captured_record_dicts
+        report_record_dicts = captured_record_dicts or tuple(
             record.to_dict() for record in detached_replay_records(tuple(all_events), scope=detached_scope)
         )
         report_records = tuple(ReplayRecord.from_dict(item) for item in report_record_dicts)
+        report_summary = dict(build_session_summary(report_records))
+        if include_parity_layers:
+            # The parity layers are the canonical causal projection for this
+            # request.  The report's action projection is the full replay
+            # record stream again and can approach a gigabyte for one session.
+            report_summary.pop("actions", None)
         report = {
             "schema_version": 1,
             "report_type": "paper_orderflow",
             "session_date": session_date,
-            "summary": dict(build_session_summary(report_records)),
+            "summary": report_summary,
             "metrics": summary,
         }
         parity_artifact = build_parity_artifact(

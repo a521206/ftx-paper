@@ -227,7 +227,6 @@ class OrderflowPolicy:
             )
             if first_1m is not None:
                 opening = _number(first_1m, "open")
-                previous_close = _number(first_1m, "previous_close")
                 prior_high = _number(first_1m, "prior_value_high")
                 prior_low = _number(first_1m, "prior_value_low")
                 reference = (
@@ -242,7 +241,7 @@ class OrderflowPolicy:
                 )
                 if opening is not None and reference_id is not None:
                     classified_gap = classify_opening_gap(
-                        opening_price=opening, prior_close=previous_close,
+                        opening_price=opening,
                         observed_at=first_1m.observed_at, reference_id=reference_id,
                         prior_value_low=_number(first_1m, "prior_value_low"),
                         prior_value_high=_number(first_1m, "prior_value_high"),
@@ -269,6 +268,7 @@ class OrderflowPolicy:
                         "direction": "down" if classified_gap.reference_id == "PD_LOW"
                         else "up" if classified_gap.reference_id == "PD_HIGH" else "none",
                         "gap_points": self._opening_gap_state.gap_points,
+                        "state": self._opening_gap_state.status,
                         "reference_level": self._opening_gap_state.reference_price,
                         "source_observation_ids": [first_1m.observation_id],
                     }))
@@ -403,7 +403,6 @@ class OrderflowPolicy:
         }
         opening_gap = classify_opening_gap(
             opening_price=_number(observation, "open"),
-            prior_close=_number(observation, "previous_close"),
             observed_at=observation.available_at,
         )
         context_gap = (

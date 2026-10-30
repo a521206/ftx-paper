@@ -286,9 +286,9 @@ def _pre_contact_side(
     return None
 
 
-def _active_key(alias: str, timeframe: str) -> str:
-    """One canonical episode per location template and timeframe."""
-    return f"{alias.upper()}:{timeframe}"
+def _active_key(alias: str, timeframe: str, generation: int) -> str:
+    """One episode per location template, timeframe, and reference generation."""
+    return f"{alias.upper()}:{timeframe}:{generation}"
 
 
 def _source_candle(observation: OrderflowObservation) -> InteractionCandle | None:
@@ -363,7 +363,7 @@ class InteractionDetector:
         if observation.interval_end is not None and observation.available_at < observation.interval_end:
             raise ValueError("interaction candle must be causally complete")
         processed_id = observation_id or observation.observation_id
-        key = _active_key(location.alias, self.timeframe)
+        key = _active_key(location.alias, self.timeframe, location.generation)
         if processed_id in self._processed_observations:
             return self._active.get(key)
         if observation.context is None or observation.context.availability_status != "available":
@@ -405,10 +405,7 @@ class InteractionDetector:
             self._session_first_observed_at[session_id] = observation.observed_at
             first_observed_at = observation.observed_at
         interaction = self._active.get(key)
-        # Keep one episode per location/timeframe while the reference develops.
-        # A new location generation is not a terminal interaction transition;
-        # the canonical detector continues evaluating the existing episode
-        # against its frozen band and provenance.
+        # A new reference generation starts an independent episode.
         if interaction is not None and any(
             item.observation_id == observation.observation_id
             or item.observed_at == observation.observed_at
@@ -944,7 +941,10 @@ class InteractionDetector:
             interaction = decode(item)
             if interaction.status is not InteractionStatus.ACTIVE:
                 raise ValueError("active interaction snapshot has terminal status")
-            key = _active_key(interaction.location_alias, interaction.timeframe)
+            key = _active_key(
+                interaction.location_alias, interaction.timeframe,
+                interaction.reference_generation,
+            )
             if key in detector._active:
                 raise ValueError("duplicate active interaction snapshot")
             detector._active[key] = interaction

@@ -61,6 +61,9 @@ def test_replay_preserves_live_store_and_resets_replay_outputs(tmp_path) -> None
 def test_replay_parity_is_opt_in(tmp_path) -> None:
     result = _worker(tmp_path).execute_detached(_request(include_parity_layers=True))
     assert isinstance(result["parity_artifact"], dict)
+    assert "replay_records" not in result
+    assert result["report"]["summary"]
+    assert "actions" not in result["report"]["summary"]
     for layer_records in result["parity_artifact"]["layers"].values():
         for record in layer_records:
             assert {"schema_version", "run_id", "execution_scope", "ledger_scope"} <= set(record)

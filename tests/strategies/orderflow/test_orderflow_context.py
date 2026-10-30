@@ -5,7 +5,7 @@ import pytest
 from ftx_paper.strategies.orderflow import (
     ContextHistory, ContextVersionRef, MarketContext, OpeningGapState,
     Permission, RegimePermission, SessionLevels, ValueReference, advance_opening_gap,
-    classify_context_relation,
+    classify_context_relation, classify_opening_gap,
 )
 
 
@@ -43,13 +43,36 @@ def test_context_history_rejects_future_or_duplicate_versions() -> None:
 
 
 def test_opening_gap_recovery_is_explicit_and_causal() -> None:
-    state = OpeningGapState("GAP_ACCEPTED", 2.0, 100.0)
+    state = OpeningGapState("GAP_ACCEPTED", 2.0, 100.0, reference_id="PD_HIGH")
     recovered = advance_opening_gap(
         state, close=99.5, available_at=datetime(2026, 1, 1, 9, 20, tzinfo=UTC),
         evidence_id="obs-1",
     )
     assert recovered.status == "RETURN_TO_VALUE"
     assert recovered.evidence_ids == ("obs-1",)
+
+
+def test_reference_level_below_opening_is_a_down_gap() -> None:
+    state = classify_opening_gap(
+        opening_price=102.0, reference_id="PD_LOW",
+        reference_price=103.0,
+    )
+
+    assert state.status == "GAP_DOWN_CANDIDATE"
+    assert state.gap_points == pytest.approx(1.0)
+
+
+def test_down_gap_acceptance_preserves_down_direction() -> None:
+    state = OpeningGapState(
+        "GAP_DOWN_CANDIDATE", 1.0, 103.0, reference_id="PD_LOW",
+    )
+
+    accepted = advance_opening_gap(
+        state, close=102.0, available_at=datetime(2026, 1, 1, 9, 20, tzinfo=UTC),
+        evidence_id="obs-1",
+    )
+
+    assert accepted.status == "GAP_DOWN_ACCEPTED"
 
 
 def test_opening_gap_expires_after_five_completed_bars() -> None:
