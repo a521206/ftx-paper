@@ -1,8 +1,9 @@
 # Strategy Boundaries
 
-`ftx-paper` contains two independent strategy policies. They are not two names
-for one strategy and must not be compared as if they were the same
-implementation.
+`ftx-paper` contains two independent strategy boundaries. The research boundary
+is executable; the orderflow boundary is currently a scaffold for the staged
+canonical port. They are not two names for one strategy and must not be
+compared as if they were the same implementation.
 
 ## Strategy Entry Points
 
@@ -18,7 +19,8 @@ The implementation paths are now separate:
 - Shared contracts and compatibility/support modules: `src/ftx_paper/strategies/shared/`
 
 The shared modules under `src/ftx_paper/strategies/shared/` provide common
-contracts and coordination. The Paper orderflow path is not
+contracts and coordination. Orderflow support modules retained for the staged
+port live under its own package, not in the shared package. The Paper orderflow path is not
 `ftx-paper/src/orderflow/`; that path belongs to the separate NiftyZoning
 repository and must never be created in this project.
 
@@ -30,7 +32,12 @@ portfolio/account state, simulated execution, persistence, and attribution.
 `MultiStrategyEngine` may run both policies for comparison, but it does not
 share policy state between them.
 
-Orderflow behavior is an independent Paper implementation informed by the
-canonical NiftyZoning orderflow contracts. It must not import NiftyZoning code,
-databases, runtime state, or generated artifacts. The research strategy must
-not receive orderflow-specific features or lifecycle state.
+The orderflow boundary is reserved for an independent Paper implementation
+informed by the canonical NiftyZoning orderflow contracts. Until the staged port
+is complete, it must remain a no-op scaffold. The eventual port must not import
+NiftyZoning code, databases, runtime state, or generated artifacts. The research
+strategy must not receive orderflow-specific features or lifecycle state.
+
+Generic strategy extension, testing, replay, and runtime ownership guidance is
+maintained in [Strategy development](STRATEGY_DEVELOPMENT.md). This document is
+the source of truth for strategy identity and isolation only.

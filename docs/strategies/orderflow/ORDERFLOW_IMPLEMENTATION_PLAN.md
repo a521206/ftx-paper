@@ -18,6 +18,11 @@ No phase may begin until the preceding phase's exit gate passes. A failing
 comparison is a blocker, not permission to add a fallback, translation helper,
 or Paper-specific behavior.
 
+Generic strategy identity, isolation, extension, and replay guidance is maintained
+in [Strategy boundaries](../shared/STRATEGY_BOUNDARIES.md) and
+[Strategy development](../shared/STRATEGY_DEVELOPMENT.md). This plan owns only
+the orderflow porting sequence and its canonical parity gates.
+
 ## Non-Negotiable Rules
 
 - NiftyZoning owns orderflow behavior, state transitions, execution semantics,
@@ -161,7 +166,8 @@ Status: Complete.
 Required work:
 
 - Keep `src/ftx_paper/strategies/orderflow/` and its basic strategy/package
-  boundary in place.
+  boundary in place, including canonical-support modules retained for the
+  staged port (`templates.py`, `response.py`, and `opportunity.py`).
 - Remove the existing Paper orderflow policy and implementation internals.
 - Keep only minimal live/replay strategy entry points, configuration wiring, and
   registration stubs needed for Phase 2 porting.
@@ -179,7 +185,8 @@ Required work:
 
 Exit gate:
 
-- The orderflow package imports as a basic strategy scaffold.
+- The orderflow package imports as a basic strategy scaffold plus retained
+  canonical-support modules.
 - No old orderflow behavior is reachable from the scaffold.
 - Superseded orderflow design and unimplemented parity documents are removed from
   the active Paper documentation set.

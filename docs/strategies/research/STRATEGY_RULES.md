@@ -19,7 +19,7 @@ change is made, and record the change in `CHANGELOG.md`.
 - **Strategy Name:** `ftx-paper-research`
 - **Version:** `0.4.0-pipeline-research-aligned`
 - **Target Instrument:** Nifty 50 Index Futures; options provide supporting PCR data.
-- **Primary Code Base:** [`src/ftx_paper/strategies/research/`](../../../src/ftx_paper/strategies/research/) and [`src/ftx_paper/market/location.py`](../../../src/ftx_paper/market/location.py)
+- **Primary Code Base:** [`src/ftx_paper/strategies/research/`](../../../src/ftx_paper/strategies/research/)
 - **Execution Mode:** Paper trading only (in-memory simulation with SQLite audit trail)
 
 ---
@@ -112,9 +112,11 @@ Defined in [`exits.py`](../../../src/ftx_paper/strategies/shared/exits.py) and [
 ## 7. Sizing & Risk Management
 
 - **Risk Budget:** Default research profile risks **3% of available capital per trade**, subject to the adaptive stop and margin limits.
-- **Lot Sizing:** Determined by risk budget, stop distance, score, directional headroom, vehicle limits, drawdown scaling, and policy stability.
+- **Lot Sizing:** Determined by risk budget, stop distance, directional headroom, vehicle limits, and configured drawdown/stability scaling. Admission score qualifies the setup but is not a sizing multiplier in the active capital path.
 - **Per-Order Maximum:** **8 lots** under the default research capital profile.
 - **Maximum Directional Exposure:** Capped at **12 lots** net position under the default research capital profile.
+- **Cell Entry Limit:** At most **2 entries per cell per trading day**.
+- **Entry Cooldown:** The default configured research profile has no separate general entry cooldown; the per-cell post-exit cooldown remains **2 bars**.
 - **Daily Loss Guardrail:** If equity falls below 95% of the daily baseline, new entries are halted for the remainder of the session.
 - **Peak Drawdown Guardrail:** Trading is blocked when equity falls more than **15%** below peak equity.
 - **Margin:** The research profile reserves at most **80%** of available capital for margin; the default futures margin reference is `175,000` per lot.
@@ -143,4 +145,4 @@ Both are defined once in [`src/ftx_paper/config.py`](../../../src/ftx_paper/conf
 - [`src/ftx_paper/strategies/research/risk.py`](../../../src/ftx_paper/strategies/research/risk.py): Risk sizing and position boundaries.
 - [`src/ftx_paper/strategies/research/sizing.py`](../../../src/ftx_paper/strategies/research/sizing.py): Deterministic score, concurrency, vehicle, drawdown, and stability sizing stages.
 - [`src/ftx_paper/domain/capital_config.py`](../../../src/ftx_paper/domain/capital_config.py): Research capital profile and vehicle limits.
-- [`src/ftx_paper/market/location.py`](../../../src/ftx_paper/market/location.py): Price level classification, OR calculation, and cell detection.
+- [`src/ftx_paper/strategies/research/location.py`](../../../src/ftx_paper/strategies/research/location.py): Price level classification, OR calculation, and cell detection.

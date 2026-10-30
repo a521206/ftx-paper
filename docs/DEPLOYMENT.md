@@ -2,8 +2,9 @@
 
 This is the operator runbook for installing, configuring, running, and
 upgrading `ftx-paper`. Design boundaries are documented in
-[Architecture](ARCHITECTURE.md); strategy behavior is documented in
-[Research strategy rules](strategies/research/STRATEGY_RULES.md).
+[Architecture](ARCHITECTURE.md); strategy boundaries are documented in
+[Strategy boundaries](strategies/shared/STRATEGY_BOUNDARIES.md); research
+behavior is documented in [Research strategy rules](strategies/research/STRATEGY_RULES.md).
 
 `ftx-paper` runs independently of NiftyZoning. Install it in its own virtual
 environment and run one API process plus the separate UI process. Never start
@@ -17,10 +18,13 @@ Install the API and UI:
 pip install ftx-paper
 ```
 
-For the Zerodha feed or login flow:
+The package requires Python 3.14 or newer. Install the extra matching the
+selected broker:
 
 ```text
 pip install "ftx-paper[zerodha]"
+pip install "ftx-paper[shoonya]"
+pip install "ftx-paper[xts]"
 ```
 
 The package provides `ftx-paper-api` and `ftx-paper-ui`. On Windows, the
@@ -39,10 +43,13 @@ FTX_BROKER=xts
 FTX_PAPER_XTS_CONFIG_PATH=/etc/ftx-paper/xts.json
 # FTX_PAPER_CONFIG_PATH=/etc/ftx-paper/zerodha.json
 # FTX_PAPER_SHOONYA_CONFIG_PATH=/etc/ftx-paper/shoonya.json
+# UI API origin; this is read by ftx-paper-ui.
 FTX_API_BASE_URL=http://127.0.0.1:8501
 FTX_WEB_HOST=127.0.0.1
 FTX_WEB_PORT=8501
 FTX_UI_PORT=8502
+# Replay CLI API origin, when using ftx-paper-replay.
+# FTX_API_URL=http://127.0.0.1:8501
 ```
 
 Keep the home directory, runtime directory, and auth database on persistent
@@ -53,8 +60,8 @@ Supported providers are `zerodha`, `shoonya`, and `xts`. Set `FTX_BROKER` when
 more than one provider configuration is available; otherwise the configured
 provider is detected from the available settings. `FTX_PAPER_CONFIG_PATH` is
 the Zerodha path; use `FTX_PAPER_SHOONYA_CONFIG_PATH` or
-`FTX_PAPER_XTS_CONFIG_PATH` for the other providers. Install the matching
-extra (`zerodha`, `shoonya`, or `xts`) for the selected provider.
+`FTX_PAPER_XTS_CONFIG_PATH` for the other providers. Install exactly one
+matching extra (`zerodha`, `shoonya`, or `xts`) for the selected provider.
 
 The supported deployment is loopback-only. Do not bind the API to a public
 interface. Loopback requests intentionally do not require a bearer token, and

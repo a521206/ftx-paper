@@ -3,8 +3,9 @@
 This guide describes the minimum contract for adding a strategy to
 `ftx-paper`. Strategy behavior belongs in `ftx_paper.strategies`; runtime,
 execution, persistence, and broker concerns stay outside the strategy.
-The extraction plan for making these capabilities reusable is in
-[Strategy Reuse Refactor](STRATEGY_REFACTORING.md).
+Shared ownership and isolation rules are defined in
+[Strategy boundaries](STRATEGY_BOUNDARIES.md). This guide covers the current
+extension contract; it is not a roadmap for a future refactor.
 
 ## Design Contract
 
@@ -30,20 +31,18 @@ them:
 | Capability | How a new strategy uses it |
 |---|---|
 | Normalized market bundles | Read completed `DecisionBundle` values in `on_bundle` or `evaluate`; do not read broker data directly. |
-| Structural locations and `Cell` values | Use the market location services to express entry conditions as composable policy inputs. |
-| Session windows and square-off | Define entry windows in strategy configuration; let the runtime enforce lifecycle and end-of-day boundaries. |
-| Admission filters | Compose causal PCR, VIX, volume, momentum, and missing-input checks through strategy admission policy. |
-| Exit state machines | Select `SIGNAL` or `TRAIL` behavior and feed execution/market events into the existing exit logic. |
-| Adaptive stops | Use the ATR/VIX stop calculator and apply its bounded result rather than creating an independent stop convention. |
-| Risk and sizing | Pass the decision context, capital profile, vehicle limits, score, and stop distance through the shared sizing and authorization path. |
+| Structural locations and `Cell` values | Use an explicitly shared location contract when one exists; research location detection remains research-specific. |
+| Session windows and square-off | Define entry windows in strategy configuration; the runtime owns lifecycle and end-of-day execution boundaries. |
+| Exit state machines | Reuse the shared exit contract where the strategy selects an existing exit mode. |
+| Risk and sizing | Use the runtime account and authorization contracts. Research-specific admission, stop, risk, and sizing code is not a shared strategy API. |
 | Futures and synthetic vehicles | Declare enabled vehicles and vehicle risk limits; preserve the existing reporting-only restrictions for synthetic positions. |
 | Cooldowns and drawdown guards | Configure cooldowns and rely on shared daily-loss, peak-drawdown, margin, and exposure guardrails. |
 | Metadata and snapshots | Return stable metadata and serializable state; version any custom snapshot fields. |
 | Replay and parity artifacts | Run the strategy through `ReplayWorker`; compare the persisted `run_scope`, `decision`, `execution_settlement`, and `portfolio_ledger` layers. |
 | Multi-strategy attribution | Supply a stable `strategy_id`; the runtime handles shared portfolio execution, order attribution, and API/UI filtering. |
 
-These capabilities are shared services and contracts. A new strategy should add
-only its policy and decision differences: what market conditions qualify, which
+The listed runtime capabilities are shared services and contracts. A new strategy
+should add only its policy and decision differences: what market conditions qualify, which
 direction and vehicle to use, how the trade is hypothesized to behave, and which
 existing exit/risk modes apply. If a new rule needs a new reusable capability,
 add it to the appropriate market, strategy-policy, or runtime layer rather than
@@ -54,7 +53,7 @@ embedding infrastructure code in the strategy.
 1. Define the strategy's configuration, metadata, decision state, entry rules,
    exits, sizing inputs, and rejection behavior.
 2. Add the implementation under `src/ftx_paper/strategies/<name>/`. Reuse shared market,
-   contract, risk, and policy types instead of adding infrastructure there.
+   contract, and policy types instead of adding infrastructure there.
 3. Implement the shared typed `StrategyFactory` port for the strategy.
 4. Register the factory at the application composition boundary. For multiple
    strategies, wrap instances in `StrategyInstance` and `MultiStrategyEngine`.
@@ -107,8 +106,4 @@ configuration hashes as a comparison failure or a separately labelled run, not
 as an unexplained strategy improvement. A new strategy may differ in decisions,
 but the replay must remain causal, deterministic, and attributable.
 
-## Boundaries
-
-Do not add per-strategy databases, broker sessions, live order routing, external
-position reconciliation, or strategy-specific runtime processes. Shared
-portfolio and execution behavior remains governed by `RuntimeSession`.
+For isolation and ownership rules, see [Strategy boundaries](STRATEGY_BOUNDARIES.md).
