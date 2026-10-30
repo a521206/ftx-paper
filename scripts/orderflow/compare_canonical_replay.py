@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 import hashlib
 import json
 import os
@@ -18,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from ftx_paper.config import PaperConfig
 
@@ -159,11 +161,29 @@ def _paper_phase35_projection(session_result: dict[str, Any]) -> dict[str, Any]:
         if isinstance(item, dict) and item.get("ordinary_context_ref") is not None
     ] if isinstance(replay, list) else []
     raw_prior = raw.get("prior_value")
-    prior_value = (
-        raw_prior.get("reference")
-        if isinstance(raw_prior, dict) and "reference" in raw_prior
-        else raw_prior
-    )
+    prior_value = raw_prior
+    if isinstance(raw_prior, dict) and isinstance(raw_prior.get("reference"), dict):
+        reference = raw_prior["reference"]
+        lineage = reference.get("lineage", ())
+        if (
+            isinstance(lineage, (list, tuple))
+            and len(lineage) >= 2
+            and isinstance(reference.get("available_at"), str)
+        ):
+            available_at = datetime.fromisoformat(reference["available_at"])
+            available_at = available_at.astimezone(ZoneInfo("Asia/Kolkata"))
+            prior_value = {
+                "reference_id": lineage[0],
+                "scope": "prior_session",
+                "poc": reference.get("point_of_control"),
+                "vah": reference.get("value_area_high"),
+                "val": reference.get("value_area_low"),
+                "source_sessions": [reference.get("session_date")],
+                "available_at": available_at.strftime("%Y-%m-%dT%H:%M"),
+                "fingerprint": lineage[1],
+            }
+        else:
+            prior_value = reference
     return {
         "atr": atr,
         "locations": locations,

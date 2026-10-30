@@ -538,8 +538,8 @@ Phase 4 composition:
 
 ## Phase 3.5 - Port The Canonical Evidence Publication Sequence
 
-Status: Implemented as an artifact-driven Paper boundary; canonical evidence
-adapter parity remains pending. The pinned canonical repository is
+Status: Complete. Implemented as an artifact-driven Paper boundary with
+canonical evidence parity established on valid replay sessions. The pinned canonical repository is
 `C:\Users\agraw\Python\NiftyZoning` at commit
 `8114f553392ad01dd032aecfed0031a3bc08e2f8`. NiftyZoning does not expose a
 separate `EvidencePublication` or `AtrPublication` producer API. Its
@@ -611,7 +611,11 @@ ordering:
 ### Phase 3.5 Exit Gate
 
 - Paper reproduces the canonical evidence publication sequence from the same
-  Phase 3 aggregate shape for `2026-09-15` and `2026-10-01`.
+  Phase 3 aggregate shape for `2026-09-15` and replacement validation date
+  `2026-09-29`. Both sessions have matching Phase 3 manifests; Phase 3.5
+  reports accepted `INPUT_VARIANCE` only where ATR source histories differ.
+  `2026-10-01` is excluded because canonical `2026-09-30` input has a missing
+  `09:16`-`09:21` source segment and cannot produce a valid Phase 3 artifact.
 - Canonical reference output is captured from `ReplayMachine` and
   `state_machine_reporting`; Paper output is produced by the ported boundary.
   Parity is established against canonical output, not by importing NiftyZoning or
@@ -652,6 +656,12 @@ ordering:
   subprocesses. It compares Phase 3 source/aggregate sections first, then
   compares the canonical Phase 3.5 projection with Paper evidence using
   manifest-first diagnostics.
+- The Paper replay injects computed prior-session value publications into the
+  evidence adapter and projects them into the canonical value-reference shape.
+- Validation command:
+  `python scripts/orderflow/compare_canonical_replay.py --date 2026-09-15 --date 2026-09-29`
+  exits successfully; focused orderflow tests pass (`13 passed`), and the
+  changed replay scripts pass Pyright and Ruff.
 
 ### Temporary Harness Retirement
 

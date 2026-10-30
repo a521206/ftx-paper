@@ -22,6 +22,7 @@ import json
 import math
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from ftx_paper.config import PaperConfig
 from ftx_paper.runtime import RuntimeStore
@@ -32,6 +33,14 @@ from ftx_paper.strategies.orderflow.evidence import (
     PaperFeatureAdapter,
     evidence_payload,
     produce_evidence,
+)
+from ftx_paper.strategies.orderflow.canonical.orderflow.value_publication import (
+    prior_profile_is_complete,
+    publish_value_references,
+)
+from ftx_paper.strategies.orderflow.value_publication import (
+    PriorSessionValueReference,
+    ValuePublication,
 )
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +147,50 @@ def _observation_artifact(
     )
 
 
+def _prior_values(
+    rows_by_date: dict[str, tuple[dict[str, Any], ...]],
+) -> dict[str, ValuePublication]:
+    publications: dict[str, ValuePublication] = {}
+    dates = sorted(rows_by_date)
+    for session_date in dates:
+        prior_dates = [value for value in dates if value < session_date]
+        if not prior_dates:
+            continue
+        prior_date = prior_dates[-1]
+        prior_rows = list(rows_by_date[prior_date])
+        rows = list(rows_by_date[session_date])
+        references = publish_value_references(
+            prior_rows,
+            rows,
+            session_date,
+            prior_profile_complete=prior_profile_is_complete(prior_rows),
+        )
+        reference = next(
+            (item for item in references if item.scope == "prior_session"),
+            None,
+        )
+        if reference is None:
+            continue
+        available_at = reference.available_at
+        observed_at = available_at
+        value_reference = PriorSessionValueReference(
+            reference.source_sessions[0],
+            reference.val,
+            reference.poc,
+            reference.vah,
+            datetime.fromisoformat(observed_at).replace(tzinfo=ZoneInfo("Asia/Kolkata")),
+            datetime.fromisoformat(available_at).replace(tzinfo=ZoneInfo("Asia/Kolkata")),
+            (reference.reference_id, reference.fingerprint),
+        )
+        publications[session_date] = ValuePublication(
+            value_reference,
+            value_reference.observed_at,
+            value_reference.available_at,
+            value_reference.lineage,
+        )
+    return publications
+
+
 def _as_of_evidence(evidence: dict[str, Any], clock: str) -> dict[str, Any]:
     """Expose only publications available at the canonical decision clock."""
     result = dict(evidence)
@@ -175,7 +228,7 @@ class OrderflowReplayEngine:
         if any(str(row.get("session_date")) != session_date for row in rows):
             raise ValueError("replay rows contain a session mismatch")
         artifact, events = _observation_artifact(rows)
-        adapter = PaperFeatureAdapter(rows_by_date)
+        adapter = PaperFeatureAdapter(rows_by_date, prior_values=_prior_values(rows_by_date))
         evidence_events: list[tuple[str, dict[str, Any], dict[str, Any] | None]] = []
         latest_5m: dict[str, Any] | None = None
         prefix_aggregates: dict[str, list[dict[str, Any]]] = {"1m": [], "5m": []}
