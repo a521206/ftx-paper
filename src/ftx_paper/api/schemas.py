@@ -97,7 +97,6 @@ def openapi_document() -> dict[str, Any]:
                         "vehicles": {"type": "array", "items": {"type": "string", "enum": ["futures", "synthetic"]}},
                         "mode": {"type": "string", "enum": ["replay"]},
                         "include_parity_layers": {"type": "boolean"},
-                        "capture_mode": {"type": "string", "enum": ["none", "summary", "diagnostic", "full"], "default": "summary"},
                     },
                 }}}}, "responses": {"202": {"description": "Replay queued"}, "400": {"description": "Invalid request"}}},
             },

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from ftx_paper.domain.capital import CapitalRuntimeContext, ResearchCapitalProfile
@@ -26,11 +26,6 @@ class ReplayRuntimeState:
     engine: Any
     coordinator: Any | None = None
     account: Any | None = None
-    shadow_trades: list[dict[str, Any]] = field(default_factory=list)
-    replay_ledger: list[dict[str, Any]] = field(default_factory=list)
-    parity_records: dict[str, list[dict[str, Any]]] = field(default_factory=lambda: {
-        "decision": [], "execution_settlement": [], "portfolio_ledger": [],
-    })
 
     @classmethod
     def create(cls, profile: ResearchCapitalProfile, engine: Any) -> "ReplayRuntimeState":

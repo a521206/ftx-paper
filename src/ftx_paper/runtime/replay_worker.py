@@ -2,36 +2,26 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
-import hashlib
-import json
 import traceback
 from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread, current_thread
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any, cast
 from uuid import uuid4
 
-from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderRole, OrderSide, Role, SyntheticFutureQuote, build_decision_view, synthetic_future_quote, validate_decision_view
+from ftx_paper.contracts import MarketBar, MarketRole, OptionRole, OrderRole, OrderSide, Role, SyntheticFutureQuote, build_decision_view, synthetic_future_quote, validate_decision_view
 from ftx_paper.contracts.replay import (
-    ExecutionScope, ReplayEvent, ReplayLedgerEntry, ReplayRequest, ReplayResult,
-    ReplaySummary, ReplayTrade, REPLAY_SCHEMA_VERSION, detach_replay_value,
+    ExecutionScope, ReplayLedgerEntry, ReplayRequest, ReplayResult,
+    ReplaySummary, ReplayTrade, REPLAY_SCHEMA_VERSION,
 )
 from ftx_paper.domain.capital import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE, CapitalRuntimeContext
-from ftx_paper.market import (
-    AggregatorConfig, CompletedBarAggregator, InstrumentKey,
-)
 from ftx_paper.domain import AccountAggregate, PortfolioState
 from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.runtime.engine import PaperEngine
 from ftx_paper.runtime.decision_turn import DecisionTurn, evaluate_turn
-from ftx_paper.runtime.events import is_parity_decision_event
-from ftx_paper.runtime.futures_source import (
-    FuturesSessionSourceResolver, virtual_continuous_bar,
-)
-from ftx_paper.runtime.parity_artifacts import (
-    NORMALIZED_BAR_FINGERPRINT_RECIPE,
-    build_parity_artifact,
-    normalized_bar_fingerprint,
+from ftx_paper.runtime.replay_input import ReplayInput
+from ftx_paper.runtime.replay_projection import (
+    build_summary, canonical_events, is_parity_decision_event, normalize_decision, normalize_trade,
 )
 from ftx_paper.runtime.state import ReplayRuntimeState
 from ftx_paper.execution.lifecycle import (
@@ -44,23 +34,8 @@ from ftx_paper.execution import PaperExecutionCoordinator
 from ftx_paper.execution.entry_fill import entry_fill_decision, validate_exit_plan
 from ftx_paper.execution.settlement import ExitValidationError, validate_exit_order
 from ftx_paper.strategies.shared.exits import ExitAction
-from ftx_paper.strategies.research.config import (
-    AFTERNOON_ENTRY_MINUTES,
-    MORNING_ENTRY_MINUTES,
-)
 from ftx_paper.strategies.shared.factory import StrategyContext, StrategySelector
-from ftx_paper.config import (
-    IST,
-    NIFTY_LOT_SIZE,
-    SESSION_DATA_END,
-    SESSION_DATA_END_MINUTES,
-    SESSION_OPEN_MINUTES,
-)
-
-
-CANONICAL_INTERACTION_LOCATIONS = frozenset({
-    "OR_HIGH", "OR_LOW", "SESSION_HIGH", "SESSION_LOW",
-})
+from ftx_paper.config import NIFTY_LOT_SIZE
 
 _EXECUTION_EVENT_TYPES = frozenset({
     "ORDER_INTENT", "ORDER_AUTHORIZED", "ORDER_ACK", "FILL",
@@ -69,16 +44,6 @@ _EXECUTION_EVENT_TYPES = frozenset({
     "RESERVATION", "AUTHORIZATION", "SUBMISSION", "PENDING_EXIT",
     "EXIT_FILL", "CANCELLATION", "SETTLEMENT",
 })
-REPLAY_SUMMARY_SCHEMA_VERSION = 1
-
-
-def _timestamp_string(value: Any) -> str:
-    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
 class _ScopedEvents(list[dict[str, Any]]):
     """Attach replay ownership when an event enters the replay stream."""
 
@@ -131,18 +96,17 @@ class ReplayWorker:
 
     def __init__(self, store: Any, *, capital_profile: ResearchCapitalProfile = RESEARCH_CAPITAL_PROFILE,
                  max_queue_size: int = 1024, strategy_selector: StrategySelector | None = None,
-                 futures_source_resolver: Any | None = None) -> None:
+                 futures_source_resolver: Any | None = None, parity_projector: Any | None = None) -> None:
         self.store = store
         self.capital_profile = capital_profile
         self.strategy_selector = strategy_selector
-        self._futures_sources = futures_source_resolver or FuturesSessionSourceResolver(store)
-        self._source_cache: dict[str, Any] = {}
+        self.parity_projector = parity_projector
+        self.inputs = ReplayInput(store, futures_source_resolver)
         self._queue: Queue[tuple[str, dict[str, Any], Event]] = Queue(maxsize=max_queue_size)
         self._lock = Lock()
         self._cancel: dict[str, Event] = {}
         self._thread: Thread | None = None
         self._stopped = Event()
-        self.lifecycle = ExecutionLifecycleCoordinator()
 
     def _ensure_started(self) -> None:
         with self._lock:
@@ -188,13 +152,6 @@ class ReplayWorker:
         request = ReplayRequest.from_mapping(request).to_dict()
         return self._execute({**request, "run_id": request.get("run_id") or uuid4().hex}, Event())
 
-    @staticmethod
-    def compare_paired_replay(
-        diagnostic: Mapping[str, Any], executable: Mapping[str, Any],
-    ) -> dict[str, Any]:
-        """Report that paired strategy comparison is unavailable without a comparator."""
-        return {"status": "INCOMPLETE", "reason": "strategy comparator not configured", "diagnostic": diagnostic, "executable": executable}
-
     def input_manifest(
         self,
         session_date: str,
@@ -202,122 +159,11 @@ class ReplayWorker:
         rows: list[dict[str, Any]] | None = None,
         bars: tuple[MarketBar, ...] | None = None,
         futures_source: Any | None = None,
-    ) -> dict[str, Any]:
+    ) -> Mapping[str, Any]:
         """Return the deterministic, API-safe inputs used by a replay date."""
-        loaded_rows = rows if rows is not None else self.store.read_market_bars(session_date)
-        futures_source = futures_source if futures_source is not None else self._resolve_source(session_date)
-        # Reuse the rows already loaded above.  A manifest is metadata-only,
-        # but _bars still applies the canonical contract and session filters.
-        if bars is None:
-            try:
-                bars = self._bars(session_date, rows=loaded_rows, futures_source=futures_source)
-            except TypeError as exc:
-                # Preserve compatibility with lightweight test doubles that still
-                # expose the original one-argument _bars hook.
-                if "unexpected keyword argument 'rows'" not in str(exc):
-                    raise
-                bars = self._bars(session_date)
-        replay_rows = [
-            {
-                "symbol": bar.instrument.symbol,
-                "exchange": bar.instrument.exchange,
-                "minute": bar.timestamp.isoformat(),
-                "open": bar.open,
-                "high": bar.high,
-                "low": bar.low,
-                "close": bar.close,
-                "volume": bar.volume,
-                "open_interest": bar.open_interest,
-                "instrument_type": bar.instrument.instrument_type,
-                "expiry": bar.instrument.expiry,
-                "strike": bar.instrument.strike,
-                "option_type": bar.instrument.option_type,
-            }
-            for bar in bars
-        ]
-        strategy_rows = [
-            row for row in replay_rows
-            if str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES", "INDEX"}
-            and (
-                str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
-                or str(row.get("symbol", "")).upper() in {"NIFTY", "NIFTY 50", "INDIA VIX"}
-            )
-        ]
-        selected_futures_rows = [
-            row for row in strategy_rows
-            if str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
-        ]
-        by_instrument: dict[str, int] = {}
-        for row in strategy_rows:
-            key = ":".join(str(row.get(field) or "").upper() for field in ("exchange", "symbol", "instrument_type"))
-            if key:
-                by_instrument[key] = by_instrument.get(key, 0) + 1
-        vix_rows = [row for row in replay_rows if str(row.get("symbol", "")).upper() == "INDIA VIX"]
-        option_rows = [row for row in replay_rows if str(row.get("instrument_type", "")).upper() in {"CE", "PE"}]
-        option_minutes = {str(row.get("minute")) for row in option_rows}
-        futures_minutes = {
-            str(row.get("minute")) for row in loaded_rows
-            if str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
-        }
-        source_provenance = {
-            "current": futures_source.provenance() if futures_source is not None else None,
-            "prior": self._prior_source_provenance(session_date),
-        }
-        completed_source_rows = len({
-            str(row.get("minute")) for row in replay_rows
-            if str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
-        })
-        current_source = source_provenance["current"]
-        selected_source_rows = int(
-            current_source["source_bar_count"]
-            if current_source is not None and "source_bar_count" in current_source
-            else completed_source_rows
+        return self.inputs.manifest(
+            session_date, rows=rows, bars=bars, futures_source=futures_source,
         )
-        expected_source_rows = SESSION_DATA_END_MINUTES - SESSION_OPEN_MINUTES
-        payload = {
-            "available_date": session_date,
-            "date": session_date,
-            "session_date": session_date,
-            "bar_count": len(strategy_rows),
-            "raw_bar_count": len(loaded_rows),
-            "supporting_bar_count": len(bars) - len(strategy_rows),
-            "selected_source_rows": selected_source_rows,
-            "filtered_source_rows": max(0, selected_source_rows - completed_source_rows),
-            "completed_source_rows": completed_source_rows,
-            "gap_rows": max(0, expected_source_rows - completed_source_rows),
-            "futures_source": futures_source.provenance() if futures_source is not None else None,
-            "provenance": source_provenance,
-            "per_instrument_counts": dict(sorted(by_instrument.items())),
-            "availability": {
-                "vix": bool(vix_rows),
-                "pcr": bool(option_rows and option_minutes.intersection(futures_minutes)) or None,
-            },
-            "expiry_calendar": sorted({
-                str(item)[:10] for item in self.store.read_expiry_dates()
-                if str(item)[:10] >= session_date
-            } | {
-                str(row["expiry"])[:10] for row in option_rows
-                if row.get("expiry") and str(row["expiry"])[:10] >= session_date
-            }),
-            "session_configuration": {
-                "timezone": "Asia/Kolkata",
-                "open": "09:15",
-                "data_end": SESSION_DATA_END,
-                "morning_entry_minutes": list(MORNING_ENTRY_MINUTES),
-                "afternoon_entry_minutes": list(AFTERNOON_ENTRY_MINUTES),
-                "aggregator": {"required_roles": ["futures"], "deadline_seconds": 0},
-            },
-        }
-        # The parity input identity is a versioned hash of normalized selected
-        # futures bars. Contract labels remain provenance and do not alter it.
-        payload["fingerprint_recipe"] = NORMALIZED_BAR_FINGERPRINT_RECIPE
-        payload["normalized_fingerprint"] = normalized_bar_fingerprint(selected_futures_rows)
-        if isinstance(current_source, Mapping):
-            source_provenance["current"] = {
-                **current_source,
-                "normalized_fingerprint": payload["normalized_fingerprint"],
-            }
-        return payload
 
     def cancel(self, run_id: str) -> bool:
         run = self.store.read_replay_run(run_id)
@@ -355,7 +201,7 @@ class ReplayWorker:
                 self._queue.task_done()
 
     def _execute(self, request: dict[str, Any], cancel: Event) -> dict[str, Any]:
-        self.lifecycle = ExecutionLifecycleCoordinator()
+        lifecycle = ExecutionLifecycleCoordinator()
         session_date_value = request.get("session_date")
         if not isinstance(session_date_value, str):
             raise ValueError("replay requires session_date as a string")
@@ -375,9 +221,6 @@ class ReplayWorker:
             raise ValueError(f"unsupported replay vehicles: {vehicles}")
         if "futures" not in vehicles:
             raise ValueError("synthetic replay is reporting-only; futures must be enabled")
-        emit_rejected_decisions = request.get("emit_rejected_decisions", False)
-        if not isinstance(emit_rejected_decisions, bool):
-            raise ValueError("emit_rejected_decisions must be a boolean")
         mode_value = request.get("mode", "replay")
         if not isinstance(mode_value, str):
             raise ValueError("mode must be 'replay'")
@@ -387,23 +230,17 @@ class ReplayWorker:
         include_parity_layers = request.get("include_parity_layers", False)
         if not isinstance(include_parity_layers, bool):
             raise ValueError("include_parity_layers must be a boolean")
-        capture_mode = str(request.get("capture_mode", "none"))
         dates = [session_date]
-        # A parity artifact must retain the same causal evidence stream as the
-        # canonical full replay. Summary capture is still available for normal
-        # reports, but cannot be used for a producer comparison.
         run_id = str(request.get("run_id") or uuid4().hex)
+        scope = cast(ExecutionScope, mode)
         all_events = _ScopedEvents(
-            run_id=run_id,
-            execution_scope=cast(ExecutionScope, mode),
-            ledger_scope="replay",
+            run_id=run_id, execution_scope=scope, ledger_scope="replay",
         )
         parity_records: dict[str, list[dict[str, Any]]] = {
             "decision": [], "execution_settlement": [], "portfolio_ledger": [],
         }
         ledger_records = parity_records["portfolio_ledger"]
         order_parent_ids: dict[str, str] = {}
-        unavailable_fields: set[str] = set()
         shadow_trades: list[dict[str, Any]] = []
         bars_seen = 0
         initial_capital = self.capital_profile.initial_capital
@@ -415,7 +252,7 @@ class ReplayWorker:
         expiry_dates = self.store.read_expiry_dates()
         # This engine/strategy is private to this replay run and never shared
         # with RuntimeSession, its broker, ledger, or risk state.
-        self._source_cache = {}
+        self.inputs.reset()
         for date in dates:
             if cancel.is_set():
                 break
@@ -436,23 +273,15 @@ class ReplayWorker:
                 "settled_orders": [],
             })
             rows = self.store.read_market_bars(date)
-            futures_source = self._resolve_source(date)
-            bars = tuple(
-                virtual_continuous_bar(bar)
-                for bar in self._bars(date, rows=rows, futures_source=futures_source)
-            )
+            futures_source = self.inputs.resolve_source(date)
+            bars = self.inputs.bars(date, rows=rows, futures_source=futures_source)
             futures_bars = tuple(
                 bar for bar in bars
                 if str(bar.instrument.instrument_type).upper() in {"FUT", "FUTURES"}
             )
             capital_context = CapitalRuntimeContext(self.capital_profile, environment="replay")
             replay_state = ReplayRuntimeState(
-                portfolio=portfolio,
-                capital_context=capital_context,
-                engine=None,
-                shadow_trades=shadow_trades,
-                replay_ledger=ledger_records,
-                parity_records=parity_records,
+                portfolio=portfolio, capital_context=capital_context, engine=None,
             )
             strategy_id = request.get("strategy_id")
             if not isinstance(strategy_id, str):
@@ -473,7 +302,7 @@ class ReplayWorker:
             coordinator = PaperExecutionCoordinator(replay_state.portfolio, replay_state.capital_context)
             account = AccountAggregate(replay_state.portfolio, replay_state.capital_context)
             engine = PaperEngine(
-                strategy, emit_rejected_decisions=emit_rejected_decisions,
+                strategy,
             )
             replay_state.engine = engine
             replay_state.coordinator = coordinator
@@ -483,15 +312,14 @@ class ReplayWorker:
             last_portfolio = replay_state.portfolio
             # Each date gets a fresh position/risk session while cumulative
             # capital is carried by the authoritative PortfolioState.
-            aggregator = self._aggregator(bars)
+            aggregator = ReplayInput.aggregator(bars)
             open_trades: list[dict[str, Any]] = []
             daily_reset_emitted = False
             # Synthetic is a reporting-only view of the accepted futures
             # decision.  Keep its diagnostic lifecycle separate so it cannot
             # consume risk, margin, cooldown, or execution state.
             synthetic_open_trades: list[dict[str, Any]] = []
-            last_quotes: dict[str, SyntheticFutureQuote] = {}
-            self.lifecycle.pending_entries.clear()
+            lifecycle.pending_entries.clear()
 
             next_available_at = {
                 item.timestamp: (
@@ -500,32 +328,6 @@ class ReplayWorker:
                 )
                 for index, item in enumerate(futures_bars)
             }
-
-            def replay_state_snapshot() -> dict[str, Any]:
-                strategy_snapshot = getattr(engine.strategy, "snapshot", None)
-                raw_strategy_state = strategy_snapshot() if callable(strategy_snapshot) else {}
-
-                def scrub_legacy_fields(value: Any) -> Any:
-                    if isinstance(value, Mapping):
-                        return {
-                            key: scrub_legacy_fields(item)
-                            for key, item in value.items()
-                            if key != "execution_mode"
-                        }
-                    if isinstance(value, tuple):
-                        return tuple(scrub_legacy_fields(item) for item in value)
-                    if isinstance(value, list):
-                        return [scrub_legacy_fields(item) for item in value]
-                    return value
-
-                strategy_state = scrub_legacy_fields(raw_strategy_state)
-                if not isinstance(strategy_state, Mapping):
-                    strategy_state = {}
-                return {
-                    "engine": {"bars_seen": engine.bars_seen},
-                    "portfolio": portfolio.snapshot(),
-                    "strategy": strategy_state,
-                }
 
             for bar in bars:
                 if cancel.is_set():
@@ -557,15 +359,6 @@ class ReplayWorker:
                     role: bar for role, bar in raw_supporting_bars.items()
                     if isinstance(role, (MarketRole, OptionRole))
                 }
-                for trade in open_trades:
-                    if trade.get("vehicle") == "futures":
-                        continue
-                    quote = synthetic_future_quote(
-                        quote_selection_bar, option_bars,
-                        symbols=(trade["ce_symbol"], trade["pe_symbol"]),
-                    )
-                    if quote is not None:
-                        last_quotes[trade["entry_order_id"]] = quote
                 # Replay advances private exit state for trade reporting without
                 # mutating the live runtime portfolio.
                 exit_actions: tuple[ExitAction, ...] = ()
@@ -659,7 +452,7 @@ class ReplayWorker:
                             action.intent.entry_order_id in portfolio.reservations
                             if action.intent.entry_order_id is not None else False
                         )
-                        settlement = self.lifecycle.apply_fill(
+                        settlement = lifecycle.apply_fill(
                             action.intent.client_order_id,
                             lambda: coordinator.fill(
                                 action.intent, price=exit_price,
@@ -736,7 +529,7 @@ class ReplayWorker:
                 selected: list[Any] = []
                 execution_orders: list[Any] = []
                 result: Any = None
-                pending_candidates = self.lifecycle.due_entries(futures_bar.timestamp.isoformat())
+                pending_candidates = lifecycle.due_entries(futures_bar.timestamp.isoformat())
                 candidate_orders: tuple[Any, ...] = ()
 
                 def form_opportunity(_turn) -> Mapping[str, Any]:
@@ -765,14 +558,14 @@ class ReplayWorker:
                         )
                         if order.role is OrderRole.ENTRY:
                             if order.client_order_id not in {item.client_order_id for item in pending_candidates}:
-                                self.lifecycle.defer_entry(
+                                lifecycle.defer_entry(
                                     order, available_at=futures_bar.timestamp.isoformat(),
                                     reason="next_observed_bar",
                                 )
                                 coordinator.release_deferred_entry(order)
                                 continue
                             if order.setup_availability is not None and futures_bar.timestamp.isoformat() <= order.setup_availability:
-                                self.lifecycle.defer_entry(
+                                lifecycle.defer_entry(
                                     order, available_at=futures_bar.timestamp.isoformat(),
                                     reason="setup_not_yet_available",
                                 )
@@ -791,8 +584,7 @@ class ReplayWorker:
                                 if order.synthetic_legs is not None else None,
                             ) if order.vehicle == "synthetic" else None
                             if order.vehicle == "synthetic" and entry_quote is None:
-                                if order.vehicle == "futures":
-                                    coordinator.cancel(order)
+                                coordinator.cancel(order)
                                 all_events.append({"event_type": "ORDER_UNFILLED", "decision_id": order.client_order_id,
                                                    "reason": "missing_synthetic_future_quote", "source": "replay",
                                                    "session_date": date})
@@ -831,7 +623,7 @@ class ReplayWorker:
                                 continue
                             execution_order = replace(execution_order, exit_plan=exit_decision.accepted)
                             fill_id = f"replay-entry:{order.client_order_id}:{futures_bar.timestamp.isoformat()}"
-                            fill_result = self.lifecycle.apply_fill(fill_id, lambda: coordinator.fill(
+                            fill_result = lifecycle.apply_fill(fill_id, lambda: coordinator.fill(
                                 execution_order, price=fill_price, timestamp=futures_bar.timestamp.isoformat(), fill_id=fill_id,
                             ))
                             if fill_result is None:
@@ -904,7 +696,7 @@ class ReplayWorker:
                                 order.entry_order_id in portfolio.reservations
                                 if order.entry_order_id is not None else False
                             )
-                            settlement = self.lifecycle.apply_fill(
+                            settlement = lifecycle.apply_fill(
                                 f"replay-exit:{order.client_order_id}:{futures_bar.timestamp.isoformat()}",
                                 lambda: coordinator.fill(order, price=exit_price,
                                                           timestamp=futures_bar.timestamp.isoformat(),
@@ -971,7 +763,7 @@ class ReplayWorker:
                             parity_records["decision"].append(dict(event))
                     return {"recorded": len(all_events) - event_start}
 
-                self.lifecycle.run(
+                lifecycle.run(
                     turn,
                     {
                         ExecutionPhase.REFERENCE_PUBLICATION: lambda _turn: {},
@@ -985,7 +777,7 @@ class ReplayWorker:
                         ExecutionPhase.EVENT_RECORDING: record_replay_events,
                     },
                 )
-                if mode == "replay" and not daily_reset_emitted:
+                if not daily_reset_emitted:
                     ledger_records.append({
                         "event_type": "DAILY_RESET",
                         "kind": "daily_reset",
@@ -995,307 +787,7 @@ class ReplayWorker:
                     })
                     daily_reset_emitted = True
                 bars_seen += 1
-                result_events = ()
-                due_entry_ids = {item.client_order_id for item in pending_candidates}
-                # Phase 8 owns execution; this local projection contains no
-                # executable orders and is retained only for denial metadata.
-                phase8_orders: tuple[Any, ...] = ()
-                selected_ids = {item.client_order_id for item in phase8_orders}
-                for denied in candidate_orders:
-                    if denied.client_order_id in selected_ids:
-                        continue
-                    denial_reason = coordinator.denied_proposals.get(
-                        denied.client_order_id, "proposal_not_selected",
-                    )
-                    all_events.append({
-                        "event_type": (
-                            "EXECUTION_GROUP_CANDIDATE_DENIED"
-                            if denial_reason == "execution_group_already_claimed"
-                            else "TRIGGER_DENIED_PORTFOLIO"
-                        ),
-                        "decision_id": denied.client_order_id,
-                        "client_order_id": denied.client_order_id,
-                        "reason": denial_reason,
-                        "decision_at": futures_bar.timestamp.isoformat(),
-                        "source": "replay",
-                        "session_date": date,
-                    })
-                for order in phase8_orders:
-                    order_parent_ids[order.client_order_id] = (
-                        order.lifecycle_id or order.client_order_id.rsplit(":", 1)[0]
-                    )
-                    if order.client_order_id not in due_entry_ids:
-                        all_events.append({"event_type": "ORDER_INTENT",
-                                           "decision_id": order.client_order_id.rsplit(":", 1)[0],
-                                           "client_order_id": order.client_order_id,
-                                           "instrument": order.instrument.symbol,
-                                           "direction": "long" if order.side is OrderSide.BUY else "short",
-                                           "quantity": order.quantity, "cell": order.cell,
-                                           "stop": order.stop_price, "exit_mode": order.exit_mode,
-                                           "entry_bar": order.entry_bar, "decision_at": futures_bar.timestamp.isoformat(),
-                                           "source": "replay",
-                                           "session_date": date})
-                    if order.role is OrderRole.ENTRY:
-                        if order.client_order_id not in due_entry_ids:
-                            self.lifecycle.defer_entry(
-                                order, available_at=futures_bar.timestamp.isoformat(),
-                                reason="next_observed_bar",
-                            )
-                            coordinator.release_deferred_entry(order)
-                            continue
-                        if order.setup_availability is not None and futures_bar.timestamp.isoformat() <= order.setup_availability:
-                            self.lifecycle.defer_entry(
-                                order, available_at=futures_bar.timestamp.isoformat(),
-                                reason="setup_not_yet_available",
-                            )
-                            coordinator.release_deferred_entry(order)
-                            continue
-                        entry_bar = futures_bar
-                        entry_timestamp = entry_bar.timestamp.isoformat()
-                        if order.vehicle == "futures":
-                            try:
-                                account.authorize_and_reserve(order)
-                            except ValueError as exc:
-                                all_events.append({"event_type": "ENTRY_BLOCKED_RISK",
-                                                    "decision_id": order.client_order_id,
-                                                    "reason": str(exc), "timestamp": futures_bar.timestamp.isoformat(),
-                                                    "source": "replay", "session_date": date})
-                                continue
-                            reservation_event = {"event_type": "RESERVATION", "decision_id": order.client_order_id,
-                                                 "client_order_id": order.client_order_id,
-                                                 "timestamp": futures_bar.timestamp.isoformat(),
-                                                 "quantity": order.quantity, "vehicle": order.vehicle,
-                                                 "source": "replay", "session_date": date}
-                            all_events.append(reservation_event)
-                            ledger_records.append({**reservation_event, "kind": "reservation"})
-                            all_events.append({"event_type": "ORDER_AUTHORIZED",
-                                               "decision_id": order.client_order_id,
-                                               "account_revision": account.revision,
-                                               "timestamp": futures_bar.timestamp.isoformat(),
-                                                 "source": "replay", "session_date": date})
-                            ledger_records.append({
-                                "event_type": "AUTHORIZATION", "kind": "authorization",
-                                "decision_id": order.client_order_id,
-                                "timestamp": futures_bar.timestamp.isoformat(),
-                                "quantity": order.quantity, "vehicle": order.vehicle,
-                            })
-                        all_events.append({"event_type": "SUBMISSION", "decision_id": order.client_order_id,
-                                           "client_order_id": order.client_order_id,
-                                           "timestamp": futures_bar.timestamp.isoformat(),
-                                           "source": "replay", "session_date": date})
-                        all_events.append({"event_type": "ORDER_ACK", "decision_id": order.client_order_id,
-                                           "client_order_id": order.client_order_id, "vehicle": order.vehicle,
-                                           "timestamp": futures_bar.timestamp.isoformat(), "source": "replay",
-                                           "session_date": date, "status": "ACKNOWLEDGED"})
-                        entry_quote = synthetic_future_quote(
-                            quote_selection_bar, option_bars,
-                            symbols=(order.synthetic_legs[0].symbol, order.synthetic_legs[1].symbol)
-                            if order.synthetic_legs is not None else None,
-                        ) if order.vehicle == "synthetic" else None
-                        if entry_quote is None and order.vehicle == "synthetic":
-                            all_events.append({"event_type": "EXECUTION_ERROR", "decision_id": order.client_order_id,
-                                               "vehicle": order.vehicle,
-                                               "reason": "missing_synthetic_future_quote", "source": "replay", "session_date": date})
-                            all_events.append({"event_type": "ORDER_UNFILLED", "decision_id": order.client_order_id,
-                                               "vehicle": order.vehicle, "timestamp": futures_bar.timestamp.isoformat(),
-                                               "source": "replay", "session_date": date, "reason": "missing_synthetic_future_quote"})
-                            ledger_records.append({"event_type": "CANCELLATION", "decision_id": order.client_order_id,
-                                                   "timestamp": futures_bar.timestamp.isoformat(), "reason": "missing_synthetic_future_quote"})
-                            continue
-                        execution_order = order
-                        if entry_quote is not None:
-                            fill_price = entry_quote.price
-                        else:
-                            requested_fill = order.requested_fill_price or order.limit_price or entry_bar.open
-                            trigger_price = order.trigger_price or order.limit_price or requested_fill
-                            fill_decision = entry_fill_decision(
-                                direction="long" if order.side is OrderSide.BUY else "short",
-                                trigger_price=trigger_price,
-                                requested_fill_price=requested_fill,
-                                bar_open=entry_bar.open,
-                                failure_boundary=float(order.stop_price) if order.stop_price is not None else entry_bar.open,
-                            )
-                            if fill_decision.hard_stop is None:
-                                all_events.append({"event_type": "ENTRY_BLOCKED_RISK", "decision_id": order.client_order_id,
-                                                   "reason": "failure_boundary_not_protective", "timestamp": entry_timestamp,
-                                                   "source": "replay", "session_date": date})
-                                continue
-                            execution_order = replace(order, stop_price=fill_decision.hard_stop)
-                            fill_price = fill_decision.fill_price
-                        exit_decision = validate_exit_plan(
-                            order.exit_plan,
-                            direction="long" if order.side is OrderSide.BUY else "short",
-                            fill_price=fill_price,
-                        )
-                        if exit_decision.required_rejections:
-                            all_events.append({"event_type": "ENTRY_BLOCKED_EXIT_PLAN", "decision_id": order.client_order_id,
-                                               "reason": "required_exit_plan_invalid", "rejected_rule_ids": tuple(
-                                                   rule.rule_id for rule in exit_decision.required_rejections
-                                               ), "timestamp": entry_timestamp,
-                                               "source": "replay", "session_date": date})
-                            continue
-                        execution_order = replace(execution_order, exit_plan=exit_decision.accepted)
-                        for event in reversed(all_events):
-                            if event.get("decision_id") == order.client_order_id:
-                                event.update({"vehicle": order.vehicle, "entry_price": fill_price})
-                                if entry_quote is not None:
-                                    event.update({"ce_symbol": entry_quote.ce.instrument.symbol,
-                                                  "pe_symbol": entry_quote.pe.instrument.symbol, "ce_strike": entry_quote.strike,
-                                                  "ce_entry_price": entry_quote.ce.close, "pe_entry_price": entry_quote.pe.close,
-                                                  "synthetic_entry_price": entry_quote.price})
-                                break
-                        all_events.append({"event_type": "FILL", "decision_id": order.client_order_id,
-                                            "fill_timestamp": entry_timestamp,
-                                           "price": fill_price, "quantity": order.quantity,
-                                           "vehicle": order.vehicle, "source": "replay",
-                                             "session_date": date})
-                        ledger_records.append({"event_type": "FILL", "decision_id": order.client_order_id,
-                                                "timestamp": entry_timestamp,
-                                               "quantity": order.quantity, "price": fill_price})
-                        engine.register_entry(execution_order, fill_price=fill_price,
-                                               entry_fill_time=entry_bar.timestamp,
-                                               reference_price=entry_bar.close)
-                        if order.vehicle == "futures":
-                            self.lifecycle.apply_fill(
-                                order.client_order_id,
-                                lambda: coordinator.fill(
-                                    execution_order, price=fill_price,
-                                    timestamp=entry_timestamp,
-                                ),
-                            )
-                        engine.on_execution_event(ExecutionNotification(
-                            event_type="FILLED", client_order_id=order.client_order_id,
-                            status="FILLED", quantity=order.quantity,
-                            filled_quantity=order.quantity, price=fill_price,
-                            occurred_at=entry_timestamp,
-                            observed_at=entry_timestamp,
-                            available_at=entry_timestamp, source="replay",
-                        ))
-                        open_trades.append({"entry_order_id": order.client_order_id,
-                                            "instrument": order.instrument.symbol,
-                                            "side": order.side.value, "quantity": order.quantity,
-                                             "entry_timestamp": entry_timestamp,
-                                            "entry_price": fill_price, "vehicle": order.vehicle,
-                                            "stop_price": execution_order.stop_price,
-                                            "initial_risk_points": abs(fill_price - execution_order.stop_price)
-                                             if execution_order.stop_price is not None else None,
-                                            "initial_risk_rs": abs(fill_price - execution_order.stop_price)
-                                             * NIFTY_LOT_SIZE * order.quantity
-                                             if execution_order.stop_price is not None else None,
-                                            "cell": order.cell,
-                                            "entry_bar": order.entry_bar or engine.bars_seen})
-                        if entry_quote is not None:
-                            open_trades[-1].update({"ce_symbol": entry_quote.ce.instrument.symbol, "pe_symbol": entry_quote.pe.instrument.symbol,
-                                                     "ce_expiry": entry_quote.ce.instrument.expiry,
-                                                     "pe_expiry": entry_quote.pe.instrument.expiry,
-                                                     "ce_strike": entry_quote.strike, "ce_entry_price": entry_quote.ce.close,
-                                                     "pe_entry_price": entry_quote.pe.close,
-                                                     "synthetic_entry_price": entry_quote.price,
-                                                     "quote_timestamp": entry_quote.ce.timestamp.isoformat(),
-                                                     "quote_source": "same_minute_bundle"})
-                            last_quotes[order.client_order_id] = entry_quote
-                        elif order.vehicle == "futures" and "synthetic" in vehicles:
-                            report_quote = synthetic_future_quote(
-                                quote_selection_bar, option_bars,
-                            )
-                            if report_quote is not None:
-                                synthetic_open_trades.append({
-                                    "futures_entry_order_id": order.client_order_id,
-                                    "entry_order_id": f"{order.client_order_id}:synthetic-report",
-                                    "instrument": order.instrument.symbol,
-                                    "side": order.side.value,
-                                    "quantity": order.quantity,
-                                    "entry_timestamp": futures_bar.timestamp.isoformat(),
-                                    "entry_price": report_quote.price,
-                                    "vehicle": "synthetic",
-                                    "cell": order.cell,
-                                    "entry_bar": order.entry_bar or engine.bars_seen,
-                                    "ce_symbol": report_quote.ce.instrument.symbol,
-                                    "pe_symbol": report_quote.pe.instrument.symbol,
-                                    "ce_expiry": report_quote.ce.instrument.expiry,
-                                    "pe_expiry": report_quote.pe.instrument.expiry,
-                                    "ce_strike": report_quote.strike,
-                                    "ce_entry_price": report_quote.ce.close,
-                                    "pe_entry_price": report_quote.pe.close,
-                                    "synthetic_entry_price": report_quote.price,
-                                    "quote_timestamp": report_quote.ce.timestamp.isoformat(),
-                                    "quote_source": "same_minute_bundle",
-                            })
-                    elif order.role is OrderRole.EXIT:
-                        all_events.append({"event_type": "PENDING_EXIT", "decision_id": order.client_order_id,
-                                           "client_order_id": order.client_order_id,
-                                           "timestamp": futures_bar.timestamp.isoformat(),
-                                           "source": "replay", "session_date": date})
-                        try:
-                            open_trade = self._matching_trade(open_trades, order)
-                        except ExitValidationError as exc:
-                            all_events.append({"event_type": "EXECUTION_ERROR", "decision_id": order.client_order_id,
-                                               "reason": exc.reason, "source": "replay", "session_date": date})
-                            engine.settle_exit(order.client_order_id, filled=False)
-                            continue
-                        exit_quote = synthetic_future_quote(
-                            quote_selection_bar, option_bars,
-                            symbols=(open_trade["ce_symbol"], open_trade["pe_symbol"]),
-                        ) if open_trade and order.vehicle == "synthetic" else None
-                        if exit_quote is None and order.vehicle == "synthetic":
-                            all_events.append({"event_type": "EXECUTION_ERROR", "decision_id": order.client_order_id,
-                                               "reason": "missing_synthetic_future_quote", "source": "replay", "session_date": date})
-                            engine.settle_exit(order.client_order_id, filled=False)
-                            continue
-                        realized = self._settle_trade(open_trades, shadow_trades, order, futures_bar,
-                                                      exit_quote, order.reason,
-                                                      exit_price=exit_quote.price if exit_quote is not None else futures_bar.close,
-                                                      trade=open_trade)
-                        settlement = None
-                        had_reservation = (
-                            order.entry_order_id in portfolio.reservations
-                            if order.entry_order_id is not None else False
-                        )
-                        if order.vehicle == "futures":
-                            settlement = self.lifecycle.apply_fill(
-                                order.client_order_id,
-                                lambda: coordinator.fill(
-                                    order,
-                                    price=exit_quote.price if exit_quote is not None else futures_bar.close,
-                                    timestamp=futures_bar.timestamp.isoformat(),
-                                    cost=_execution_cost(open_trade),
-                                ),
-                            )
-                        settlement_values = settlement if isinstance(settlement, Mapping) else {}
-                        exit_timestamp = futures_bar.timestamp.isoformat()
-                        all_events.append({"event_type": "EXIT_FILL", "decision_id": order.client_order_id,
-                                           "client_order_id": order.client_order_id, "fill_timestamp": exit_timestamp,
-                                           "quantity": order.quantity,
-                                           "price": exit_quote.price if exit_quote is not None else futures_bar.close,
-                                           "source": "replay", "session_date": date})
-                        all_events.append({"event_type": "SETTLEMENT", "decision_id": order.client_order_id,
-                                           "timestamp": exit_timestamp, "source": "replay", "session_date": date})
-                        if settlement is not None:
-                            ledger_records.append({
-                                "event_type": "EXIT_SETTLEMENT", "kind": "exit_settlement",
-                                "decision_id": order.client_order_id, "timestamp": exit_timestamp,
-                                "quantity": order.quantity,
-                                "gross_pnl": settlement_values.get("gross_pnl"),
-                                "costs": settlement_values.get("costs"),
-                                "net_pnl": settlement_values.get("net_pnl"),
-                            })
-                        if had_reservation and settlement is not None:
-                            ledger_records.append({
-                                "event_type": "RESERVATION_RELEASE", "kind": "reservation_release",
-                                "decision_id": order.client_order_id, "entry_order_id": order.entry_order_id,
-                                "timestamp": exit_timestamp, "quantity": order.quantity,
-                            })
-                        engine.record_exit(strategy_id=order.strategy_id,
-                                           cell=realized.cell, reason=order.reason,
-                                           entry_bar=realized.entry_bar, exit_bar=engine.bars_seen,
-                                           date=date, vehicle=order.vehicle,
-                                           direction="long" if order.side.value == "SELL" else "short",
-                                           quantity=order.quantity)
-                        current_equity = portfolio.equity
-                        peak_equity = portfolio.peak_equity
-                        max_drawdown = min(max_drawdown, current_equity - peak_equity)
-                del result_events
-            for pending in self.lifecycle.pending_entries.values():
+            for pending in lifecycle.pending_entries.values():
                 order = pending.order
                 all_events.append({
                     "event_type": "ORDER_UNFILLED",
@@ -1322,9 +814,9 @@ class ReplayWorker:
                     event.setdefault("lifecycle_id", parent)
         scores = [int(event["score"]) for event in all_events
                   if isinstance(event.get("score"), (int, float))]
-        normalized_trades = [self._normalize_trade(trade) for trade in shadow_trades]
+        normalized_trades = [normalize_trade(trade) for trade in shadow_trades]
         summary = {
-            **self._build_summary(all_events, normalized_trades),
+            **build_summary(all_events, normalized_trades),
             "bars_seen": bars_seen,
             "decisions_scored": len(scores),
         }
@@ -1394,12 +886,9 @@ class ReplayWorker:
                 "requested_parameters": {
                     "session_date": session_date,
                     "vehicles": list(vehicles),
-                    "emit_rejected_decisions": emit_rejected_decisions,
-                    "capture_mode": capture_mode,
                     "mode": mode,
                     "include_parity_layers": include_parity_layers,
                 },
-                "capture_mode": capture_mode,
                 "mode": mode,
                 "include_parity_layers": include_parity_layers,
             }
@@ -1412,7 +901,7 @@ class ReplayWorker:
         for event in all_events:
             if not is_parity_decision_event(str(event.get("event_type", "")), event):
                 continue
-            normalized = self._normalize_decision(event)
+            normalized = normalize_decision(event)
             decision_id = event.get("decision_id")
             execution_events = execution_by_decision.get(decision_id, [])
             normalized["execution"].update({
@@ -1421,56 +910,20 @@ class ReplayWorker:
                                           if item.get("client_order_id")), None),
             })
             normalized_decisions.append(normalized)
-        replay_result = {
-            "run_id": run_id,
-            "schema_version": REPLAY_SCHEMA_VERSION,
-            "source": "replay",
-            "vehicles": list(vehicles),
-            "vehicle_semantics": "shared_portfolio_directional_and_margin",
+        projection_input = {
             "strategy": {"name": last_strategy_metadata.name, "version": last_strategy_metadata.version,
                          "config_hash": last_strategy_metadata.config_hash},
-            "metadata": metadata,
-            "configuration": {"initial_capital": initial_capital,
-                               "max_daily_loss": self.capital_profile.max_daily_loss,
-                               "max_net_directional_lots": self.capital_profile.max_net_directional_lots,
-                               "risk_per_trade": self.capital_profile.risk_per_trade,
-                               "max_lots": self.capital_profile.max_lots,
-                               "lot_size": NIFTY_LOT_SIZE},
             "bars_seen": bars_seen,
-            "directional_exposure": directional_exposure,
+            "metadata": metadata,
             "events": all_events,
             "decisions": [event for event in all_events if is_parity_decision_event(str(event.get("event_type", "")), event)],
-            "decision_trace_schema_version": 1,
             "decision_trace": normalized_decisions,
-            "unavailable_fields": sorted(unavailable_fields),
-            "summary_schema_version": REPLAY_SUMMARY_SCHEMA_VERSION,
             "summary": summary,
             "shadow_trades": normalized_trades,
             "shadow_ledger": ledger_records,
-            "authoritative_trades": [],
-            "authoritative_ledger": [],
-            "first_divergent_stage": None,
-            # Diagnostic-only trades live inside the replay run result. They
-            # are never written to runtime_events, the broker ledger, or the
-            # live trades/capital projections.
             "execution_scope": mode,
             "ledger_scope": "replay",
-            "capital": {
-                "initial_capital": initial_capital,
-                "current_equity": current_equity,
-                "realized_pnl": current_equity - initial_capital,
-                "peak_equity": peak_equity,
-                "max_drawdown": max_drawdown,
-                "lot_size": NIFTY_LOT_SIZE,
-            },
-            "scoring": {
-                "decisions_scored": len(scores),
-                "score_min": min(scores) if scores else None,
-                "score_max": max(scores) if scores else None,
-                "score_average": sum(scores) / len(scores) if scores else None,
-            },
         }
-        persisted_record_dicts: tuple[dict[str, Any], ...] = ()
         report = {
             "schema_version": 1,
             "report_type": "paper_replay",
@@ -1478,10 +931,12 @@ class ReplayWorker:
             "summary": summary,
             "metrics": summary,
         }
-        parity_artifact = build_parity_artifact(
-            replay_result, request=request, layer_records=parity_records,
-        ) if include_parity_layers else None
-        canonical_events = self._canonical_events(
+        parity_artifact = None
+        if include_parity_layers:
+            parity_artifact = self.parity_projector(
+                projection_input, request=request, layer_records=parity_records,
+            ) if self.parity_projector is not None else None
+        canonical_replay_events = canonical_events(
             all_events, run_id=run_id, execution_scope=cast(ExecutionScope, mode),
         )
         canonical = ReplayResult(
@@ -1490,175 +945,13 @@ class ReplayWorker:
             execution_scope=cast(ExecutionScope, mode),
             ledger_scope="replay",
             summary=ReplaySummary(summary),
-            events=tuple(canonical_events),
+            events=tuple(canonical_replay_events),
             shadow_trades=tuple(ReplayTrade(item) for item in normalized_trades),
             shadow_ledger=tuple(ReplayLedgerEntry(item) for item in ledger_records),
-            authoritative_trades=(),
-            authoritative_ledger=(),
             parity_artifact=parity_artifact,
-            replay_records=persisted_record_dicts,
             report=report,
         )
         return canonical.to_dict()
-
-    @staticmethod
-    def _canonical_events(events: Sequence[Mapping[str, Any]], *, run_id: str,
-                           execution_scope: ExecutionScope) -> list[ReplayEvent]:
-        """Wrap producer events in one strict, producer-neutral event envelope."""
-        result: list[ReplayEvent] = []
-        for sequence, event in enumerate(events):
-            raw_timestamp = (
-                event.get("occurred_at") or event.get("timestamp") or event.get("decision_at")
-                or event.get("fill_timestamp") or f"{event.get('session_date', '1970-01-01')}T00:00:00Z"
-            )
-            occurred_at = _timestamp_string(raw_timestamp)
-            identity_source = json.dumps(
-                {"sequence": sequence, "event_type": event.get("event_type"),
-                 "decision_id": event.get("decision_id"), "occurred_at": occurred_at},
-                sort_keys=True, separators=(",", ":"), default=str,
-            ).encode()
-            identity = hashlib.sha256(identity_source).hexdigest()
-            result.append(ReplayEvent(
-                schema_version=REPLAY_SCHEMA_VERSION, run_id=run_id,
-                execution_scope=cast(ExecutionScope, execution_scope), ledger_scope="replay",
-                sequence=sequence, occurred_at=occurred_at, identity=identity,
-                values=detach_replay_value(event),
-            ))
-        return result
-
-    @staticmethod
-    def _build_summary(
-        events: list[dict[str, Any]], trades: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        decisions = [item for item in events if is_parity_decision_event(str(item.get("event_type", "")), item)]
-        risk_rewards = [
-            float(item["gross_pnl_rs"]) / float(item["initial_risk_rs"])
-            for item in trades
-            if item.get("initial_risk_rs") not in (None, 0)
-        ]
-        return {
-            "decisions_emitted": len(decisions),
-            "orders_filled": len(trades),
-            "gross_pnl": round(sum(float(item.get("gross_pnl_rs") or 0.0) for item in trades), 4),
-            "risk_reward": round(sum(risk_rewards), 2),
-            "metric_lineage": {
-                "decision_event_count": len(decisions),
-                "trade_count": len(trades),
-                "trades_missing_initial_risk": sum(1 for item in trades if item.get("initial_risk_rs") is None),
-                "risk_reward_component_count": len(risk_rewards),
-            },
-        }
-
-    @staticmethod
-    def _normalize_decision(event: dict[str, Any]) -> dict[str, Any]:
-        payload = dict(event)
-        event_type = str(payload.get("event_type", ""))
-        raw_view = payload.get("decision_view")
-        view = validate_decision_view(raw_view) if isinstance(raw_view, Mapping) else build_decision_view(
-            payload, event_type=event_type,
-        )
-        subject = dict(view["subject"])
-        policy = dict(view["policy"])
-        evidence = dict(view["evidence"])
-        metrics = dict(evidence.get("metrics") or {})
-        return {
-            "decision_id": view.get("decision_id"),
-            "decision_stage": view.get("stage") or event_type.lower().removesuffix("decision"),
-            "outcome": policy.get("outcome") or event_type.lower(),
-            "rejection_reason": policy.get("reason_code"),
-            "risk": {
-                key: metrics.get(key) for key in ("stop_basis", "risk_per_trade", "risk_amount", "quantity", "score_multiplier")
-                if metrics.get(key) is not None
-            },
-            "sizing": {
-                key: metrics.get(key) for key in ("quantity", "max_lots", "lot_size", "entry_price")
-                if metrics.get(key) is not None
-            },
-            "execution": {
-                key: payload.get(key) for key in ("client_order_id", "execution_status", "execution_event_type")
-                if payload.get(key) is not None
-            },
-            "subject": subject,
-            "evidence": evidence,
-            "date": evidence.get("provenance", {}).get("session_date"),
-            "timestamp": view.get("at"),
-            "bar_index": metrics.get("sequence"),
-        }
-
-    @staticmethod
-    def _normalize_trade(trade: dict[str, Any]) -> dict[str, Any]:
-        """Expose the replay engine's authoritative entry-to-exit record."""
-        entry_at = datetime.fromisoformat(str(trade["entry_timestamp"]))
-        exit_at = (
-            datetime.fromisoformat(str(trade["exit_timestamp"]))
-            if trade.get("exit_timestamp") else None
-        )
-        entry_ist = entry_at.astimezone(IST)
-        exit_ist = exit_at.astimezone(IST) if exit_at else None
-        stop_price = float(trade["stop_price"]) if trade.get("stop_price") is not None else None
-        initial_risk_points = (
-            float(trade["initial_risk_points"])
-            if trade.get("initial_risk_points") is not None
-            else abs(float(trade["entry_price"]) - stop_price) if stop_price is not None else None
-        )
-        initial_risk_rs = (
-            float(trade["initial_risk_rs"])
-            if trade.get("initial_risk_rs") is not None
-            else initial_risk_points * NIFTY_LOT_SIZE * float(trade.get("quantity", 0.0))
-            if initial_risk_points is not None else None
-        )
-        entry_minutes = entry_ist.hour * 60 + entry_ist.minute - SESSION_OPEN_MINUTES
-        return {
-            "status": str(trade.get("status", "open")),
-            "date": entry_ist.date().isoformat(),
-            "session": ReplayWorker._session_for_minutes(entry_minutes),
-            "vehicle": str(trade.get("vehicle", "synthetic")),
-            "cell": str(trade.get("cell", "")),
-            "direction": "long" if str(trade.get("side", "")).upper() == "BUY" else "short",
-            "entry_time": entry_ist.strftime("%H:%M"),
-            "exit_time": exit_ist.strftime("%H:%M") if exit_ist else "",
-            "quantity": float(trade.get("quantity", 0.0)),
-            "entry_price": float(trade["entry_price"]),
-            "stop_price": stop_price,
-            "initial_risk_points": initial_risk_points,
-            "initial_risk_rs": initial_risk_rs,
-            "exit_price": float(trade["exit_price"]) if trade.get("exit_price") is not None else None,
-            "gross_pnl_rs": float(trade["gross_pnl_rs"]) if trade.get("gross_pnl_rs") is not None else None,
-            "cost_rs": float(trade["cost_rs"]) if trade.get("cost_rs") is not None else None,
-            "net_pnl_rs": float(trade["net_pnl_rs"]) if trade.get("net_pnl_rs") is not None else None,
-            # The normalized replay API uses the canonical audit vocabulary;
-            # Paper’s internal state machine keeps its more descriptive name.
-            "exit_reason": {
-                "trailing_stop": "trail_stop",
-            }.get(str(trade.get("exit_reason")), trade.get("exit_reason")),
-            # Keep the normalized replay record self-contained for API-only
-            # comparators investigating synthetic quote selection.
-            "ce_strike": trade.get("ce_strike"),
-            "ce_entry_price": trade.get("ce_entry_price"),
-            "pe_entry_price": trade.get("pe_entry_price"),
-            "ce_exit_price": trade.get("ce_exit_price"),
-            "pe_exit_price": trade.get("pe_exit_price"),
-            "synthetic_entry_price": trade.get("synthetic_entry_price"),
-            "synthetic_exit_price": trade.get("synthetic_exit_price"),
-            "ce_symbol": trade.get("ce_symbol"),
-            "pe_symbol": trade.get("pe_symbol"),
-            "expiry": trade.get("ce_expiry") or trade.get("pe_expiry"),
-            "quote_timestamp": trade.get("quote_timestamp"),
-            "quote_source": trade.get("quote_source"),
-            "ce_exit_symbol": trade.get("ce_exit_symbol"),
-            "pe_exit_symbol": trade.get("pe_exit_symbol"),
-            "exit_quote_timestamp": trade.get("exit_quote_timestamp"),
-            "exit_quote_source": trade.get("exit_quote_source"),
-        }
-
-    @staticmethod
-    def _session_for_minutes(minutes_from_open: int) -> str:
-        """Classify an entry with the canonical half-open session windows."""
-        if MORNING_ENTRY_MINUTES[0] <= minutes_from_open < MORNING_ENTRY_MINUTES[1]:
-            return "morning"
-        if AFTERNOON_ENTRY_MINUTES[0] <= minutes_from_open < AFTERNOON_ENTRY_MINUTES[1]:
-            return "afternoon"
-        return "unknown"
 
     @staticmethod
     def _matching_trade(open_trades: list[dict[str, Any]], order: Any) -> dict[str, Any]:
@@ -1712,103 +1005,5 @@ class ReplayWorker:
         if not isinstance(entry_bar, int) or isinstance(entry_bar, bool):
             raise TypeError("settled trade entry_bar must be an integer")
         return TradeSettlement(cell, entry_bar, len(trades), net_pnl)
-
-    def _dates(self) -> list[str]:
-        return self.store.read_dates()
-
-    def _resolve_source(self, session_date: str) -> Any | None:
-        if session_date not in self._source_cache:
-            self._source_cache[session_date] = self._futures_sources.resolve(session_date)
-        return self._source_cache[session_date]
-
-    def _prior_source_provenance(self, session_date: str) -> dict[str, Any] | None:
-        dates = sorted(value for value in self._dates() if value < session_date)
-        if not dates:
-            return None
-        source = self._resolve_source(dates[-1])
-        return source.provenance() if source is not None else None
-
-    def _bars(
-        self,
-        session_date: str,
-        *,
-        rows: list[dict[str, Any]] | None = None,
-        futures_source: Any | None = None,
-    ) -> tuple[MarketBar, ...]:
-        loaded_rows = rows if rows is not None else self.store.read_market_bars(session_date)
-        futures_source = futures_source if futures_source is not None else self._resolve_source(session_date)
-        if any(str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"} for row in loaded_rows):
-            loaded_rows = [
-                row for row in loaded_rows
-                if str(row.get("instrument_type", "")).upper() not in {"FUT", "FUTURES"}
-                or (
-                    futures_source is not None
-                    and str(row.get("symbol")) == futures_source.symbol
-                    and str(row.get("expiry", ""))[:10] == futures_source.expiry
-                )
-            ]
-        selected_futures_timestamps = [
-            datetime.fromisoformat(str(row["minute"]))
-            for row in loaded_rows
-            if str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
-        ]
-        if any(left >= right for left, right in zip(
-            selected_futures_timestamps, selected_futures_timestamps[1:],
-        )):
-            raise ValueError("futures source rows must be strictly chronological")
-        bars = []
-        for row in loaded_rows:
-            instrument_type = str(row.get("instrument_type", "")).upper()
-            if instrument_type not in {"FUT", "FUTURES", "INDEX", "EQ", "CE", "PE"}:
-                continue
-            timestamp = datetime.fromisoformat(str(row["minute"]))
-            local_timestamp = timestamp.astimezone(IST)
-            minute_of_day = local_timestamp.hour * 60 + local_timestamp.minute
-            if not SESSION_OPEN_MINUTES <= minute_of_day < SESSION_DATA_END_MINUTES:
-                continue
-            is_selected_futures = (
-                futures_source is not None
-                and instrument_type in {"FUT", "FUTURES"}
-                and str(row.get("symbol")) == futures_source.symbol
-                and str(row.get("expiry", ""))[:10] == futures_source.expiry
-            )
-            raw_bar = MarketBar(
-                instrument=Instrument(symbol=str(row["symbol"]), exchange=str(row["exchange"]),
-                                      instrument_type=instrument_type, expiry=row.get("expiry"),
-                                      strike=row.get("strike")),
-                timestamp=timestamp,
-                open=float(row["open"]), high=float(row["high"]), low=float(row["low"]), close=float(row["close"]),
-                volume=row.get("volume"), open_interest=row.get("open_interest"),
-            )
-            bars.append(virtual_continuous_bar(raw_bar) if is_selected_futures else raw_bar)
-        # The futures bar is the decision clock and is emitted immediately by
-        # the aggregator. Ingest same-minute supporting bars first so spot,
-        # VIX, and option inputs are available in that completed bundle.
-        return tuple(sorted(
-            bars,
-            key=lambda bar: (
-                bar.timestamp,
-                str(bar.instrument.instrument_type).upper() in {"FUT", "FUTURES"},
-            ),
-        ))
-
-    @staticmethod
-    def _aggregator(
-        bars: tuple[MarketBar, ...],
-    ) -> CompletedBarAggregator:
-        roles = {}
-        for bar in bars:
-            kind = str(bar.instrument.instrument_type).upper()
-            role = (MarketRole.FUTURES if kind in {"FUT", "FUTURES"}
-                    else MarketRole.VIX if bar.instrument.symbol.upper() == "INDIA VIX"
-                    else OptionRole(bar.instrument.symbol) if kind in {"CE", "PE"}
-                    else MarketRole.SPOT)
-            roles[InstrumentKey(bar.instrument.exchange, bar.instrument.symbol)] = role
-        return CompletedBarAggregator(
-            roles,
-            AggregatorConfig(
-                required_roles=(MarketRole.FUTURES,), deadline_seconds=0,
-            ),
-        )
 
 __all__ = ["ReplayWorker"]

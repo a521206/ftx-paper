@@ -7,10 +7,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 
-from ftx_paper.runtime.parity_artifacts import PARITY_LAYERS, build_parity_manifest, read_parity_artifact
+from ftx_paper.strategies.research.parity_artifacts import PARITY_LAYERS, build_parity_manifest, read_parity_artifact
 
 
-ROOT = Path(__file__).resolve().parents[1]
+# The script lives under scripts/strategies/research; anchor outputs at the repo root.
+ROOT = Path(__file__).resolve().parents[3]
 DATABASE = Path.home() / "AppData" / "Local" / "ftx-paper" / "runtime" / "runtime.sqlite3"
 OUTPUT = ROOT / "data" / "output" / "paper_parity_20261022" / "parity_artifact.json"
 START = "2026-09-01"

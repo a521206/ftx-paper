@@ -1,5 +1,5 @@
 # Keep this file focused on small store behavior; do not reintroduce broad
-# lease/process-thread tests or artificial ReplayWorker thread stubs here.
+# lease/process-thread tests or artificial worker-thread stubs here.
 from datetime import datetime
 import hashlib
 import sqlite3

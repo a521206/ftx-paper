@@ -24,7 +24,6 @@ from ftx_paper.execution import PaperExecutionCoordinator
 from ftx_paper.strategies.research.location import Cell, Location, LocationFeatures, LocationSnapshot
 from ftx_paper.strategies.research.decision import _configured_policies_for_cell
 from ftx_paper.strategies.research.config import Session
-from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.domain.capital import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE as CAPITAL_CONFIG
 
 
@@ -515,16 +514,6 @@ def test_risk_sizer_enforces_drawdown_and_lot_sizing() -> None:
     assert not approved.approved and approved.reason == "insufficient_risk_budget"
     blocked = sizer.size(capital=10000, equity=8000, peak_equity=10000, entry=100, stop=95)
     assert not blocked.approved and blocked.reason == "drawdown_limit"
-
-
-def test_replay_trade_session_classification_matches_canonical_windows() -> None:
-    assert ReplayWorker._session_for_minutes(60) == "morning"
-    assert ReplayWorker._session_for_minutes(119) == "morning"
-    assert ReplayWorker._session_for_minutes(120) == "unknown"
-    assert ReplayWorker._session_for_minutes(239) == "unknown"
-    assert ReplayWorker._session_for_minutes(240) == "afternoon"
-    assert ReplayWorker._session_for_minutes(299) == "afternoon"
-    assert ReplayWorker._session_for_minutes(300) == "unknown"
 
 
 def test_exit_state_machine_emits_protective_exit() -> None:

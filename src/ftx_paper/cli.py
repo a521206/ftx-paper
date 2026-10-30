@@ -12,6 +12,7 @@ from ftx_paper.domain.capital import CapitalRuntimeContext, RESEARCH_CAPITAL_PRO
 from ftx_paper.domain.portfolio import PortfolioState
 from ftx_paper.infrastructure.sqlite.runtime_store import ProcessAlreadyRunningError
 from ftx_paper.runtime.store import RuntimeStore
+from ftx_paper.strategies.research.parity_artifacts import build_parity_artifact
 from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.strategies.shared.factory import StrategyContext
 from ftx_paper.runtime.engine import MultiStrategyEngine
@@ -115,18 +116,20 @@ def api_main() -> None:
             portfolio=portfolio,
             capital_context=capital_context,
             engine=MultiStrategyEngine({
-                "ftx-paper-research": strategy_catalog.create(
-                    "ftx-paper-research",
+                strategy_id: strategy_catalog.create(
+                    strategy_id,
                     StrategyContext(
                         expiry_dates=frozenset(store.read_expiry_dates()),
                         portfolio=portfolio,
                         capital_context=capital_context,
                     ),
-                ),
+                )
+                for strategy_id in strategy_catalog.strategy_ids
             }),
         )
         replay_worker = ReplayWorker(
             store, capital_profile=capital_profile, strategy_selector=strategy_catalog,
+            parity_projector=build_parity_artifact,
         )
         operations = RuntimeOperations(session, replay_worker)
         if auth is not None and auth.access_token() is not None:

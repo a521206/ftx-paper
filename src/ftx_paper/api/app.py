@@ -12,7 +12,7 @@ from ftx_paper.infrastructure.sqlite.runtime_store import ProcessAlreadyRunningE
 from ftx_paper.runtime.session import RuntimeSession
 from ftx_paper.runtime.store import RuntimeStore
 from ftx_paper.runtime.replay_worker import ReplayWorker
-from ftx_paper.runtime.parity_artifacts import PARITY_LAYERS, read_parity_artifact
+from ftx_paper.strategies.research.parity_artifacts import PARITY_LAYERS, read_parity_artifact
 from ftx_paper.application.runtime_operations import RuntimeOperations
 from ftx_paper.domain.capital import ResearchCapitalProfile
 from ftx_paper.runtime.events import (

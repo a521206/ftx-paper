@@ -1,13 +1,17 @@
-"""Minimal producer-neutral parity artifact for Paper replays."""
+"""Research-strategy producer-neutral parity artifact for Paper replays."""
 from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
 import hashlib
 import json
 from typing import Any
+
+from ftx_paper.runtime.input_identity import (
+    NORMALIZED_BAR_FINGERPRINT_RECIPE,
+    normalized_bar_fingerprint,
+)
 
 from ftx_paper.contracts.replay import LEGACY_REPLAY_FIELDS
 
@@ -15,8 +19,6 @@ from ftx_paper.contracts.replay import LEGACY_REPLAY_FIELDS
 PARITY_ARTIFACT_SCHEMA_VERSION = 2
 PARITY_CONTRACT_ID = "producer_replay_parity"
 PARITY_MANIFEST_VERSION = 1
-NORMALIZED_BAR_FINGERPRINT_RECIPE = "normalized-bars-v1"
-_SESSION_ZONE = ZoneInfo("Asia/Kolkata")
 PARITY_LAYERS = ("run_scope", "decision", "execution_settlement", "portfolio_ledger")
 DECISION_STAGES = frozenset({"interaction", "candidate", "admission", "trigger", "exit"})
 DECISION_OUTCOMES = frozenset({"accepted", "rejected", "cancelled", "invalidated", "expired", "observed", "unavailable"})
@@ -38,56 +40,6 @@ def _jsonable(value: Any) -> Any:
 
 def _canonical_json(value: Any) -> str:
     return json.dumps(_jsonable(value), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-
-
-def normalized_bar_fingerprint(rows: Sequence[Mapping[str, Any]]) -> str:
-    """Hash comparable normalized bars using the canonical source recipe.
-
-    Futures source identity is represented separately in replay provenance. The
-    canonical input identity uses the continuous-series transformation so a
-    dated contract selected by Paper compares with NiftyZoning's series `I`.
-    """
-    normalized = []
-    for row in rows:
-        minute = str(row.get("minute") or row.get("time") or "")
-        try:
-            timestamp = datetime.fromisoformat(minute.replace("Z", "+00:00"))
-        except ValueError as exc:
-            raise ValueError("parity bar timestamps must be ISO timestamps") from exc
-        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
-            raise ValueError("parity bar timestamps must be timezone-aware")
-        required = ("open", "high", "low", "close")
-        if any(row.get(name) is None for name in required):
-            raise ValueError("parity bars require complete OHLCV values")
-        try:
-            open_price = float(row["open"])
-            high_price = float(row["high"])
-            low_price = float(row["low"])
-            close_price = float(row["close"])
-            volume = int(row["volume"]) if row.get("volume") is not None else None
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise ValueError("parity bar OHLCV values must be numeric") from exc
-        session_timestamp = timestamp.astimezone(_SESSION_ZONE)
-        normalized.append({
-            # Canonical source identity uses the session-local minute label,
-            # not the transport timestamp or its UTC-derived calendar date.
-            "time": session_timestamp.strftime("%H:%M"),
-            "open": open_price,
-            "high": high_price,
-            "low": low_price,
-            "close": close_price,
-            "volume": volume if volume is not None else 0,
-            "oi": int(row.get("oi", row.get("open_interest")) or 0),
-            "symbol": "NIFTY",
-            "expiry": "",
-            "contract_type": "CONTINUOUS",
-            "session_date": str(row.get("session_date") or session_timestamp.date().isoformat()),
-        })
-    normalized.sort(key=lambda row: tuple(row[key] for key in (
-        "session_date", "time", "open", "high", "low", "close", "volume", "oi",
-        "symbol", "expiry", "contract_type",
-    )))
-    return hashlib.sha256(_canonical_json(normalized).encode("utf-8")).hexdigest()
 
 
 def _decision_value(record: Mapping[str, Any], name: str) -> Any:
@@ -697,7 +649,6 @@ def build_parity_artifact(
         "fingerprint_recipe": NORMALIZED_BAR_FINGERPRINT_RECIPE,
         "execution_scope": str(result.get("execution_scope") or request.get("mode") or "replay"),
         "ledger_scope": str(result.get("ledger_scope") or "replay"),
-        "capture_mode": request.get("capture_mode", metadata.get("capture_mode", "full")),
         "capital_profile": request.get("capital_profile", {"name": "research"}),
         "strategy_configuration": request.get("strategy_configuration", {}),
         "replay_input": replay_input,
@@ -713,8 +664,8 @@ def build_parity_artifact(
     input_identity = replay_identity[0] if replay_identity else None
     coverage = _coverage(
         decisions,
-        int(result.get("causal_bars_seen", result.get("bars_seen", 0))),
-        result.get("unavailable_fields", ()),
+        int(result.get("bars_seen", 0)),
+        (),
         execution_observed="execution_settlement" in layer_records,
         settlement_observed="synthetic_settlements" in result or any(
             str(item.get("event_type", "")).upper() in {"SETTLEMENT", "SYNTHETIC_SETTLEMENT"}

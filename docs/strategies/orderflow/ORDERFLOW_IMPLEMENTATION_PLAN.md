@@ -153,7 +153,8 @@ only against the canonical input contract.
 
 Pin the canonical commit.
 
-Status: Complete.
+Status: Complete for the Phase 2 runtime-boundary contract; behavioral parity
+remains blocked until later canonical layers are ported.
 
 Required work:
 
@@ -208,12 +209,16 @@ Exit gate:
 
 Phase 1 verification record:
 
-- The old Paper orderflow implementation modules and behavior-specific tests were
-  removed; the package now contains only the configuration and strategy scaffold.
+- The old Paper orderflow policy, lifecycle, producer, replay, reporting, and
+  behavior-specific test modules were removed. The package retains only the
+  no-op strategy/configuration scaffold, registration/API boundaries, and the
+  explicitly retained canonical-support modules listed above.
 - Live and replay runtime paths no longer invoke the deleted producer, pipeline,
-  context provider, replay machine, or reporting projection.
-- The orderflow API projection and its OpenAPI route were removed.
-- Boundary tests, Ruff, and Pyright passed for the changed Phase 1 files.
+  context provider, replay machine, or old trader-facing reporting projection.
+- The retained API exposes canonical strategy decisions only; it does not
+  recompute orderflow policy, lifecycle, or execution state.
+- Validation at commit `12d957f`: 6 targeted tests passed; Ruff and Pyright
+  passed with zero errors.
 
 ## Phase 2: Define The Parity Contract And Runtime Boundary
 
@@ -222,6 +227,25 @@ establish the host-neutral transition boundary used by Paper live and replay.
 Use `C:\Users\agraw\Python\NiftyZoning\docs\orderflow\PARITY_CONTRACT.md` as
 the behavioral and artifact contract. Phase 2 does not port the whole package at
 once or add policy behavior.
+
+Status: Complete.
+
+Phase 2 checklist and runtime-boundary record:
+
+- `docs/strategies/orderflow/PHASE_2_PARITY_CHECKLIST.md` records the canonical
+  modules, symbols, dependency closure, public contract facts, transitions,
+  timestamps, availability, lineage, unavailable semantics, Paper ownership,
+  live/replay behavior, and canonical/scaffold test gates for every required
+  layer and reporting stream.
+- `src/ftx_paper/strategies/orderflow/runtime_boundary.py` defines the
+  host-neutral `transition_one` boundary, `CompletedObservation`, boundary event
+  envelope, versioned state snapshot, and separate incremental live and
+  bounded replay adapters. It also emits the versioned runtime-boundary artifact
+  for replay, incremental, and recovery executions. It contains no orderflow
+  policy.
+- The pinned canonical source exposes no explicit full state restore API;
+  `BoundaryState.from_snapshot` is therefore an explicit Paper runtime
+  snapshot/recovery contract and is not represented as canonical behavior.
 
 For each layer, record:
 
@@ -291,6 +315,20 @@ Runtime boundary gate:
 - No live callback calls `ReplayMachine` batch/file orchestration, and no replay
   path calls the live feed adapter.
 - Snapshot and recovery contracts are defined before policy-layer porting begins.
+
+Phase 2 verification record:
+
+- `tests/strategies/orderflow/test_runtime_boundary.py`: 4 passed. The live
+  incremental and replay-prefix adapters produce identical state/event prefixes;
+  recovery from a snapshot and duplicate input preserve the same prefix. The
+  runtime-boundary artifact reports matching replay, incremental, and recovery
+  hashes.
+- `.venv\Scripts\ruff.exe check .`: passed.
+- `.venv\Scripts\pyright.exe src/ftx_paper/strategies/orderflow/runtime_boundary.py src/ftx_paper/strategies/orderflow/__init__.py tests/strategies/orderflow/test_runtime_boundary.py`: passed with zero errors.
+- `git diff --check`: passed.
+- The Paper adapters do not invoke each other, and no policy or Paper-native
+  orderflow state machine was added. Later behavioral parity remains blocked
+  until the pinned `ReplayMachine` layers are ported and compared.
 
 This gate proves that the port is implementable; it does not prove behavioral
 parity. Behavioral parity remains blocked until the layer gates below pass against
