@@ -514,6 +514,9 @@ Phase 5 verification record:
 
 Validate opportunity formation and setup lifecycle only after Layers 1-3 pass.
 
+Status: Complete for the deterministic canonical contract gate. Paper runtime and
+database parity remains incomplete and is deferred to Phase 9.
+
 Port opportunity and setup-lifecycle behavior only after the first three layer
 gates pass. Paper accounting and execution remain outside this phase.
 
@@ -530,6 +533,18 @@ Parity gate:
 - Opportunity identities, lifecycle transitions, timeout counts, evidence, and
   close reasons match canonical output.
 - Duplicate/retry replay is idempotent and does not create duplicate candidates.
+
+Phase 6 verification record:
+
+- Canonical opportunity and timeout tests pass (30 tests) at the pinned baseline.
+- Paper Phase 6 opportunity, setup, timeout, lineage, future-evidence, and
+  deterministic identity tests pass together with the Phase 4/5 gates (18 tests).
+- Opportunity/setup contracts preserve causal identity, parent context, response
+  evidence lineage, lifecycle stages, explicit expiry/invalidation/supersession,
+  and duplicate timeout observation idempotence.
+- Ruff, Pyright, and `git diff --check` pass for the changed Paper scope.
+- No runtime/database parity claim is made; Phase 9 remains the host integration
+  and persistence gate.
 
 ## Phase 7: Port And Verify Intents, Admission, Allocation, And Execution
 

@@ -21,6 +21,12 @@ class ContextVersionRef:
     version: str
 
 
+class ContextRelation(StrEnum):
+    CONFIRMED = "confirmed"
+    CONFLICTED = "conflicted"
+    NEUTRAL = "neutral"
+
+
 def _freeze(value: Any) -> Any:
     if isinstance(value, Mapping):
         if any(not isinstance(key, str) for key in value):
@@ -74,3 +80,34 @@ class RegimePermission:
         if direction not in {"long", "short"}:
             raise ValueError(f"unsupported direction: {direction}")
         return (self.long if direction == "long" else self.short) is not Permission.BLOCKED
+
+
+@dataclass(frozen=True, slots=True)
+class StructuralSetup:
+    """Immutable setup facts resolved from one opportunity."""
+
+    setup_id: str
+    version: str
+    regime_version: str
+    direction: str
+    kind: str
+    entry_zone_low: float
+    entry_zone_high: float
+    structural_reference: float
+    sweep_extreme: float | None
+    failure_boundary: float
+    expires_at: str
+    active: bool = True
+    required_confirmation: tuple[str, ...] = ()
+    parent_context_id: str | None = None
+    parent_context_version: str | None = None
+    context_relation: ContextRelation = ContextRelation.CONFIRMED
+    context_reference_level: float | None = None
+    lifecycle_id: str | None = None
+    template: Any | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "context_relation", ContextRelation(self.context_relation))
+
+    def invalidated_by(self, *, close: float) -> bool:
+        return close < self.failure_boundary if self.direction == "long" else close > self.failure_boundary

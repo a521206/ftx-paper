@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Sequence
 
+from .hierarchy import StructuralSetup
+from .lifecycle import EvidenceRef as LifecycleEvidenceRef, SetupOpportunity
+from .orderflow_common import canonical_timestamp
 from .response import ResponseCandle, ResponseOutcomeStatus, build_response_spec, evaluate_response_window
 from .templates import Direction, ResponseType, TradeTemplate
 
@@ -35,6 +38,9 @@ class DirectionalResponse:
     evidence_ids: tuple[str, ...]
     observed_at: str
     available_at: str
+    band: Any | None = None
+    evidence: tuple[Any, ...] = ()
+    evidence_lineage: tuple[EvidenceRef, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,14 +92,24 @@ def opportunity_identity(*, session_date: str, instrument: str, direction: Direc
 
 
 def evaluate_response(template: TradeTemplate, interaction: Any, bars: Sequence[Any], *, as_of: str, response_evidence: Sequence[Any] | None = None) -> OpportunityOutcome:
+    as_of = canonical_timestamp(as_of)
+    interaction_available = str(_value(interaction, "available_at"))
+    if as_of < interaction_available:
+        raise ValueError("evaluation as-of cannot precede interaction availability")
     available = tuple(response_evidence) if response_evidence is not None else tuple(
         bar for bar in bars
         if _value(bar, "timeframe") == template.response_timeframe
+        and _value(bar, "available_at") >= interaction_available
+        and _value(bar, "available_at") >= _value(bar, "end_time")
         and _value(bar, "available_at") <= as_of
+        and _value(bar, "available_at") <= f"{_value(bar, 'session_date')}T{template.expiry_at}"
     )
+    if any(_value(bar, "available_at") > as_of or _value(bar, "available_at") < interaction_available for bar in available):
+        raise ValueError("response evidence is outside the evaluation boundary")
+    available = tuple(sorted(available, key=lambda item: (_value(item, "time"), _value(item, "available_at"))))
     if not available:
         return OpportunityOutcome(OpportunityOutcomeStatus.PENDING, "missing_completed_evidence", str(_value(interaction, "created_at")), str(_value(interaction, "available_at")), policy_version=template.policy_version, template=template, as_of=as_of)
-    spec = build_response_spec(template, band_lower=float(_value(interaction, "band_lower")), band_upper=float(_value(interaction, "band_upper")))
+    spec = build_response_spec(template, band_lower=float(_value(interaction, "band_low")), band_upper=float(_value(interaction, "band_high")))
     evaluation = evaluate_response_window(
         available,
         to_candle=lambda item: ResponseCandle(float(_value(item, "features")["open"] if hasattr(item, "features") else _value(item, "open")), float(_value(item, "features")["high"] if hasattr(item, "features") else _value(item, "high")), float(_value(item, "features")["low"] if hasattr(item, "features") else _value(item, "low")), float(_value(item, "features")["close"] if hasattr(item, "features") else _value(item, "close"))),
@@ -103,7 +119,7 @@ def evaluate_response(template: TradeTemplate, interaction: Any, bars: Sequence[
     )
     evidence = tuple(evaluation.evidence)
     lineage = tuple(_lineage(item) for item in evidence)
-    observed = str(_value(evidence[-1], "observed_at")) if evidence else str(_value(interaction, "created_at"))
+    observed = str(_value(evidence[-1], "end_time")) if evidence else str(_value(interaction, "interaction_started_at"))
     available_at = str(_value(evidence[-1], "available_at")) if evidence else str(_value(interaction, "available_at"))
     if evaluation.status is ResponseOutcomeStatus.INVALIDATED:
         return OpportunityOutcome(OpportunityOutcomeStatus.CONTRADICTED, "reference_crossed_after_contact", observed, available_at, evidence, evidence_lineage=lineage, policy_version=template.policy_version, template=template, as_of=as_of)
@@ -113,9 +129,9 @@ def evaluate_response(template: TradeTemplate, interaction: Any, bars: Sequence[
     candle = evaluation.confirmation_candle
     if candle is None:
         raise RuntimeError("confirmed response is missing its candle")
-    fields = candle.features if hasattr(candle, "features") else candle
+    fields = candle.features if hasattr(candle, "features") else {"high": _value(candle, "high"), "low": _value(candle, "low"), "close": _value(candle, "close")}
     direction = evaluation.direction or template.direction
-    response = DirectionalResponse(direction, str(_value(interaction, "location_alias")), float(_value(interaction, "reference_level")), float(fields["high"] if direction is Direction.LONG else fields["low"]), float(_value(interaction, "band_lower") if direction is Direction.LONG else _value(interaction, "band_upper")), float(_value(interaction, "band_upper") if direction is Direction.LONG and template.response_type is ResponseType.REJECTION else _value(interaction, "band_lower") if direction is Direction.SHORT and template.response_type is ResponseType.REJECTION else fields["close"]), (str(_value(candle, "observation_id")),), str(_value(candle, "observed_at")), str(_value(candle, "available_at")))
+    response = DirectionalResponse(direction, str(_value(interaction, "location")), float(_value(interaction, "reference_level")), float(fields["high"] if direction is Direction.LONG else fields["low"]), float(_value(interaction, "band_low" if direction is Direction.LONG else "band_high")), float(_value(interaction, "band_high" if direction is Direction.LONG else "band_low")) if template.response_type is ResponseType.REJECTION else float(fields["close"]), (str(_value(interaction, "interaction_id")), str(_value(candle, "time"))), str(_value(candle, "end_time")), str(_value(candle, "available_at")))
     return OpportunityOutcome(OpportunityOutcomeStatus.RESOLVED, f"causal_{template.response_type.value}", response.observed_at, response.available_at, evidence, response, lineage, template.policy_version, template, as_of)
 
 
@@ -127,4 +143,20 @@ def identify_opportunity(template: TradeTemplate, interaction: Any, bars: Sequen
     return outcome, opportunity_identity(session_date=str(_value(interaction, "session_date")), instrument=str(_value(interaction, "instrument")), direction=response.direction, interaction_id=str(_value(interaction, "interaction_id")), reference_generation=int(_value(interaction, "reference_generation")), template_id=template.template_id, response_evidence_ids=response.evidence_ids, formation_at=response.observed_at, formation_available_at=response.available_at)
 
 
-__all__ = ["DirectionalResponse", "EvidenceRef", "OpportunityContext", "OpportunityOutcome", "OpportunityOutcomeStatus", "evaluate_response", "identify_opportunity", "opportunity_identity"]
+def form_opportunity(response: DirectionalResponse, context: OpportunityContext, template: TradeTemplate, *, formation_available_at: str | None = None, decision_context_required: bool = True) -> tuple[SetupOpportunity, StructuralSetup]:
+    if template.direction is not response.direction:
+        raise ValueError("trade template direction does not match response direction")
+    available = formation_available_at or response.available_at
+    if available < response.available_at:
+        raise ValueError("formation availability cannot precede response availability")
+    failure = context.failure_boundary if context.failure_boundary is not None else response.invalidation_boundary
+    entry = response.entry_boundary or response.structure_boundary
+    response_episode = context.response_episode_id or f"response-episode:{context.session_date}:{context.instrument}:{template.template_id}:{context.location_interaction_id or context.lifecycle_id}"
+    group = f"execution-group:{context.session_date}:{context.instrument}:{template.execution_conflict_group}:{available}" if template.execution_conflict_group else response_episode
+    lineage = tuple(LifecycleEvidenceRef(ref.evidence_id, "5m", ref.observed_at, ref.available_at, "", 0) for ref in response.evidence_lineage)
+    opportunity = SetupOpportunity(context.lifecycle_id, response.direction, context.session_date, context.instrument, context.strategy, response.observed_at, available, context.candidate_id, context.parent_context, response.anchor, response.reference_level, context.context_candle, response.structure_boundary, failure, policy_version=context.policy_version, reference_generation=context.reference_generation, causal_identity=context.causal_identity, location_interaction_id=context.location_interaction_id, opening_interaction_kind=context.opening_interaction_kind, opening_policy_version=context.opening_policy_version, template_id=template.template_id, response_episode_id=response_episode, execution_group_id=group, clock=context.clock, decision_context_required=decision_context_required, origin_evidence_id=response.evidence_ids[0] if response.evidence_ids else None, response_evidence_ids=response.evidence_ids, response_evidence_lineage=lineage)
+    setup = StructuralSetup(context.candidate_id, f"{context.candidate_id}.template-{template.version}", context.regime_version, response.direction.value, "5m_acceptance_breakout" if template.response_type is ResponseType.ACCEPTANCE else "5m_recovery_breakout", entry, entry, context.context_candle.low if response.direction is Direction.LONG else context.context_candle.high, context.context_candle.low if response.direction is Direction.LONG else context.context_candle.high, failure, f"{available[:10]}T{template.expiry_at}", required_confirmation=template.required_confirmation, parent_context_id=context.parent_context.context_id if context.parent_context else None, parent_context_version=context.parent_context.version if context.parent_context else None, context_reference_level=response.reference_level, lifecycle_id=context.lifecycle_id, template=template)
+    return opportunity, setup
+
+
+__all__ = ["DirectionalResponse", "EvidenceRef", "OpportunityContext", "OpportunityOutcome", "OpportunityOutcomeStatus", "evaluate_response", "form_opportunity", "identify_opportunity", "opportunity_identity"]

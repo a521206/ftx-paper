@@ -9,6 +9,8 @@ from typing import Any, Iterable
 from .hierarchy import ContextVersionRef, MarketContext
 from .location_geometry import BAND_ATR_FRACTION, LocationBand
 from .orderflow_common import Aggregate
+from .lifecycle import EvidenceRef, LifecycleEvent, LifecycleStage, OpportunityStatus, SetupOpportunity  # noqa: F401
+from .opportunity import DirectionalResponse, OpportunityOutcome, OpportunityOutcomeStatus  # noqa: F401
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,3 +192,7 @@ class ReplayContext:
 
     def context(self, reference: ContextVersionRef) -> MarketContext | None:
         return self.market_contexts.resolve(reference)
+
+
+# Opportunity-layer contracts are re-exported here for the canonical state
+# machine import surface; their implementation remains outside this owner.
