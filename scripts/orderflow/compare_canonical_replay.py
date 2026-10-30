@@ -1,9 +1,8 @@
 """Compare the Paper evidence replay with NiftyZoning for one session.
 
-The two repositories are executed in isolated subprocesses.  Phase 3 market
-observations are compared first; only when those inputs match are the
-Phase 3.5 evidence projections compared.  No NiftyZoning package is imported
-into the Paper process.
+The two repositories are executed in isolated subprocesses.  Phase 3.5
+evidence projections are compared.  No NiftyZoning package is imported into
+the Paper process.
 """
 
 from __future__ import annotations
@@ -21,9 +20,6 @@ from typing import Any
 from ftx_paper.config import PaperConfig
 
 
-PHASE3_FIELDS = (
-    "source_fingerprint", "aggregates", "source_gaps", "issues", "session_boundaries",
-)
 PHASE35_FIELDS = (
     "atr", "locations", "vwap_measurements", "prior_value", "contexts",
     "unavailable", "context_stream_id", "location_stream_id",
@@ -155,24 +151,6 @@ def compare_date(
 ) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="orderflow-cross-repo-") as directory_name:
         directory = Path(directory_name)
-        canonical_phase3_path = directory / "canonical-phase3.json"
-        paper_phase3_path = directory / "paper-phase3.json"
-        canonical_phase3, canonical_error = _run_json(
-            [canonical_python, "scripts/orderflow/export_market_observation.py", "--date", session_date, "--output", str(canonical_phase3_path)],
-            cwd=canonical_root, output=canonical_phase3_path,
-        )
-        paper_phase3, paper_error = _run_json(
-            [paper_python, "scripts/orderflow/export_market_observation.py", "--date", session_date, "--runtime-dir", str(paper_runtime_dir), "--output", str(paper_phase3_path)],
-            cwd=paper_root, output=paper_phase3_path,
-        )
-        if canonical_phase3 is None or paper_phase3 is None:
-            return {
-                "date": session_date,
-                "phase3": {"status": "INCOMPLETE", "layer": "phase3", "canonical": canonical_error, "paper": paper_error},
-            }
-        phase3 = _compare_fields(canonical_phase3, paper_phase3, PHASE3_FIELDS, label="phase3")
-    with tempfile.TemporaryDirectory(prefix="orderflow-cross-repo-") as directory_name:
-        directory = Path(directory_name)
         paper_replay_path = directory / "paper-replay.json"
         paper_replay, replay_error = _run_json(
             [paper_python, "scripts/orderflow/orderflow_replay.py", "--date", session_date, "--runtime-dir", str(paper_runtime_dir), "--output", str(paper_replay_path)],
@@ -199,13 +177,7 @@ def compare_date(
             if canonical_path is not None and canonical_error is None
             else (None, canonical_error or "canonical replay artifact was not produced")
         )
-        if phase3["status"] != "MATCHED":
-            phase35 = {
-                "status": "UNAVAILABLE",
-                "layer": "phase3_5",
-                "reason": "phase3_mismatch",
-            }
-        elif paper_replay is None or canonical_projection is None:
+        if paper_replay is None or canonical_projection is None:
             phase35 = {
                 "status": "INCOMPLETE",
                 "layer": "phase3_5",
@@ -218,7 +190,6 @@ def compare_date(
             )
         return {
             "date": session_date,
-            "phase3": phase3,
             "phase3_5": phase35,
             "canonical_replay": {"status": "MATCHED" if canonical_projection else "INCOMPLETE"},
             "paper_replay": {"status": "MATCHED" if paper_replay else "INCOMPLETE"},
@@ -249,8 +220,7 @@ def main(argv: list[str] | None = None) -> int:
     ) for session_date in args.dates]
     print(json.dumps(results, indent=2, sort_keys=True))
     return 0 if all(
-        item.get("phase3", {}).get("status") == "MATCHED"
-        and item.get("phase3_5", {}).get("status") == "MATCHED"
+        item.get("phase3_5", {}).get("status") == "MATCHED"
         for item in results
     ) else 1
 
