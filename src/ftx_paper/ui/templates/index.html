@@ -1270,6 +1270,9 @@
     function strategyReplayPath(strategyId = selectedStrategy) {
       return `/api/v1/strategies/${encodeURIComponent(replayStrategyId(strategyId))}/replays`;
     }
+    function strategyActivityPath(strategyId = selectedStrategy) {
+      return `/api/v1/strategies/${encodeURIComponent(strategyId || '')}/activity`;
+    }
     function strategyReplayDetailPath(strategyId, runId) {
       return `${strategyReplayPath(strategyId)}/${encodeURIComponent(runId)}`;
     }
