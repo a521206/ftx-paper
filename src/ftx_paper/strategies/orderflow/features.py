@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+ZONE_WINDOWS = ("Z1", 9 * 60 + 15, 11 * 60), ("Z2", 11 * 60, 13 * 60), ("Z3", 13 * 60, 15 * 60)
+
 @dataclass(frozen=True, slots=True)
 class _DailyFeature:
     session_date: str
@@ -28,7 +30,11 @@ def _daily_features(rows_by_date: Mapping[str, Sequence[Mapping[str, object]]]) 
     days: list[_DailyFeature] = []
     for session_date in sorted(rows_by_date):
         rows = sorted(rows_by_date[session_date], key=lambda row: _clock(row["time"]))
-        if not rows:
+        zones = {
+            name: [row for row in rows if start <= _clock(row["time"]) < end]
+            for name, start, end in ZONE_WINDOWS
+        }
+        if not rows or any(not values for values in zones.values()):
             continue
         days.append(_DailyFeature(
             session_date,

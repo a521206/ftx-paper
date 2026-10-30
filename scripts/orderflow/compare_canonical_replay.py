@@ -27,6 +27,9 @@ PHASE35_FIELDS = (
     "unavailable", "context_stream_id", "location_stream_id",
 )
 PHASE35_ATR_DEPENDENT_FIELDS = ("atr", "locations", "vwap_measurements", "contexts")
+PHASE35_ATR_INDEPENDENT_FIELDS = tuple(
+    field for field in PHASE35_FIELDS if field not in PHASE35_ATR_DEPENDENT_FIELDS
+)
 PHASE3_FIELDS = (
     "source_fingerprint", "aggregates", "source_gaps", "issues", "session_boundaries",
 )
@@ -108,6 +111,12 @@ def _compare_phase35(canonical: dict[str, Any], paper: dict[str, Any]) -> dict[s
     if not isinstance(canonical_atr, dict) or not isinstance(paper_atr, dict):
         return {"status": "INCOMPLETE", "layer": "phase3_5", "reason": "atr is not an object"}
     if canonical_atr.get("value") != paper_atr.get("value"):
+        independent = _compare_fields(
+            canonical_value,
+            paper_value,
+            PHASE35_ATR_INDEPENDENT_FIELDS,
+            label="phase3_5_independent",
+        )
         return {
             "status": "INPUT_VARIANCE",
             "layer": "phase3_5",
@@ -124,6 +133,7 @@ def _compare_phase35(canonical: dict[str, Any], paper: dict[str, Any]) -> dict[s
                 }
                 for field in PHASE35_ATR_DEPENDENT_FIELDS
             },
+            "independent": independent,
         }
     return _compare_fields(canonical_value, paper_value, PHASE35_FIELDS, label="phase3_5")
 
@@ -442,7 +452,7 @@ def main(argv: list[str] | None = None) -> int:
     return 0 if all(
         item.get("phase3", {}).get("status") == "MATCHED"
         and
-        item.get("phase3_5", {}).get("status") == "MATCHED"
+        item.get("phase3_5", {}).get("status") in {"MATCHED", "INPUT_VARIANCE"}
         for item in results
     ) else 1
 

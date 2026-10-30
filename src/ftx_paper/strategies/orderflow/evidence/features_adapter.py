@@ -4,26 +4,26 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping, Sequence
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from ..features import daily_atr
 from ..market_observation import observe_market
 from ..state_machine_types import SessionLevels
-from ..value_publication import PriorSessionValueReference, ValuePublication
+from ..value_publication import ValuePublication
 from ..evidence_publication import AtrPublication
-from ..canonical.orderflow.value_publication import (
-    prior_profile_is_complete,
-    publish_value_references,
-)
 from .producer import EvidenceAdapter
 
 
 class PaperFeatureAdapter(EvidenceAdapter):
     """Calculate Phase 3.5 inputs from Paper-owned market rows and features."""
 
-    def __init__(self, rows_by_date: Mapping[str, Sequence[Mapping[str, object]]]) -> None:
+    def __init__(
+        self,
+        rows_by_date: Mapping[str, Sequence[Mapping[str, object]]],
+        *,
+        prior_values: Mapping[str, ValuePublication] | None = None,
+    ) -> None:
         self._rows = {date: tuple(rows) for date, rows in rows_by_date.items()}
+        self._prior_values = dict(prior_values or {})
         self._observations = {
             date: observe_market([dict(row) for row in rows])
             for date, rows in self._rows.items()
@@ -91,48 +91,10 @@ class PaperFeatureAdapter(EvidenceAdapter):
 
     def prior_value(self, session_date: str) -> ValuePublication:
         if session_date not in self._prior_value_cache:
-            prior_dates = sorted(date for date in self._rows if date < session_date)
-            prior_date = prior_dates[-1] if prior_dates else None
-            if prior_date is None:
-                self._prior_value_cache[session_date] = ValuePublication(
-                    None, None, None, (), "missing_prior_session_value_evidence",
-                )
-                return self._prior_value_cache[session_date]
-            prior_rows = [dict(row) for row in self._rows[prior_date]]
-            if not prior_profile_is_complete(prior_rows):
-                self._prior_value_cache[session_date] = ValuePublication(
-                    None, None, None, (), "prior_session_incomplete",
-                )
-                return self._prior_value_cache[session_date]
-            references = publish_value_references(
-                prior_rows,
-                [dict(row) for row in self._rows[session_date]],
+            self._prior_value_cache[session_date] = self._prior_values.get(
                 session_date,
-                prior_profile_complete=True,
+                ValuePublication(None, None, None, (), "missing_prior_session_value_evidence"),
             )
-            reference = next((item for item in references if item.scope == "prior_session"), None)
-            if reference is None:
-                self._prior_value_cache[session_date] = ValuePublication(
-                    None, None, None, (), "missing_prior_session_value_evidence",
-                )
-            else:
-                paper_reference = PriorSessionValueReference(
-                    reference.source_sessions[0], reference.val, reference.poc,
-                    reference.vah,
-                    datetime.fromisoformat(
-                        f"{prior_date}T{str(prior_rows[-1]['time'])[:5]}"
-                    ).replace(
-                        tzinfo=ZoneInfo("Asia/Kolkata"),
-                    ),
-                    datetime.fromisoformat(reference.available_at).replace(
-                        tzinfo=ZoneInfo("Asia/Kolkata"),
-                    ),
-                    (reference.reference_id, reference.fingerprint),
-                )
-                self._prior_value_cache[session_date] = ValuePublication(
-                    paper_reference, paper_reference.observed_at,
-                    paper_reference.available_at, paper_reference.lineage,
-                )
         return self._prior_value_cache[session_date]
 
 __all__ = ["PaperFeatureAdapter"]

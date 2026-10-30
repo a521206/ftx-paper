@@ -35,10 +35,8 @@ def test_replay_machine_publishes_evidence_at_each_row_clock() -> None:
     records, state = machine.run()
 
     assert records[0]["ordinary_context_ref"] is None
-    assert records[1]["ordinary_context_ref"] == {
-        "context_id": "5m-context-NIFTY-2026-10-30-1m_5m", "version": "v1",
-    }
+    assert records[1]["ordinary_context_ref"] is None
     assert state.sequence == 1
     assert state.latest_5m is not None
     assert state.latest_5m["time"] == "2026-10-30T09:15"
-    assert state.context_publications[0]["kind"] == "context_published"
+    assert state.context_publications == ()

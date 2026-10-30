@@ -107,7 +107,7 @@ def build_aggregate_result(rows: Iterable[Mapping[str, Any]], timeframe: int) ->
     for session_date, start in sorted(groups):
         items = groups[(session_date, start)]
         expected = [_clock(start + index) for index in range(timeframe)]
-        observed = [str(item["time"])[:5] for item in items]
+        observed = [str(item["time"]).split("T")[-1][:5] for item in items]
         missing_volume = any(not _usable_volume(item) for item in items)
         if missing_volume:
             issues.append(ObservationIssue(ObservationIssueKind.MISSING_VOLUME, session_date, timeframe,
@@ -125,7 +125,10 @@ def build_aggregate_result(rows: Iterable[Mapping[str, Any]], timeframe: int) ->
         if missing_volume or incomplete:
             continue
         first, last = items[0], items[-1]
-        raw = "|".join(f"{item['time']}:{item['open']}:{item['high']}:{item['low']}:{item['close']}:{item['volume']}" for item in items)
+        raw = "|".join(
+            f"{str(item['time']).split('T')[-1][:5]}:{item['open']}:{item['high']}:{item['low']}:{item['close']}:{item['volume']}"
+            for item in items
+        )
         aggregates.append(Aggregate(f"{session_date}T{_clock(start)}",
             f"{session_date}T{_clock(start + timeframe - 1)}", f"{session_date}T{_clock(start + timeframe)}",
             f"{timeframe}m", len(items), float(first["open"]), max(float(item["high"]) for item in items),
