@@ -396,6 +396,11 @@ Phase 3 parity verification record:
   unverified. Paper 5m observations retain all contributing 1m lineage IDs.
 - Both repositories normalize `HH:MM` source times consistently. Manifest
   hashes are compared before detailed records and report the first mismatch.
+- Added `scripts/orderflow/phase3_parity_harness.py` to run both exporters and
+  compare the five Layer 1 sections with hash-first manifests and first-field
+  mismatch reporting. The harness returned `MATCHED` for `2026-09-29`,
+  `2026-09-01`, `2026-09-15`, `2026-09-18`, and `2026-10-01` using the
+  canonical and Paper runtime databases.
 - `tests/strategies/orderflow`: 16 passed, with focused parity tests also
   passing in both repositories. Ruff and Pyright passed in both repositories.
 - `.venv\Scripts\ruff.exe check .`: passed.
