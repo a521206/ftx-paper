@@ -409,8 +409,9 @@ remain follow-up work.
 
 ## Phase 4: Port And Verify Layer 2 - Context, Values, Permissions, And Locations
 
-Status: Contract and pure-behavior port complete; behavioral runtime parity is
-INCOMPLETE and deferred to Phase 9.
+Status: Contract and pure-behavior port complete. Causal runtime parity is
+INCOMPLETE and requires the Phase 4 harness extension and Phase 4.5 below;
+host persistence remains deferred to Phase 9.
 
 Port and validate the canonical context and location contracts using exact
 Layer 1-shaped inputs. This phase does not claim Paper runtime or DB-backed
@@ -462,15 +463,84 @@ Phase 4 parity verification record:
   not `MATCHED`, until Phase 9 wires the canonical runtime owner to the Paper
   store and replay boundary.
 
+Phase 4 pending work:
+
+- Extend the current direct-domain parity harness to drive context and location
+  resolution from chronological completed observations rather than final
+  `location_interactions` snapshots.
+- Capture point-in-time location generations, source-observation IDs, causal
+  parents, availability timestamps, and explicit unavailable outcomes at each
+  replay clock step.
+- Keep final context/location snapshots as assertions only; they must not drive
+  the causal input stream.
+
+## Phase 4.5: Add The Causal Interaction Replay Boundary
+
+Phase 4.5 is the runtime-neutral layer between the pure context/location
+contracts and Phase 5 event-stream parity. It adds no interaction or response
+policy; it supplies the chronological orchestration required to exercise the
+already ported domain contracts.
+
+Status: Pending. Deterministic interaction/response primitives are ported, but
+canonical policy dispatch and chronological event parity are blocked until this
+layer exists.
+
+Required work:
+
+- Advance one shared replay clock over completed `1m` and `5m` aggregates.
+- Resolve context and locations as of each aggregate's available timestamp.
+- Publish causal location observations with timeframe, source IDs, parent
+  lineage, reference generation, bands, and unavailable reasons.
+- Feed observations into independent Paper `1m` and `5m` interaction episodes.
+- Incrementally advance each applicable response hypothesis only with newly
+  available response-timeframe evidence.
+- Invoke the canonical policy owners for hypothesis eligibility, direction,
+  role transitions, invalidation, and arbitration. For PD interactions this is
+  the `policies/pd.py` path and its `evaluate_response_hypotheses` contract;
+  the boundary must not select every location-matching template by itself.
+- Preserve canonical response-window boundaries, including carry-session
+  expiry, contact-candle selection, terminal-candle cutoff, instrument
+  filtering, unavailable evidence, and the canonical as-of clock.
+- Emit interaction creation, observation, departure, closure, response, and
+  expiry facts at the transition where they occur.
+- Make duplicate/retry replay idempotent while preserving event order.
+
+Phase 4.5 parity gate:
+
+- Paper and canonical streams match in chronological interaction/response
+  identity, causal parent, timestamp, evidence lineage, status, and reason.
+- Paper and canonical hypothesis selection, dynamic direction/role transitions,
+  invalidation, winner selection, and loser arbitration match exactly.
+- Final interaction snapshots are assertions only and do not drive Paper events.
+- Phase 5 comparison reports the first causal mismatch from this stream.
+- No Paper fallback, template selection rule, or response outcome exists unless
+  the corresponding canonical implementation has the same behavior.
+
 ## Phase 5: Port And Verify Layer 3 - Interactions And Responses
 
 Validate canonical observations, interaction episodes, response hypotheses, and
 response outcomes before opportunity formation.
 
-Status: INCOMPLETE. The pure opportunity/setup contracts are present, but the
-deterministic canonical contract gate remains open pending independent Paper
-Phase 5-input generation and full lifecycle parity. Runtime and database parity
-remain deferred to Phase 9.
+Status: Deterministic primitives and data contracts are ported. Canonical
+policy-dispatch parity and chronological event parity are pending Phase 4.5;
+runtime and database parity remain deferred to Phase 9.
+
+Phase 5 pending strategy-port repairs:
+
+- Align Paper response evaluation with canonical `opportunity.py` before using
+  it in the Phase 4.5 boundary. This is a Phase 5 policy defect, not a Paper
+  input-adapter fallback.
+- Preserve canonical `carry_sessions` expiry and the
+  `response_window_expired` outcome.
+- Filter response evidence by the canonical instrument/symbol and causal
+  availability boundary.
+- Stop evaluation at the canonical terminal interaction candle.
+- Locate and require the canonical contact candle before evaluating the response
+  window; emit `contact_not_available` when it cannot be found.
+- Preserve canonical as-of filtering, completed-bar filtering, response-window
+  expiry, and invalidation-before-confirmation ordering.
+- Do not replace any missing rule with a Paper-specific fallback or inferred
+  neutral outcome.
 
 Port only the canonical interaction and response modules and their newly required
 direct dependencies. Do not preserve the deleted Paper interaction or response
@@ -484,6 +554,8 @@ Canonical scope:
 - departure and close reasons;
 - response policy selection, arming, rejection, acceptance, confirmation,
   invalidation, and expiry;
+- canonical policy dispatch, including PD role transitions, hypothesis
+  eligibility, dynamic direction, response-window boundaries, and arbitration;
 - pre-event context and completed-evidence rules.
 
 Paper must not retain the deleted `InteractionDetector`, response policy, or
@@ -494,8 +566,13 @@ Parity gate:
 
 - Canonical and ported event streams match in order, identity, causal
   parent, evidence, status, timestamps, and close/expiry reason.
+- Canonical and ported policy dispatch match in hypothesis selection, role and
+  direction changes, response invalidation, evidence boundaries, expiry, and
+  winner/loser arbitration.
 - Duplicate observations are idempotent in both runs.
 - No response outcome is inferred from a terminal interaction state.
+- Paper does not add a location-to-template fallback or evaluate all matching
+  templates unless the canonical policy does so for that interaction.
 - Live and replay invoke the same ported interaction and response implementation;
   replay-only batch boundaries cannot create a second implementation path.
 
@@ -511,6 +588,11 @@ Phase 5 verification record:
 - Paper runtime/database context-location and interaction/response parity remain
   `INCOMPLETE` until Phase 9 wires the canonical runtime owner and persistence
   boundary; no DB-backed parity claim is made.
+- The direct Phase 5 harness compares explicitly supplied Paper boundary facts
+  and exposes causal mismatches, but it does not infer policy outcomes or claim
+  policy/event-stream parity until Phase 4.5 supplies the canonical
+  policy-dispatch and chronological input boundary, and the response evaluator
+  matches the canonical opportunity contract above.
 
 ## Phase 6: Port And Verify Opportunities And Setup Lifecycle
 
