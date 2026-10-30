@@ -9,6 +9,7 @@ from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from .orderflow_contract import stable_orderflow_id
+from .orderflow_geometry import BAND_ATR_FRACTION
 from .orderflow_location import LocationBand, LocationRecord
 
 
@@ -33,16 +34,11 @@ class MarketAggregate(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class VwapCalculationConfig:
-    calculation_version: str = "typical_price_volume_v1"
-    band_atr_fraction: float = 0.06
+    calculation_version: str = "vwap_typical_price_volume_v1"
 
     def __post_init__(self) -> None:
         if not self.calculation_version.strip():
             raise ValueError("invalid VWAP calculation configuration")
-        if self.band_atr_fraction < 0:
-            raise ValueError("VWAP band fraction cannot be negative")
-
-
 @dataclass(frozen=True, slots=True)
 class VwapMeasurement:
     timeframe: str
@@ -198,10 +194,10 @@ class VwapLocationProvider:
         return tuple(sorted(measurements, key=lambda item: (item.available_at, item.timeframe, item.source_aggregate_id)))
 
 
-def derive_vwap_band(value: float, atr: float, *, fraction: float = 0.06) -> LocationBand:
+def derive_vwap_band(value: float, atr: float) -> LocationBand:
     if atr <= 0:
         raise ValueError("VWAP location bands require a positive frozen ATR")
-    width = float(atr) * fraction
+    width = float(atr) * BAND_ATR_FRACTION
     return LocationBand(value - width, value + width)
 
 
@@ -210,7 +206,6 @@ def publish_vwap_locations(
     measurements: Sequence[VwapMeasurement],
     *,
     atr: float | None = None,
-    band_fraction: float = 0.06,
 ) -> tuple[LocationRecord, ...]:
     """Convert immutable measurements into ordinary diagnostic records."""
     if atr is None or atr <= 0:
@@ -240,7 +235,7 @@ def publish_vwap_locations(
             created_at=measurement.available_at,
             available_at=measurement.available_at,
             stream_id=getattr(registry, "stream_id", measurement.session_id),
-            band=derive_vwap_band(measurement.value, atr, fraction=band_fraction),
+            band=derive_vwap_band(measurement.value, atr),
             generation=generation, frozen_atr=float(atr),
             source_aggregate_id=measurement.source_aggregate_id,
             source_observation_id=measurement.source_observation_id,

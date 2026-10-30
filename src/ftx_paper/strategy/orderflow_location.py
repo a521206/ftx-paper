@@ -7,27 +7,12 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Iterable
 
+from .orderflow_geometry import BAND_ATR_FRACTION, LocationBand
+
 
 def is_diagnostic_location(alias: str) -> bool:
     """Return whether a location is evidence-only, never an executable setup."""
     return alias.upper() == "VWAP"
-
-
-@dataclass(frozen=True, slots=True)
-class LocationBand:
-    low: float
-    high: float
-
-    def __post_init__(self) -> None:
-        if self.low > self.high:
-            raise ValueError("location band low must not exceed high")
-
-    def intersects(self, *, high: float, low: float) -> bool:
-        return low <= self.high and high >= self.low
-
-    @property
-    def center(self) -> float:
-        return (self.low + self.high) / 2.0
 
 
 class LocationStatus(StrEnum):
@@ -204,8 +189,8 @@ class LocationRegistry:
             default=0,
         ) + 1
         band = LocationBand(
-            float(price) - 0.06 * frozen_atr,
-            float(price) + 0.06 * frozen_atr,
+            float(price) - BAND_ATR_FRACTION * frozen_atr,
+            float(price) + BAND_ATR_FRACTION * frozen_atr,
         )
         record = LocationRecord(
             location_id=f"{alias}:{source_session}:{generation}", alias=alias, price=float(price),
@@ -273,7 +258,7 @@ class LocationRegistry:
             key=lambda record: record.generation, default=None,
         )
         generation = previous.generation + 1 if previous is not None else 1
-        width = 0.06 * atr
+        width = BAND_ATR_FRACTION * atr
         record = LocationRecord(
             location_id=f"VWAP:{source_session}:{timeframe}:{generation}", alias="VWAP", price=float(value),
             source_session=source_session, created_at=available_at, available_at=available_at,

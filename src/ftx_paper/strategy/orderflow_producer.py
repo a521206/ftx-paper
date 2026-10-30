@@ -17,6 +17,7 @@ from .orderflow_contract import (
     OrderflowContext, OrderflowObservation, OrderflowObservationContext,
     stable_orderflow_id,
 )
+from .orderflow_geometry import BAND_ATR_FRACTION
 from .orderflow_location import LocationBand, LocationObservation, LocationRecord, is_diagnostic_location
 from .orderflow_source import source_fingerprint
 
@@ -411,7 +412,10 @@ class CausalOrderflowProducer:
                     key=lambda item: item.generation,
                     default=None,
                 )
-                band = LocationBand(level - atr * 0.06, level + atr * 0.06)
+                band = LocationBand(
+                    level - atr * BAND_ATR_FRACTION,
+                    level + atr * BAND_ATR_FRACTION,
+                )
                 if previous is None or previous.price != level or previous.band != band:
                     generation = location_generations.get(alias, 0) + 1
                     location_generations[alias] = generation

@@ -66,9 +66,12 @@ class OrderflowPolicy:
         self._session_id: str | None = None
         self._processed_observation_ids: set[str] = set()
         self._processed_location_observation_ids: set[str] = set()
-        self._location_detectors = {timeframe: InteractionDetector(timeframe) for timeframe in ("1m", "5m")}
-        self._context_history = ContextHistory()
         self._location_registry = LocationRegistry("orderflow")
+        self._location_detectors = {
+            timeframe: InteractionDetector(timeframe, self._location_registry)
+            for timeframe in ("1m", "5m")
+        }
+        self._context_history = ContextHistory()
         self._context_version = 0
         self._session_high: float | None = None
         self._session_low: float | None = None
@@ -138,10 +141,13 @@ class OrderflowPolicy:
         self._processed_observation_ids.clear()
         self._processed_location_observation_ids.clear()
         self._evidence.clear_cache()
-        self._location_detectors = {timeframe: InteractionDetector(timeframe) for timeframe in ("1m", "5m")}
         self._context_history = ContextHistory()
         if self._session_id is None:
             self._location_registry = LocationRegistry("orderflow")
+        self._location_detectors = {
+            timeframe: InteractionDetector(timeframe, self._location_registry)
+            for timeframe in ("1m", "5m")
+        }
         self._context_version = 0
         self._session_high = None
         self._session_low = None

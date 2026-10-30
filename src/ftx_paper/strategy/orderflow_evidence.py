@@ -197,12 +197,13 @@ class OrderflowEvidenceAssembler:
             )
             atr = next(
                 (
-                    location.frozen_atr
-                    for item in observations
-                    for location in item.location_observations
-                    if location.location_alias.upper() != "VWAP"
-                    and location.frozen_atr is not None
-                    and location.frozen_atr > 0
+                    item.context.frozen_atr if item.context is not None else None
+                    for item in reversed(observations)
+                    if item.timeframe == "5m"
+                    and item.available_at <= min(context.as_of, orderflow.cutoff)
+                    and item.context is not None
+                    and item.context.frozen_atr is not None
+                    and item.context.frozen_atr > 0
                 ),
                 None,
             )
@@ -210,7 +211,6 @@ class OrderflowEvidenceAssembler:
             vwap_locations = publish_vwap_locations(
                 location_registry,
                 vwap_measurements, atr=atr,
-                band_fraction=self.vwap_provider.config.band_atr_fraction,
             )
         first_parent_available = min(
             (item.available_at for item in observations if item.timeframe == "5m"),

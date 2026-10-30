@@ -9,7 +9,7 @@ from enum import StrEnum
 from typing import cast
 
 from .orderflow_contract import OrderflowObservation
-from .orderflow_location import LocationRecord, is_diagnostic_location
+from .orderflow_location import LocationRecord, LocationRegistry, is_diagnostic_location
 
 
 class InteractionStatus(StrEnum):
@@ -328,10 +328,11 @@ class InteractionDetector:
         "VWAP", "OR_HIGH", "OR_LOW", "PD_HIGH", "PD_LOW", "SESSION_HIGH", "SESSION_LOW",
     }
 
-    def __init__(self, timeframe: str) -> None:
+    def __init__(self, timeframe: str, registry: LocationRegistry | None = None) -> None:
         if timeframe not in {"1m", "5m"}:
             raise ValueError("interaction timeframe must be 1m or 5m")
         self.timeframe = timeframe
+        self._registry = registry
         self._active: dict[str, LocationInteraction] = {}
         self._closed: list[LocationInteraction] = []
         self._processed_observations: set[str] = set()
@@ -352,6 +353,12 @@ class InteractionDetector:
             return None
         if location.alias.upper() not in self._SUPPORTED_LOCATIONS:
             return None
+        if self._registry is not None:
+            registered = self._registry.records.get(location.location_id)
+            if registered is None:
+                self._registry.register(location)
+            else:
+                location = registered
         if location.available_at > observation.available_at:
             return None
         if observation.interval_end is not None and observation.available_at < observation.interval_end:
@@ -360,7 +367,6 @@ class InteractionDetector:
         key = _active_key(location.alias, self.timeframe)
         if processed_id in self._processed_observations:
             return self._active.get(key)
-        self._processed_observations.add(processed_id)
         if observation.context is None or observation.context.availability_status != "available":
             return None
         if self.timeframe == "5m":
@@ -392,6 +398,7 @@ class InteractionDetector:
             or not isinstance(low, (int, float)) or isinstance(low, bool)
         ):
             return None
+        self._processed_observations.add(processed_id)
         close_value, open_value, high_value, low_value = float(close), float(open_price), float(high), float(low)
         session_id = observation.context.session_id if observation.context is not None else ""
         first_observed_at = self._session_first_observed_at.get(session_id)
@@ -401,7 +408,6 @@ class InteractionDetector:
         interaction = self._active.get(key)
         if (
             interaction is not None
-            and location.alias.upper() != "VWAP"
             and interaction.reference_generation != location.generation
         ):
             replaced = replace(
