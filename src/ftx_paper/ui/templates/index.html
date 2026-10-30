@@ -1254,6 +1254,10 @@
       const separator = path.includes('?') ? '&' : '?';
       return `${path}${separator}strategy_id=${encodeURIComponent(selectedStrategy)}`;
     }
+    function replayStrategyId(strategyId) {
+      if (strategyId === 'orderflow-research') return 'ftx-paper-orderflow';
+      return strategyId || 'ftx-paper-orderflow';
+    }
     let replaySelectionInFlight = false;
     const replaySearch = new URLSearchParams(location.search);
     let replayRangeState = {
@@ -1778,7 +1782,7 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               session_date: request.session_date,
-              strategy_id: request.strategy_id || 'ftx-paper-orderflow',
+              strategy_id: replayStrategyId(request.strategy_id),
               vehicles: request.vehicles || ['futures', 'synthetic'],
               mode: 'replay',
               include_parity_layers: Boolean(request.include_parity_layers),
@@ -1807,7 +1811,9 @@
         }
         return;
       }
-      const run = runs.find((candidate) => replayRunDate(candidate) === dateValue);
+      const requestedStrategyId = selectedStrategy ? replayStrategyId(selectedStrategy) : null;
+      const run = runs.find((candidate) => replayRunDate(candidate) === dateValue
+        && (!requestedStrategyId || replayStrategyId(candidate.request?.strategy_id) === requestedStrategyId));
       if (run) {
         if (String(run.status).toLowerCase() === 'completed' && !replayDetails.has(String(run.run_id || ''))) {
           await loadReplayDetail(String(run.run_id || ''));
@@ -1816,7 +1822,7 @@
       }
       replaySelectionInFlight = true;
       try {
-         await get('/api/v1/replay', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({session_date: dateValue, strategy_id: 'ftx-paper-orderflow', vehicles: ['futures', 'synthetic'], mode: 'replay', include_parity_layers: false})});
+         await get('/api/v1/replay', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({session_date: dateValue, strategy_id: replayStrategyId(selectedStrategy), vehicles: ['futures', 'synthetic'], mode: 'replay', include_parity_layers: false})});
         flash(`Replay queued for ${replayDateLabel(dateValue)}`);
       } catch (e) {
         flash(e.message);
@@ -2235,7 +2241,7 @@
             const run = latestByDate.get(value);
             return !run || ['failed', 'rejected', 'cancelled'].includes(String(run.status || '').toLowerCase());
           });
-          await Promise.all(missing.map((session_date) => get('/api/v1/replay', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({session_date, strategy_id: selectedStrategy || 'ftx-paper-orderflow', vehicles: ['futures', 'synthetic'], mode: 'replay', include_parity_layers: false})})));
+          await Promise.all(missing.map((session_date) => get('/api/v1/replay', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({session_date, strategy_id: replayStrategyId(selectedStrategy), vehicles: ['futures', 'synthetic'], mode: 'replay', include_parity_layers: false})})));
           const query = new URLSearchParams({ date: from, date_from: from, date_to: to });
           history.replaceState({}, '', `/replay?${query.toString()}`);
           flash(missing.length ? `${missing.length} missing day${missing.length === 1 ? '' : 's'} queued` : 'Loaded cached replay days');
