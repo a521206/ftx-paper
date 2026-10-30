@@ -63,6 +63,51 @@ embedding infrastructure code in the strategy.
 6. Version and validate the snapshot schema if the strategy has state that must
    be persisted. Snapshots must not restore a separate runtime owner.
 
+## Minimal Bring-Up
+
+Use this path to prove that a new strategy is correctly wired before adding
+strategy behavior. A minimal strategy can intentionally return no decisions.
+
+1. Add the strategy package under `src/ftx_paper/strategies/<name>/` with:
+   - a strategy class implementing the shared protocol;
+   - stable metadata and a serializable `snapshot`;
+   - a factory implementing `StrategyFactory`.
+2. Register the factory and its stable `strategy_id` in
+   `src/ftx_paper/application/strategy_registry.py`.
+3. Add a focused test that constructs the strategy, checks metadata and the
+   snapshot, and confirms that a minimal completed bundle produces a tuple of
+   decisions. For a no-op scaffold, that tuple should be empty.
+4. Start the API from the repository root. The API owns the replay worker and
+   must be the only process that owns the runtime store:
+
+   ```powershell
+   .venv\Scripts\python.exe -m ftx_paper.cli
+   ```
+
+5. Select a date that exists in the runtime market-bar store and run the
+   strategy through the API-owned replay path:
+
+   ```powershell
+   .venv\Scripts\python.exe -m ftx_paper.replay_cli 2026-10-29 `
+     --base-url http://127.0.0.1:8501 `
+     --strategy-id ftx-paper-<name> `
+     --vehicles futures `
+     --include-parity-layers `
+     --json
+   ```
+
+   The request must use `mode: "replay"`, include `futures`, and use a date
+   with stored market data. The CLI submits `POST /api/v1/replay`, waits for
+   the terminal run, and fetches `GET /api/v1/replay/{run_id}`.
+6. Treat `status: "completed"` as the wiring check. For a no-op scaffold,
+   `bars_seen` should be positive while `decisions_emitted`, `orders_filled`,
+   and trades remain zero. If parity is enabled, also verify the persisted
+   manifest and its four layers: `run_scope`, `decision`,
+   `execution_settlement`, and `portfolio_ledger`.
+7. Before enabling non-empty behavior, run the focused tests, Pyright on the
+   changed Python files, and Ruff. Do not use a strategy-specific simulator or
+   call the broker to validate the scaffold.
+
 ## Required Tests
 
 Add focused tests for:
