@@ -23,6 +23,21 @@ in [Strategy boundaries](../shared/STRATEGY_BOUNDARIES.md) and
 [Strategy development](../shared/STRATEGY_DEVELOPMENT.md). This plan owns only
 the orderflow porting sequence and its canonical parity gates.
 
+## Canonical Strategy Fidelity - Paper Trading
+
+Canonical reference:
+`C:\Users\agraw\Python\NiftyZoning\src\orderflow`
+
+- Paper trading must faithfully adopt the canonical strategy, not independently
+  implement or extend strategy rules.
+- Trace strategy behavior to canonical code or an approved design; compare the
+  corresponding execution paths when investigating discrepancies.
+- Paper infrastructure may differ only at host boundaries and must preserve
+  canonical semantics, point-in-time availability, and causal/replay correctness.
+- Resolve divergence by fixing the paper implementation. Add fallbacks or
+  compatibility layers only when canonical behavior or an explicit approval
+  requires them; surface conflicts between canonical code and documented design.
+
 ## Non-Negotiable Rules
 
 - NiftyZoning owns orderflow behavior, state transitions, execution semantics,
