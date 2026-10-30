@@ -26,7 +26,7 @@ from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.runtime.engine import PaperEngine
 from ftx_paper.runtime.decision_turn import DecisionTurn, evaluate_turn
 from ftx_paper.runtime.orderflow_pipeline import ingest_orderflow_bar
-from ftx_paper.runtime.events import is_decision_event
+from ftx_paper.runtime.events import is_parity_decision_event
 from ftx_paper.strategies.orderflow.orderflow_contract import feature_values_to_dict, stable_orderflow_id
 from ftx_paper.strategies.orderflow.orderflow_observation import observe_market
 from ftx_paper.strategies.orderflow.orderflow_producer import CausalOrderflowProducer
@@ -447,6 +447,11 @@ class ReplayWorker:
         except ValueError as exc:
             raise ValueError("capture_mode must be none, summary, diagnostic, or full") from exc
         dates = [session_date]
+        # A parity artifact must retain the same causal evidence stream as the
+        # canonical full replay. Summary capture is still available for normal
+        # reports, but cannot be used for a producer comparison.
+        if include_parity_layers:
+            capture_mode = CaptureMode.FULL
         run_id = str(request.get("run_id") or uuid4().hex)
         all_events = _ScopedEvents(
             run_id=run_id,
@@ -971,9 +976,23 @@ class ReplayWorker:
                                 continue
                             execution_order = replace(execution_order, exit_plan=exit_decision.accepted)
                             fill_id = f"replay-entry:{order.client_order_id}:{futures_bar.timestamp.isoformat()}"
-                            self.lifecycle.apply_fill(fill_id, lambda: coordinator.fill(
+                            fill_result = self.lifecycle.apply_fill(fill_id, lambda: coordinator.fill(
                                 execution_order, price=fill_price, timestamp=futures_bar.timestamp.isoformat(), fill_id=fill_id,
                             ))
+                            if fill_result is None:
+                                coordinator.cancel(execution_order)
+                                all_events.append({
+                                    "event_type": "TRIGGER_DENIED_PORTFOLIO",
+                                    "decision_id": order.client_order_id,
+                                    "client_order_id": order.client_order_id,
+                                    "reason": coordinator.denied_proposals.get(
+                                        order.client_order_id, "portfolio_position_limit",
+                                    ),
+                                    "timestamp": futures_bar.timestamp.isoformat(),
+                                    "source": "replay",
+                                    "session_date": date,
+                                })
+                                continue
                             engine.register_entry(execution_order, fill_price=fill_price,
                                                   entry_fill_time=futures_bar.timestamp,
                                                   reference_price=futures_bar.close)
@@ -1092,8 +1111,8 @@ class ReplayWorker:
                         event_type = str(event.get("event_type", "")).upper()
                         if event_type in _EXECUTION_EVENT_TYPES or event_type in {"EXITDECISION", "EXIT", "CLOSE"}:
                             parity_records["execution_settlement"].append(dict(event))
-                    for event in result.events if result is not None else ():
-                        if is_decision_event(str(event.get("event_type", "")), event):
+                    for event in all_events[event_start:]:
+                        if is_parity_decision_event(str(event.get("event_type", "")), event):
                             parity_records["decision"].append(dict(event))
                     return {"recorded": len(all_events) - event_start}
 
@@ -1588,7 +1607,7 @@ class ReplayWorker:
                 execution_by_decision.setdefault(decision_id, []).append(item)
         normalized_decisions = []
         for event in all_events:
-            if not is_decision_event(str(event.get("event_type", "")), event):
+            if not is_parity_decision_event(str(event.get("event_type", "")), event):
                 continue
             normalized = self._normalize_decision(event)
             decision_id = event.get("decision_id")
@@ -1618,7 +1637,7 @@ class ReplayWorker:
             "causal_bars_seen": causal_bars_seen,
             "directional_exposure": directional_exposure,
             "events": all_events,
-            "decisions": [event for event in all_events if is_decision_event(str(event.get("event_type", "")), event)],
+            "decisions": [event for event in all_events if is_parity_decision_event(str(event.get("event_type", "")), event)],
             "decision_trace_schema_version": 1,
             "decision_trace": normalized_decisions,
             "unavailable_fields": sorted(unavailable_fields),

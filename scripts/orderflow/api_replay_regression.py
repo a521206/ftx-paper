@@ -82,7 +82,9 @@ def run(base_url: str, *, timeout: float, interval: float) -> int:
             "vehicles": ["futures"],
             "mode": "replay",
             "include_parity_layers": True,
-            "capture_mode": "summary",
+            # Parity requires the complete causal replay record, not the
+            # lightweight presentation summary.
+            "capture_mode": "full",
         },
     )
     run_id = queued.get("run_id")

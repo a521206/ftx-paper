@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from ftx_paper.contracts.replay import ReplayRequest, ReplayResult, detach_replay_value
+from ftx_paper.runtime.events import is_parity_decision_event
 from ftx_paper.runtime.replay_worker import ReplayWorker
 
 
@@ -33,6 +34,22 @@ def test_replay_request_defaults_to_lightweight_capture() -> None:
     assert ReplayRequest.from_mapping({**_request(), "capture_mode": "full"}).capture_mode == "full"
     with pytest.raises(ValueError, match="capture_mode"):
         ReplayRequest.from_mapping({**_request(), "capture_mode": "invalid"})
+
+
+def test_parity_decision_stream_includes_producer_observations() -> None:
+    trigger = {
+        "event_type": "POLICY_DECISION",
+        "decision_id": "trigger-1",
+        "decision_stage": "trigger",
+    }
+    execution = {
+        "event_type": "ORDER_INTENT",
+        "decision_id": "trigger-1",
+        "decision_stage": "trigger",
+    }
+
+    assert is_parity_decision_event("POLICY_DECISION", trigger)
+    assert not is_parity_decision_event("ORDER_INTENT", execution)
 
 
 def test_replay_result_requires_only_canonical_fields() -> None:

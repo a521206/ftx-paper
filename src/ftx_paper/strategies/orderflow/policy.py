@@ -1228,9 +1228,9 @@ class OrderflowPolicy:
                 "status": "RESOLVED", "response_evidence_ids": list(evidence_ids),
                 "source_observation_ids": list(evidence_ids),
                 "observed_at": response_observation.observed_at.isoformat(),
-                "available_at": formed_at.isoformat(),
-            }),
-    )
+             "available_at": formed_at.isoformat(),
+             }),
+     )
 
     def _evaluate_response(
         self,

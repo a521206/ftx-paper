@@ -100,6 +100,27 @@ def is_decision_event(event_type: str, payload: Mapping[str, object] | None = No
     )
 
 
+def is_parity_decision_event(event_type: str, payload: Mapping[str, object] | None = None) -> bool:
+    """Identify every causal decision record emitted by a replay producer.
+
+    Replay parity includes producer-side observations such as trigger events,
+    which are not persisted runtime decision events and therefore do not always
+    carry a ``decision_view`` envelope.
+    """
+    normalized = str(event_type).upper()
+    if normalized in EXECUTION_EVENT_TYPES:
+        return False
+    if is_decision_event(normalized, payload):
+        return True
+    if payload is None or not payload.get("decision_id"):
+        return False
+    return bool(
+        payload.get("decision_stage")
+        or payload.get("stage")
+        or normalized in {"EXITDECISION", "EXIT", "CLOSE"}
+    )
+
+
 __all__ = [
     "DECISION_EVENT_TYPES",
     "DecisionTimestampError",
@@ -111,6 +132,7 @@ __all__ = [
     "decision_session_bucket",
     "event_category",
     "is_decision_event",
+    "is_parity_decision_event",
     "parse_decision_at",
     "serialize_datetime",
 ]
