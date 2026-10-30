@@ -133,9 +133,19 @@ only against the canonical input contract.
 
 Pin the canonical commit.
 
+Status: Complete.
+
 Required work:
 
 - Record the canonical repository commit ID used for the baseline.
+
+Baseline record:
+
+- Canonical repository: `C:\Users\agraw\Python\NiftyZoning`.
+- Canonical branch at pin time: `main`.
+- Canonical commit: `8114f553392ad01dd032aecfed0031a3bc08e2f8`.
+- Commit subject: `docs: replace orderflow parity contract`.
+- Canonical worktree was clean when this baseline was recorded on 2026-10-30.
 
 Exit gate:
 
@@ -145,6 +155,8 @@ Exit gate:
 
 Remove the old behavior while keeping a minimal strategy structure for the
 canonical port.
+
+Status: Complete.
 
 Required work:
 
@@ -171,6 +183,15 @@ Exit gate:
 - No old orderflow behavior is reachable from the scaffold.
 - Superseded orderflow design and unimplemented parity documents are removed from
   the active Paper documentation set.
+
+Phase 1 verification record:
+
+- The old Paper orderflow implementation modules and behavior-specific tests were
+  removed; the package now contains only the configuration and strategy scaffold.
+- Live and replay runtime paths no longer invoke the deleted producer, pipeline,
+  context provider, replay machine, or reporting projection.
+- The orderflow API projection and its OpenAPI route were removed.
+- Boundary tests, Ruff, and Pyright passed for the changed Phase 1 files.
 
 ## Phase 2: Define The Parity Contract And Runtime Boundary
 

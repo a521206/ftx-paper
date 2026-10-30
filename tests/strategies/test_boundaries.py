@@ -17,7 +17,7 @@ def test_strategy_factory_selects_orderflow_explicitly() -> None:
     strategy = factory.create(strategy="ftx-paper-orderflow")
 
     assert strategy.metadata.name == "ftx-paper-orderflow"
-    assert strategy.metadata.version == "0.1.0"
+    assert strategy.metadata.version == "scaffold"
 
 
 def test_strategy_entry_points_are_explicitly_separate() -> None:

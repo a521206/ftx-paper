@@ -120,9 +120,6 @@ def api_main() -> None:
                     portfolio=portfolio,
                     capital_context=capital_context,
                 ),
-                "orderflow-research": strategy_factory.create(
-                    strategy_name="ftx-paper-orderflow",
-                ),
             }),
         )
         replay_worker = ReplayWorker(store, capital_profile=capital_profile)

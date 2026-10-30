@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Callable
 from dataclasses import dataclass, replace
 import time
 from typing import Iterable, Mapping, TypedDict
@@ -12,7 +11,6 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ftx_paper.market.feature_cache import FeatureSnapshot
-    from ftx_paper.strategies.orderflow.orderflow_contract import OrderflowContext
     from ftx_paper.strategies.shared.policy_contract import StrategyPolicy
 
 
@@ -36,7 +34,6 @@ class DecisionBundle:
     required_roles: tuple[Role | str, ...]
     missing_roles: tuple[Role | str, ...] = ()
     supporting_inputs: SupportingInputs | None = None
-    orderflow_context: OrderflowContext | None = None
     feature_snapshot: "FeatureSnapshot | None" = None
 
     @property
@@ -101,7 +98,6 @@ class CompletedBarAggregator:
         *,
         required_roles: Iterable[Role | str] | None = None,
         deadline_seconds: float | None = None,
-        orderflow_context_provider: Callable[[str, str], "OrderflowContext | None"] | None = None,
     ) -> None:
         # Accept tuple keys temporarily at this boundary for old callers;
         # internal state always uses the named identity type.
@@ -128,7 +124,6 @@ class CompletedBarAggregator:
         self._latest_trading_date: str | None = None
         self._last_futures_key: tuple[str, str] | None = None
         self._last_emitted_key: tuple[str, str] | None = None
-        self._orderflow_context_provider = orderflow_context_provider
 
     def ingest(self, bar: MarketBar) -> DecisionBundle | None:
         role = self._roles.get(InstrumentKey(bar.instrument.exchange, bar.instrument.symbol))
@@ -286,10 +281,6 @@ class CompletedBarAggregator:
                 "missing": tuple(role_to_key(role) for role in sorted(missing_same_minute, key=role_to_key)),
                 "unavailable": tuple(role_to_key(role) for role in sorted(unavailable_inputs, key=role_to_key)),
             },
-            orderflow_context=(
-                self._orderflow_context_provider(trading_date, minute)
-                if self._orderflow_context_provider is not None else None
-            ),
         )
         self._last_emitted_key = key
         return bundle
