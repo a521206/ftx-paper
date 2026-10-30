@@ -318,7 +318,7 @@ Runtime boundary gate:
 
 Phase 2 verification record:
 
-- `tests/strategies/orderflow/test_runtime_boundary.py`: 4 passed. The live
+- `tests/strategies/orderflow/test_runtime_boundary.py`: 6 passed. The live
   incremental and replay-prefix adapters produce identical state/event prefixes;
   recovery from a snapshot and duplicate input preserve the same prefix. The
   runtime-boundary artifact reports matching replay, incremental, and recovery
@@ -326,6 +326,9 @@ Phase 2 verification record:
 - `.venv\Scripts\ruff.exe check .`: passed.
 - `.venv\Scripts\pyright.exe src/ftx_paper/strategies/orderflow/runtime_boundary.py src/ftx_paper/strategies/orderflow/__init__.py tests/strategies/orderflow/test_runtime_boundary.py`: passed with zero errors.
 - `git diff --check`: passed.
+- Research parity/replay regression test files are currently absent from the
+  worktree because of unrelated pending deletions; they were not counted as
+  Phase 2 evidence.
 - The Paper adapters do not invoke each other, and no policy or Paper-native
   orderflow state machine was added. Later behavioral parity remains blocked
   until the pinned `ReplayMachine` layers are ported and compared.
@@ -335,6 +338,8 @@ parity. Behavioral parity remains blocked until the layer gates below pass again
 the pinned canonical commit.
 
 ## Phase 3: Port And Verify Layer 1 - Source And Market Observation
+
+Status: Complete.
 
 Port and validate the canonical source and observation behavior before adding
 context or policy integration. Do not compare market input datasets between
@@ -369,6 +374,38 @@ Parity gate:
 - Paper live and replay adapters each satisfy the ported canonical input
   contract, including ordering, identity, completion, availability, and lineage.
 - No later layer is enabled until the ported layer's canonical tests pass.
+
+Phase 3 parity verification record:
+
+- Ported the pinned canonical source fingerprint/metadata, aggregate builder,
+  session filtering, strict ordering, duplicate rejection, gap and incomplete
+  aggregate diagnostics, observed/available timestamps, and aggregate lineage.
+- Added canonical source/observation tests with package-root import changes and
+  Paper scaffold tests for identity, ordering, completion, availability, and
+  live/replay lineage through the Phase 2 transition boundary.
+- Paper adapters project canonical completed aggregates only; they do not
+  calculate a second aggregate, score, gap state, or VWAP. Live publishes one
+  completed observation at a time and replay remains bounded and ordered.
+- Canonical and Paper DB-backed observation paths produced identical payloads
+  for `2026-09-29`, including source fingerprints, aggregates, OHLCV values,
+  timestamps, gaps, issues, and session boundaries.
+- Post-repair parity samples matched for `2026-09-01`, `2026-09-15`,
+  `2026-09-18`, and `2026-10-01`.
+- Paper validates its selected dated futures source before projecting continuous
+  futures and fails closed as `INCOMPLETE` when source data is missing or
+  unverified. Paper 5m observations retain all contributing 1m lineage IDs.
+- Both repositories normalize `HH:MM` source times consistently. Manifest
+  hashes are compared before detailed records and report the first mismatch.
+- `tests/strategies/orderflow`: 16 passed, with focused parity tests also
+  passing in both repositories. Ruff and Pyright passed in both repositories.
+- `.venv\Scripts\ruff.exe check .`: passed.
+- `.venv\Scripts\pyright.exe` on all changed Phase 3 Python files: passed with
+  zero errors, warnings, or informations.
+- `git diff --check`: passed.
+
+Extended multi-date edge-case coverage, duplicate/order-violation sessions, and
+a commit containing the repair are not part of this verification record and
+remain follow-up work.
 
 ## Phase 4: Port And Verify Layer 2 - Context, Values, Permissions, And Locations
 
