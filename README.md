@@ -45,9 +45,9 @@ $env:FTX_PAPER_RUNTIME_DIR = "$env:LOCALAPPDATA\ftx-paper\runtime"
 For example, replay September 29 through the API after starting it:
 
 ```powershell
-Invoke-RestMethod -Method Post http://127.0.0.1:8501/api/v1/replay `
+Invoke-RestMethod -Method Post http://127.0.0.1:8501/api/v1/strategies/ftx-paper-orderflow/replays `
   -ContentType 'application/json' `
-  -Body '{"session_date":"2026-09-29","strategy_id":"ftx-paper-orderflow","vehicles":["futures"]}'
+  -Body '{"session_date":"2026-09-29","vehicles":["futures"],"mode":"replay","include_parity_layers":false}'
 ```
 
 The same API-owned replay worker can be run from the console without manually

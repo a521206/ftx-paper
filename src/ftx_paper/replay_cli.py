@@ -47,11 +47,10 @@ def run(
 ) -> dict[str, Any]:
     root = base_url.rstrip("/")
     queued = _request(
-        f"{root}/api/v1/replay",
+        f"{root}/api/v1/strategies/{strategy_id}/replays",
         method="POST",
         payload={
             "session_date": session_date,
-            "strategy_id": strategy_id,
             "vehicles": vehicles,
             "mode": "replay",
             "include_parity_layers": include_parity_layers,
@@ -63,7 +62,7 @@ def run(
 
     deadline = time.monotonic() + timeout
     while True:
-        result = _request(f"{root}/api/v1/replay/{run_id}")
+        result = _request(f"{root}/api/v1/strategies/{strategy_id}/replays/{run_id}")
         if result.get("status") in TERMINAL_STATUSES:
             return result
         if time.monotonic() >= deadline:

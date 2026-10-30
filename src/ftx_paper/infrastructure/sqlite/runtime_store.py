@@ -27,6 +27,7 @@ from ftx_paper.runtime.events import (
     RUNTIME_EVENT_SCHEMA_VERSION,
     RISK_EVENT_TYPES,
     DecisionTimestampError,
+    OPERATIONAL_ACTIVITY_EVENT_TYPES,
     event_category,
     is_decision_event,
     parse_decision_at,
@@ -636,6 +637,47 @@ class SqliteRuntimeStore:
             self._event_counts_cache = None
         return inserted
 
+    def read_activity(
+        self,
+        *,
+        strategy_id: str | None = None,
+        session_date: str | None = None,
+        event_type: str | None = None,
+        limit: int = 100,
+        before_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Read operational activity from the authoritative event store."""
+        if limit < 1:
+            return []
+        type_placeholders = ", ".join("?" for _ in OPERATIONAL_ACTIVITY_EVENT_TYPES)
+        clauses: list[str] = [f"event_type IN ({type_placeholders})"]
+        params: list[Any] = list(OPERATIONAL_ACTIVITY_EVENT_TYPES)
+        if strategy_id is not None:
+            clauses.append("json_extract(payload, '$.strategy_id') = ?")
+            params.append(strategy_id)
+        if session_date:
+            clauses.append("json_extract(payload, '$.session_date') = ?")
+            params.append(session_date)
+        if event_type:
+            clauses.append("event_type = ?")
+            params.append(event_type.upper())
+        if before_id is not None:
+            clauses.append("id < ?")
+            params.append(before_id)
+        where = f"WHERE {' AND '.join(clauses)}"
+        params.append(limit)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT id, event_type, payload, created_at FROM runtime_events {where} "
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                params,
+            ).fetchall()
+        events = self._events_from_rows([(row[1], row[2], row[3]) for row in rows])
+        return [
+            {**event, "activity_id": int(row[0])}
+            for event, row in zip(events, rows)
+        ]
+
     def create_order_lifecycle(self, client_order_id: str, payload: dict[str, Any], *, state: str = "PROPOSED",
                                account_revision: int | None = None) -> bool:
         """Durably register an order before any external broker call."""
@@ -764,10 +806,17 @@ class SqliteRuntimeStore:
                 "INSERT INTO replay_runs(run_id, status, request, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
                 (run_id, "queued", json.dumps(_json_safe(request, path="replay request")), now, now),
             )
+        self.append_event(
+            "REPLAY_QUEUED",
+            {"run_id": run_id, **request},
+            f"replay_activity:queued:{run_id}",
+            timestamp=now,
+        )
         return self.read_replay_run(run_id) or {}
 
     def update_replay_run(self, run_id: str, *, status: str, result: dict[str, Any] | None = None,
                           error: str | None = None) -> None:
+        updated_at = self._now()
         with self._connect() as connection:
             encoded_result = None
             chunks: list[bytes] = []
@@ -775,7 +824,7 @@ class SqliteRuntimeStore:
                 encoded_result, chunks = _encode_replay_result(result)
             connection.execute(
                 "UPDATE replay_runs SET status=?, result=COALESCE(?, result), error=?, updated_at=? WHERE run_id=?",
-                (status, encoded_result, error, self._now(), run_id),
+                (status, encoded_result, error, updated_at, run_id),
             )
             if result is not None:
                 connection.execute("DELETE FROM replay_result_chunks WHERE run_id=?", (run_id,))
@@ -783,6 +832,15 @@ class SqliteRuntimeStore:
                     "INSERT INTO replay_result_chunks(run_id, chunk_index, payload) VALUES (?, ?, ?)",
                     ((run_id, index, payload) for index, payload in enumerate(chunks)),
                 )
+        run = self.read_replay_run(run_id)
+        request = run.get("request", {}) if run else {}
+        self.append_event(
+            "REPLAY_STATUS",
+            {"run_id": run_id, "status": status, "strategy_id": request.get("strategy_id"),
+             "session_date": request.get("session_date"), "error": error},
+            f"replay_activity:{status}:{run_id}:{updated_at}",
+            timestamp=updated_at,
+        )
 
     def transition_replay_run(self, run_id: str, *, expected_status: str, status: str,
                               result: dict[str, Any] | None = None, error: str | None = None) -> bool:
@@ -798,13 +856,28 @@ class SqliteRuntimeStore:
                 (status, encoded_result,
                  error, self._now(), run_id, expected_status),
             )
-            if cursor.rowcount == 1 and result is not None:
+            changed = cursor.rowcount == 1
+            if changed and result is not None:
                 connection.execute("DELETE FROM replay_result_chunks WHERE run_id=?", (run_id,))
                 connection.executemany(
                     "INSERT INTO replay_result_chunks(run_id, chunk_index, payload) VALUES (?, ?, ?)",
                     ((run_id, index, payload) for index, payload in enumerate(chunks)),
                 )
-            return cursor.rowcount == 1
+            if changed:
+                request_row = connection.execute(
+                    "SELECT request FROM replay_runs WHERE run_id=?", (run_id,),
+                ).fetchone()
+            else:
+                request_row = None
+        if changed:
+            request = json.loads(request_row[0]) if request_row else {}
+            self.append_event(
+                "REPLAY_STATUS",
+                {"run_id": run_id, "status": status, "strategy_id": request.get("strategy_id"),
+                 "session_date": request.get("session_date"), "error": error},
+                f"replay_activity:{status}:{run_id}:{self._now()}",
+            )
+        return changed
 
     def read_replay_run(self, run_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
@@ -831,7 +904,8 @@ class SqliteRuntimeStore:
                 WITH ranked AS (
                     SELECT run_id, status, request, created_at, updated_at, error,
                            ROW_NUMBER() OVER (
-                               PARTITION BY json_extract(request, '$.session_date')
+                               PARTITION BY json_extract(request, '$.session_date'),
+                                            json_extract(request, '$.strategy_id')
                                ORDER BY created_at DESC
                            ) AS rank_for_day
                     FROM replay_runs

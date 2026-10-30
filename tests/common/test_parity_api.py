@@ -36,13 +36,17 @@ def _stored_replay(tmp_path):
 
 def test_parity_manifest_and_layer_endpoints_are_bounded(tmp_path) -> None:
     store, run_id, artifact = _stored_replay(tmp_path)
-    client = create_app(store, replay_worker=ReplayWorker(store)).test_client()
+    client = create_app(
+        store,
+        session=SimpleNamespace(strategy_status=lambda: ({"strategy_id": "ftx-paper-orderflow"},)),
+        replay_worker=ReplayWorker(store),
+    ).test_client()
 
-    manifest = client.get(f"/api/v1/replay/{run_id}/parity/manifest")
+    manifest = client.get(f"/api/v1/strategies/ftx-paper-orderflow/replays/{run_id}/parity/manifest")
     assert manifest.status_code == 200
     assert manifest.get_json() == artifact["manifest"]
 
-    page = client.get(f"/api/v1/replay/{run_id}/parity/decision?offset=0&limit=1")
+    page = client.get(f"/api/v1/strategies/ftx-paper-orderflow/replays/{run_id}/parity/decision?offset=0&limit=1")
     payload = page.get_json()
     assert page.status_code == 200
     assert payload["records"] == artifact["layers"]["decision"]
@@ -51,9 +55,13 @@ def test_parity_manifest_and_layer_endpoints_are_bounded(tmp_path) -> None:
 
 def test_parity_layer_endpoint_rejects_invalid_pagination(tmp_path) -> None:
     store, run_id, _ = _stored_replay(tmp_path)
-    client = create_app(store, replay_worker=ReplayWorker(store)).test_client()
+    client = create_app(
+        store,
+        session=SimpleNamespace(strategy_status=lambda: ({"strategy_id": "ftx-paper-orderflow"},)),
+        replay_worker=ReplayWorker(store),
+    ).test_client()
 
-    response = client.get(f"/api/v1/replay/{run_id}/parity/decision?limit=1001")
+    response = client.get(f"/api/v1/strategies/ftx-paper-orderflow/replays/{run_id}/parity/decision?limit=1001")
 
     assert response.status_code == 400
     assert response.get_json()["error"]["code"] == "invalid_pagination"
@@ -74,20 +82,23 @@ def test_legacy_event_routes_are_not_exposed(tmp_path) -> None:
 
 def test_activity_endpoint_supports_common_filters(tmp_path) -> None:
     store = RuntimeStore(tmp_path)
-    store.append_event("ORDER_INTENT", {
+    store.append_event("RUNTIME_RECOVERY", {
         "strategy_id": "ftx-paper-orderflow",
         "session_date": "2026-01-05",
         "message": "candidate order",
     })
-    client = create_app(store, replay_worker=ReplayWorker(store)).test_client()
+    client = create_app(
+        store,
+        session=SimpleNamespace(strategy_status=lambda: ({"strategy_id": "ftx-paper-orderflow"},)),
+        replay_worker=ReplayWorker(store),
+    ).test_client()
 
-    response = client.get("/api/v1/activity?category=execution&date=2026-01-05")
+    response = client.get("/api/v1/strategies/ftx-paper-orderflow/activity?date=2026-01-05")
 
     assert response.status_code == 200
     events = response.get_json()["events"]
     assert len(events) == 1
-    assert events[0]["event_type"] == "ORDER_INTENT"
-    assert client.get("/api/v1/activity?category=unknown").status_code == 400
+    assert events[0]["event_type"] == "RUNTIME_RECOVERY"
 
 
 def test_historical_date_cannot_start_live_runtime(tmp_path) -> None:

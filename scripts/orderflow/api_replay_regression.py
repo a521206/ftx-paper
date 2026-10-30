@@ -72,11 +72,10 @@ def run(base_url: str, *, timeout: float, interval: float) -> int:
         raise ValueError("interval must be non-negative")
     root = base_url.rstrip("/")
     queued = _request(
-        f"{root}/api/v1/replay",
+        f"{root}/api/v1/strategies/ftx-paper-orderflow/replays",
         method="POST",
         payload={
             "session_date": "2026-09-29",
-            "strategy_id": "ftx-paper-orderflow",
             # The canonical strategy metrics are futures-owned. Synthetic is a
             # reporting projection and must not participate in reconciliation.
             "vehicles": ["futures"],
@@ -94,7 +93,7 @@ def run(base_url: str, *, timeout: float, interval: float) -> int:
     deadline = time.monotonic() + timeout
     poll_interval = interval
     while True:
-        status = _request(f"{root}/api/v1/replay/{run_id}")
+        status = _request(f"{root}/api/v1/strategies/ftx-paper-orderflow/replays/{run_id}")
         state = status.get("status")
         if state in {"completed", "failed", "cancelled"}:
             break

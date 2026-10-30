@@ -1160,7 +1160,7 @@
       <div class="card empty">Loading {{ page|replace('-', ' ') }}…</div>
     </div>
   </main>
-  <script id="page-config" type="application/json">{{ {'api': api_base_url, 'page': page}|tojson }}</script>
+  <script id="page-config" type="application/json">{{ {'api': api_base_url, 'page': page, 'strategy_id': strategy_id}|tojson }}</script>
   <script>
     const config = JSON.parse(document.getElementById('page-config').textContent);
     const api = config.api;
@@ -1234,7 +1234,7 @@
     ];
 
     let selectedDecisionSession = new URLSearchParams(location.search).get('session');
-    const selectedStrategy = new URLSearchParams(location.search).get('strategy_id') || '';
+    const selectedStrategy = new URLSearchParams(location.search).get('strategy_id') || config.strategy_id || '';
     const strategyScopedPages = new Set(['decisions', 'trades', 'activity', 'replay']);
     const decisionDate = new URLSearchParams(location.search).get('date') || new Intl.DateTimeFormat('en-CA', {
       timeZone: 'Asia/Kolkata',
@@ -1266,6 +1266,12 @@
     }
     function replayStrategyId(strategyId) {
       return strategyId || '';
+    }
+    function strategyReplayPath(strategyId = selectedStrategy) {
+      return `/api/v1/strategies/${encodeURIComponent(replayStrategyId(strategyId))}/replays`;
+    }
+    function strategyReplayDetailPath(strategyId, runId) {
+      return `${strategyReplayPath(strategyId)}/${encodeURIComponent(runId)}`;
     }
     let replaySelectionInFlight = false;
     const replaySearch = new URLSearchParams(location.search);
@@ -1349,16 +1355,7 @@
       </table>`;
     }
 
-    function activityCategory(raw) {
-      const category = String(raw?.category || '').toLowerCase();
-      return { decision: 'Decision', risk: 'Risk', execution: 'Execution', runtime: 'Runtime' }[category] || 'Runtime';
-    }
-
     function activityTimestamp(raw) {
-      if (activityCategory(raw) === 'Decision') {
-        if (!raw?.payload?.decision_at) throw new Error('Decision row is missing decision_at');
-        return raw.payload.decision_at;
-      }
       return raw?.created_at;
     }
 
@@ -1379,14 +1376,13 @@
       if (!rows?.length) return '<div class="empty">No runtime activity recorded</div>';
       return rows.map((raw) => {
         const type = String(raw.event_type || 'UNKNOWN').toUpperCase();
-        const category = activityCategory(raw);
         const created = raw.created_at;
         const operatorTime = activityTimestamp(raw);
         const dateKey = activityDateKey(operatorTime);
         return `<details class="activity-item" data-activity-type="${esc(type.toLowerCase())}" data-activity-category="${esc(category.toLowerCase())}" data-activity-session="${esc(session(operatorTime).toLowerCase())}" data-activity-date="${esc(dateKey)}">
           <summary class="activity-row">
             <span><strong>${esc(type)}</strong><small>${date(created)}</small></span>
-            <span>${badge(category, category === 'Decision' ? 'good' : category === 'Execution' ? 'warn' : '')}</span>
+            <span>${badge('Runtime')}</span>
             <span>${badge(session(created))}</span>
             <span>${esc(activityMessage(raw))}</span>
             <span>View details</span>
@@ -1399,26 +1395,20 @@
     function activityPage(rows) {
       const types = [...new Set(rows.map((x) => String(x.event_type || 'UNKNOWN').toLowerCase()))].sort();
       const dates = [...new Set(rows.map((x) => activityDateKey(activityTimestamp(x))).filter(Boolean))].sort().reverse();
-      const counts = rows.reduce((result, row) => {
-        const category = activityCategory(row);
-        result[category] = (result[category] || 0) + 1;
-        return result;
-      }, {});
       const option = (value, label = value) => `<option value="${esc(value.toLowerCase())}">${esc(label)}</option>`;
       return `<div class="card">
         <div class="section-head">
-          <div><h2>Runtime activity</h2><div class="label">Decisions, execution, and operational events in one timeline</div></div>
+          <div><h2>Runtime activity</h2><div class="label">Operational and audit events not shown in decisions or trades</div></div>
           <button id="refresh-activity" class="secondary">Refresh now</button>
         </div>
         <div class="activity-summary">
-          ${[['All activity', rows.length], ['Decisions', counts.Decision || 0], ['Risk', counts.Risk || 0], ['Execution', counts.Execution || 0], ['Runtime', counts.Runtime || 0]].map((x) => `<span class="badge"><strong>${x[1]}</strong> ${x[0]}</span>`).join('')}
+          ${[['All activity', rows.length]].map((x) => `<span class="badge"><strong>${x[1]}</strong> ${x[0]}</span>`).join('')}
           <span class="badge"><strong id="activity-visible-count">${rows.length}</strong> shown</span>
         </div>
         <div class="activity-toolbar">
           <input id="activity-search" type="search" placeholder="Search type, reason, cell, or payload…" aria-label="Search runtime activity">
           <select id="activity-date" aria-label="Filter by date"><option value="">All dates</option>${dates.map((x) => option(x)).join('')}</select>
           <select id="activity-session" aria-label="Filter by session"><option value="">All sessions</option>${['Pre', 'Morning', 'Mid', 'Afternoon', 'Post'].map((x) => option(x)).join('')}</select>
-          <select id="activity-category" aria-label="Filter by category"><option value="">All categories</option>${['Decision', 'Risk', 'Execution', 'Runtime'].map((x) => option(x)).join('')}</select>
           <select id="activity-type" aria-label="Filter by event type"><option value="">All event types</option>${types.map((x) => option(x, x.toUpperCase())).join('')}</select>
         </div>
         <div id="activity-list">${activityStream(rows)}</div>
@@ -1426,8 +1416,13 @@
     }
 
     function strategyPickerPage(targetPage, strategies) {
-      const title = targetPage === 'decisions' ? 'Review decisions' : 'Run replay';
-      const description = targetPage === 'decisions' ? 'Choose a strategy to review.' : 'Choose a strategy to replay.';
+      const copy = {
+        decisions: ['Review decisions', 'Choose a strategy to review.'],
+        replay: ['Run replay', 'Choose a strategy to replay.'],
+        activity: ['Review activity', 'Choose a strategy to inspect.'],
+        trades: ['Review trades', 'Choose a strategy to inspect.'],
+      }[targetPage] || ['Choose a strategy', 'Choose a strategy to continue.'];
+      const [title, description] = copy;
       const options = strategies.length
         ? strategies.map((item) => `<a href="/${targetPage}?strategy_id=${encodeURIComponent(item.strategy_id)}"><strong>${esc(item.name || item.strategy_id)}</strong><small>${esc(item.strategy_id)} · v${esc(item.version || 'unversioned')}</small>${badge(item.enabled === false ? 'Disabled' : 'Ready', item.enabled === false ? 'warn' : 'good')}</a>`).join('')
         : '<div class="empty">No configured research strategies are available.</div>';
@@ -1486,8 +1481,8 @@
       const locationCards = locations.length ? locations.map((item) => `<article class="orderflow-location"><h3>${esc(item.name || item.location)}</h3><span>Reference / distance</span><strong>${esc(value(item.reference))} · ${esc(value(item.distance))}</strong><p>${badge(value(item.interaction_status), 'subtle')} ${badge(value(item.response_status), item.response_status === 'CONFIRMED' ? 'good' : 'warn')}</p><p>Implication: <strong>${esc(value(item.implication))}</strong></p></article>`).join('') : '<div class="empty">No active locations recorded</div>';
       const sequenceRows = sequence.length ? sequence.slice().reverse().map((item) => `<details class="orderflow-sequence-row"><summary><span>${esc(date(item.time))}</span><span>${esc(value(item.location))}</span><span>${esc(value(item.transition))}</span><span>${badge(value(item.direction), item.direction === 'LONG' ? 'good' : item.direction === 'SHORT' ? 'bad' : 'subtle')}</span><span>${esc(value(item.implication))}</span></summary><div class="payload">${esc(JSON.stringify(item.evidence || {}, null, 2))}</div></details>`).join('') : '<div class="empty">No orderflow sequence recorded</div>';
       const tradeRows = trades.length ? trades.slice(0, 8).map((trade) => `<tr><td>${esc(date(trade.created_at || trade.payload?.timestamp))}</td><td>${esc(trade.payload?.side || trade.payload?.direction || '—')}</td><td>${esc(money(trade.payload?.entry_price ?? trade.payload?.price))}</td><td>${esc(money(trade.payload?.realized_pnl ?? trade.payload?.pnl))}</td></tr>`).join('') : '<tr><td colspan="4" class="empty">No orderflow-triggered trades recorded</td></tr>';
-      return `<div class="orderflow-grid">${[['Bias', model.bias], ['Market state', model.market_state], ['Setup', setup.name], ['Position', position.length ? `${position.length} open` : 'Flat'], ['Freshness', date(model.as_of)]].map(([label, item]) => `<div class="orderflow-stat"><div class="label">${label}</div><strong>${esc(value(item))}</strong></div>`).join('')}</div>
-        <section class="orderflow-action"><div class="section-head"><div><div class="label">Decision action</div><h2>${esc(value(action.name))}</h2></div><a href="/replay?date=${encodeURIComponent(replayDate)}">Open replay</a></div><div class="orderflow-action-grid">${[['Direction', action.direction], ['Entry trigger', action.entry_trigger], ['Entry / zone', action.entry_price ?? `${action.trigger_zone?.lower ?? '—'} – ${action.trigger_zone?.upper ?? '—'}`], ['Stop', `${value(action.stop_basis)} · ${value(action.stop_price)}`], ['Target / exit', action.target ?? action.exit_condition], ['Risk / reward', action.risk_reward]].map(([label, item]) => `<div><span>${label}</span><strong>${esc(value(item))}</strong></div>`).join('')}</div><p><strong>Reason:</strong> ${esc(value(action.reason))}</p></section>${diagnosticPanel}
+        return `<div class="orderflow-grid">${[['Bias', model.bias], ['Market state', model.market_state], ['Setup', setup.name], ['Position', position.length ? `${position.length} open` : 'Flat'], ['Freshness', date(model.as_of)]].map(([label, item]) => `<div class="orderflow-stat"><div class="label">${label}</div><strong>${esc(value(item))}</strong></div>`).join('')}</div>
+         <section class="orderflow-action"><div class="section-head"><div><div class="label">Decision action</div><h2>${esc(value(action.name))}</h2></div><a href="/replay?strategy_id=${encodeURIComponent(selectedStrategy)}&date=${encodeURIComponent(replayDate)}">Open replay</a></div><div class="orderflow-action-grid">${[['Direction', action.direction], ['Entry trigger', action.entry_trigger], ['Entry / zone', action.entry_price ?? `${action.trigger_zone?.lower ?? '—'} – ${action.trigger_zone?.upper ?? '—'}`], ['Stop', `${value(action.stop_basis)} · ${value(action.stop_price)}`], ['Target / exit', action.target ?? action.exit_condition], ['Risk / reward', action.risk_reward]].map(([label, item]) => `<div><span>${label}</span><strong>${esc(value(item))}</strong></div>`).join('')}</div><p><strong>Reason:</strong> ${esc(value(action.reason))}</p></section>${diagnosticPanel}
         <section><div class="section-head"><div><h2>Active location board</h2><div class="label">Actionable interaction and response state</div></div></div><div class="orderflow-locations">${locationCards}</div></section>
         <section class="card orderflow-sequence"><div class="section-head"><div><h2>Orderflow sequence</h2><div class="label">Recent causal transitions</div></div><span class="badge">${sequence.length} events</span></div>${sequenceRows}</section>
         <div class="orderflow-columns"><section class="card"><h2>Current shared portfolio exposure</h2><div class="label">Position data is shared across configured strategies.</div>${position.length ? table(position) : '<div class="empty">Flat</div>'}</section><section class="card"><h2>Recent trades</h2><table><thead><tr><th>Time</th><th>Direction</th><th>Price</th><th>P&amp;L</th></tr></thead><tbody>${tradeRows}</tbody></table></section></div>
@@ -1495,16 +1490,15 @@
     }
 
     function wireActivityPage() {
-      const controls = ['activity-search', 'activity-date', 'activity-session', 'activity-category', 'activity-type'].map((id) => document.getElementById(id));
+      const controls = ['activity-search', 'activity-date', 'activity-session', 'activity-type'].map((id) => document.getElementById(id));
       const apply = () => {
-        const [search, dateFilter, sessionFilter, categoryFilter, typeFilter] = controls;
+        const [search, dateFilter, sessionFilter, typeFilter] = controls;
         const query = (search?.value || '').toLowerCase().trim();
         let shown = 0;
         document.querySelectorAll('.activity-item').forEach((item) => {
           const matches = (!query || item.textContent.toLowerCase().includes(query)) &&
             (!dateFilter.value || item.dataset.activityDate === dateFilter.value) &&
             (!sessionFilter.value || item.dataset.activitySession === sessionFilter.value) &&
-            (!categoryFilter.value || item.dataset.activityCategory === categoryFilter.value) &&
             (!typeFilter.value || item.dataset.activityType === typeFilter.value);
           item.hidden = !matches;
           if (matches) shown += 1;
@@ -1722,7 +1716,7 @@
       const fallback = available.includes(selectedDate) ? selectedDate : (available[available.length - 1] || '');
       const from = replayRangeState.from || fallback;
       const to = replayRangeState.to || fallback;
-      return `<section class="replay-control-bar"><form id="replay-form" class="replay-form"><label>From<input id="replay-from" type="date" value="${esc(from)}" aria-label="Replay range start"></label><label>To<input id="replay-to" type="date" value="${esc(to)}" aria-label="Replay range end"></label><button>${status === 'queued' || status === 'running' ? 'Replay running…' : 'Load date range'}</button></form><div class="replay-shortcuts"><span>${available.length} market days · cached days are reused</span><a href="/replay?date=${encodeURIComponent(fallback)}">Selected day</a></div></section>`;
+       return `<section class="replay-control-bar"><form id="replay-form" class="replay-form"><label>From<input id="replay-from" type="date" value="${esc(from)}" aria-label="Replay range start"></label><label>To<input id="replay-to" type="date" value="${esc(to)}" aria-label="Replay range end"></label><button>${status === 'queued' || status === 'running' ? 'Replay running…' : 'Load date range'}</button></form><div class="replay-shortcuts"><span>${available.length} market days · cached days are reused</span><a href="/replay?strategy_id=${encodeURIComponent(selectedStrategy)}&date=${encodeURIComponent(fallback)}">Selected day</a></div></section>`;
     }
 
     function replayRunView(run, filters = {}) {
@@ -1800,16 +1794,15 @@
       const buttons = document.querySelectorAll(`[data-run-id="${CSS.escape(runId)}"]`);
       buttons.forEach((button) => { button.disabled = true; button.textContent = 'Loading replay details…'; });
       try {
-        const detail = await get(`/api/v1/replay/${encodeURIComponent(runId)}`);
+        const detail = await get(strategyReplayDetailPath(replayStrategyId(selectedStrategy), runId));
         if (String(detail.status || '').toLowerCase() === 'completed'
             && !Array.isArray(detail.result?.shadow_trades)) {
           const request = detail.request || {};
-          await get('/api/v1/replay', {
+          await get(strategyReplayPath(request.strategy_id), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               session_date: request.session_date,
-              strategy_id: replayStrategyId(request.strategy_id),
               vehicles: request.vehicles || ['futures', 'synthetic'],
               mode: 'replay',
               include_parity_layers: Boolean(request.include_parity_layers),
@@ -1849,7 +1842,7 @@
       }
       replaySelectionInFlight = true;
       try {
-         await get('/api/v1/replay', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({session_date: dateValue, strategy_id: replayStrategyId(selectedStrategy), vehicles: ['futures', 'synthetic'], mode: 'replay', include_parity_layers: false})});
+         await get(strategyReplayPath(), {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({session_date: dateValue, strategy_id: replayStrategyId(selectedStrategy), vehicles: ['futures', 'synthetic'], mode: 'replay', include_parity_layers: false})});
         flash(`Replay queued for ${replayDateLabel(dateValue)}`);
       } catch (e) {
         flash(e.message);
@@ -2060,14 +2053,7 @@
               )
               .join('')}
           </div>
-        </div>
-        <div class="card">
-          <div class="section-head">
-            <h2>Recent decisions</h2>
-            <a href="/decisions">View all</a>
-          </div>
-          ${decisions(decisionRows.slice(0, 10))}
-        </div>`;
+         </div>`;
       } else if (page === 'decisions') {
         const visibleDecisionRows = decisionRows;
         const summary = data.decisions.summary || {};
@@ -2278,7 +2264,7 @@
             const run = latestByDate.get(value);
             return !run || ['failed', 'rejected', 'cancelled'].includes(String(run.status || '').toLowerCase());
           });
-          await Promise.all(missing.map((session_date) => get('/api/v1/replay', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({session_date, strategy_id: replayStrategyId(selectedStrategy), vehicles: ['futures', 'synthetic'], mode: 'replay', include_parity_layers: false})})));
+          await Promise.all(missing.map((session_date) => get(strategyReplayPath(), {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({session_date, strategy_id: replayStrategyId(selectedStrategy), vehicles: ['futures', 'synthetic'], mode: 'replay', include_parity_layers: false})})));
            const query = new URLSearchParams({ date: from, date_from: from, date_to: to });
            if (selectedStrategy) query.set('strategy_id', selectedStrategy);
           history.replaceState({}, '', `/replay?${query.toString()}`);
@@ -2342,16 +2328,15 @@
           dashboard: {
             capital: '/api/v1/capital',
             positions: '/api/v1/positions',
-            decisions: strategyQuery('/api/v1/decisions'),
           },
           positions: { positions: '/api/v1/positions' },
           trades: { trades: strategyQuery('/api/v1/trades') },
           capital: { capital: '/api/v1/capital' },
           replay: {
-            replays: '/api/v1/replay',
+            replays: strategyReplayPath(),
           },
           activity: {
-            events: strategyQuery('/api/v1/activity'),
+            events: strategyActivityPath(),
           },
         }[page] || {};
 

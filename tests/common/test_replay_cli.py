@@ -33,18 +33,17 @@ def test_run_submits_canonical_request_and_polls_until_complete(monkeypatch):
     assert result["status"] == "completed"
     assert calls == [
         (
-            "http://127.0.0.1:8501/api/v1/replay",
+                "http://127.0.0.1:8501/api/v1/strategies/ftx-paper-orderflow/replays",
             "POST",
             {
                 "session_date": "2026-09-29",
-                "strategy_id": "ftx-paper-orderflow",
                 "vehicles": ["futures"],
                 "mode": "replay",
                 "include_parity_layers": True,
             },
         ),
-        ("http://127.0.0.1:8501/api/v1/replay/replay-1", "GET", None),
-        ("http://127.0.0.1:8501/api/v1/replay/replay-1", "GET", None),
+            ("http://127.0.0.1:8501/api/v1/strategies/ftx-paper-orderflow/replays/replay-1", "GET", None),
+            ("http://127.0.0.1:8501/api/v1/strategies/ftx-paper-orderflow/replays/replay-1", "GET", None),
     ]
 
 

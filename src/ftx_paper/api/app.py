@@ -49,7 +49,7 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
         return value
 
     def strategy_filter() -> str | None | object:
-        selected = request.args.get("strategy_id")
+        selected = (request.view_args or {}).get("strategy_id") or request.args.get("strategy_id")
         if not selected:
             return None
         known = {
@@ -125,18 +125,27 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
     def health():
         return jsonify({"status": "pass", "service": "ftx-paper-api"})
 
-    @app.post("/api/v1/replay")
-    def create_replay():
+    @app.post("/api/v1/strategies/<strategy_id>/replays")
+    def create_replay(strategy_id: str | None = None):
         payload = request.get_json(silent=True)
         if not isinstance(payload, dict):
             return jsonify(error_payload("invalid_request", "JSON object body required")), 400
-        required_fields = {"session_date", "strategy_id", "vehicles", "mode", "include_parity_layers"}
+        required_fields = {"session_date", "vehicles", "mode", "include_parity_layers"}
         missing_fields = required_fields - set(payload)
         if missing_fields:
             return jsonify(error_payload(
                 "invalid_request", "missing replay request fields: " + ", ".join(sorted(missing_fields)),
             )), 400
+        if strategy_id:
+            configured_ids = {
+                str(item["strategy_id"])
+                for item in configured_strategy_statuses()
+                if item.get("strategy_id")
+            }
+            if strategy_id not in configured_ids:
+                return jsonify(error_payload("invalid_strategy", "strategy_id is not configured")), 400
         try:
+            payload["strategy_id"] = strategy_id
             replay_request = ReplayRequest.from_mapping(payload)
         except (TypeError, ValueError) as exc:
             return jsonify(error_payload("invalid_request", str(exc))), 400
@@ -158,23 +167,33 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             return jsonify(error_payload("not_found", "replay not found")), 404
         return jsonify(json_safe(queued)), 202
 
-    @app.get("/api/v1/replay")
-    def list_replays():
-        return jsonify(json_safe({"runs": store.read_replay_run_summaries()}))
+    @app.get("/api/v1/strategies/<strategy_id>/replays")
+    def list_replays(strategy_id: str | None = None):
+        selected = strategy_filter()
+        if selected is INVALID_STRATEGY:
+            return jsonify(error_payload("invalid_strategy", "strategy_id is not configured")), 400
+        runs = store.read_replay_run_summaries()
+        if isinstance(selected, str):
+            runs = [run for run in runs if run.get("request", {}).get("strategy_id") == selected]
+        return jsonify(json_safe({"runs": runs}))
 
-    @app.get("/api/v1/replay/<run_id>")
-    def replay_detail(run_id: str):
+    @app.get("/api/v1/strategies/<strategy_id>/replays/<run_id>")
+    def replay_detail(strategy_id: str, run_id: str):
         run = store.read_replay_run(run_id)
         if run is None:
+            return jsonify(error_payload("not_found", "replay not found")), 404
+        if run.get("request", {}).get("strategy_id") != strategy_id:
             return jsonify(error_payload("not_found", "replay not found")), 404
         if run.get("status") not in {"completed", "failed", "cancelled"}:
             return incomplete_replay_response(run)
         return jsonify(json_safe(run))
 
-    @app.get("/api/v1/replay/<run_id>/parity/manifest")
-    def replay_parity_manifest(run_id: str):
+    @app.get("/api/v1/strategies/<strategy_id>/replays/<run_id>/parity/manifest")
+    def replay_parity_manifest(strategy_id: str, run_id: str):
         run = store.read_replay_run(run_id)
         if run is None:
+            return jsonify(error_payload("not_found", "replay not found")), 404
+        if run.get("request", {}).get("strategy_id") != strategy_id:
             return jsonify(error_payload("not_found", "replay not found")), 404
         artifact, error = parity_artifact_for(run)
         if error is not None:
@@ -182,12 +201,14 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
         assert artifact is not None
         return jsonify(json_safe(artifact["manifest"]))
 
-    @app.get("/api/v1/replay/<run_id>/parity/<layer>")
-    def replay_parity_layer(run_id: str, layer: str):
+    @app.get("/api/v1/strategies/<strategy_id>/replays/<run_id>/parity/<layer>")
+    def replay_parity_layer(strategy_id: str, run_id: str, layer: str):
         if layer not in PARITY_LAYERS:
             return jsonify(error_payload("invalid_layer", f"unsupported parity layer: {layer}")), 400
         run = store.read_replay_run(run_id)
         if run is None:
+            return jsonify(error_payload("not_found", "replay not found")), 404
+        if run.get("request", {}).get("strategy_id") != strategy_id:
             return jsonify(error_payload("not_found", "replay not found")), 404
         artifact, error = parity_artifact_for(run)
         if error is not None:
@@ -405,7 +426,7 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
         if command in {"start", "restart"} and isinstance(payload, dict) and "session_date" in payload:
             return jsonify(error_payload(
                 "historical_session_requires_replay",
-                "Historical sessions must use POST /api/v1/replay; runtime start is for the live feed.",
+                "Historical sessions must use a strategy replay endpoint; runtime start is for the live feed.",
             )), 400
         if command in {"start", "restart"} and active_auth is not None and active_auth.access_token() is None:
             login_url = getattr(active_auth, "login_url", lambda: None)()
@@ -532,17 +553,23 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             "next_cursor": next_cursor,
         }))
 
-    @app.get("/api/v1/activity")
-    def activity():
-        """Return the common runtime activity stream with server-side filters."""
+    @app.get("/api/v1/strategies/<strategy_id>/activity")
+    def activity(strategy_id: str | None = None):
+        """Return one strategy's operational activity stream."""
         selected = strategy_filter()
         if selected is INVALID_STRATEGY:
             return jsonify(error_payload("invalid_strategy", "strategy_id is not configured")), 400
-        category = request.args.get("category", "").strip().lower()
         event_type = request.args.get("event_type", "").strip().upper()
         selected_date = request.args.get("date", "").strip()
-        if category and category not in {"decision", "risk", "execution", "runtime"}:
-            return jsonify(error_payload("invalid_category", "category must be decision, risk, execution, or runtime")), 400
+        try:
+            limit = int(request.args.get("limit", "100"))
+            before_id = int(request.args["before"]) if request.args.get("before") else None
+        except ValueError:
+            return jsonify(error_payload("invalid_pagination", "limit and before must be integers")), 400
+        if not 1 <= limit <= 1000:
+            return jsonify(error_payload("invalid_limit", "limit must be between 1 and 1000")), 400
+        if before_id is not None and before_id < 1:
+            return jsonify(error_payload("invalid_cursor", "before must be a positive activity cursor")), 400
         if selected_date:
             try:
                 parsed_date = datetime.strptime(selected_date, "%Y-%m-%d").date()
@@ -550,13 +577,20 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
                 return jsonify(error_payload("invalid_date", "date must be YYYY-MM-DD")), 400
             if parsed_date.isoformat() != selected_date:
                 return jsonify(error_payload("invalid_date", "date must be YYYY-MM-DD")), 400
-        rows = filter_attributed(store.read_events(1000), selected)
-        rows = [row for row in rows if (
-            (not category or str(row.get("category", "")).lower() == category)
-            and (not event_type or str(row.get("event_type", "")).upper() == event_type)
-            and (not selected_date or str(row.get("payload", {}).get("session_date", ""))[:10] == selected_date)
-        )]
-        return jsonify(json_safe({"events": rows}))
+        rows = store.read_activity(
+            strategy_id=selected if isinstance(selected, str) else None,
+            session_date=selected_date or None,
+            event_type=event_type or None,
+            limit=limit + 1,
+            before_id=before_id,
+        )
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        return jsonify(json_safe({
+            "events": rows,
+            "has_more": has_more,
+            "next_cursor": str(rows[-1]["activity_id"]) if has_more and rows else None,
+        }))
 
     @app.get("/api/v1/positions")
     def positions():
@@ -592,4 +626,9 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
                 if event["event_type"] in {"FILL", "TRADE"}]
         return jsonify({"trades": rows})
 
+    from ftx_paper.strategies.orderflow.api import register_decision_api as register_orderflow_decision_api
+    from ftx_paper.strategies.research.api import register_decision_api as register_research_decision_api
+
+    register_research_decision_api(app, store, json_safe)
+    register_orderflow_decision_api(app, store, json_safe)
     return app

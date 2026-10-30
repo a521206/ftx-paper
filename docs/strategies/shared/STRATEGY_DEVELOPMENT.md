@@ -97,8 +97,9 @@ strategy behavior. A minimal strategy can intentionally return no decisions.
    ```
 
    The request must use `mode: "replay"`, include `futures`, and use a date
-   with stored market data. The CLI submits `POST /api/v1/replay`, waits for
-   the terminal run, and fetches `GET /api/v1/replay/{run_id}`.
+    with stored market data. The CLI submits
+    `POST /api/v1/strategies/{strategy_id}/replays`, waits for the terminal run,
+    and fetches `GET /api/v1/strategies/{strategy_id}/replays/{run_id}`.
 6. Treat `status: "completed"` as the wiring check. For a no-op scaffold,
    `bars_seen` should be positive while `decisions_emitted`, `orders_filled`,
    and trades remain zero. If parity is enabled, also verify the persisted
@@ -128,11 +129,12 @@ tests, Pyright on changed files, and Ruff.
 
 Use the existing replay path rather than a strategy-specific simulator:
 
-1. Inspect `/api/v1/replay/inputs?date=YYYY-MM-DD` and record the input
-   fingerprint, provenance, availability, selected contract, and bar coverage.
+1. Inspect the stored market-data availability for `date=YYYY-MM-DD` and record
+   the input fingerprint, provenance, selected contract, and bar coverage.
 2. Run the same session date, sessions, vehicles, capital profile, and strategy
    configuration for each candidate being compared.
-3. Retrieve the completed run from `/api/v1/replay/{run_id}`. Use the persisted
+3. Retrieve the completed run from
+   `/api/v1/strategies/{strategy_id}/replays/{run_id}`. Use the persisted
    parity manifest and bounded layer endpoints for comparison data; producer
    replay facts remain internal and are not API reporting surfaces.
 4. Compare the generated parity artifacts, not timestamps or run IDs. The

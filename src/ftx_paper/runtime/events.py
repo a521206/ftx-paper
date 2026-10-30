@@ -63,6 +63,13 @@ def decision_session_bucket(value: datetime) -> str:
 
 RISK_EVENT_TYPES = frozenset({"ENTRY_BLOCKED_RISK"})
 
+# Operational events have their own activity projection. Decision, risk, and
+# execution events belong to their dedicated views instead.
+OPERATIONAL_ACTIVITY_EVENT_TYPES = frozenset({
+    "RUNTIME_RECOVERY", "STRATEGY_ERROR", "BUNDLE_INCOMPLETE",
+    "REPLAY_QUEUED", "REPLAY_STATUS",
+})
+
 EXECUTION_EVENT_TYPES = frozenset({
     "ORDER_INTENT",
     "EXECUTION_PROPOSAL_SUPPRESSED",
