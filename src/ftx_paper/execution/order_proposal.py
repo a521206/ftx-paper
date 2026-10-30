@@ -52,6 +52,10 @@ def build_entry_order(
         value = proposal.get(name)
         return value if isinstance(value, int) and not isinstance(value, bool) else None
 
+    def number(name: str) -> float | None:
+        value = proposal.get(name)
+        return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
     available = context.margin.available
     required_per_lot = context.margin.required_per_lot
     available_lots = (
@@ -79,6 +83,8 @@ def build_entry_order(
         exit_plan=exit_plan,
         role=OrderRole.ENTRY,
         entry_bar=integer("entry_bar"),
+        trigger_price=float(trigger_price) if trigger_price is not None else None,
+        requested_fill_price=number("requested_fill_price") or (float(trigger_price) if trigger_price is not None else None),
         strategy_id=string("strategy_id"),
         execution_group_id=string("execution_group_id"),
         lifecycle_id=lifecycle_id,

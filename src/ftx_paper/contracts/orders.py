@@ -315,6 +315,8 @@ class OrderIntent:
     target_price: float | None = None
     exit_plan: tuple[ExitPlanRule, ...] = ()
     entry_bar: int | None = None
+    trigger_price: float | None = field(default=None, kw_only=True)
+    requested_fill_price: float | None = field(default=None, kw_only=True)
     role: OrderRole = field(kw_only=True)
     # Execution vehicle is a property of this order, never of the strategy.
     # Synthetic orders retain the futures instrument as their logical mark
@@ -334,6 +336,9 @@ class OrderIntent:
         vehicle = str(self.vehicle).lower()
         if vehicle not in {"futures", "synthetic"}:
             raise ValueError("order vehicle must be 'futures' or 'synthetic'")
+        for name, value in (("trigger_price", self.trigger_price), ("requested_fill_price", self.requested_fill_price)):
+            if value is not None and (not isfinite(value) or value <= 0):
+                raise ValueError(f"{name} must be a positive finite number")
         if vehicle == "synthetic":
             if self.synthetic_legs is None or len(self.synthetic_legs) != 2:
                 raise ValueError("synthetic orders must contain a CE/PE leg pair")

@@ -7,6 +7,10 @@ from .lifecycle import (
     EXECUTION_PHASES, ExecutionLifecycleCoordinator, ExecutionPhase,
     ExecutionTurn, PendingExecution,
 )
+from .entry_fill import (
+    EntryFillDecision, ExitPlanDecision, entry_fill_decision,
+    protective_stop_price, risk_adjustment, validate_exit_plan,
+)
 
 __all__ = [
     "ExecutionService", "ExecutionLifecycleEvent", "PaperExecutionCoordinator", "ExecutionNotification",
@@ -14,4 +18,6 @@ __all__ = [
     "synthetic_futures_cost", "validate_exit_order",
     "EXECUTION_PHASES", "ExecutionLifecycleCoordinator", "ExecutionPhase",
     "ExecutionTurn", "PendingExecution",
+    "EntryFillDecision", "ExitPlanDecision", "entry_fill_decision", "protective_stop_price",
+    "risk_adjustment", "validate_exit_plan",
 ]
