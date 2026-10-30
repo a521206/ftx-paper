@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from ftx_paper.execution.events import ExecutionNotification
-from ftx_paper.strategies.shared.protocol import StrategyMetadata
+from ftx_paper.strategies.shared.protocol import StrategyDecision, StrategyMetadata
 
 from .orderflow_config import ORDERFLOW_NAME, ORDERFLOW_VERSION, OrderflowConfig
 
@@ -20,10 +20,10 @@ class OrderflowStrategy:
     def metadata(self) -> StrategyMetadata:
         return StrategyMetadata(ORDERFLOW_NAME, ORDERFLOW_VERSION, self.config.config_hash)
 
-    def on_bundle(self, bundle: object) -> tuple[object, ...]:
+    def on_bundle(self, bundle: object) -> tuple[StrategyDecision, ...]:
         return ()
 
-    def evaluate(self, bundle: object, context: object) -> tuple[object, ...]:
+    def evaluate(self, bundle: object, context: object) -> tuple[StrategyDecision, ...]:
         return ()
 
     def on_execution_event(self, event: ExecutionNotification) -> None:

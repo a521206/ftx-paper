@@ -55,9 +55,8 @@ embedding infrastructure code in the strategy.
    exits, sizing inputs, and rejection behavior.
 2. Add the implementation under `src/ftx_paper/strategies/<name>/`. Reuse shared market,
    contract, risk, and policy types instead of adding infrastructure there.
-3. Implement a `StrategyFactory` or constructor compatible with
-   `ConfiguredStrategyFactory`.
-4. Select the factory at the application composition boundary. For multiple
+3. Implement the shared typed `StrategyFactory` port for the strategy.
+4. Register the factory at the application composition boundary. For multiple
    strategies, wrap instances in `StrategyInstance` and `MultiStrategyEngine`.
 5. Keep each instance identified by a stable `strategy_id`. Instances share the
    one runtime portfolio and capital context; do not create a second runtime or

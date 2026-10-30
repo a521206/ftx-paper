@@ -12,11 +12,10 @@ from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.execution.order_proposal import build_entry_order
 from ftx_paper.contracts import MarketRole
 from ftx_paper.contracts import build_decision_view, validate_decision_view
-from .policy_contract import ExecutionMode, StrategyPolicy
+from .policy_contract import ExecutionMode, PolicyDecision, StrategyPolicy
 
 if TYPE_CHECKING:
     from ftx_paper.market.bundles import DecisionBundle
-    from ftx_paper.strategies.research.decision import DecisionEvent
 
 
 class SharedDecisionCoordinator:
@@ -29,11 +28,9 @@ class SharedDecisionCoordinator:
         self,
         bundle: DecisionBundle,
         context: DecisionContext,
-    ) -> tuple[DecisionEvent, ...]:
-        from ftx_paper.strategies.research.decision import CandidateDecision, LiveDecision
-
+    ) -> tuple[PolicyDecision, ...]:
         decisions = self.policy.evaluate(bundle, context)
-        result: list[DecisionEvent] = []
+        result: list[PolicyDecision] = []
 
         def canonical(payload: dict[str, object], event_type: str) -> dict[str, object]:
             evidence = payload.get("evidence")
@@ -78,33 +75,6 @@ class SharedDecisionCoordinator:
                     order = build_entry_order(
                         proposal, instrument=futures.instrument, context=context,
                     )
-            if isinstance(decision, (LiveDecision, CandidateDecision)):
-                payload_order = payload.get("order")
-                if self.policy.execution_mode is ExecutionMode.DIAGNOSTIC and (order is not None or payload_order is not None):
-                    policy = payload.get("policy")
-                    payload.update({
-                        "outcome": "rejected",
-                        "reason": "diagnostic_policy_order_forbidden",
-                        "policy": {
-                            **(policy if isinstance(policy, Mapping) else {}),
-                            "outcome": "rejected",
-                            "reason_code": "diagnostic_policy_order_forbidden",
-                        },
-                    })
-                    payload.pop("order", None)
-                    if not payload.get("decision_id"):
-                        payload["decision_id"] = sha256(
-                            f"{bundle.bundle_id}:diagnostic_policy_order_forbidden".encode()
-                        ).hexdigest()[:24]
-                    payload["decision_view"] = canonical(payload, decision.event_type)
-                    result.append(CandidateDecision(payload, event_type=decision.event_type))
-                    continue
-                payload["decision_view"] = canonical(payload, decision.event_type)
-                if isinstance(decision, CandidateDecision):
-                    result.append(CandidateDecision(payload, order=order, event_type=decision.event_type))
-                else:
-                    result.append(LiveDecision(decision.event_type, payload, order=order))
-                continue
             if self.policy.execution_mode is ExecutionMode.DIAGNOSTIC and (
                 order is not None or payload.get("order") is not None
             ):
@@ -119,7 +89,7 @@ class SharedDecisionCoordinator:
                 payload.pop("order", None)
                 order = None
             payload["decision_view"] = canonical(payload, decision.event_type)
-            result.append(CandidateDecision(payload, order=order, event_type=decision.event_type))
+            result.append(PolicyDecision(payload, order=order, event_type=decision.event_type))
         return tuple(result)
 
     def on_execution_event(self, event: ExecutionNotification) -> None:

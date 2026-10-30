@@ -8,5 +8,6 @@ from .start_runtime import StartRuntime
 from .stop_runtime import StopRuntime
 from .runtime_operations import RuntimeOperations
 from .composition import Application, build_application, build_runtime_session
+from .strategy_registry import StrategyRegistry
 
-__all__ = ["Application", "ProcessMarketBar", "QueryDecisions", "RecoverRuntime", "RunReplay", "RuntimeOperations", "StartRuntime", "StopRuntime", "build_application", "build_runtime_session"]
+__all__ = ["Application", "ProcessMarketBar", "QueryDecisions", "RecoverRuntime", "RunReplay", "RuntimeOperations", "StartRuntime", "StopRuntime", "StrategyRegistry", "build_application", "build_runtime_session"]

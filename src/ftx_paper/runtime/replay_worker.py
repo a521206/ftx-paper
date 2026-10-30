@@ -45,11 +45,11 @@ from ftx_paper.execution import PaperExecutionCoordinator
 from ftx_paper.execution.entry_fill import entry_fill_decision, validate_exit_plan
 from ftx_paper.execution.settlement import ExitValidationError, validate_exit_order
 from ftx_paper.strategies.shared.exits import ExitAction
-from ftx_paper.strategies.research import ConfiguredStrategyFactory, StrategyFactory
 from ftx_paper.strategies.research.config import (
     AFTERNOON_ENTRY_MINUTES,
     MORNING_ENTRY_MINUTES,
 )
+from ftx_paper.strategies.shared.factory import StrategyContext, StrategySelector
 from ftx_paper.config import (
     IST,
     NIFTY_LOT_SIZE,
@@ -131,11 +131,11 @@ class ReplayWorker:
     """Bounded in-process replay queue with a fresh engine per job."""
 
     def __init__(self, store: Any, *, capital_profile: ResearchCapitalProfile = RESEARCH_CAPITAL_PROFILE,
-                 max_queue_size: int = 1024, strategy_factory: StrategyFactory | None = None,
+                 max_queue_size: int = 1024, strategy_selector: StrategySelector | None = None,
                  futures_source_resolver: Any | None = None) -> None:
         self.store = store
         self.capital_profile = capital_profile
-        self.strategy_factory = strategy_factory or ConfiguredStrategyFactory(capital_profile=capital_profile)
+        self.strategy_selector = strategy_selector
         self._futures_sources = futures_source_resolver or FuturesSessionSourceResolver(store)
         self._source_cache: dict[str, Any] = {}
         self._queue: Queue[tuple[str, dict[str, Any], Event]] = Queue(maxsize=max_queue_size)
@@ -467,18 +467,21 @@ class ReplayWorker:
                 replay_ledger=ledger_records,
                 parity_records=parity_records,
             )
-            strategy_kwargs = {}
             strategy_id = request.get("strategy_id")
-            if strategy_id is not None:
-                strategy_kwargs["strategy"] = strategy_id
-            strategy = self.strategy_factory.create(
-                **strategy_kwargs,
-                enabled_vehicles=vehicles,
-                portfolio=replay_state.portfolio,
-                capital_context=replay_state.capital_context,
-                prior_day_high=prior_day_high,
-                prior_day_low=prior_day_low,
-                expiry_dates=frozenset(effective_expiry_dates),
+            if not isinstance(strategy_id, str):
+                raise ValueError("strategy_id is required")
+            if self.strategy_selector is None:
+                raise RuntimeError("replay strategy selector was not configured")
+            strategy = self.strategy_selector.create(
+                strategy_id,
+                StrategyContext(
+                    enabled_vehicles=tuple(vehicles),
+                    portfolio=replay_state.portfolio,
+                    capital_context=replay_state.capital_context,
+                    prior_day_high=prior_day_high,
+                    prior_day_low=prior_day_low,
+                    expiry_dates=frozenset(effective_expiry_dates),
+                ),
             )
             last_portfolio = portfolio
             last_strategy_metadata = strategy.metadata
@@ -1580,6 +1583,9 @@ class ReplayWorker:
             "setup_candidates": len({str(item.get("opportunity_id")) for item in setup_events}),
             "location_interactions": len(canonical_interactions),
             "entries_filled": len(futures_trades),
+            "gross_reward_points": round(
+                sum(float(item.get("gross_pnl_rs") or 0.0) for item in futures_trades), 4,
+            ),
             "achieved_risk_reward": round(sum(risk_rewards), 2),
             "metric_lineage": {
                 "setup_candidate_event_count": len(setup_events),

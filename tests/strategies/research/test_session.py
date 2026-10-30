@@ -12,6 +12,7 @@ from ftx_paper.runtime.store import _json_safe
 from ftx_paper.market import DecisionBundle, CompletedBarAggregator
 from ftx_paper.runtime.engine import EngineResult, PaperEngine
 from ftx_paper.runtime.replay_worker import ReplayWorker
+from ftx_paper.application import StrategyRegistry
 from ftx_paper.runtime.futures_source import FuturesSessionSourceResolver
 from ftx_paper.runtime import RuntimeSession, RuntimeStore
 from ftx_paper.domain.capital import ResearchCapitalProfile
@@ -62,9 +63,11 @@ def test_replay_and_runtime_share_paper_engine_bundle_path(monkeypatch, tmp_path
     runtime_store = RuntimeStore(tmp_path / "runtime")
     RuntimeSession(runtime_store, None, [], engine=PaperEngine())._process_bundle(bundle, source="live")
 
-    replay = ReplayWorker(RuntimeStore(tmp_path / "replay"))
+    replay = ReplayWorker(
+        RuntimeStore(tmp_path / "replay"), strategy_selector=StrategyRegistry(),
+    )
     replay._bars = lambda session_date, **_kwargs: (bar,)
-    result = replay._execute({"session_date": "2026-01-01"}, Event())
+    result = replay._execute({"session_date": "2026-01-01", "strategy_id": "ftx-paper-research"}, Event())
 
     assert calls == [bundle.bundle_id, bundle.bundle_id]
     assert any(event["values"]["event_type"] == "BUNDLE_PATH_CHECK" for event in result["events"])

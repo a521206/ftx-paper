@@ -14,7 +14,6 @@ from ftx_paper.market.requirements import FeatureRequirement, feature_union
 
 if TYPE_CHECKING:
     from ftx_paper.market.bundles import DecisionBundle
-    from ftx_paper.strategies.research.decision import DecisionEvent
 
 
 class ExecutionMode(StrEnum):
@@ -35,6 +34,14 @@ class PolicyDecision:
             raise ValueError("policy decision event type is required")
 
 
+class PolicyOutput(Protocol):
+    """Strategy-local policy output consumed by the shared coordinator."""
+
+    payload: Mapping[str, object]
+    event_type: str
+    order: OrderIntent | None
+
+
 class StrategyPolicy(Protocol):
     @property
     def execution_mode(self) -> ExecutionMode: ...
@@ -46,7 +53,7 @@ class StrategyPolicy(Protocol):
         self,
         bundle: DecisionBundle,
         context: DecisionContext,
-    ) -> tuple[PolicyDecision | DecisionEvent, ...]: ...
+    ) -> tuple[PolicyOutput, ...]: ...
 
     def on_execution_event(self, event: ExecutionNotification) -> None: ...
 
@@ -57,6 +64,7 @@ __all__ = [
     "ExecutionMode",
     "FeatureRequirement",
     "PolicyDecision",
+    "PolicyOutput",
     "StrategyPolicy",
     "feature_union",
 ]

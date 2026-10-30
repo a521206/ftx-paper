@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from ftx_paper.contracts import Instrument, MarketBar
 from ftx_paper.contracts.replay import LEGACY_REPLAY_FIELDS
 from ftx_paper.runtime.replay_worker import ReplayWorker
+from ftx_paper.application import StrategyRegistry
 from ftx_paper.runtime.store import RuntimeStore
 
 
@@ -19,7 +20,7 @@ def _request(include_parity_layers: bool = False) -> dict[str, object]:
 
 
 def _worker(tmp_path):
-    worker = ReplayWorker(RuntimeStore(tmp_path))
+    worker = ReplayWorker(RuntimeStore(tmp_path), strategy_selector=StrategyRegistry())
     worker._bars = lambda session_date, **kwargs: (
         MarketBar(
             Instrument("NIFTY26SEP", "NFO", "FUTURES", "2026-09-29"),

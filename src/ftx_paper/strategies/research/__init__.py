@@ -1,7 +1,7 @@
 """Implementation package for the isolated FTX research strategy."""
 
 from .live import ConfiguredLiveStrategy
-from .factory import ConfiguredStrategyFactory, StrategyFactory
+from .factory import ResearchStrategyFactory
 from .admission import admission_result, build_admission_features
 from .risk_state import RiskGateState
 from .risk import RiskAssessment, RiskConfig, RiskDecision, RiskEngine
@@ -12,7 +12,7 @@ from ftx_paper.strategies.research.config import STRATEGY_NAME, STRATEGY_VERSION
 STRATEGY_ID = STRATEGY_NAME
 
 __all__ = [
-    "ConfiguredLiveStrategy", "ConfiguredStrategyFactory", "StrategyFactory", "STRATEGY_ID", "STRATEGY_NAME", "STRATEGY_VERSION",
+    "ConfiguredLiveStrategy", "ResearchStrategyFactory", "STRATEGY_ID", "STRATEGY_NAME", "STRATEGY_VERSION",
     "admission_result", "build_admission_features", "RiskGateState", "RiskAssessment", "RiskConfig", "RiskDecision", "RiskEngine",
     "SizingPipeline", "SizingPipelineInput", "CandidateDecision", "IndependentLiveDecisionEngine", "LiveDecision",
 ]

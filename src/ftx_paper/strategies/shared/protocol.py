@@ -2,14 +2,20 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import Protocol
 
 from ftx_paper.market.bundles import DecisionBundle
 from ftx_paper.domain.decision_context import DecisionContext
 from ftx_paper.execution.events import ExecutionNotification
+from ftx_paper.contracts import OrderIntent
 
-if TYPE_CHECKING:
-    from ftx_paper.strategies.research.decision import DecisionEvent
+
+class StrategyDecision(Protocol):
+    """Neutral decision fact emitted by any strategy implementation."""
+
+    event_type: str
+    payload: Mapping[str, object]
+    order: OrderIntent | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,12 +37,15 @@ class Strategy(Protocol):
     @property
     def metadata(self) -> StrategyMetadata: ...
 
-    def on_bundle(self, bundle: DecisionBundle) -> tuple[DecisionEvent, ...]: ...
+    def on_bundle(self, bundle: DecisionBundle) -> tuple[object, ...]: ...
 
     def evaluate(
         self, bundle: DecisionBundle, context: DecisionContext,
-    ) -> tuple[DecisionEvent, ...]: ...
+    ) -> tuple[object, ...]: ...
 
     def on_execution_event(self, event: ExecutionNotification) -> None: ...
 
     def snapshot(self) -> Mapping[str, object]: ...
+
+
+__all__ = ["Strategy", "StrategyDecision", "StrategyMetadata"]

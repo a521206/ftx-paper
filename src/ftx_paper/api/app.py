@@ -14,6 +14,7 @@ from ftx_paper.runtime.store import RuntimeStore
 from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.runtime.parity_artifacts import PARITY_LAYERS, read_parity_artifact
 from ftx_paper.application.runtime_operations import RuntimeOperations
+from ftx_paper.application.strategy_registry import StrategyRegistry
 from ftx_paper.domain.capital import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
 from ftx_paper.runtime.events import (
     EXECUTION_EVENT_TYPES, RISK_EVENT_TYPES, DecisionTimestampError,
@@ -36,6 +37,7 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
     session = session or RuntimeSession(store, effective_auth, [])
     replay_worker = replay_worker or ReplayWorker(
         store, capital_profile=capital_profile or RESEARCH_CAPITAL_PROFILE,
+        strategy_selector=StrategyRegistry(capital_profile=capital_profile or RESEARCH_CAPITAL_PROFILE),
     )
     operations = runtime_operations or RuntimeOperations(session, replay_worker, controller)
 

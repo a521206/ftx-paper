@@ -9,7 +9,7 @@ implementation.
 | Strategy | Public entry point | Stable strategy name | Runtime strategy ID |
 | --- | --- | --- | --- |
 | FTX research | `ftx_paper.strategies.research` | `ftx-paper-research` | `ftx-paper-research` |
-| Orderflow | `ftx_paper.strategies.orderflow` | `ftx-paper-orderflow` | `orderflow-research` |
+| Orderflow | `ftx_paper.strategies.orderflow` | `ftx-paper-orderflow` | `ftx-paper-orderflow` |
 
 The implementation paths are now separate:
 

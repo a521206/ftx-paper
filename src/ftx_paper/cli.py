@@ -6,14 +6,14 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from ftx_paper.api import create_app
-from ftx_paper.application import RuntimeOperations, build_runtime_session
+from ftx_paper.application import RuntimeOperations, StrategyRegistry, build_runtime_session
 from ftx_paper.config import PaperConfig
 from ftx_paper.domain.capital import CapitalRuntimeContext, RESEARCH_CAPITAL_PROFILE
 from ftx_paper.domain.portfolio import PortfolioState
 from ftx_paper.infrastructure.sqlite.runtime_store import ProcessAlreadyRunningError
 from ftx_paper.runtime.store import RuntimeStore
 from ftx_paper.runtime.replay_worker import ReplayWorker
-from ftx_paper.strategies.research import ConfiguredStrategyFactory
+from ftx_paper.strategies.shared.factory import StrategyContext
 from ftx_paper.runtime.engine import MultiStrategyEngine
 from ftx_paper.ui import create_ui_app
 from ftx_paper.broker.shoonya import ShoonyaAuth
@@ -59,7 +59,7 @@ def api_main() -> None:
     capital_profile = RESEARCH_CAPITAL_PROFILE
     portfolio = PortfolioState(capital_profile.initial_capital)
     capital_context = CapitalRuntimeContext(capital_profile, environment="live")
-    strategy_factory = ConfiguredStrategyFactory(capital_profile=capital_profile)
+    strategy_registry = StrategyRegistry(capital_profile=capital_profile)
     store = RuntimeStore(config.runtime_dir)
     try:
         instance_id = store.acquire_process_lease("api")
@@ -115,14 +115,19 @@ def api_main() -> None:
             portfolio=portfolio,
             capital_context=capital_context,
             engine=MultiStrategyEngine({
-                "ftx-paper-research": strategy_factory.create(
-                    expiry_dates=store.read_expiry_dates(),
-                    portfolio=portfolio,
-                    capital_context=capital_context,
+                "ftx-paper-research": strategy_registry.create(
+                    "ftx-paper-research",
+                    StrategyContext(
+                        expiry_dates=frozenset(store.read_expiry_dates()),
+                        portfolio=portfolio,
+                        capital_context=capital_context,
+                    ),
                 ),
             }),
         )
-        replay_worker = ReplayWorker(store, capital_profile=capital_profile)
+        replay_worker = ReplayWorker(
+            store, capital_profile=capital_profile, strategy_selector=strategy_registry,
+        )
         operations = RuntimeOperations(session, replay_worker)
         if auth is not None and auth.access_token() is not None:
             try:
