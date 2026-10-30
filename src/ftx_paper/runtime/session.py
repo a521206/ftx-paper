@@ -42,6 +42,10 @@ from ftx_paper.execution.lifecycle import (
 logger = logging.getLogger("ftx-paper")
 
 
+class DecisionViewProjectionError(ValueError):
+    """Raised when a policy event cannot be materialized for presentation."""
+
+
 def _validate_required_backfill(
     instruments: Sequence[Mapping[str, Any]], bars: Sequence[MarketBar],
 ) -> None:
@@ -234,9 +238,10 @@ class RuntimeSession:
             self._started.clear()
             self._market_wait.clear()
             self.store.patch_status({"state": "STARTING", "health_state": "STARTING",
-                                     "feed_connected": False, "feed_health": None,
-                                     "error": None, "started_at": datetime.now(timezone.utc).isoformat(),
-                                     "initial_capital": self.capital_profile.initial_capital if self.capital_profile else None,
+                                      "feed_connected": False, "feed_health": None,
+                                      "error": None, "started_at": datetime.now(timezone.utc).isoformat(),
+                                      "failed_strategy_id": None,
+                                      "initial_capital": self.capital_profile.initial_capital if self.capital_profile else None,
                                      "max_daily_loss": self.capital_profile.max_daily_loss if self.capital_profile else None,
                                       "max_net_directional_lots": self.capital_profile.max_net_directional_lots if self.capital_profile else None,
                                       "strategies": self.strategy_status(),
@@ -544,11 +549,14 @@ class RuntimeSession:
             event_decision_at = max(decision_at, available_at)
             payload["decision_at"] = serialize_datetime(event_decision_at)
         if decision_event:
-            payload["decision_view"] = validate_decision_view(build_decision_view(
-                payload,
-                event_type=event_type,
-                strategy_id=payload.get("strategy_id") if isinstance(payload.get("strategy_id"), str) else None,
-            ))
+            try:
+                payload["decision_view"] = validate_decision_view(build_decision_view(
+                    payload,
+                    event_type=event_type,
+                    strategy_id=payload.get("strategy_id") if isinstance(payload.get("strategy_id"), str) else None,
+                ))
+            except ValueError as exc:
+                raise DecisionViewProjectionError(str(exc)) from exc
         strategy_id = str(payload.get("strategy_id") or payload.get("strategy_name") or "unknown")
         decision_id = str(payload.get("decision_id") or "")
         self._event_sequence += 1
@@ -737,11 +745,22 @@ class RuntimeSession:
                 return {"recorded": 0}
             result = result_holder[0]
             for event in result.events:
-                self._persist_engine_event(
-                    event, source=source, bundle_id=bundle.bundle_id,
-                    session_date=bundle.trading_date, decision_at=decision_at,
-                    timestamp=timestamp, engine=active_engine,
-                )
+                try:
+                    self._persist_engine_event(
+                        event, source=source, bundle_id=bundle.bundle_id,
+                        session_date=bundle.trading_date, decision_at=decision_at,
+                        timestamp=timestamp, engine=active_engine,
+                    )
+                except DecisionViewProjectionError as exc:
+                    self.store.append_event("DECISION_VIEW_ERROR", {
+                        "bundle_id": bundle.bundle_id,
+                        "event_type": str(event.get("event_type", "ENGINE_EVENT")),
+                        "strategy_id": event.get("strategy_id"),
+                        "reason": str(exc),
+                        "decision_source": source,
+                        "session_date": bundle.trading_date,
+                        "execution_allowed": source == "live",
+                    }, f"decision_view_error:{source}:{bundle.bundle_id}:{event.get('decision_id', '')}", timestamp=timestamp)
             outcome_types = [str(event.get("event_type", "ENGINE_EVENT")) for event in result.events]
             self.store.append_event("BUNDLE_COMPLETE", {
                 "bundle_id": bundle.bundle_id, "minute": bundle.minute,
