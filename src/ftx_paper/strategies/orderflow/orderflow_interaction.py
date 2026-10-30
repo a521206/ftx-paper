@@ -944,9 +944,7 @@ class InteractionDetector:
             interaction = decode(item)
             if interaction.status is not InteractionStatus.ACTIVE:
                 raise ValueError("active interaction snapshot has terminal status")
-            key = (
-                _active_key(interaction.location_alias, interaction.timeframe)
-            )
+            key = _active_key(interaction.location_alias, interaction.timeframe)
             if key in detector._active:
                 raise ValueError("duplicate active interaction snapshot")
             detector._active[key] = interaction

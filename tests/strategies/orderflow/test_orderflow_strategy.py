@@ -347,7 +347,10 @@ def test_opening_gap_context_uses_open_availability_not_completed_bar_boundary()
     children = list(bundle.orderflow_context.observations_for("1m"))
     children[0] = replace(
         children[0],
-        features={"open": 101.0, "previous_close": 100.0, "close": 100.0},
+        features={
+            "open": 101.0, "previous_close": 100.0, "close": 100.0,
+            "prior_value_high": 100.5, "prior_value_low": 99.0,
+        },
     )
     context = replace(
         bundle.orderflow_context,
@@ -463,16 +466,44 @@ def test_generation_change_keeps_active_interaction_episode() -> None:
     assert any("2026-01-01T10:00:00+00:00" in str(event.payload["interaction_id"]) for event in observed)
     detector = strategy.policy._location_detectors["5m"]
     assert len(detector.active_interactions) == 1
-    # Reference generations may change while the canonical interaction episode
-    # remains active against its original frozen band.
     assert detector.active_interactions[0].reference_generation == 1
     assert len(detector.closed_interactions) == 0
-
 
 def test_non_contact_location_observation_does_not_start_interaction() -> None:
     bundle, account = _context(contact=False, observation_id="no-contact")
 
     assert OrderflowStrategy().evaluate(bundle, account) == ()
+
+
+def test_opening_gap_uses_prior_reference_not_previous_close_for_parity() -> None:
+    bundle, account = _context()
+    assert bundle.orderflow_context is not None
+    children = list(bundle.orderflow_context.observations_for("1m"))
+    children[0] = replace(
+        children[0],
+        features={
+            **children[0].features,
+            "open": 102.0,
+            "previous_close": 101.0,
+            "prior_value_low": 103.0,
+            "prior_value_high": 110.0,
+        },
+    )
+    context = replace(
+        bundle.orderflow_context,
+        observations=(bundle.orderflow_context.observations[0], *children),
+        prefixes={"5m": bundle.orderflow_context.observations_for("5m"), "1m": tuple(children)},
+    )
+
+    events = OrderflowStrategy().evaluate(replace(bundle, orderflow_context=context), account)
+    opening = next(
+        event for event in events
+        if event.payload.get("reason") == "opening_gap_context"
+    )
+
+    assert opening.payload["direction"] == "down"
+    assert opening.payload["gap_points"] == pytest.approx(1.0)
+    assert opening.payload["reference_level"] == pytest.approx(103.0)
 
 
 def test_orderflow_executable_mode_emits_bounded_futures_entry() -> None:

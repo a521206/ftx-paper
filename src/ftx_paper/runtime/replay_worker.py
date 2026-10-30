@@ -899,7 +899,7 @@ class ReplayWorker:
                 def arbitrate(_turn) -> Mapping[str, Any]:
                     nonlocal candidate_orders
                     candidate_orders = pending_candidates + tuple(result.orders)
-                    selected.extend(coordinator.arbitrate(candidate_orders))
+                    selected.extend(coordinator.arbitrate(candidate_orders, max_open_positions=1))
                     return {"accepted": len(selected)}
 
                 def queue_execution(_turn) -> Mapping[str, Any]:

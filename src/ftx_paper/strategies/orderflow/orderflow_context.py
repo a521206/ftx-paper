@@ -317,13 +317,17 @@ def classify_opening_gap(
     reference_id: str | None = None, prior_value_low: float | None = None,
     prior_value_high: float | None = None, reference_price: float | None = None,
 ) -> OpeningGapState:
-    if opening_price is None or prior_close is None:
+    if opening_price is None or (reference_id is None and prior_close is None):
         return OpeningGapState("UNAVAILABLE", observed_at=observed_at, reference_id=reference_id)
     if reference_id is None:
         return OpeningGapState("NONE", 0.0, None, observed_at,
                                reference_id=None, prior_value_low=prior_value_low,
                                prior_value_high=prior_value_high)
-    gap = opening_price - prior_close
+    if reference_price is not None:
+        gap = abs(opening_price - reference_price)
+    else:
+        assert prior_close is not None
+        gap = opening_price - prior_close
     if abs(gap) <= tolerance:
         status = "NONE"
     elif gap > 0:
@@ -368,7 +372,15 @@ def advance_opening_gap(
     if evidence_id in state.evidence_ids:
         return state
     completed_bars = state.completed_bars + 1
-    recovered = close <= state.reference_price if state.gap_points is not None and state.gap_points > 0 else close >= state.reference_price
+    recovered = (
+        close >= state.reference_price
+        if state.reference_id == "PD_LOW"
+        else close <= state.reference_price
+        if state.reference_id == "PD_HIGH"
+        else close <= state.reference_price
+        if state.gap_points is not None and state.gap_points > 0
+        else close >= state.reference_price
+    )
     in_value = (
         state.prior_value_low is not None and state.prior_value_high is not None
         and state.prior_value_low <= close <= state.prior_value_high

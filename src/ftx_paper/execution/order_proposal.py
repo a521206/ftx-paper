@@ -89,6 +89,7 @@ def build_entry_order(
         execution_group_id=string("execution_group_id"),
         lifecycle_id=lifecycle_id,
         setup_availability=string("setup_availability"),
+        structural_rank=integer("structural_rank") or 0,
     )
 
 

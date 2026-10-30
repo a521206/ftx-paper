@@ -70,6 +70,7 @@ class PaperExecutionCoordinator:
         )
         accepted: list[OrderIntent] = []
         seen_ids: set[str] = set()
+        accepted_entries = 0
         claimed = {
             str(getattr(item, "execution_group_id"))
             for item in self.portfolio.positions.values()
@@ -89,8 +90,13 @@ class PaperExecutionCoordinator:
                 self._denied[order.client_order_id] = "duplicate_entry"
             elif group is not None and str(group) in claimed:
                 self._denied[order.client_order_id] = "execution_group_already_claimed"
+            elif max_open_positions is not None and (
+                len(self.portfolio.positions) + accepted_entries >= max_open_positions
+            ):
+                self._denied[order.client_order_id] = "portfolio_position_limit"
             else:
                 accepted.append(order)
+                accepted_entries += 1
                 if order.role is OrderRole.ENTRY and group is not None:
                     group_key = str(group)
                     claimed.add(group_key)
