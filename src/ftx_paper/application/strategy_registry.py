@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from ftx_paper.domain.capital import RESEARCH_CAPITAL_PROFILE, ResearchCapitalProfile
-from ftx_paper.strategies.orderflow.factory import OrderflowStrategyFactory
+from ftx_paper.strategies.orderflow.boundary.factory import OrderflowStrategyFactory
 from ftx_paper.strategies.research.factory import ResearchStrategyFactory
 from ftx_paper.strategies.shared.factory import StrategyContext, StrategyFactory
 from ftx_paper.strategies.shared.protocol import Strategy

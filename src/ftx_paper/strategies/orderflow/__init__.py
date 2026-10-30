@@ -1,8 +1,9 @@
 """Minimal orderflow strategy boundary for the canonical port."""
 
-from .orderflow import OrderflowStrategy
-from .orderflow_config import ORDERFLOW_NAME, ORDERFLOW_VERSION, OrderflowConfig
-from .factory import OrderflowStrategyFactory
+from .boundary.factory import OrderflowStrategyFactory
+from .boundary.orderflow import OrderflowStrategy
+from .boundary.orderflow_config import ORDERFLOW_NAME, ORDERFLOW_VERSION, OrderflowConfig
+from .boundary.source_adapter import LiveSourceAdapter, ReplaySourceAdapter, completed_observations
 from .runtime_boundary import (
     BoundaryEvent,
     BoundaryState,
@@ -14,7 +15,6 @@ from .runtime_boundary import (
     transition_one,
 )
 from .market_observation import MarketObservation, ObservationGap, observe_market
-from .source_adapter import LiveSourceAdapter, ReplaySourceAdapter, completed_observations
 from .state_machine_source import canonical_source_rows, source_fingerprint, source_metadata
 from .value_publication import PriorSessionValueAdapter, PriorSessionValueReference, ValuePublication, publish_prior_session_value
 from .parity_artifacts import PHASE_STREAMS, build_phase4_artifact, compare_phase4_manifests, phase_facts_from_payload

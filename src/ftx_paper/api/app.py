@@ -626,7 +626,7 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
                 if event["event_type"] in {"FILL", "TRADE"}]
         return jsonify({"trades": rows})
 
-    from ftx_paper.strategies.orderflow.api import register_decision_api as register_orderflow_decision_api
+    from ftx_paper.strategies.orderflow.boundary.api import register_decision_api as register_orderflow_decision_api
     from ftx_paper.strategies.research.api import register_decision_api as register_research_decision_api
 
     register_research_decision_api(app, store, json_safe)
