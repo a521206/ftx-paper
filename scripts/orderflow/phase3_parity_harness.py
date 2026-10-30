@@ -18,6 +18,11 @@ import tempfile
 from typing import Any
 
 from ftx_paper.config import PaperConfig
+from ftx_paper.strategies.orderflow.evidence import (
+    SerializedEvidenceAdapter,
+    evidence_payload,
+    produce_evidence,
+)
 
 SECTIONS = (
     "source_fingerprint",
@@ -116,7 +121,7 @@ def _validate_phase3_artifact(payload: dict[str, Any]) -> None:
 
 
 def _publication_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    value = payload.get("phase4a_evidence", payload)
+    value = payload.get("phase4a_evidence", payload.get("evidence", payload))
     if not isinstance(value, dict):
         raise ValueError("Phase 4A publication must be an object")
     return value
@@ -273,22 +278,53 @@ def compare_date(
         except ValueError as exc:
             return {"date": session_date, "phase3": compare_payloads(canonical, paper), "phase4a": {"status": "INCOMPLETE", "reason": str(exc)}}
         phase3_result = compare_payloads(canonical, paper)
-        if canonical_evidence is None or paper_evidence is None:
+        if (canonical_evidence is None) != (paper_evidence is None):
+            phase35_result = {
+                "status": "INCOMPLETE", "reason": "canonical_and_paper_evidence_are_required_together",
+            }
+            phase4_result = {
+                "status": "INCOMPLETE", "reason": "canonical_and_paper_evidence_are_required_together",
+            }
+        elif canonical_evidence is None or paper_evidence is None:
+            phase35_result = {
+                "status": "UNAVAILABLE", "reason": "supplied_phase3_5_publications_required",
+            }
             phase4_result = {"status": "UNAVAILABLE", "reason": "supplied_phase4a_publications_required"}
         else:
             try:
+                canonical_publication = _load_publication(canonical_evidence, session_date)
+                paper_publication = _load_publication(paper_evidence, session_date)
+                canonical_phase35 = produce_evidence(
+                    canonical, session_date=session_date,
+                    adapter=SerializedEvidenceAdapter(canonical_publication),
+                )
+                paper_phase35 = produce_evidence(
+                    paper, session_date=session_date,
+                    adapter=SerializedEvidenceAdapter(paper_publication),
+                )
+                phase35_result = compare_phase4a_evidence(
+                    evidence_payload(canonical_phase35)["evidence"],
+                    evidence_payload(paper_phase35)["evidence"],
+                )
                 phase4_result = compare_phase4a_evidence(
-                    _load_publication(canonical_evidence, session_date),
-                    _load_publication(paper_evidence, session_date),
+                    canonical_publication, paper_publication,
                 )
             except (OSError, json.JSONDecodeError, ValueError) as exc:
+                phase35_result = {"status": "INCOMPLETE", "reason": str(exc)}
                 phase4_result = {"status": "INCOMPLETE", "reason": str(exc)}
-        return {"date": session_date, "phase3": phase3_result, "phase4a": phase4_result}
+        return {
+            "date": session_date,
+            "phase3": phase3_result,
+            "phase35": phase35_result,
+            "phase4a": phase4_result,
+        }
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--date", action="append", dest="dates", choices=ALLOWED_DATES, default=None)
+    parser.add_argument("--canonical-evidence", type=Path, default=None)
+    parser.add_argument("--paper-evidence", type=Path, default=None)
     args = parser.parse_args(argv)
     dates = args.dates or DEFAULT_DATES
     paper_root = Path(__file__).resolve().parents[2]
@@ -304,12 +340,15 @@ def main(argv: list[str] | None = None) -> int:
             paper_runtime_dir=paper_runtime_dir,
             canonical_python=canonical_python,
             paper_python=sys.executable,
+            canonical_evidence=args.canonical_evidence,
+            paper_evidence=args.paper_evidence,
         )
         for date in dates
     ]
     print(json.dumps(results, indent=2, sort_keys=True))
     return 0 if all(
         item.get("phase3", {}).get("verdict") == "MATCHED"
+        and item.get("phase35", {}).get("status") == "MATCHED"
         and item.get("phase4a", {}).get("status") == "MATCHED"
         for item in results
     ) else 1

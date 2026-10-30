@@ -530,50 +530,115 @@ Phase 4 composition:
   feed its artifact into Phase 3.5/4B, then compare source and context/location
   streams. It must not require a manually prepared Paper facts artifact.
 
-## Phase 3.5 - Implement The Evidence Producer
+## Phase 3.5 - Port The Canonical Evidence Publication Sequence
 
-Status: Pending. The immutable publication contracts exist, but the producer
-that assembles them from the Phase 3 aggregate artifact and canonical evidence
-adapters is not yet implemented.
+Status: Implemented as an artifact-driven Paper boundary; canonical evidence
+adapter parity remains pending. The pinned canonical repository is
+`C:\Users\agraw\Python\NiftyZoning` at commit
+`8114f553392ad01dd032aecfed0031a3bc08e2f8`. NiftyZoning does not expose a
+separate `EvidencePublication` or `AtrPublication` producer API. Its
+`ReplayMachine` is the orchestration owner, and its published evidence is the
+source contract to port. Paper Phase 3.5 must therefore implement one reusable
+Paper-side boundary that reproduces the canonical publication sequence; it must
+not invent a second canonical producer API or claim that both repositories call
+the same runtime function.
 
-Required work:
+### Canonical Owners And Call Order
 
-- Add one reusable Phase 3.5 producer boundary in the orderflow package. The
-  harness and any later runtime adapter must call this boundary rather than
-  deriving evidence in a script.
-- Consume the validated Phase 3 aggregate artifact without re-aggregating raw
-  bars or reading presentation snapshots.
-- Publish an explicit causal `AtrPublication`, including source observation ID,
-  lineage, observed timestamp, available timestamp, and unavailable reason.
-- Publish canonical opening-range, prior-day, and developing session extreme
-  locations through `LocationRegistry`, preserving stream identity, generation,
-  parent extreme lineage, frozen ATR bands, source aggregate IDs, and causal
-  availability. Prior-day levels must retain their session-open availability.
-- Publish completed-prefix VWAP measurements and matching VWAP locations through
-  `causal_vwap_prefix` and the canonical calculation version.
-- Publish prior-session value references through `publish_prior_session_value`,
-  preserving profile lineage and session-open availability. Missing value
-  evidence remains explicitly unavailable.
-- Accept context generations from the canonical context publication adapter,
-  preserving context stream identity, version, parent context ID, source
-  provenance, and available timestamp. Do not reconstruct context from
-  snapshots, scores, or presentation output.
-- Serialize the resulting `EvidencePublication` deterministically for parity
-  comparison, including all unavailable reasons and publication provenance.
+Trace every ported symbol to the pinned canonical commit and preserve this
+ordering:
 
-Phase 3.5 exit gate:
+1. `ReplayMachine.from_session_inputs` calls `observe_market`, derives
+   `SessionLevels`, creates a `LocationRegistry`, and publishes opening-range
+   and prior-day levels with `daily_atr`.
+2. `value_publication.publish_value_references` supplies prior-session value
+   references. Complete prior-session profiles are made available at the
+   session open; missing or incomplete profiles produce no reference.
+3. `ReplayContext.publish_context` publishes immutable `MarketContext` versions
+   with parent context and source provenance. Context facts are recorded through
+   the canonical `context_location` parity stream.
+4. `LocationRegistry.publish_session_extrema` publishes only completed and
+   causally available 5m extrema, replacing generations with parent lineage and
+   frozen ATR bands.
+5. `causal_vwap_prefix` publishes completed 1m and 5m VWAP prefixes. Each
+   measurement retains source aggregate identity, source observation identity,
+   observed/available timestamps, and `vwap_typical_price_volume_v1`.
+6. `LocationRegistry.publish_vwap` projects each VWAP measurement into a
+   location with matching timeframe, source IDs, frozen ATR, and generation.
+7. `ReplayContext.record_parity_fact` and
+   `state_machine_reporting.aggregate_payload` expose the resulting causal
+   facts. Presentation snapshots and final state are not evidence sources.
 
-- Canonical and Paper invoke the same producer contract with their respective
-  host evidence adapters and produce structurally complete or explicitly
-  unavailable publications for `2026-09-15` and `2026-10-01` only.
-- Focused tests cover available evidence, missing evidence, prior-day
-  session-open availability, stream identity, generation replacement, source
-  lineage, bands, calculation versions, and first-field mismatch reporting.
-- The Phase 3.5 harness runs the Phase 3 exporter first, invokes the producer on
-  its aggregate artifact, compares publication manifests before records, and
-  reports the first stream/field mismatch.
+### Required Work
+
+- Add one reusable Paper producer boundary in the orderflow package. The parity
+  harness and later runtime adapter must call it rather than deriving evidence
+  in a script.
+- Consume the validated Phase 3 aggregate artifact. Do not re-aggregate raw
+  bars, reread presentation snapshots, or infer evidence from terminal state.
+- Port canonical ATR lookup semantics using the canonical `daily_atr` evidence
+  contract. When ATR is unavailable, preserve the canonical unavailable event
+  and do not create ATR-dependent bands or VWAP locations.
+- Port `SessionLevels` publication through `LocationRegistry`, including
+  opening-range and prior-day levels, their source sessions, availability, and
+  frozen ATR. Prior-day levels must remain available at session open.
+- Port developing session-extreme publication exactly through
+  `publish_session_extrema`: completed 5m inputs only, generation replacement,
+  parent extreme generation, source aggregate identity, and causal availability.
+- Port prior-session value publication through
+  `publish_value_references`, preserving profile completeness, reference
+  identity/fingerprint, scope, lineage, and session-open availability. Missing
+  value evidence remains unavailable.
+- Port immutable context publication through `MarketContext` and
+  `ReplayContext.publish_context`, preserving context ID, version, parent
+  context ID, source timeframe, source provenance, and availability. Do not
+  reconstruct context from scores or presentation output.
+- Port `causal_vwap_prefix` and `LocationRegistry.publish_vwap` without changing
+  timeframe filtering, completed-prefix ordering, source observation IDs,
+  calculation version, or ATR-band construction.
+- Project comparable records using the parity contract's common record shape:
+  `kind`, `occurred_at`, `observed_at`, `available_at`, `sequence`, `identity`,
+  `causal_parent_id`, `values`, and `unavailable`.
+- Serialize the Paper projection deterministically for comparison. This is a
+  parity artifact projection, not a new canonical domain model.
+
+### Phase 3.5 Exit Gate
+
+- Paper reproduces the canonical evidence publication sequence from the same
+  Phase 3 aggregate shape for `2026-09-15` and `2026-10-01`.
+- Canonical reference output is captured from `ReplayMachine` and
+  `state_machine_reporting`; Paper output is produced by the ported boundary.
+  Parity is established against canonical output, not by importing NiftyZoning or
+  requiring a shared runtime producer implementation.
+- Focused tests cover ATR availability, opening/prior-day publication,
+  session-open value availability, extrema generation replacement, source
+  lineage, frozen bands, VWAP calculation version, immutable context versions,
+  unavailable evidence, and deterministic projection.
+- The Phase 3.5 harness runs the Phase 3 exporter first, invokes the Paper
+  producer on its aggregate artifact, obtains the canonical comparison payload
+  through the pinned canonical replay/reporting path, compares manifests before
+  records, and reports the first stream/field mismatch.
+- A missing stream is `INCOMPLETE` or `UNAVAILABLE` according to the parity
+  contract; it is never treated as an empty successful publication.
 - No Phase 4B chronological replay, Phase 4C combined policy parity, runtime,
-  database, API, or Paper-specific derivation is included in this phase.
+  database, API, or Paper-specific policy derivation is included in this phase.
+
+### Phase 3.5 Implementation Record
+
+- `src/ftx_paper/strategies/orderflow/evidence/` now owns the reusable
+  artifact-driven producer and deterministic evidence projection.
+- The producer validates the Phase 3 aggregate envelope, preserves explicit
+  unavailable evidence, and invokes the ported ATR, session-level, extrema,
+  VWAP, value, and context contracts through `EvidenceAdapter`.
+- `scripts/orderflow/phase3_parity_harness.py` invokes the producer after the
+  Phase 3 exporter. Without a host evidence adapter it reports `UNAVAILABLE`,
+  never fabricated parity.
+- The harness accepts `--canonical-evidence` and `--paper-evidence`, adapts both
+  serialized publications through the same producer, compares Phase 3.5
+  manifests before records, and reports the first field mismatch.
+- Focused producer tests and the complete `tests/strategies/orderflow` suite
+  pass. Canonical-vs-Paper Phase 3.5 evidence parity remains deferred until
+  Paper host evidence adapters are supplied.
 
 Phase 4 input contract:
 
