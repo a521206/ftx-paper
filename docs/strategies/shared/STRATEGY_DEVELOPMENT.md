@@ -1,7 +1,7 @@
 # Strategy Development
 
 This guide describes the minimum contract for adding a strategy to
-`ftx-paper`. Strategy behavior belongs in `ftx_paper.strategy`; runtime,
+`ftx-paper`. Strategy behavior belongs in `ftx_paper.strategies`; runtime,
 execution, persistence, and broker concerns stay outside the strategy.
 The extraction plan for making these capabilities reusable is in
 [Strategy Reuse Refactor](STRATEGY_REFACTORING.md).
@@ -10,7 +10,7 @@ The extraction plan for making these capabilities reusable is in
 
 A strategy must:
 
-- implement the `Strategy` protocol in `strategy/protocol.py`;
+- implement the shared strategy protocol in `strategies/shared/protocol.py`;
 - expose stable `StrategyMetadata` (`name`, `version`, and `config_hash`);
 - consume completed, normalized `DecisionBundle` values;
 - return deterministic `DecisionEvent` values from `on_bundle` and `evaluate`;
@@ -53,7 +53,7 @@ embedding infrastructure code in the strategy.
 
 1. Define the strategy's configuration, metadata, decision state, entry rules,
    exits, sizing inputs, and rejection behavior.
-2. Add the implementation under `src/ftx_paper/strategy/`. Reuse shared market,
+2. Add the implementation under `src/ftx_paper/strategies/<name>/`. Reuse shared market,
    contract, risk, and policy types instead of adding infrastructure there.
 3. Implement a `StrategyFactory` or constructor compatible with
    `ConfiguredStrategyFactory`.

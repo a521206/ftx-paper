@@ -11,8 +11,8 @@ or modify its files.
 
 Producer-neutral parity artifacts, normalization, and mismatch reporting remain
 separate deliverables. Their contract and roadmap are defined in
-`docs/PRODUCER_NEUTRAL_PARITY.md` and
-`docs/PRODUCER_NEUTRAL_PARITY_IMPLEMENTATION_PLAN.md`. The paired replay
+`PRODUCER_NEUTRAL_PARITY.md` and
+`PRODUCER_NEUTRAL_PARITY_IMPLEMENTATION_PLAN.md`. The paired replay
 validation required by Phase 9 is part of this plan: it compares Paper's
 diagnostic decisions with its opt-in executable projections and validates the
 resulting simulated lifecycle. Phase 9 paired replay is Paper-internal
@@ -329,7 +329,7 @@ replay clocks, or replay ownership.
 
 ### Refactor Ownership Boundaries
 
-Refactor `src/ftx_paper/strategy/orderflow.py` in place. The ownership rules in
+Refactor `src/ftx_paper/strategies/orderflow/orderflow.py` in place. The ownership rules in
 the preceding sections and the causal order below are authoritative; the
 canonical NiftyZoning split must not become a second Paper state machine or
 execution owner.
@@ -1280,17 +1280,18 @@ relative to the repository root.
 ### Foundation, Input, And Observations
 
 - `NiftyZoning/src/orderflow/config.py`, `state_machine_types.py` ->
-  `ftx_paper/strategy/config.py`, `strategy/orderflow.py`, and
-  `strategy/orderflow_contract.py`: validated orderflow configuration, stable
+  `ftx_paper/strategies/orderflow/orderflow_config.py`,
+  `strategies/orderflow/orderflow.py`, and
+  `strategies/orderflow/orderflow_contract.py`: validated orderflow configuration, stable
   identities, typed unavailable values, and policy contracts.
 - `NiftyZoning/src/orderflow/state_machine_source.py`, `research_replay.py`,
-  `replay_common.py`, `runner.py` -> `ftx_paper/strategy/orderflow_source.py`,
-  `strategy/orderflow_replay.py`, `application/run_replay.py`, and
+  `replay_common.py`, `runner.py` -> `ftx_paper/strategies/orderflow/orderflow_source.py`,
+  `strategies/orderflow/orderflow_replay.py`, `application/run_replay.py`, and
   `contracts/replay.py`: source identity, input selection, replay scope, and
   replay orchestration.
 - `NiftyZoning/src/orderflow/market_observation.py`, `orderflow_common.py` ->
-  `ftx_paper/strategy/orderflow_producer.py`,
-  `strategy/orderflow_observation.py`, and `contracts/market.py`: completed
+  `ftx_paper/strategies/orderflow/orderflow_producer.py`,
+  `strategies/orderflow/orderflow_observation.py`, and `contracts/market.py`: completed
   market evidence, aggregate availability, gaps, lineage, and source-row
   fingerprints.
 - Canonical NiftyZoning `daily_atr`/`build_context_scores` semantics -> Paper's
@@ -1298,8 +1299,8 @@ relative to the repository root.
   own prior-session ATR and recursively calculates scores. These values are not
   producer-owned fields and no NiftyZoning runtime artifact is consumed.
 - `NiftyZoning/src/orderflow/vwap_location.py` ->
-  `ftx_paper/strategy/orderflow_producer.py` and
-  `strategy/orderflow_observation.py`: causal VWAP and prefix evidence;
+  `ftx_paper/strategies/orderflow/orderflow_producer.py` and
+  `strategies/orderflow/orderflow_observation.py`: causal VWAP and prefix evidence;
   VWAP participates in opportunity formation, while structural acceptance
   templates may use the executable `OR_VWAP` protective stop.
 
@@ -1307,35 +1308,35 @@ relative to the repository root.
 
 - `NiftyZoning/src/orderflow/market_context_history.py`,
   `value_publication.py`, `opening_gap_policy.py`, `regime_classification.py`,
-  `hierarchy.py` -> `ftx_paper/strategy/orderflow_context.py` and
-  `strategy/orderflow_contract.py`: as-of context, values, opening-gap state,
+  `hierarchy.py` -> `ftx_paper/strategies/orderflow/orderflow_context.py` and
+  `strategies/orderflow/orderflow_contract.py`: as-of context, values, opening-gap state,
   permissions, generations, and unavailable context evidence.
 - `NiftyZoning/src/orderflow/state_machine_types.py`,
   `location_geometry.py`, `location_observation.py` ->
-  `ftx_paper/strategy/orderflow_location.py`: location records, bands,
+  `ftx_paper/strategies/orderflow/orderflow_location.py`: location records, bands,
   generations, as-of resolution, ownership, and observation provenance.
 - `NiftyZoning/src/orderflow/interaction_detector.py`, `interactions.py` ->
-  `ftx_paper/strategy/orderflow_interaction.py`: independent 1m/5m
+  `ftx_paper/strategies/orderflow/orderflow_interaction.py`: independent 1m/5m
   interaction clocks, frozen contact lineage, lifecycle transitions, and
   close reasons.
 
 ### Responses, Opportunities, And Admission
 
 - `NiftyZoning/src/orderflow/response.py`, `policies/`, `templates.py` ->
-  `ftx_paper/strategy/orderflow_response.py` and `strategy/templates.py`:
+  `ftx_paper/strategies/orderflow/orderflow_response.py` and `strategies/shared/templates.py`:
   response hypotheses, location-specific policies, response state, template
   identity, confirmation, invalidation, and expiry.
 - `NiftyZoning/src/orderflow/opportunity_coordinator.py`, `opportunity.py`,
   `opportunity_timeout.py`, `lifecycle.py` ->
-  `ftx_paper/strategy/orderflow_opportunity.py`,
-  `strategy/opportunity_timeout.py`, and `strategy/opportunity.py`:
+  `ftx_paper/strategies/orderflow/orderflow_opportunity.py` and
+  `strategies/shared/opportunity.py`:
   structural setups, bounded opportunity lifecycles, timeout ordering,
   execution-group identities, and setup identities. Group claims remain owned
   by the execution boundary and occur only after fill.
 - `NiftyZoning/src/orderflow/intent_policy.py`, `execution.py`,
   `active_position_gate.py`, `allocation.py` ->
-  `ftx_paper/strategy/orderflow_admission.py`,
-  `strategy/orderflow_trigger.py`, and the existing execution owner:
+  `ftx_paper/strategies/orderflow/orderflow_admission.py`,
+  `strategies/orderflow/orderflow_trigger.py`, and the existing execution owner:
   strategy-owned predicate ordering and trigger evidence are ported in the
   strategy layer; active-position, allocation, sizing, risk, reservations,
   and proposal arbitration are evaluated by execution/account ownership.
@@ -1349,17 +1350,17 @@ relative to the repository root.
   management, fills, exits, reservations, and settlement. Diagnostic mode
   must remain mutation-free.
 - `NiftyZoning/src/orderflow/state_engine.py` ->
-  `ftx_paper/strategy/orderflow_capture.py` and `contracts/replay.py`:
+  `ftx_paper/strategies/orderflow/orderflow_capture.py` and `contracts/replay.py`:
   replay capture modes and detached replay records. This mapping does not
   introduce a live replay recorder.
 - `NiftyZoning/src/orderflow/state_machine_reporting.py`,
   `state_machine_evidence.py`, `reporting.py` ->
-  `ftx_paper/strategy/orderflow_reporting.py`, `contracts/decision_view.py`,
+  `ftx_paper/strategies/orderflow/orderflow_reporting.py`, `contracts/decision_view.py`,
   `contracts/decision_artifacts.py`, `runtime/events.py`, and
   `runtime/session.py`: recorded-fact projections, generic decision views,
   runtime event envelopes, persistence, and reports.
 - `NiftyZoning/src/orderflow/state_machine.py` ->
-  `ftx_paper/strategy/orderflow.py`, `strategy/orderflow_replay.py`,
+  `ftx_paper/strategies/orderflow/orderflow.py`, `strategies/orderflow/orderflow_replay.py`,
   `runtime/engine.py`, and `runtime/session.py`: causal sequencing is split
   between the live `OrderflowPolicy`, replay-only `ReplayMachine`, shared
   runtime coordination, and persistence; no single Paper file replaces the
@@ -1369,8 +1370,8 @@ relative to the repository root.
 
 - `NiftyZoning/src/orderflow/parity_artifacts.py` and its parity tests map to
   the separate Paper parity deliverables in
-  `ftx_paper/runtime/parity_artifacts.py`, `docs/PRODUCER_NEUTRAL_PARITY.md`,
-  and `docs/PRODUCER_NEUTRAL_PARITY_IMPLEMENTATION_PLAN.md`; they are not part
+  `ftx_paper/runtime/parity_artifacts.py`, `PRODUCER_NEUTRAL_PARITY.md`,
+  and `PRODUCER_NEUTRAL_PARITY_IMPLEMENTATION_PLAN.md`; they are not part
   of the live orderflow owner.
 - VWAP locations, `reversal_at_vwap`, and VWAP cell policies map to the Paper
   orderflow location and response contracts. Structural acceptance templates

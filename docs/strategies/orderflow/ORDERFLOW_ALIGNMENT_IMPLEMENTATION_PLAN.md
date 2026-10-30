@@ -8,9 +8,9 @@ Paper counterpart that can be reviewed and tested side by side.
 This is an organization plan, not a second strategy or parity implementation
 plan. Detailed behavior remains in:
 
-- `docs/ORDERFLOW_IMPLEMENTATION_PLAN.md`
-- `docs/PRODUCER_NEUTRAL_PARITY.md`
-- `docs/PRODUCER_NEUTRAL_PARITY_IMPLEMENTATION_PLAN.md`
+- `ORDERFLOW_IMPLEMENTATION_PLAN.md`
+- `PRODUCER_NEUTRAL_PARITY.md`
+- `PRODUCER_NEUTRAL_PARITY_IMPLEMENTATION_PLAN.md`
 
 NiftyZoning remains a read-only reference. Paper does not import its code or
 share its runtime state.

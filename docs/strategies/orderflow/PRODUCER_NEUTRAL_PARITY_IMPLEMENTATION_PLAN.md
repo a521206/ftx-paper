@@ -1,6 +1,6 @@
 # Producer-Neutral Parity Implementation Plan
 
-Status: proposed implementation plan for `docs/PRODUCER_NEUTRAL_PARITY.md`.
+Status: proposed implementation plan for `PRODUCER_NEUTRAL_PARITY.md`.
 
 ## Canonical References
 
@@ -32,7 +32,7 @@ four-layer projection and comparison workflow.
 
 ## Relationship To Alignment
 
-`docs/ORDERFLOW_ALIGNMENT_IMPLEMENTATION_PLAN.md` owns Paper code organization,
+`ORDERFLOW_ALIGNMENT_IMPLEMENTATION_PLAN.md` owns Paper code organization,
 behavioral alignment, and focused Paper-owned regression fixtures.
 
 This plan owns only:

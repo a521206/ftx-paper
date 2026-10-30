@@ -3,7 +3,7 @@
 Status: normative first-pass contract. This is the producer-neutral counterpart
 to the canonical FTX parity contract. It keeps the comparison surface small and
 does not require sharing strategy or runtime code. The implementation roadmap is
-in `docs/PRODUCER_NEUTRAL_PARITY_IMPLEMENTATION_PLAN.md`.
+in `PRODUCER_NEUTRAL_PARITY_IMPLEMENTATION_PLAN.md`.
 
 ## Four comparison layers
 

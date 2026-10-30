@@ -37,7 +37,7 @@
 
 - Keep SQLite connections, SQL statements, database paths, and row mapping in `src/ftx_paper/infrastructure/sqlite/`.
 - Use typed records and repository protocols from `ftx_paper.ports`. API and CLI code should use `ftx_paper.runtime.store` rather than selecting concrete SQLite adapters.
-- Keep strategy policy and decision policy in `ftx_paper.strategy`; keep market normalization and decision-clock processing in `ftx_paper.market`.
+- Keep strategy policy and decision policy in `ftx_paper.strategies`; keep market normalization and decision-clock processing in `ftx_paper.market`.
 - Treat runtime, portfolio, broker, and execution mutations as in-memory operations that are persisted afterward; do not imply that SQLite writes roll back those mutations.
 - Preserve startup recovery behavior: interrupted runtime sessions become `STOPPED` and retain an audit event without reconstructing the in-memory engine.
 - Add tests for reusable behavior and architecture boundaries according to the testing guidance above.
@@ -61,5 +61,5 @@
 
 - See `docs/ARCHITECTURE.md` for dependency boundaries, persistence behavior, and runtime composition.
 - See `docs/DEPLOYMENT.md` for process ownership, loopback deployment, configuration, and upgrade rules.
-- See `docs/STRATEGY_RULES.md` for live strategy rules, session windows, location cells, exits, and risk parameters.
+- See `docs/strategies/research/STRATEGY_RULES.md` for live research strategy rules, session windows, location cells, exits, and risk parameters.
 

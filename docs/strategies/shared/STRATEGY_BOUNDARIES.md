@@ -15,10 +15,10 @@ The implementation paths are now separate:
 
 - Research policy: `src/ftx_paper/strategies/research/`
 - Orderflow policy: `src/ftx_paper/strategies/orderflow/`
-- Shared contracts and compatibility/support modules: `src/ftx_paper/strategy/`
+- Shared contracts and compatibility/support modules: `src/ftx_paper/strategies/shared/`
 
-The compatibility modules under `src/ftx_paper/strategy/` only forward legacy
-imports; they are not strategy implementations. The Paper orderflow path is not
+The shared modules under `src/ftx_paper/strategies/shared/` provide common
+contracts and coordination. The Paper orderflow path is not
 `ftx-paper/src/orderflow/`; that path belongs to the separate NiftyZoning
 repository and must never be created in this project.
 

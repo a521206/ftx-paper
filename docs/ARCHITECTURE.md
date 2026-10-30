@@ -2,7 +2,7 @@
 
 This document describes the system's design contracts for maintainers and
 extension authors. It is not an installation, operations, or strategy-parameter
-runbook; see [Deployment](DEPLOYMENT.md) and [Strategy rules](STRATEGY_RULES.md)
+runbook; see [Deployment](DEPLOYMENT.md) and [Research strategy rules](strategies/research/STRATEGY_RULES.md)
 for those concerns.
 
 `ftx-paper` is a paper-trading modular monolith. The API process owns one
@@ -26,7 +26,7 @@ SQLite connections, SQL, database paths, and row mapping belong in
 Composition and adapter selection belong in `application.composition` and
 runtime wiring.
 
-Strategy policy lives in `ftx_paper.strategy`. Market normalization and
+Strategy policy lives in `ftx_paper.strategies`. Market normalization and
 decision-clock processing live in `ftx_paper.market`.
 
 ## Single Source Of Truth
@@ -145,7 +145,7 @@ session = RuntimeSession(store, auth, specifications, engine=engine)
 
 The single `PaperEngine` remains supported for existing deployments and tests.
 
-Strategies live in `ftx_paper.strategy` and are selected at the composition
+Strategies live in `ftx_paper.strategies` and are selected at the composition
 boundary. The `Strategy` protocol is the stable extension point:
 
 ```text
@@ -168,7 +168,7 @@ produced it.
 
 To add a strategy:
 
-1. Add the implementation under `ftx_paper.strategy` and depend only on
+1. Add the implementation under `ftx_paper.strategies` and depend only on
    contracts, domain decision context, market bundles, and other strategy
    policy modules.
 2. Define its configuration and deterministic state explicitly. Do not put

@@ -5,7 +5,7 @@ and strategy capabilities available to strategies beyond `ftx-paper-research`.
 It is not a rewrite and does not change the research strategy's behavior.
 
 This refactor is a prerequisite for the orderflow strategy described in
-`FTX_PAPER_ORDERFLOW_STRATEGY_DESIGN_PLAN.md`. Orderflow must consume the
+`../orderflow/FTX_PAPER_ORDERFLOW_STRATEGY_DESIGN_PLAN.md`. Orderflow must consume the
 resulting policy and coordinator contracts rather than bypassing them.
 
 ## Current Problem

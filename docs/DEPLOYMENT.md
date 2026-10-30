@@ -3,7 +3,7 @@
 This is the operator runbook for installing, configuring, running, and
 upgrading `ftx-paper`. Design boundaries are documented in
 [Architecture](ARCHITECTURE.md); strategy behavior is documented in
-[Strategy rules](STRATEGY_RULES.md).
+[Research strategy rules](strategies/research/STRATEGY_RULES.md).
 
 `ftx-paper` runs independently of NiftyZoning. Install it in its own virtual
 environment and run one API process plus the separate UI process. Never start

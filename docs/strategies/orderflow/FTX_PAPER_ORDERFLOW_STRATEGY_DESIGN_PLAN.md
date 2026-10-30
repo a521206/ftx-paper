@@ -4,7 +4,7 @@ Status: proposed design and implementation plan, October 2026
 
 This document describes how orderflow can be added as a strategy to the
 independent `ftx-paper` paper-trading application. It is based on the strategy
-contract in `ftx-paper/docs/STRATEGY_DEVELOPMENT.md` and the causal orderflow
+contract in `../shared/STRATEGY_DEVELOPMENT.md` and the causal orderflow
 work in this repository.
 
 The implementation must preserve the boundary between the two repositories:
@@ -31,7 +31,7 @@ engine, database, or persistence path.
 ## Architectural Prerequisites
 
 Orderflow implementation depends on the strategy reuse refactor described in
-`docs/STRATEGY_REFACTORING.md`. That refactor is not optional plumbing: it
+`../shared/STRATEGY_REFACTORING.md`. That refactor is not optional plumbing: it
 defines the boundary that prevents an orderflow policy from copying the
 research strategy's orchestration.
 
@@ -64,7 +64,7 @@ strategy_id: orderflow-research
 The strategy should be implemented under:
 
 ```text
-src/ftx_paper/strategy/orderflow.py
+src/ftx_paper/strategies/orderflow/orderflow.py
 ```
 
 It should implement the existing `Strategy` protocol as a thin adapter rather
@@ -117,7 +117,7 @@ bundle and to restore an equivalent decision state from a snapshot.
 Add a versioned, runtime-independent contract in `ftx-paper`, for example:
 
 ```text
-src/ftx_paper/strategy/orderflow_contract.py
+src/ftx_paper/strategies/orderflow/orderflow_contract.py
 ```
 
 The contract should expose an observation equivalent to:
@@ -511,8 +511,8 @@ interaction is only `ENDED`; those are response or opportunity outcomes.
 Add policy and trigger modules, for example:
 
 ```text
-src/ftx_paper/strategy/orderflow_policy.py
-src/ftx_paper/strategy/orderflow_trigger.py
+src/ftx_paper/strategies/orderflow/policy.py
+src/ftx_paper/strategies/orderflow/orderflow_trigger.py
 ```
 
 The policy must form opportunities only from causal response evidence. The

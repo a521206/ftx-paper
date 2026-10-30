@@ -2,13 +2,13 @@
 
 This document covers only `ftx-paper-research`. Orderflow is a separate
 strategy with its own entry point and contracts; see
-[Strategy boundaries](STRATEGY_BOUNDARIES.md).
+[Strategy boundaries](../shared/STRATEGY_BOUNDARIES.md).
 
 This document specifies the behavior of the `ftx-paper-research` strategy:
 locations, entry and exit policies, admission filters, sizing, and session
 boundaries. It is a research and review contract, not an installation guide or
-general system-architecture document. See [Deployment](DEPLOYMENT.md) for
-operations and [Architecture](ARCHITECTURE.md) for ownership and boundaries.
+general system-architecture document. See [Deployment](../../DEPLOYMENT.md) for
+operations and [Architecture](../../ARCHITECTURE.md) for ownership and boundaries.
 
 The implementation and tests remain authoritative when this document and the
 code disagree. Update this specification whenever an intentional strategy
@@ -19,7 +19,7 @@ change is made, and record the change in `CHANGELOG.md`.
 - **Strategy Name:** `ftx-paper-research`
 - **Version:** `0.4.0-pipeline-research-aligned`
 - **Target Instrument:** Nifty 50 Index Futures; options provide supporting PCR data.
-- **Primary Code Base:** [`src/ftx_paper/strategy/`](../src/ftx_paper/strategy/) and [`src/ftx_paper/market/location.py`](../src/ftx_paper/market/location.py)
+- **Primary Code Base:** [`src/ftx_paper/strategies/research/`](../../../src/ftx_paper/strategies/research/) and [`src/ftx_paper/market/location.py`](../../../src/ftx_paper/market/location.py)
 - **Execution Mode:** Paper trading only (in-memory simulation with SQLite audit trail)
 
 ---
@@ -81,7 +81,7 @@ Entries are only permitted during two intraday regimes (IST), using half-open mi
 
 ## 5. Admission, Momentum & Supporting Filters
 
-Before a signal triggers an order, it must pass the causal checks in [`admission.py`](../src/ftx_paper/strategy/admission.py):
+Before a signal triggers an order, it must pass the causal checks in [`admission.py`](../../../src/ftx_paper/strategies/research/admission.py):
 
 - **Mean-reversion policies:** Reject panic descent, extreme PCR, or climactic selling.
 - **Trend-continuation policies:** Apply the same rejection gates, reject a VIX spike, and require at least two confirmations from prior volume climax, prior-bar midpoint reclaim, and volume drying.
@@ -93,7 +93,7 @@ Before a signal triggers an order, it must pass the causal checks in [`admission
 
 ## 6. Exit Mechanics & Stop Logic
 
-Defined in [`exits.py`](../src/ftx_paper/strategy/exits.py) and [`adaptive_stop.py`](../src/ftx_paper/strategy/adaptive_stop.py):
+Defined in [`exits.py`](../../../src/ftx_paper/strategies/shared/exits.py) and [`adaptive_stop.py`](../../../src/ftx_paper/strategies/research/adaptive_stop.py):
 
 ### 1. Trailing Stop (`ExitMode.TRAIL`)
 - **Activation Threshold:** Activates when unrealized gain reaches **`+20.0 bps`** (0.20%).
@@ -129,18 +129,18 @@ Defined in [`exits.py`](../src/ftx_paper/strategy/exits.py) and [`adaptive_stop.
 | `SESSION_EXIT_DEADLINE` | `15:10` | Force-closes open positions only (`eod` exit). |
 | `SESSION_DATA_END` | `15:30` | Market-input window for bars, levels, and extrema. |
 
-Both are defined once in [`src/ftx_paper/config.py`](../src/ftx_paper/config.py); the data window never extends the exit deadline.
+Both are defined once in [`src/ftx_paper/config.py`](../../../src/ftx_paper/config.py); the data window never extends the exit deadline.
 
 ---
 
 ## 9. Source File Map
 
-- [`src/ftx_paper/strategy/config.py`](../src/ftx_paper/strategy/config.py): Session constants, cell policy declarations, parameters.
-- [`src/ftx_paper/strategy/decision.py`](../src/ftx_paper/strategy/decision.py): Main bar-by-bar decision loop and order intent generator.
-- [`src/ftx_paper/strategy/admission.py`](../src/ftx_paper/strategy/admission.py): Admission predicates and hypothesis-specific gates.
-- [`src/ftx_paper/strategy/exits.py`](../src/ftx_paper/strategy/exits.py): Trailing stop and signal exit evaluations.
-- [`src/ftx_paper/strategy/adaptive_stop.py`](../src/ftx_paper/strategy/adaptive_stop.py): Dynamic stop-loss calculator.
-- [`src/ftx_paper/strategy/risk.py`](../src/ftx_paper/strategy/risk.py): Risk sizing and position boundaries.
-- [`src/ftx_paper/strategy/sizing.py`](../src/ftx_paper/strategy/sizing.py): Deterministic score, concurrency, vehicle, drawdown, and stability sizing stages.
-- [`src/ftx_paper/domain/capital_config.py`](../src/ftx_paper/domain/capital_config.py): Research capital profile and vehicle limits.
-- [`src/ftx_paper/market/location.py`](../src/ftx_paper/market/location.py): Price level classification, OR calculation, and cell detection.
+- [`src/ftx_paper/strategies/research/config.py`](../../../src/ftx_paper/strategies/research/config.py): Session constants, cell policy declarations, parameters.
+- [`src/ftx_paper/strategies/research/decision.py`](../../../src/ftx_paper/strategies/research/decision.py): Main bar-by-bar decision loop and order intent generator.
+- [`src/ftx_paper/strategies/research/admission.py`](../../../src/ftx_paper/strategies/research/admission.py): Admission predicates and hypothesis-specific gates.
+- [`src/ftx_paper/strategies/shared/exits.py`](../../../src/ftx_paper/strategies/shared/exits.py): Trailing stop and signal exit evaluations.
+- [`src/ftx_paper/strategies/research/adaptive_stop.py`](../../../src/ftx_paper/strategies/research/adaptive_stop.py): Dynamic stop-loss calculator.
+- [`src/ftx_paper/strategies/research/risk.py`](../../../src/ftx_paper/strategies/research/risk.py): Risk sizing and position boundaries.
+- [`src/ftx_paper/strategies/research/sizing.py`](../../../src/ftx_paper/strategies/research/sizing.py): Deterministic score, concurrency, vehicle, drawdown, and stability sizing stages.
+- [`src/ftx_paper/domain/capital_config.py`](../../../src/ftx_paper/domain/capital_config.py): Research capital profile and vehicle limits.
+- [`src/ftx_paper/market/location.py`](../../../src/ftx_paper/market/location.py): Price level classification, OR calculation, and cell detection.
