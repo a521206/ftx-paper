@@ -50,7 +50,7 @@ from ftx_paper.strategies.orderflow.orderflow_position_manager import OrderflowP
 from ftx_paper.strategies.orderflow.orderflow_evidence import OrderflowEvidenceAssembler
 
 from ftx_paper.strategies.orderflow.orderflow_codec import policy_snapshot_payload, strategy_snapshot_payload
-from ftx_paper.strategies.orderflow.orderflow_capture import detached_asdict
+from ftx_paper.strategies.orderflow.orderflow_capture import CaptureMode, detached_asdict
 from ftx_paper.strategies.orderflow.orderflow_snapshot import policy_from_snapshot, strategy_from_snapshot
 from ftx_paper.strategies.orderflow.orderflow_config import ORDERFLOW_NAME, ORDERFLOW_VERSION, OrderflowConfig
 from ftx_paper.strategies.orderflow.orderflow_helpers import (
@@ -766,7 +766,11 @@ class OrderflowPolicy:
                         "decision_id": _decision_id("opportunity_invalidated", opportunity_id, location_key),
                         "opportunity_id": opportunity_id, "source_observation_ids": [location_key],
                     }))
-        if interaction is not None and interaction.status is InteractionStatus.ACTIVE:
+        if (
+            self.config.capture_mode is CaptureMode.FULL
+            and interaction is not None
+            and interaction.status is InteractionStatus.ACTIVE
+        ):
             lifecycle_events.append(PolicyDecision({
                 **base, "decision_stage": "opportunity", "outcome": "recorded",
                 "reason": "location_interaction_observed",
