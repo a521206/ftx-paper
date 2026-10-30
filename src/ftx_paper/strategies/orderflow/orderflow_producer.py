@@ -22,6 +22,9 @@ from .orderflow_location import LocationBand, LocationObservation, LocationRecor
 from .orderflow_source import source_fingerprint
 
 
+STRUCTURAL_REFERENCE_TIMEFRAME = "5m"
+
+
 def _numeric_feature(features: Mapping[str, object], name: str) -> float:
     value = features.get(name)
     if not isinstance(value, (int, float)) or isinstance(value, bool):
@@ -478,7 +481,7 @@ class CausalOrderflowProducer:
                     child_observation_ids=child_ids,
                     method="causal_producer",
                     reference_source_aggregate_id=record.source_aggregate_id,
-                    reference_source_timeframe=record.timeframe or "5m",
+                    reference_source_timeframe=record.timeframe or STRUCTURAL_REFERENCE_TIMEFRAME,
                     frozen_atr=record.frozen_atr,
                 ))
             # Publish the same structural reference against each complete 1m
@@ -513,7 +516,7 @@ class CausalOrderflowProducer:
                             location_type="diagnostic_reference" if is_diagnostic_location(record.alias) else "session_reference",
                             source_observation_id=record.source_observation_id,
                             reference_source_aggregate_id=record.source_aggregate_id,
-                            reference_source_timeframe=record.timeframe or "5m",
+                            reference_source_timeframe=record.timeframe or STRUCTURAL_REFERENCE_TIMEFRAME,
                             frozen_atr=record.frozen_atr,
                             timeframe="1m",
                         ),

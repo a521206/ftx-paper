@@ -369,6 +369,11 @@ class InteractionDetector:
             return None
         if location.alias.upper() not in self._SUPPORTED_LOCATIONS:
             return None
+        # Structural episodes belong to the completed 5m parent.  1m keeps
+        # reference observations as confirmation evidence, but cannot open a
+        # second structural interaction lifecycle.
+        if self.timeframe == "1m" and location.alias.upper() != "VWAP":
+            return None
         if self._registry is not None:
             registered = self._registry.records.get(location.location_id)
             if registered is None:

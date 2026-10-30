@@ -1259,7 +1259,10 @@ class OrderflowPolicy:
         detector: InteractionDetector,
         futures: MarketBar | None,
     ) -> tuple[PolicyDecision, ...]:
-        if interaction.timeframe != self.config.response_timeframe:
+        # The 5m parent owns structural response and setup formation.  1m
+        # observations are consumed later for confirmation, displacement, and
+        # trigger evidence only.
+        if interaction.timeframe != "5m":
             return ()
         decision_cutoff = min(context.as_of, orderflow.cutoff)
         response_observations = self._response_observations(interaction, observations)
@@ -1355,10 +1358,20 @@ class OrderflowPolicy:
         updated = detector.update_response(interaction.interaction_id, next_status, hypothesis_id, state=state)
         if updated is None:
             return ()
+        response_outcome = (
+            "recorded"
+            if arbitration_selected or next_status != "CONFIRMED"
+            else "rejected"
+        )
+        response_reason = (
+            reason
+            if arbitration_selected or next_status != "CONFIRMED"
+            else arbitration_reason or "hypothesis_suppressed"
+        )
         results = [PolicyDecision({
             **base, "decision_stage": "response",
-            "outcome": "recorded" if next_status == "CONFIRMED" else "unavailable" if next_status == "UNAVAILABLE" else "rejected",
-            "reason": reason, "decision_id": _decision_id("response", interaction.interaction_id,
+            "outcome": response_outcome if next_status == "CONFIRMED" else "unavailable" if next_status == "UNAVAILABLE" else "rejected",
+            "reason": response_reason, "decision_id": _decision_id("response", interaction.interaction_id,
                 confirmation_id or (evidence_ids[-1] if evidence_ids else observation.observation_id), next_status),
             "location": interaction.location_alias, "interaction_id": interaction.interaction_id,
             "reference_generation": interaction.reference_generation, "response_state": next_status,
