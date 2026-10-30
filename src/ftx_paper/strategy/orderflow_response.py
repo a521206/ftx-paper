@@ -3,19 +3,28 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, time, timezone
 
 from .response import (
     ResponseCandle,
     ResponseEvaluation as GeometryResponseEvaluation,
     ResponseOutcomeStatus as GeometryResponseOutcomeStatus,
-    ResponseSpec,
     build_response_spec,
     evaluate_response_window as evaluate_geometry_response_window,
 )
 from .templates import Direction, ResponseType, TRADE_TEMPLATES, TradeTemplate
 from ftx_paper.config import IST
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyResponseEvaluation:
+    """One response hypothesis plus explicit same-interaction arbitration."""
+
+    template: TradeTemplate
+    evaluation: GeometryResponseEvaluation[object]
+    selected: bool = False
+    arbitration_reason: str | None = None
 
 
 def _prior_day_role(interaction: object) -> str | None:
@@ -102,57 +111,6 @@ def _template_expiry(created_at: datetime, expiry_at: str) -> datetime:
     ).astimezone(created_at.tzinfo)
 
 
-def evaluate_policy_response(
-    interaction: object,
-    observations: Sequence[object],
-    *,
-    max_candles: int,
-    cutoff: object,
-) -> GeometryResponseEvaluation[object] | None:
-    """Adapt orderflow observations to the reusable response geometry contract."""
-    alias = str(getattr(interaction, "location_alias", "")).upper()
-    template = TRADE_TEMPLATES.get(("5m_recovery_breakout", alias))
-    if template is None or not isinstance(cutoff, datetime):
-        return None
-    template = _effective_template(template, interaction)
-    created_at = getattr(interaction, "created_at", None)
-    expiry = _template_expiry(created_at, template.expiry_at) if isinstance(created_at, datetime) else None
-    candidates = _after_prior_day_transition(
-        _causal_candidates(interaction, observations, template, cutoff, expiry=expiry),
-        interaction,
-    )[:max_candles]
-    if not candidates:
-        return GeometryResponseEvaluation(None, False, (), None, template.direction)
-    lower, upper = getattr(interaction, "band_lower", None), getattr(interaction, "band_upper", None)
-    if not isinstance(lower, (int, float)) or not isinstance(upper, (int, float)):
-        return None
-
-    def evaluate(spec: ResponseSpec, *, armed: bool = False, pre_contact_side: str | None = None) -> GeometryResponseEvaluation[object]:
-        return evaluate_geometry_response_window(
-            candidates,
-            to_candle=lambda item: ResponseCandle(*(
-                float(getattr(item, "features")[name]) for name in ("open", "high", "low", "close")
-            )),
-            spec_for=lambda _item: spec,
-            armed=armed,
-            pre_contact_side=pre_contact_side,
-        )
-
-    spec = build_response_spec(template, band_lower=float(lower), band_upper=float(upper))
-    result = evaluate(spec, pre_contact_side=getattr(interaction, "pre_contact_side", None))
-    if result.status is not GeometryResponseOutcomeStatus.CONFIRMED:
-        first_features = getattr(candidates[0], "features", {})
-        previous_close = first_features.get("previous_close") if isinstance(first_features, Mapping) else None
-        reference = getattr(interaction, "reference_level", None)
-        if isinstance(previous_close, (int, float)) and isinstance(reference, (int, float)) and previous_close != reference:
-            template = replace(template, direction=Direction.LONG if previous_close < reference else Direction.SHORT)
-            result = evaluate(
-                build_response_spec(template, band_lower=float(lower), band_upper=float(upper)),
-                pre_contact_side=getattr(interaction, "pre_contact_side", None),
-            )
-    return result
-
-
 def evaluate_policy_responses(
     interaction: object,
     observations: Sequence[object],
@@ -160,8 +118,8 @@ def evaluate_policy_responses(
     max_candles: int,
     cutoff: object,
     initial_armed: Mapping[str, bool] | None = None,
-) -> tuple[tuple[TradeTemplate, GeometryResponseEvaluation[object]], ...]:
-    """Evaluate orderflow acceptance and rejection hypotheses independently."""
+) -> tuple[PolicyResponseEvaluation, ...]:
+    """Evaluate all arms on shared evidence, then select execution authority."""
     alias = str(getattr(interaction, "location_alias", "")).upper()
     if not isinstance(cutoff, datetime):
         return ()
@@ -170,16 +128,19 @@ def evaluate_policy_responses(
          if location == alias and family in {"5m_recovery_breakout", "5m_acceptance_breakout"}),
          key=lambda item: item.response_type.value != "acceptance",
     ))
-    results: list[tuple[TradeTemplate, GeometryResponseEvaluation[object]]] = []
+    results: list[PolicyResponseEvaluation] = []
+    shared_candidates: tuple[object, ...] | None = None
     for template in templates:
         template_for_evaluation = _effective_template(template, interaction)
         created_at = getattr(interaction, "created_at", None)
         expiry = _template_expiry(created_at, template_for_evaluation.expiry_at) if isinstance(created_at, datetime) else None
-        candidates = _after_prior_day_transition(
-            _causal_candidates(
-                interaction, observations, template_for_evaluation, cutoff, expiry=expiry,
-            ), interaction,
-        )[:max_candles]
+        if shared_candidates is None:
+            shared_candidates = _after_prior_day_transition(
+                _causal_candidates(
+                    interaction, observations, template_for_evaluation, cutoff, expiry=expiry,
+                ), interaction,
+            )[:max_candles]
+        candidates = shared_candidates
         lower, upper = getattr(interaction, "band_lower", None), getattr(interaction, "band_upper", None)
         if not isinstance(lower, (int, float)) or not isinstance(upper, (int, float)):
             continue
@@ -193,10 +154,51 @@ def evaluate_policy_responses(
             armed=bool(initial_armed.get(template.template_id, False)) if initial_armed else False,
             pre_contact_side=getattr(interaction, "pre_contact_side", None),
         )
-        results.append((template, evaluation))
-    return tuple(results)
+        results.append(PolicyResponseEvaluation(template, evaluation))
+    resolved = [
+        item for item in results
+        if item.evaluation.status is GeometryResponseOutcomeStatus.CONFIRMED
+        and item.evaluation.confirmation_available_at is not None
+    ]
+    if not resolved:
+        return tuple(results)
+    latest_available_at = max(
+        item.evaluation.confirmation_available_at for item in resolved
+        if item.evaluation.confirmation_available_at is not None
+    )
+    latest = [
+        item for item in resolved
+        if item.evaluation.confirmation_available_at == latest_available_at
+    ]
+    winner = min(
+        latest,
+        key=lambda item: (
+            0 if item.template.response_type is ResponseType.REJECTION else 1,
+            item.evaluation.direction.value if item.evaluation.direction is not None else "",
+            item.template.template_id,
+        ),
+    )
+    has_prior = any(
+        item.evaluation.confirmation_available_at is not None
+        and item.evaluation.confirmation_available_at < latest_available_at
+        for item in resolved
+    )
+    has_rejection = any(item.template.response_type is ResponseType.REJECTION for item in latest)
+    return tuple(
+        replace(
+            item,
+            selected=item is winner,
+            arbitration_reason=(
+                "later_causal_response_superseded_prior" if item is winner and has_prior
+                else "same_time_rejection_precedence" if item is winner and has_rejection
+                else "single_latest_causal_response" if item is winner
+                else "same_interaction_execution_arbitration"
+            ),
+        ) if item.evaluation.status is GeometryResponseOutcomeStatus.CONFIRMED else item
+        for item in results
+    )
 
 
 __all__ = [
-    "evaluate_policy_response", "evaluate_policy_responses",
+    "PolicyResponseEvaluation", "evaluate_policy_responses",
 ]

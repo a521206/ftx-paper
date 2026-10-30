@@ -1248,10 +1248,26 @@ class OrderflowPolicy:
             cutoff=decision_cutoff,
             initial_armed={item.hypothesis_id: item.armed for item in interaction.hypothesis_states},
         )
-        for template, evaluation in evaluations:
+        selected = next((item for item in evaluations if item.selected), None)
+        if selected is not None and selected.evaluation.confirmation_available_at is not None:
+            for lifecycle_id, opportunity in tuple(self._opportunities.items()):
+                if (
+                    opportunity.status is OpportunityStatus.ACTIVE
+                    and opportunity.source_interaction_id == interaction.interaction_id
+                    and opportunity.template_id != selected.template.template_id
+                ):
+                    at = selected.evaluation.confirmation_available_at
+                    self._opportunities[lifecycle_id] = opportunity.supersede(
+                        at=at, replacement_id=selected.template.template_id,
+                        evidence_ids=selected.evaluation.evidence_ids,
+                    )
+                    self._pending_triggers.pop(lifecycle_id, None)
+        for arbitration in evaluations:
             results.extend(self._record_response_evaluation(
-                interaction, observation, response_observations, template, evaluation,
+                interaction, observation, response_observations, arbitration.template, arbitration.evaluation,
                 decision_cutoff, context, base, detector, futures,
+                arbitration_selected=arbitration.selected,
+                arbitration_reason=arbitration.arbitration_reason,
             ))
         return tuple(results)
 
@@ -1267,6 +1283,9 @@ class OrderflowPolicy:
         base: Mapping[str, Any],
         detector: InteractionDetector,
         futures: MarketBar | None,
+        *,
+        arbitration_selected: bool = False,
+        arbitration_reason: str | None = None,
     ) -> tuple[PolicyDecision, ...]:
         hypothesis_id = template.template_id
         future = next((item for item in response_observations if item.available_at > decision_cutoff), None)
@@ -1320,9 +1339,13 @@ class OrderflowPolicy:
             "reference_generation": interaction.reference_generation, "response_state": next_status,
             "template_id": template.template_id, "hypothesis_state": detached_asdict(state),
             "response_evidence_ids": list(evidence_ids), "source_observation_ids": list(source_ids),
+            "arbitration_selected": arbitration_selected,
+            "arbitration_reason": arbitration_reason,
             "expected_available_at": expected_available_at.isoformat() if expected_available_at else None,
         })]
         if next_status == "CONFIRMED":
+            if not arbitration_selected:
+                return tuple(results)
             results.extend(self._handle_confirmed_response(
                 interaction, observation, response_observations, template, evaluation,
                 direction, confirmation_id, evidence_ids, context, base, futures,
@@ -1376,6 +1399,13 @@ class OrderflowPolicy:
                     "fill_permission_margin": self.config.fill_permission_margin},
                     "provenance": {"context_version": formation_context.version if formation_context else None,
                         "source_observation_ids": list(evidence_ids)}}}),)
+        if any(
+            item.status is OpportunityStatus.ACTIVE
+            and item.source_interaction_id == interaction.interaction_id
+            and item.template_id == template.template_id
+            for item in self._opportunities.values()
+        ):
+            return ()
         opportunity = SetupOpportunity.create(
             interaction_id=interaction.interaction_id, direction=direction, formed_at=formed_at,
             expires_at=formed_at + timedelta(minutes=self.config.response_window_candles * (5 if interaction.timeframe == "5m" else 1)),

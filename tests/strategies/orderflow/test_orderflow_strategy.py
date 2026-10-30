@@ -22,6 +22,7 @@ from ftx_paper.strategy import (
     OrderflowStrategy,
 )
 from ftx_paper.strategy.orderflow import OrderflowConfig, OrderflowPolicy, _score_rejection
+from ftx_paper.strategy.orderflow_interaction import InteractionCloseReason
 from ftx_paper.strategy.orderflow_codec import (
     bar_from_snapshot,
     bar_snapshot,
@@ -448,7 +449,7 @@ def test_policy_snapshot_rejects_obsolete_single_detector_state() -> None:
         OrderflowPolicy.from_snapshot(current)
 
 
-def test_generation_change_keeps_alias_timeframe_interaction_active() -> None:
+def test_generation_change_closes_old_interaction_and_opens_new_generation() -> None:
     strategy = OrderflowStrategy()
     bundle, account = _context()
     strategy.evaluate(bundle, account)
@@ -463,8 +464,9 @@ def test_generation_change_keeps_alias_timeframe_interaction_active() -> None:
     assert any("2026-01-01T10:00:00+00:00" in str(event.payload["interaction_id"]) for event in observed)
     detector = strategy.policy._location_detectors["5m"]
     assert len(detector.active_interactions) == 1
-    assert detector.active_interactions[0].reference_generation == 1
-    assert detector.closed_interactions == ()
+    assert detector.active_interactions[0].reference_generation == 2
+    assert len(detector.closed_interactions) == 1
+    assert detector.closed_interactions[0].close_reason is InteractionCloseReason.REFERENCE_REPLACED
 
 
 def test_non_contact_location_observation_does_not_start_interaction() -> None:

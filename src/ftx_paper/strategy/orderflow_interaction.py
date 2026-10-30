@@ -405,6 +405,19 @@ class InteractionDetector:
             self._session_first_observed_at[session_id] = observation.observed_at
             first_observed_at = observation.observed_at
         interaction = self._active.get(key)
+        if (
+            interaction is not None
+            and interaction.reference_generation != location.generation
+        ):
+            replaced = replace(
+                _freeze_projections(interaction),
+                status=InteractionStatus.ENDED,
+                close_reason=InteractionCloseReason.REFERENCE_REPLACED,
+                closed_at=location.available_at,
+            )
+            self._active.pop(key, None)
+            self._closed.append(replaced)
+            interaction = None
         if interaction is not None and any(
             item.observation_id == observation.observation_id
             or item.observed_at == observation.observed_at
