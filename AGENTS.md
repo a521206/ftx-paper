@@ -7,6 +7,15 @@
 - Run `.venv\Scripts\python.exe -m pytest` from the repository root for the test suite, or target the relevant test files when iterating.
 - Run `.venv\Scripts\ruff.exe check .` from the repository root when Ruff is installed in the virtual environment. If that executable is unavailable, use `py -m ruff check .` when the system Python provides Ruff. Add `--fix` only when intentionally applying autofixes.
 
+## Engineering Principles
+
+- Follow the agreed design and canonical implementation; investigate discrepancies and fix their underlying causes rather than layering patches.
+- Prefer the smallest clear solution and established project patterns. Avoid speculative abstractions, indirection, fallbacks, and parallel implementations.
+- Make forward-only changes: remove obsolete paths, dead code, and compatibility shims unless backward compatibility is explicitly required.
+- For substantial work, use a concise phased plan; keep each phase focused, verify it against the design, and simplify before proceeding.
+- If strategy behavior cannot be resolved from the design or canonical code, ask rather than inventing a rule.
+- Before completion, review the affected diff for unnecessary complexity, confirm obsolete paths are removed, and run the relevant validation commands below.
+
 ## Validation
 
 - Install development dependencies with `.venv\Scripts\python.exe -m pip install -e ".[dev]"` when needed.
