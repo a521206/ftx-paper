@@ -409,8 +409,8 @@ remain follow-up work.
 
 ## Phase 4: Port And Verify Layer 2 - Context, Values, Permissions, And Locations
 
-Status: Contract and pure-behavior port complete; runtime parity deferred to
-Phase 9.
+Status: Contract and pure-behavior port complete; behavioral runtime parity is
+INCOMPLETE and deferred to Phase 9.
 
 Port and validate the canonical context and location contracts using exact
 Layer 1-shaped inputs. This phase does not claim Paper runtime or DB-backed
@@ -448,6 +448,19 @@ Phase 4 gate:
   timestamps, source-observation lineage, and explicit unavailable reasons are
   covered without reconstructing facts from presentation output.
 - No Paper runtime parity claim is made while the host adapter is absent.
+
+Phase 4 parity verification record:
+
+- The ported context, value, permission, location, geometry, VWAP, opening-gap,
+  immutable-history, and explicit-unavailable contracts are covered by 45
+  focused Paper tests.
+- Canonical context/value/history parity tests pass in the canonical repository.
+- Source-observation parity remains `MATCHED` for `2026-09-15` and
+  `2026-10-01`; `2026-10-29` is excluded because its source is mismatched.
+- Paper does not yet emit persisted runtime `context_location` facts. The Phase
+  4 context/location behavioral parity stream therefore remains `UNAVAILABLE`,
+  not `MATCHED`, until Phase 9 wires the canonical runtime owner to the Paper
+  store and replay boundary.
 
 ## Phase 5: Port And Verify Layer 3 - Interactions And Responses
 
