@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from ftx_paper.strategies.orderflow.features import daily_atr, derive_session_levels
-from ftx_paper.strategies.orderflow.orderflow_common import Aggregate
+from ftx_paper.strategies.orderflow.features import daily_atr
 
 
 def _rows(session_date: str, offset: float) -> list[dict[str, object]]:
@@ -13,23 +12,29 @@ def _rows(session_date: str, offset: float) -> list[dict[str, object]]:
     ]
 
 
-def test_daily_atr_uses_fourteen_completed_prior_sessions() -> None:
+def test_daily_atr_uses_wilder_smoothing_after_fourteen_completed_sessions() -> None:
     rows = {f"2026-09-{index:02d}": _rows(f"2026-09-{index:02d}", float(index)) for index in range(1, 16)}
 
     assert daily_atr("2026-09-15", rows) == 6.0
     assert daily_atr("2026-09-14", rows) is None
 
 
-def test_derive_session_levels_matches_canonical_availability() -> None:
-    aggregate = Aggregate(
-        "2026-09-15T09:15", "2026-09-15T09:19", "2026-09-15T09:20", "5m", 5,
-        100.0, 105.0, 99.0, 104.0, 50, "NIFTY", "", "CONTINUOUS", "2026-09-15", "source",
+def test_daily_atr_applies_wilder_update_to_later_sessions() -> None:
+    rows = {f"2026-09-{index:02d}": _rows(f"2026-09-{index:02d}", float(index)) for index in range(1, 17)}
+    rows["2026-09-15"] = [
+        {"time": "09:15", "open": 15.0, "high": 35.0, "low": 5.0, "close": 25.0},
+        {"time": "11:00", "open": 25.0, "high": 35.0, "low": 5.0, "close": 25.0},
+        {"time": "13:00", "open": 25.0, "high": 35.0, "low": 5.0, "close": 25.0},
+        {"time": "14:59", "open": 25.0, "high": 35.0, "low": 5.0, "close": 25.0},
+    ]
+
+    assert daily_atr("2026-09-16", rows) == 7.714285714285714
+
+
+def test_daily_atr_uses_full_session_ohlc_not_zone_boundaries() -> None:
+    rows = {f"2026-09-{index:02d}": _rows(f"2026-09-{index:02d}", float(index)) for index in range(1, 16)}
+    rows["2026-09-14"].append(
+        {"time": "15:20", "open": 18.0, "high": 30.0, "low": 0.0, "close": 20.0},
     )
 
-    levels = derive_session_levels(
-        [aggregate], [{"low": 95.0, "high": 110.0}], "2026-09-15",
-    )
-
-    assert levels.opening_range_available_at == "2026-09-15T09:20"
-    assert levels.prior_day_available_at == "2026-09-15T09:15"
-    assert (levels.prior_day_low, levels.prior_day_high) == (95.0, 110.0)
+    assert daily_atr("2026-09-15", rows) == 7.714285714285714

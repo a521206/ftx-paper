@@ -110,6 +110,9 @@ Required ownership rules:
   calculation, permissions, and location priority remain canonical-owned.
 - Missing ATR, value, context, level, or location evidence stays explicitly
   unavailable. Paper must not infer it from snapshots or presentation output.
+- ATR numeric values are source-dependent when Paper and NiftyZoning use different
+  continuous-futures history. The parity harness reports this as `INPUT_VARIANCE`;
+  it does not remove ATR from the evidence contract or apply a numeric tolerance.
 - Canonical `LocationRecord` and `MarketContext` stream identities are preserved
   through the Paper evidence boundary; records are not rewritten to fit Paper
   identifiers.

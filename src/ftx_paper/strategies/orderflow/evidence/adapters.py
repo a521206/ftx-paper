@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Sequence
+from typing import Any
 
 from ..evidence_publication import AtrPublication
-from ..hierarchy import MarketContext
 from ..location_geometry import LocationBand
 from ..state_machine_types import LocationRecord, LocationStatus, SessionLevels
 from ..value_publication import PriorSessionValueReference, ValuePublication
@@ -40,22 +39,6 @@ def _location(value: Any) -> LocationRecord:
         source_observation_id=value.get("source_observation_id"),
         timeframe=str(value.get("timeframe", "")),
         source_method=value.get("source_method"),
-    )
-
-
-def _context(value: Any) -> MarketContext:
-    if not isinstance(value, dict):
-        raise ValueError("serialized context must be an object")
-    return MarketContext(
-        context_id=str(value["context_id"]), version=str(value["version"]),
-        timestamp=str(value["timestamp"]), available_at=str(value["available_at"]),
-        location=value.get("location"), market_state=str(value["market_state"]),
-        long_score=value.get("long_score"), short_score=value.get("short_score"),
-        evidence=tuple(value.get("evidence", ())),
-        source_timeframe=str(value.get("source_timeframe", "5m")),
-        parent_context_id=value.get("parent_context_id"),
-        definition_version=str(value.get("definition_version", "1")),
-        source_provenance=tuple(value.get("source_provenance", ())),
     )
 
 
@@ -110,7 +93,6 @@ class SerializedEvidenceAdapter(EvidenceAdapter):
         self._prior_value = _value_publication(value.get("prior_value", {
             "reference": None, "lineage": (), "unavailable_reason": "missing_prior_session_value_evidence",
         }))
-        self._contexts = tuple(_context(item) for item in value.get("contexts", ()))
 
     def atr(self, session_date: str, symbol: str) -> AtrPublication:
         del session_date, symbol
@@ -139,7 +121,3 @@ class SerializedEvidenceAdapter(EvidenceAdapter):
     def prior_value(self, session_date: str) -> ValuePublication:
         del session_date
         return self._prior_value
-
-    def contexts(self, session_date: str) -> Sequence[MarketContext]:
-        del session_date
-        return self._contexts

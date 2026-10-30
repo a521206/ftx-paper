@@ -208,8 +208,7 @@ class FuturesSessionSourceResolver:
             minute = timestamp.hour * 60 + timestamp.minute
         except (KeyError, ValueError):
             return False
-        # The canonical replay treats the data-end minute as the exclusive
-        # completion boundary.
+        # The data-end minute is the exclusive completion boundary.
         return SESSION_OPEN_MINUTES <= minute < SESSION_DATA_END_MINUTES
 
 

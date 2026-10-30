@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Iterable
+from collections.abc import Iterable
 
 from .hierarchy import MarketContext
 from .state_machine_types import LocationRecord

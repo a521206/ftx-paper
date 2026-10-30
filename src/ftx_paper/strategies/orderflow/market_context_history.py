@@ -262,14 +262,12 @@ def project_history(replay_artifact: Mapping[str, Any]) -> HistoryProjection:
         event_ids = tuple(str(event["event_id"]) for event in events if event.get("event_id") is not None)
         if len(event_ids) != len(set(event_ids)):
             raise ValueError(f"replay record {sequence} contains duplicate event IDs")
-        context = record.get("latest_5m")
+        context = record.get("ordinary_context_ref")
         same_record_visibility = source_mapping.get("same_record_context_visibility") == "allowed"
         if isinstance(context, Mapping) and context.get("available_at") is not None:
             cutoff = str(record["timestamp"]) if same_record_visibility else str(record["available_at"])
             if _timestamp_after(context["available_at"], cutoff, later_field="context availability", earlier_field="record cutoff"):
                 context = None
-        elif isinstance(context, Mapping):
-            context = None
         permission = record.get("permission")
         permission_before = _freeze(permission.get("before")) if isinstance(permission, Mapping) and "before" in permission else None
         permission_after = _freeze(permission.get("after")) if isinstance(permission, Mapping) and "after" in permission else None

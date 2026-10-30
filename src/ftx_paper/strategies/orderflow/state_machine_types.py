@@ -174,6 +174,7 @@ class LocationRegistry:
 @dataclass
 class MarketContextStore:
     versions: dict[str, list[MarketContext]] = field(default_factory=dict)
+    ordinary_context: ContextVersionRef | None = None
 
     def publish(self, context: MarketContext) -> ContextVersionRef:
         versions = self.versions.setdefault(context.context_id, [])

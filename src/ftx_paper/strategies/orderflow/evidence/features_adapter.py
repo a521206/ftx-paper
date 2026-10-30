@@ -4,22 +4,24 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping, Sequence
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
-from ..contextual import publish_market_contexts
-from ..features import daily_atr, derive_session_levels
-from ..hierarchy import MarketContext
+from ..features import daily_atr
 from ..market_observation import observe_market
-from ..prior_session_value import PriorSessionValueStore, build_prior_session_profile
-from ..state_machine_types import MarketContextStore, SessionLevels
-from ..value_publication import ValuePublication, publish_prior_session_value
+from ..state_machine_types import SessionLevels
+from ..value_publication import PriorSessionValueReference, ValuePublication
 from ..evidence_publication import AtrPublication
+from ..canonical.orderflow.value_publication import (
+    prior_profile_is_complete,
+    publish_value_references,
+)
 from .producer import EvidenceAdapter
 
 
 class PaperFeatureAdapter(EvidenceAdapter):
     """Calculate Phase 3.5 inputs from Paper-owned market rows and features."""
 
-    context_stream_id = "orderflow:context:5m"
     def __init__(self, rows_by_date: Mapping[str, Sequence[Mapping[str, object]]]) -> None:
         self._rows = {date: tuple(rows) for date, rows in rows_by_date.items()}
         self._observations = {
@@ -29,7 +31,6 @@ class PaperFeatureAdapter(EvidenceAdapter):
         self._atr_cache: dict[tuple[str, str], AtrPublication] = {}
         self._levels_cache: dict[str, SessionLevels | None] = {}
         self._prior_value_cache: dict[str, ValuePublication] = {}
-        self._contexts_cache: dict[str, tuple[MarketContext, ...]] = {}
         first = next((row for rows in self._rows.values() for row in rows), None)
         if first is None:
             self.location_stream_id = "orderflow:locations:1m"
@@ -38,12 +39,6 @@ class PaperFeatureAdapter(EvidenceAdapter):
                 f"{first.get('symbol', 'NIFTY')}:{first.get('expiry', '')}:"
                 f"{first.get('contract_type', 'CONTINUOUS')}:1m"
             )
-        profiles = tuple(
-            profile
-            for date, rows in self._rows.items()
-            if (profile := build_prior_session_profile(rows, session_date=date)) is not None
-        )
-        self._values = PriorSessionValueStore(profiles)
 
     def atr(self, session_date: str, symbol: str) -> AtrPublication:
         key = (session_date, symbol)
@@ -73,8 +68,19 @@ class PaperFeatureAdapter(EvidenceAdapter):
             else:
                 prior_dates = sorted(date for date in self._rows if date < session_date)
                 prior_rows = self._rows[prior_dates[-1]] if prior_dates else ()
-                result = derive_session_levels(
-                    self._observations[session_date].aggregates["5m"], prior_rows, session_date,
+                first = next(
+                    (item for item in self._observations[session_date].aggregates["5m"] if item.available_at),
+                    None,
+                )
+                if first is None:
+                    raise ValueError(f"no completed 5m context available for {session_date}")
+                result = SessionLevels(
+                    opening_range_low=first.low,
+                    opening_range_high=first.high,
+                    prior_day_low=min((float(str(row["low"])) for row in prior_rows), default=None),
+                    prior_day_high=max((float(str(row["high"])) for row in prior_rows), default=None),
+                    opening_range_available_at=first.available_at,
+                    prior_day_available_at=f"{session_date}T09:15",
                 )
             self._levels_cache[session_date] = result
         return self._levels_cache[session_date]
@@ -85,30 +91,48 @@ class PaperFeatureAdapter(EvidenceAdapter):
 
     def prior_value(self, session_date: str) -> ValuePublication:
         if session_date not in self._prior_value_cache:
-            self._prior_value_cache[session_date] = publish_prior_session_value(
-                self._values, session_date=session_date,
-            )
-        return self._prior_value_cache[session_date]
-
-    def contexts(self, session_date: str) -> Sequence[MarketContext]:
-        if session_date not in self._contexts_cache:
-            rows = self._rows.get(session_date, ())
-            if not rows:
-                result = ()
-            else:
-                observation = self._observations[session_date]
-                store = MarketContextStore()
-                publish_market_contexts(
-                    observation.aggregates["5m"],
-                    stream_id=self.context_stream_id,
-                    store=store,
-                    raw_rows=rows,
-                    aggregates=observation.aggregates,
-                    atr=self.atr(session_date, str(rows[0].get("symbol", "NIFTY"))).value,
+            prior_dates = sorted(date for date in self._rows if date < session_date)
+            prior_date = prior_dates[-1] if prior_dates else None
+            if prior_date is None:
+                self._prior_value_cache[session_date] = ValuePublication(
+                    None, None, None, (), "missing_prior_session_value_evidence",
                 )
-                result = tuple(store.versions.get(self.context_stream_id, ()))
-            self._contexts_cache[session_date] = result
-        return self._contexts_cache[session_date]
-
+                return self._prior_value_cache[session_date]
+            prior_rows = [dict(row) for row in self._rows[prior_date]]
+            if not prior_profile_is_complete(prior_rows):
+                self._prior_value_cache[session_date] = ValuePublication(
+                    None, None, None, (), "prior_session_incomplete",
+                )
+                return self._prior_value_cache[session_date]
+            references = publish_value_references(
+                prior_rows,
+                [dict(row) for row in self._rows[session_date]],
+                session_date,
+                prior_profile_complete=True,
+            )
+            reference = next((item for item in references if item.scope == "prior_session"), None)
+            if reference is None:
+                self._prior_value_cache[session_date] = ValuePublication(
+                    None, None, None, (), "missing_prior_session_value_evidence",
+                )
+            else:
+                paper_reference = PriorSessionValueReference(
+                    reference.source_sessions[0], reference.val, reference.poc,
+                    reference.vah,
+                    datetime.fromisoformat(
+                        f"{prior_date}T{str(prior_rows[-1]['time'])[:5]}"
+                    ).replace(
+                        tzinfo=ZoneInfo("Asia/Kolkata"),
+                    ),
+                    datetime.fromisoformat(reference.available_at).replace(
+                        tzinfo=ZoneInfo("Asia/Kolkata"),
+                    ),
+                    (reference.reference_id, reference.fingerprint),
+                )
+                self._prior_value_cache[session_date] = ValuePublication(
+                    paper_reference, paper_reference.observed_at,
+                    paper_reference.available_at, paper_reference.lineage,
+                )
+        return self._prior_value_cache[session_date]
 
 __all__ = ["PaperFeatureAdapter"]

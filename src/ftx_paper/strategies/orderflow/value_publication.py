@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Protocol
 
 
 def _utc(value: datetime) -> datetime:
@@ -58,21 +57,3 @@ class ValuePublication:
         if tuple(self.lineage) != self.reference.lineage:
             raise ValueError("publication lineage must match its reference")
 
-
-class PriorSessionValueAdapter(Protocol):
-    def prior_session_value(self, session_date: str) -> PriorSessionValueReference | None: ...
-
-
-def publish_prior_session_value(
-    adapter: PriorSessionValueAdapter, *, session_date: str
-) -> ValuePublication:
-    """Publish adapter-owned evidence; never infer or fall back to a profile."""
-    reference = adapter.prior_session_value(session_date)
-    if reference is None:
-        return ValuePublication(None, None, None, (), "missing_prior_session_value_evidence")
-    return ValuePublication(
-        reference,
-        reference.observed_at,
-        reference.available_at,
-        reference.lineage,
-    )

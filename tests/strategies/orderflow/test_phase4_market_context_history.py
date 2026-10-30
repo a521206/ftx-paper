@@ -21,7 +21,7 @@ def _artifact() -> dict[str, object]:
         "source": {"source_fingerprint": "source-1", "timestamp_convention": "1m label; completed at next minute", "evaluation_timeframe": "1m"},
         "method": {"policy_version": "test"},
         "replay_records": [
-            {"sequence": 0, "timestamp": "2026-09-29T09:20", "available_at": "2026-09-29T09:21", "primary_state_before": "BALANCE", "primary_state_after": "BALANCE", "market_state_before": "BALANCE", "market_state_after": "BALANCE", "bar": {"time": "09:20", "open": 100.0}, "latest_5m": {"time": "2026-09-29T09:15", "available_at": "2026-09-29T09:20"}, "permission": {"status": "ALLOWED"}, "events": [{"event_id": "evt-0", "kind": "state_transition"}]},
+            {"sequence": 0, "timestamp": "2026-09-29T09:20", "available_at": "2026-09-29T09:21", "primary_state_before": "BALANCE", "primary_state_after": "BALANCE", "market_state_before": "BALANCE", "market_state_after": "BALANCE", "bar": {"time": "09:20", "open": 100.0}, "latest_5m": {"time": "2026-09-29T09:15", "available_at": "2026-09-29T09:20"}, "ordinary_context_ref": {"context_id": "ctx-1", "version": "v1"}, "permission": {"status": "ALLOWED"}, "events": [{"event_id": "evt-0", "kind": "state_transition"}]},
             {"sequence": 1, "timestamp": "2026-09-29T09:21", "available_at": "2026-09-29T09:22", "primary_state_before": "BALANCE", "primary_state_after": "ARMED", "market_state_before": "BALANCE", "market_state_after": "DISPLACEMENT", "bar": {"time": "09:21", "open": 100.0}, "latest_5m": {"time": "2026-09-29T09:20", "available_at": "2026-09-29T09:25"}, "permission": {"status": "BLOCKED"}, "events": [{"event_id": "evt-1", "kind": "state_transition"}]},
             {"sequence": 2, "timestamp": "2026-09-29T09:22", "available_at": "2026-09-29T09:23", "primary_state_before": "ARMED", "primary_state_after": "ARMED", "market_state_before": "DISPLACEMENT", "market_state_after": "DISPLACEMENT", "bar": {"time": "09:22", "open": 100.0}, "latest_5m": {"time": "2026-09-29T09:20", "available_at": "2026-09-29T09:25"}, "permission": {"status": "BLOCKED"}, "events": []},
         ],
@@ -86,7 +86,7 @@ def test_context_visibility_and_canonical_decision_refs() -> None:
     source["same_record_context_visibility"] = "allowed"
     records = artifact["replay_records"]
     assert isinstance(records, list)
-    records[0]["latest_5m"] = {"time": "2026-09-29T09:20", "available_at": "2026-09-29T09:20"}
+    records[0]["ordinary_context_ref"] = {"context_id": "ctx-1", "version": "v1"}
     records[0]["context_references"] = {"legacy": True}
     records[0]["decision_input_context_refs"] = {"intent-1": {"context_id": "ctx-1"}}
     row = project_history(artifact).timeline[0]

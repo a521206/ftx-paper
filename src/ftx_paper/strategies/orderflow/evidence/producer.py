@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Protocol, Sequence
+from typing import Protocol
 
 from ..evidence_publication import AtrPublication, publish_phase4a_evidence
-from ..hierarchy import MarketContext
 from ..orderflow_common import Aggregate
 from ..state_machine_types import LocationRegistry, SessionLevels
 from ..value_publication import ValuePublication
@@ -23,7 +22,6 @@ class EvidenceAdapter(Protocol):
 
     def prior_value(self, session_date: str) -> ValuePublication: ...
 
-    def contexts(self, session_date: str) -> Sequence[MarketContext]: ...
 
 
 def _text(value: object, field: str) -> str:
@@ -148,9 +146,8 @@ def produce_evidence(
             locations=registry.records.values(),
             vwap_measurements=measurements,
             prior_value=adapter.prior_value(session_date),
-            contexts=adapter.contexts(session_date),
+            contexts=(),
             unavailable=unavailable,
-            context_stream_id=getattr(adapter, "context_stream_id", None),
             location_stream_id=getattr(adapter, "location_stream_id", None),
         ),
     }

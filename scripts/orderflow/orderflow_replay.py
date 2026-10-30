@@ -27,14 +27,12 @@ from ftx_paper.config import PaperConfig
 from ftx_paper.runtime import RuntimeStore
 from ftx_paper.runtime.futures_source import FuturesSessionSourceResolver
 from ftx_paper.strategies.orderflow import observe_market
+from ftx_paper.strategies.orderflow.state_machine import ReplayMachine
 from ftx_paper.strategies.orderflow.evidence import (
     PaperFeatureAdapter,
     evidence_payload,
     produce_evidence,
 )
-
-PRICE_DECIMALS = 1
-
 
 @dataclass(frozen=True, slots=True)
 class _AvailableAggregate:
@@ -59,10 +57,10 @@ def _normalize_rows(source: Any, session_date: str) -> list[dict[str, Any]]:
             raise ValueError(f"source row has invalid numeric values for {session_date}")
         rows.append({
             "time": minute.strftime("%H:%M"),
-            "open": round(float(row["open"]), PRICE_DECIMALS),
-            "high": round(float(row["high"]), PRICE_DECIMALS),
-            "low": round(float(row["low"]), PRICE_DECIMALS),
-            "close": round(float(row["close"]), PRICE_DECIMALS),
+            "open": float(row["open"]),
+            "high": float(row["high"]),
+            "low": float(row["low"]),
+            "close": float(row["close"]),
             "volume": int(row["volume"]),
             "oi": int(row["open_interest"]),
             "symbol": "NIFTY",
@@ -111,10 +109,21 @@ def _aggregate_events(observation: Any) -> tuple[_AvailableAggregate, ...]:
     return tuple(sorted(events, key=lambda item: (item.available_at, item.timeframe, item.index)))
 
 
+def _observation_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Provide canonical timestamps without changing the replay bar contract."""
+    return [
+        {
+            **row,
+            "time": f"{row['session_date']}T{str(row['time']).split('T')[-1][:5]}",
+        }
+        for row in rows
+    ]
+
+
 def _observation_artifact(
     rows: list[dict[str, Any]],
 ) -> tuple[dict[str, Any], tuple[_AvailableAggregate, ...]]:
-    observation = observe_market(rows)
+    observation = observe_market(_observation_rows(rows))
     return (
         {
             "schema_version": 1,
@@ -127,22 +136,6 @@ def _observation_artifact(
         },
         _aggregate_events(observation),
     )
-
-
-def _prefix_evidence(
-    artifact: dict[str, Any],
-    events: tuple[_AvailableAggregate, ...],
-    position: int,
-    *,
-    session_date: str,
-    adapter: PaperFeatureAdapter,
-) -> dict[str, Any]:
-    prefix: dict[str, Any] = {**artifact, "aggregates": {"1m": [], "5m": []}}
-    for event in events[:position]:
-        prefix["aggregates"][event.timeframe].append(event.value)
-    return evidence_payload(
-        produce_evidence(prefix, session_date=session_date, adapter=adapter),
-    )["evidence"]
 
 
 def _as_of_evidence(evidence: dict[str, Any], clock: str) -> dict[str, Any]:
@@ -167,56 +160,6 @@ def _as_of_evidence(evidence: dict[str, Any], clock: str) -> dict[str, Any]:
     return result
 
 
-def _replay_record(
-    index: int,
-    row: dict[str, Any],
-    rows: list[dict[str, Any]],
-    evidence: dict[str, Any],
-    latest_5m: dict[str, Any] | None,
-) -> dict[str, Any]:
-    session_date = str(row["session_date"])
-    timestamp = f"{session_date}T{str(row['time'])[:5]}"
-    next_time = (
-        f"{session_date}T{str(rows[index + 1]['time'])[:5]}"
-        if index + 1 < len(rows) else timestamp
-    )
-    contexts = [item for item in evidence.get("contexts", ()) if isinstance(item, dict)]
-    latest_context = max(
-        contexts,
-        key=lambda item: (str(item.get("available_at", "")), str(item.get("version", ""))),
-        default=None,
-    )
-    return {
-        "sequence": index,
-        "timestamp": timestamp,
-        "available_at": next_time,
-        "primary_state_before": "UNAVAILABLE",
-        "primary_state_after": "UNAVAILABLE",
-        "market_state_before": "UNAVAILABLE",
-        "market_state_after": "UNAVAILABLE",
-        "predicates": [],
-        "events": [],
-        "hypotheses": [],
-        "structural_windows": [],
-        "bar": row,
-        "latest_5m": latest_5m,
-        "permission": None,
-        "setup": None,
-        "intent": None,
-        "position": None,
-        "location_observations": [],
-        "setup_opportunities": [],
-        "ordinary_context_ref": (
-            {"context_id": latest_context["context_id"], "version": latest_context["version"]}
-            if latest_context is not None
-            and latest_context.get("context_id") is not None
-            and latest_context.get("version") is not None
-            else None
-        ),
-        "capture_scope": "phase3_5_evidence_only",
-    }
-
-
 class OrderflowReplayEngine:
     """Replay raw session rows through the bounded canonical evidence layer."""
 
@@ -235,16 +178,27 @@ class OrderflowReplayEngine:
         adapter = PaperFeatureAdapter(rows_by_date)
         evidence_events: list[tuple[str, dict[str, Any], dict[str, Any] | None]] = []
         latest_5m: dict[str, Any] | None = None
+        prefix_aggregates: dict[str, list[dict[str, Any]]] = {"1m": [], "5m": []}
         for position, event in enumerate(events, start=1):
             if event.timeframe == "5m":
                 latest_5m = event.value
+            prefix_aggregates[event.timeframe].append(event.value)
+            prefix = {
+                **artifact,
+                "aggregates": {
+                    timeframe: list(values)
+                    for timeframe, values in prefix_aggregates.items()
+                },
+            }
             evidence_events.append((
                 event.available_at,
-                _prefix_evidence(artifact, events, position, session_date=session_date, adapter=adapter),
+                evidence_payload(
+                    produce_evidence(prefix, session_date=session_date, adapter=adapter),
+                )["evidence"],
                 latest_5m,
             ))
 
-        replay_records: list[dict[str, Any]] = []
+        event_index = 0
         current_evidence: dict[str, Any] = {
             "atr": None,
             "locations": [],
@@ -255,19 +209,24 @@ class OrderflowReplayEngine:
             "context_stream_id": None,
             "location_stream_id": None,
         }
-        current_5m: dict[str, Any] | None = None
-        event_index = 0
-        for index, row in enumerate(rows):
-            clock = f"{session_date}T{str(row['time'])[:5]}"
+
+        def evidence_at_clock(clock: str) -> dict[str, Any]:
+            nonlocal current_evidence, event_index
             while event_index < len(evidence_events) and evidence_events[event_index][0] <= clock:
-                _, current_evidence, current_5m = evidence_events[event_index]
+                current_evidence = evidence_events[event_index][1]
                 event_index += 1
-            replay_records.append(_replay_record(
-                index, row, rows, _as_of_evidence(current_evidence, clock), current_5m,
-            ))
+            return _as_of_evidence(current_evidence, clock)
+
+        machine = ReplayMachine(
+            rows,
+            evidence_events=evidence_events,
+            evidence_at_clock=evidence_at_clock,
+            session_date=session_date,
+        )
+        replay_records, final_state = machine.run()
 
         final_clock = f"{session_date}T{str(rows[-1]['time'])[:5]}"
-        final_evidence = _as_of_evidence(current_evidence, final_clock)
+        final_evidence = _as_of_evidence(final_state.evidence, final_clock)
         locations = final_evidence["locations"]
         source_identity = {
             "symbol": rows[0]["symbol"],
@@ -297,7 +256,7 @@ class OrderflowReplayEngine:
             "prior_value": final_evidence["prior_value"],
             "context_stream_id": final_evidence["context_stream_id"],
             "parity_phase_facts": {
-                "context_publication": final_evidence["contexts"],
+                "context_publication": list(final_state.context_publications),
             },
             "evidence": final_evidence,
         }

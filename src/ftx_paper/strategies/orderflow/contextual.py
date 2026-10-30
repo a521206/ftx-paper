@@ -6,65 +6,7 @@ from collections.abc import Sequence
 import math
 from typing import Any, Mapping
 
-from .hierarchy import ContextVersionRef, MarketContext
 from .orderflow_common import Aggregate
-from .state_machine_types import MarketContextStore
-
-
-def publish_market_contexts(
-    aggregates5: Sequence[Aggregate],
-    *,
-    stream_id: str,
-    store: MarketContextStore,
-    raw_rows: Sequence[Mapping[str, Any]] = (),
-    aggregates: Mapping[str, Sequence[Aggregate]] | None = None,
-    atr: float | None = None,
-) -> tuple[ContextVersionRef, ...]:
-    """Publish one context version per causally available completed 5m aggregate.
-
-    Context state is intentionally limited to information available at each
-    aggregate's completion boundary; later aggregates cannot backfill earlier
-    versions.
-    """
-    completed = sorted(
-        (
-            item
-            for item in aggregates5
-            if item.timeframe == "5m"
-            and item.source_bar_count == 5
-            and item.available_at >= item.end_time
-        ),
-        key=lambda item: item.available_at,
-    )
-    references: list[ContextVersionRef] = []
-    state: str | None = None
-    for aggregate in completed:
-        scores = build_context_scores(
-            aggregate,
-            raw_rows=list(raw_rows),
-            aggregates={key: list(value) for key, value in (aggregates or {"5m": aggregates5}).items()},
-            atr=atr,
-        )
-        next_state = _market_state(scores)
-        next_location = None
-        if next_state == state and scores == _previous_scores(store, stream_id):
-            continue
-        version = str(len(store.versions.get(stream_id, ())) + 1)
-        context = MarketContext(
-            stream_id,
-            version,
-            aggregate.end_time,
-            aggregate.available_at,
-            next_location,
-            next_state,
-            long_score=scores[0] if scores else None,
-            short_score=scores[1] if scores else None,
-            evidence=({"aggregate_id": aggregate.time, "source_fingerprint": aggregate.source_fingerprint},),
-            source_timeframe=aggregate.timeframe,
-        )
-        references.append(store.publish(context))
-        state = next_state
-    return tuple(references)
 
 
 def contextual_support(
@@ -119,7 +61,7 @@ def hierarchical_score(
 def build_context_scores(
     aggregate: Aggregate,
     *,
-    raw_rows: list[Mapping[str, Any]],
+    raw_rows: Sequence[Mapping[str, Any]],
     aggregates: dict[str, list[Aggregate]],
     atr: float | None,
 ) -> tuple[float, float] | None:
@@ -162,12 +104,4 @@ def _market_state(scores: tuple[float, float] | None) -> str:
     return "BALANCE"
 
 
-def _previous_scores(store: MarketContextStore, stream_id: str) -> tuple[float | None, float | None] | None:
-    versions = store.versions.get(stream_id, ())
-    if not versions:
-        return None
-    item = versions[-1]
-    return item.long_score, item.short_score
-
-
-__all__ = ["build_context_scores", "contextual_support", "hierarchical_score", "publish_market_contexts"]
+__all__ = ["build_context_scores", "contextual_support", "hierarchical_score"]

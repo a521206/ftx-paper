@@ -94,7 +94,10 @@ def build_aggregate_result(rows: Iterable[Mapping[str, Any]], timeframe: int) ->
     groups: dict[tuple[str, int], list[Mapping[str, Any]]] = {}
     for row in rows:
         session_date = str(row["session_date"])
-        timestamp = datetime.strptime(f"{session_date}T{str(row['time'])[:5]}", "%Y-%m-%dT%H:%M")
+        timestamp = datetime.strptime(
+            f"{session_date}T{str(row['time']).split('T')[-1][:5]}",
+            "%Y-%m-%dT%H:%M",
+        )
         offset = timestamp.hour * 60 + timestamp.minute - SESSION_START
         if offset >= 0:
             start = SESSION_START + (offset // timeframe) * timeframe
