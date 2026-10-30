@@ -568,8 +568,9 @@ class RuntimeSession:
             event_identity = hashlib.sha256(
                 json.dumps(stable_payload, sort_keys=True, separators=(",", ":"), default=str).encode()
             ).hexdigest()[:24]
+        vehicle = str(payload.get("vehicle") or "")
         idempotency_key = json.dumps(
-            (strategy_id, session_date, source, event_type, bundle_id, event_identity),
+            (strategy_id, session_date, source, event_type, bundle_id, vehicle, event_identity),
             separators=(",", ":"), ensure_ascii=True,
         )
         self.store.append_event(
@@ -690,7 +691,7 @@ class RuntimeSession:
                         timestamp=timestamp,
                     )
                 for order in selected:
-                    order_decision_id = order.client_order_id.rsplit(":", 1)[0]
+                    order_decision_id = order.lifecycle_decision_id
                     if source == "live":
                         create_order = getattr(self.store, "create_order_lifecycle", None)
                         if callable(create_order):
@@ -837,7 +838,7 @@ class RuntimeSession:
                 f"execution_error:halt:{order.client_order_id}", timestamp=timestamp,
             )
         context = {
-            "decision_id": order.client_order_id,
+            "decision_id": order.lifecycle_decision_id,
             "client_order_id": order.client_order_id,
             "decision_source": "live",
             "session_date": session_date,

@@ -131,8 +131,9 @@ def test_live_order_reaches_paper_broker_and_persists_fill(tmp_path):
 
         def on_bundle(self, bundle):
             return EngineResult(
-                orders=(OrderIntent("live-order", instrument, OrderSide.BUY, 2, role=OrderRole.ENTRY),),
-                events=({"event_type": "ACCEPTEDDECISION", "decision_id": "live-order"},),
+                orders=(OrderIntent("strategy-entry:candidate", instrument, OrderSide.BUY, 2,
+                                    role=OrderRole.ENTRY, decision_id="candidate"),),
+                events=({"event_type": "ACCEPTEDDECISION", "decision_id": "candidate"},),
             )
 
     session = RuntimeSession(store, None, [], engine=cast(PaperEngine, Engine()))
@@ -155,10 +156,35 @@ def test_live_order_reaches_paper_broker_and_persists_fill(tmp_path):
     assert "STRATEGY_EVALUATION" in event_types
     assert "ORDER_SUPPRESSED" not in event_types
     fill = next(event for event in events if event["event_type"] == "FILL")
-    assert fill["payload"]["decision_id"] == "live-order"
+    assert fill["payload"]["decision_id"] == "candidate"
     assert fill["payload"]["price"] == 101.5
     assert fill["payload"]["outcome"] == "filled"
     assert fill["created_at"] != "2026-01-01T10:20:00+05:30"
+    order_intent = next(event for event in events if event["event_type"] == "ORDER_INTENT")
+    assert order_intent["payload"]["decision_id"] == "candidate"
+
+
+def test_decisions_with_same_id_for_each_vehicle_are_both_persisted(tmp_path):
+    store = RuntimeStore(tmp_path)
+
+    class Engine:
+        bars_seen = 0
+        strategy_metadata = None
+
+        def on_bundle(self, bundle):
+            return EngineResult(events=(
+                {"event_type": "POLICY_DECISION", "decision_id": "shared", "outcome": "accepted", "vehicle": "futures", "strategy_id": "alpha"},
+                {"event_type": "POLICY_DECISION", "decision_id": "shared", "outcome": "accepted", "vehicle": "synthetic", "strategy_id": "alpha"},
+            ))
+
+    session = RuntimeSession(store, None, [], engine=cast(PaperEngine, Engine()))
+    session._process_bundle(type("Bundle", (), {
+        "bundle_id": "2026-01-01:10:20", "trading_date": "2026-01-01", "minute": "10:20",
+        "required_roles": (), "bars": {},
+    })(), source="live")
+
+    decisions = [event for event in store.read_events() if event["event_type"] == "POLICY_DECISION"]
+    assert {event["payload"]["vehicle"] for event in decisions} == {"futures", "synthetic"}
 
 
 def test_decision_event_timestamp_advances_to_evidence_availability(tmp_path):

@@ -329,8 +329,14 @@ class OrderIntent:
     account_id: str | None = field(default=None, kw_only=True)
     execution_group_id: str | None = field(default=None, kw_only=True)
     lifecycle_id: str | None = field(default=None, kw_only=True)
+    decision_id: str | None = field(default=None, kw_only=True)
     setup_availability: str | None = field(default=None, kw_only=True)
     structural_rank: int = field(default=0, kw_only=True)
+
+    @property
+    def lifecycle_decision_id(self) -> str:
+        """Decision identifier used to link entry lifecycle events."""
+        return self.decision_id or self.client_order_id
 
     def __post_init__(self) -> None:
         vehicle = str(self.vehicle).lower()

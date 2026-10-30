@@ -70,6 +70,7 @@ def build_entry_order(
     if any(rule.required and rule.level is None for rule in exit_plan):
         return None
     strategy_id = string("strategy_id") or "strategy"
+    decision_id = string("decision_id") or lifecycle_id
     return OrderIntent(
         client_order_id=f"{strategy_id}-entry:{lifecycle_id}",
         instrument=instrument,
@@ -89,6 +90,7 @@ def build_entry_order(
         strategy_id=strategy_id,
         execution_group_id=string("execution_group_id"),
         lifecycle_id=lifecycle_id,
+        decision_id=decision_id,
         setup_availability=string("setup_availability"),
         structural_rank=integer("structural_rank") or 0,
     )

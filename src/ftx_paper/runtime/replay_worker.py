@@ -577,7 +577,7 @@ class ReplayWorker:
                             try:
                                 account.authorize_and_reserve(order)
                             except ValueError as exc:
-                                all_events.append({"event_type": "ENTRY_BLOCKED_RISK", "decision_id": order.client_order_id,
+                                all_events.append({"event_type": "ENTRY_BLOCKED_RISK", "decision_id": order.lifecycle_decision_id,
                                                    "reason": str(exc), "timestamp": futures_bar.timestamp.isoformat(),
                                                    "source": "replay", "session_date": date})
                                 continue
@@ -588,7 +588,7 @@ class ReplayWorker:
                             ) if order.vehicle == "synthetic" else None
                             if order.vehicle == "synthetic" and entry_quote is None:
                                 coordinator.cancel(order)
-                                all_events.append({"event_type": "ORDER_UNFILLED", "decision_id": order.client_order_id,
+                                all_events.append({"event_type": "ORDER_UNFILLED", "decision_id": order.lifecycle_decision_id,
                                                    "reason": "missing_synthetic_future_quote", "source": "replay",
                                                    "session_date": date})
                                 continue
@@ -604,7 +604,7 @@ class ReplayWorker:
                                     failure_boundary=float(order.stop_price) if order.stop_price is not None else futures_bar.open,
                                 )
                                 if fill_decision.hard_stop is None:
-                                    all_events.append({"event_type": "ENTRY_BLOCKED_RISK", "decision_id": order.client_order_id,
+                                    all_events.append({"event_type": "ENTRY_BLOCKED_RISK", "decision_id": order.lifecycle_decision_id,
                                                        "reason": "failure_boundary_not_protective", "timestamp": futures_bar.timestamp.isoformat(),
                                                        "source": "replay", "session_date": date})
                                     continue
@@ -618,7 +618,7 @@ class ReplayWorker:
                                 fill_price=fill_price,
                             )
                             if exit_decision.required_rejections:
-                                all_events.append({"event_type": "ENTRY_BLOCKED_EXIT_PLAN", "decision_id": order.client_order_id,
+                                all_events.append({"event_type": "ENTRY_BLOCKED_EXIT_PLAN", "decision_id": order.lifecycle_decision_id,
                                                    "reason": "required_exit_plan_invalid", "rejected_rule_ids": tuple(
                                                        rule.rule_id for rule in exit_decision.required_rejections
                                                    ), "timestamp": futures_bar.timestamp.isoformat(),
@@ -633,7 +633,7 @@ class ReplayWorker:
                                 coordinator.cancel(execution_order)
                                 all_events.append({
                                     "event_type": "TRIGGER_DENIED_PORTFOLIO",
-                                    "decision_id": order.client_order_id,
+                                    "decision_id": order.lifecycle_decision_id,
                                     "client_order_id": order.client_order_id,
                                     "reason": coordinator.denied_proposals.get(
                                         order.client_order_id, "portfolio_position_limit",
@@ -647,10 +647,10 @@ class ReplayWorker:
                                                   entry_fill_time=futures_bar.timestamp,
                                                   reference_price=futures_bar.close)
                             all_events.extend((
-                                {"event_type": "RESERVATION", "decision_id": order.client_order_id,
+                                {"event_type": "RESERVATION", "decision_id": order.lifecycle_decision_id,
                                  "client_order_id": order.client_order_id, "quantity": order.quantity,
                                  "timestamp": futures_bar.timestamp.isoformat(), "source": "replay", "session_date": date},
-                                {"event_type": "FILL", "decision_id": order.client_order_id,
+                                {"event_type": "FILL", "decision_id": order.lifecycle_decision_id,
                                  "client_order_id": order.client_order_id, "fill_id": fill_id,
                                  "fill_timestamp": futures_bar.timestamp.isoformat(), "price": fill_price,
                                  "quantity": order.quantity, "vehicle": order.vehicle,
@@ -659,17 +659,17 @@ class ReplayWorker:
                             if order.vehicle == "futures":
                                 ledger_records.extend((
                                     {"event_type": "RESERVATION", "kind": "reservation",
-                                     "decision_id": order.client_order_id,
+                                     "decision_id": order.lifecycle_decision_id,
                                      "timestamp": futures_bar.timestamp.isoformat(),
                                      "quantity": order.quantity, "vehicle": order.vehicle},
                                     {"event_type": "AUTHORIZATION", "kind": "authorization",
-                                     "decision_id": order.client_order_id,
+                                     "decision_id": order.lifecycle_decision_id,
                                      "timestamp": futures_bar.timestamp.isoformat(),
                                      "quantity": order.quantity, "vehicle": order.vehicle},
                                 ))
                             ledger_records.append({
                                 "event_type": "FILL", "kind": "fill",
-                                "decision_id": order.client_order_id,
+                                "decision_id": order.lifecycle_decision_id,
                                 "timestamp": futures_bar.timestamp.isoformat(),
                                 "quantity": order.quantity, "price": fill_price,
                             })
@@ -794,7 +794,7 @@ class ReplayWorker:
                 order = pending.order
                 all_events.append({
                     "event_type": "ORDER_UNFILLED",
-                    "decision_id": order.client_order_id,
+                    "decision_id": order.lifecycle_decision_id,
                     "vehicle": order.vehicle,
                     "timestamp": pending.available_at or bars[-1].timestamp.isoformat(),
                     "source": "replay",
