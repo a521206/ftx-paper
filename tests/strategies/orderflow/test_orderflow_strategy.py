@@ -434,7 +434,7 @@ def test_snapshot_restore_rejects_invalid_location_detector_state() -> None:
         OrderflowStrategy.from_snapshot(snapshot)
 
 
-def test_policy_snapshot_rejects_legacy_single_detector_state() -> None:
+def test_policy_snapshot_rejects_obsolete_single_detector_state() -> None:
     strategy = OrderflowStrategy()
     bundle, account = _context()
     strategy.evaluate(bundle, account)

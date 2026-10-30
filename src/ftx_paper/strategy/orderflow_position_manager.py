@@ -40,20 +40,6 @@ class OrderflowPositionManager:
     def update_exit_scores(self, location: str, scores: tuple[float | None, float | None]) -> None:
         self.exit_scores[location.upper()] = scores
 
-    def update_exit_levels(self, bands: Mapping[str, tuple[float, float]]) -> None:
-        """Bind newly available causal location geometry to open plans."""
-        for order_id, (position, exits) in tuple(self.positions.items()):
-            updated_plan = tuple(
-                replace(
-                    rule,
-                    level=(bounds[0] if position.side is OrderSide.BUY else bounds[1]),
-                    band_lower=bounds[0], band_upper=bounds[1],
-                ) if rule.level is None and (bounds := bands.get(rule.location.upper())) is not None else rule
-                for rule in position.exit_plan
-            )
-            if updated_plan != position.exit_plan:
-                self.positions[order_id] = (replace(position, exit_plan=updated_plan), exits)
-
     def update_exit_interactions(self, interactions: Mapping[str, tuple[Any, ...]]) -> None:
         self.exit_interactions = {key.upper(): tuple(value) for key, value in interactions.items()}
 
@@ -67,7 +53,10 @@ class OrderflowPositionManager:
                 item for item in self.exit_interactions.get(rule.location.upper(), ())
                 if getattr(item, "created_at", None) is not None
                 and getattr(item, "available_at", as_of) <= as_of
-                and (position.entry_fill_time is None or item.created_at >= position.entry_fill_time)
+                and (
+                    position.entry_fill_time is None
+                    or position.entry_fill_time <= item.created_at <= as_of
+                )
             ]
             interaction = min(
                 candidates,
@@ -75,12 +64,16 @@ class OrderflowPositionManager:
                 default=None,
             )
             if interaction is None:
-                updated_plan.append(rule)
+                updated_plan.append(replace(
+                    rule, level=None, band_lower=None, band_upper=None,
+                ))
                 continue
             lower = getattr(interaction, "band_lower", None)
             upper = getattr(interaction, "band_upper", None)
             if not isinstance(lower, (int, float)) or not isinstance(upper, (int, float)):
-                updated_plan.append(rule)
+                updated_plan.append(replace(
+                    rule, level=None, band_lower=None, band_upper=None,
+                ))
                 continue
             updated_plan.append(replace(
                 rule,
@@ -204,15 +197,9 @@ class OrderflowPositionManager:
             position, timestamp=bar.timestamp, high=bar.high, low=bar.low,
             close=bar.close, open=bar.open, volume=bar.volume,
             client_order_id=f"exit-{order_id}-{bar.timestamp.isoformat()}",
-            include_signal=True,
+            include_signal=not position.exit_plan,
         )
         if action is None and position.exit_plan:
-            entry_index = max(
-                (index for index, item in enumerate(self.completed_bars)
-                 if position.entry_fill_time is not None
-                 and item.timestamp <= position.entry_fill_time),
-                default=-1,
-            )
             for rule in position.exit_plan:
                 interaction = next(
                     (item for item in self.exit_interactions.get(rule.location.upper(), ())
@@ -225,6 +212,12 @@ class OrderflowPositionManager:
                     item for item in self.completed_bars
                     if (interaction_start is None or item.timestamp >= interaction_start)
                     and (interaction_end is None or item.timestamp <= interaction_end)
+                )
+                entry_index = max(
+                    (index for index, item in enumerate(candidate_bars)
+                     if position.entry_fill_time is not None
+                     and item.timestamp <= position.entry_fill_time),
+                    default=-1,
                 )
                 result = evaluate_exit_plan_rule(
                     rule, position_side=position.side, bars=candidate_bars,

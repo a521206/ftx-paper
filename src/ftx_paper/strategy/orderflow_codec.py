@@ -12,8 +12,9 @@ from ftx_paper.contracts import Instrument, MarketBar, OptionType, OrderIntent, 
 from .exits import ExitAction, ExitStateMachine, PositionState
 from .orderflow_config import OrderflowConfig
 from .orderflow_context import ContextHistory
+from .orderflow_capture import detached_asdict
 from .orderflow_interaction import InteractionDetector
-from .orderflow_opportunity import SetupOpportunity
+from .orderflow_opportunity import PendingTrigger, SetupOpportunity
 from .orderflow_location import LocationRegistry
 from .orderflow_exit import exit_plan_payload
 
@@ -34,7 +35,7 @@ class _PolicySnapshotSource(Protocol):
     _gap_end: datetime | None
     _opening_gap_last_evaluated_id: str | None
     _opening_seed: dict[str, object] | None
-    _pending_triggers: dict[str, dict[str, object]]
+    _pending_triggers: dict[str, PendingTrigger]
     @property
     def _opportunities(self) -> Mapping[str, SetupOpportunity]: ...
 
@@ -94,10 +95,11 @@ def policy_snapshot_payload(policy: _PolicySnapshotSource) -> dict[str, object]:
         "opportunities": [policy._opportunities[key].snapshot() for key in sorted(policy._opportunities)],
         "pending_triggers": {
             key: {
-                "direction": value.get("direction"),
-                "template_id": getattr(value.get("template"), "template_id", None),
-                "interaction_id": getattr(value.get("interaction"), "interaction_id", None),
-                "retest_touched": value.get("retest_touched", False),
+                "direction": value.direction,
+                "template_id": value.template.template_id,
+                "interaction_id": value.interaction.interaction_id,
+                "retest_touched": value.retest_touched,
+                "intent": detached_asdict(value.intent),
             }
             for key, value in policy._pending_triggers.items()
         },

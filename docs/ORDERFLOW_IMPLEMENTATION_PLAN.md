@@ -1495,12 +1495,13 @@ phase can be marked complete:
 - Execution-group identity is now carried as proposal metadata only. The live
   policy no longer owns an execution-group registry or emits executable order
   intents; fill-time group ownership remains in `PaperExecutionCoordinator`.
-- Interaction, response, opportunity, admission, and execution-group state is
-  not yet fully independent at the persistence boundary. Hypothesis status is
-  serialized, but hypothesis evidence and arming state are not.
-- Opening-gap state is currently reduced to `UNAVAILABLE`/`NONE` in the policy
-  context update. The planned candidate, accepted, reclaimed, return-to-value,
-  and expiry transitions are not implemented in the live path.
+- Interaction, response, opportunity, admission, execution-group, and pending
+  intent state are serialized as detached causal facts. Restored positions
+  rebind their exit interactions from restored detector state before the next
+  evaluation.
+- Opening-gap state advances through candidate, accepted, return-to-value, and
+  expiry transitions only from completed, causally available 1m evidence; the
+  published context retains the reference and evidence IDs.
 - Location generations and carry policy are integrated with the live session
   rollover path; remaining work is focused regression coverage for carried and
   terminated interactions at the boundary.

@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from ftx_paper.contracts import Instrument, MarketBar, OrderIntent, OrderRole, OrderSide
 from ftx_paper.strategy.response import ResponseCandle, build_response_spec, evaluate_response_window
@@ -112,6 +113,18 @@ def test_frozen_trade_exit_flows_through_position_manager_to_next_bar_open() -> 
     )
     manager = OrderflowPositionManager(OrderflowConfig())
     manager.update_exit_scores("PD_HIGH", (0.0, 1.0))
+    manager.update_exit_interactions({
+        "PD_HIGH": (SimpleNamespace(
+            interaction_id="pd-high-after-entry",
+            created_at=datetime(2026, 1, 1, 9, 1, tzinfo=timezone.utc),
+            available_at=datetime(2026, 1, 1, 9, 1, tzinfo=timezone.utc),
+            band_lower=104.5,
+            band_upper=105.5,
+            candles=(SimpleNamespace(
+                available_at=datetime(2026, 1, 1, 9, 1, tzinfo=timezone.utc),
+            ),),
+        ),),
+    })
     manager.register_entry(
         OrderIntent(
             "entry-canonical-exit", instrument, OrderSide.BUY, 1,
@@ -129,3 +142,31 @@ def test_frozen_trade_exit_flows_through_position_manager_to_next_bar_open() -> 
     assert len(actions) == 1
     assert actions[0].reason == "conditional_exit:pd_low-long-exit"
     assert actions[0].price == 104
+
+
+def test_exit_binding_requires_post_entry_interaction_creation() -> None:
+    instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
+    plan = exit_plan_from_template(
+        TRADE_TEMPLATES[("5m_recovery_breakout", "PD_LOW")].exits,
+        levels={}, bands={},
+    )
+    manager = OrderflowPositionManager(OrderflowConfig())
+    manager.update_exit_interactions({
+        "PD_HIGH": (SimpleNamespace(
+            interaction_id="pre-entry",
+            created_at=datetime(2026, 1, 1, 8, 59, tzinfo=timezone.utc),
+            available_at=datetime(2026, 1, 1, 9, tzinfo=timezone.utc),
+            band_lower=104.5, band_upper=105.5,
+        ),),
+    })
+    manager.register_entry(
+        OrderIntent("entry-no-pre-entry-bind", instrument, OrderSide.BUY, 1,
+                    stop_price=95.0, role=OrderRole.ENTRY, exit_plan=plan),
+        fill_price=100.0,
+        entry_fill_time=datetime(2026, 1, 1, 9, tzinfo=timezone.utc),
+    )
+    manager.on_closed_bar(
+        MarketBar(instrument, datetime(2026, 1, 1, 9, 1, tzinfo=timezone.utc), 100, 101, 99, 100),
+    )
+    position, _ = manager.positions["entry-no-pre-entry-bind"]
+    assert position.exit_plan[0].interaction_id is None

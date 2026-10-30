@@ -6,9 +6,15 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
 from collections.abc import Iterable, Mapping
+from typing import TYPE_CHECKING
 import hashlib
 
 from .orderflow_context import ContextVersionRef
+from .orderflow_trigger import EntryPolicy, TriggerObservation
+
+if TYPE_CHECKING:
+    from .orderflow_interaction import LocationInteraction
+    from .templates import TradeTemplate
 
 
 class OpportunityStatus(StrEnum):
@@ -32,12 +38,114 @@ class StructuralSetup:
     context_version: int | None = None
     confirmation_ids: tuple[str, ...] = ()
     regime_version: int | None = None
+    active: bool = True
+    version: str = "1"
 
     def __post_init__(self) -> None:
         if self.direction not in {"long", "short"}:
             raise ValueError("setup direction must be long or short")
         if self.entry_lower > self.entry_upper or self.expires_at <= self.formed_at:
             raise ValueError("invalid setup structure or expiry")
+
+
+class IntentStatus(StrEnum):
+    OBSERVING = "observing"
+    CONFIRMATION_FOUND = "confirmation_found"
+    ARMED = "armed"
+    TRIGGER_OBSERVED = "trigger_observed"
+    TRIGGERED = "triggered"
+    CANCELLED = "cancelled"
+
+
+@dataclass(frozen=True, slots=True)
+class TradeIntent:
+    """Strategy-owned causal intent; execution begins only after triggering."""
+
+    intent_id: str
+    setup_id: str
+    regime_version: str
+    direction: str
+    status: IntentStatus
+    created_at: datetime
+    trigger_price: float
+    failure_boundary: float
+    expiry: datetime
+    confirmation: tuple[str, ...] = ()
+    cancel_reason: str | None = None
+    triggered_at: datetime | None = None
+    setup_version: str | None = None
+    entry_policy: EntryPolicy = EntryPolicy.INTRABAR_CROSS
+    required_confirmation: tuple[str, ...] = ()
+    armed_at: datetime | None = None
+    effective_at: datetime | None = None
+    lifecycle_id: str | None = None
+    formation_context: ContextVersionRef | None = None
+    decision_context: ContextVersionRef | None = None
+
+    def __post_init__(self) -> None:
+        if self.direction not in {"long", "short"}:
+            raise ValueError("intent direction must be long or short")
+        if self.expiry <= self.created_at:
+            raise ValueError("intent expiry must follow creation")
+        object.__setattr__(self, "entry_policy", EntryPolicy(self.entry_policy))
+
+
+@dataclass(frozen=True, slots=True)
+class PendingTrigger:
+    """Armed intent plus the template and interaction it evaluates."""
+
+    direction: str
+    template: "TradeTemplate"
+    interaction: "LocationInteraction"
+    intent: TradeIntent
+    retest_touched: bool = False
+
+
+def arm_intent(
+    *, intent: TradeIntent, setup: StructuralSetup, regime: str,
+    at: datetime, confirmations: tuple[str, ...] = (),
+) -> TradeIntent:
+    if intent.status is not IntentStatus.CONFIRMATION_FOUND:
+        raise ValueError("only a confirmed intent can arm")
+    if setup.setup_id != intent.setup_id or not setup.active:
+        raise ValueError("intent setup is not active or does not match")
+    if setup.regime_version is not None and str(setup.regime_version) != regime:
+        raise ValueError("intent regime version does not match setup")
+    if intent.setup_version is not None and intent.setup_version != setup.version:
+        raise ValueError("intent setup version does not match setup")
+    if at >= setup.expires_at:
+        raise ValueError("setup has expired")
+    available = set(intent.confirmation) | set(confirmations)
+    missing = set(intent.required_confirmation) - available
+    if missing:
+        raise ValueError(f"required confirmation missing: {sorted(missing)}")
+    if at < intent.created_at:
+        raise ValueError("arming time cannot precede intent creation")
+    return replace(
+        intent, status=IntentStatus.ARMED, regime_version=regime,
+        armed_at=at, effective_at=at, confirmation=tuple(sorted(available)),
+    )
+
+
+def record_trigger(*, intent: TradeIntent, observation: TriggerObservation) -> TradeIntent:
+    if intent.status is not IntentStatus.ARMED:
+        raise ValueError("only an armed intent can trigger")
+    if observation.intent_id != intent.intent_id or not observation.eligible:
+        raise ValueError("trigger observation does not trigger this intent")
+    at = datetime.fromisoformat(observation.available_at)
+    if at >= intent.expiry:
+        raise ValueError("intent has expired")
+    return replace(
+        intent, status=IntentStatus.TRIGGERED, triggered_at=at,
+        trigger_price=observation.price or intent.trigger_price,
+        decision_context=intent.decision_context,
+    )
+
+
+def cancel_intent(*, intent: TradeIntent, reason: str) -> TradeIntent:
+    if intent.status in {IntentStatus.TRIGGERED, IntentStatus.CANCELLED}:
+        return intent
+    return replace(intent, status=IntentStatus.CANCELLED, cancel_reason=reason)
 
 
 @dataclass(frozen=True, slots=True)

@@ -44,8 +44,9 @@ if TYPE_CHECKING:
         InteractionStatus, LocationInteraction, ProjectionSnapshot,
     )
     from .orderflow_opportunity import (
-        ExecutionGroupClaim, ExecutionGroupRegistry, OpportunityStatus,
-        OpportunityTransition, SetupOpportunity, StructuralSetup,
+        ExecutionGroupClaim, ExecutionGroupRegistry, IntentStatus, OpportunityStatus,
+        OpportunityTransition, PendingTrigger, SetupOpportunity, StructuralSetup, TradeIntent,
+        arm_intent, cancel_intent, record_trigger, advance_timeouts_before_formation,
     )
     from .orderflow_admission import (
         AdmissionDecision, DiagnosticDecisionIntent, PredicateResult,
@@ -190,12 +191,13 @@ def __getattr__(name: str):
             "LocationInteraction": LocationInteraction,
             "ProjectionSnapshot": ProjectionSnapshot,
         }[name]
-    if name in {"ExecutionGroupClaim", "ExecutionGroupRegistry", "OpportunityStatus", "OpportunityTransition", "SetupOpportunity", "StructuralSetup", "advance_timeouts_before_formation"}:
+    if name in {"ExecutionGroupClaim", "ExecutionGroupRegistry", "IntentStatus", "OpportunityStatus", "OpportunityTransition", "PendingTrigger", "SetupOpportunity", "StructuralSetup", "TradeIntent", "arm_intent", "cancel_intent", "record_trigger", "advance_timeouts_before_formation"}:
         from .orderflow_opportunity import (
-            ExecutionGroupClaim, ExecutionGroupRegistry, OpportunityStatus,
-            OpportunityTransition, SetupOpportunity, StructuralSetup, advance_timeouts_before_formation,
+            ExecutionGroupClaim, ExecutionGroupRegistry, IntentStatus, OpportunityStatus,
+            OpportunityTransition, PendingTrigger, SetupOpportunity, StructuralSetup, TradeIntent,
+            arm_intent, cancel_intent, record_trigger, advance_timeouts_before_formation,
         )
-        return {"ExecutionGroupClaim": ExecutionGroupClaim, "ExecutionGroupRegistry": ExecutionGroupRegistry, "OpportunityStatus": OpportunityStatus, "OpportunityTransition": OpportunityTransition, "SetupOpportunity": SetupOpportunity, "StructuralSetup": StructuralSetup, "advance_timeouts_before_formation": advance_timeouts_before_formation}[name]
+        return {"ExecutionGroupClaim": ExecutionGroupClaim, "ExecutionGroupRegistry": ExecutionGroupRegistry, "IntentStatus": IntentStatus, "OpportunityStatus": OpportunityStatus, "OpportunityTransition": OpportunityTransition, "PendingTrigger": PendingTrigger, "SetupOpportunity": SetupOpportunity, "StructuralSetup": StructuralSetup, "TradeIntent": TradeIntent, "arm_intent": arm_intent, "cancel_intent": cancel_intent, "record_trigger": record_trigger, "advance_timeouts_before_formation": advance_timeouts_before_formation}[name]
     if name in {"AdmissionDecision", "DiagnosticDecisionIntent", "PredicateResult", "PredicateStatus", "can_requalify", "evaluate_admission"}:
         from .orderflow_admission import (
             AdmissionDecision, DiagnosticDecisionIntent, PredicateResult,
@@ -256,8 +258,9 @@ __all__ = [
     "derive_vwap_band", "evaluate_vwap_diagnostic_response", "publish_vwap_locations",
     "HypothesisState", "InteractionCandle", "InteractionCloseReason", "InteractionDetector",
     "InteractionStatus", "LocationInteraction", "ProjectionSnapshot",
-    "ExecutionGroupClaim", "ExecutionGroupRegistry", "OpportunityStatus",
-    "OpportunityTransition", "SetupOpportunity", "StructuralSetup",
+    "ExecutionGroupClaim", "ExecutionGroupRegistry", "IntentStatus", "OpportunityStatus",
+    "OpportunityTransition", "PendingTrigger", "SetupOpportunity", "StructuralSetup", "TradeIntent",
+    "arm_intent", "cancel_intent", "record_trigger", "advance_timeouts_before_formation",
     "AdmissionDecision", "DiagnosticDecisionIntent", "PredicateResult", "PredicateStatus", "evaluate_admission",
     "CaptureMode", "REPLAY_RECORD_SCHEMA_VERSION", "ReplayRecord", "ReplayRecorder", "validate_replay_scope",
     "CANONICAL_PHASE_ORDER", "OrderflowRuntimeState", "ReplayBarResult", "ReplayMachine", "ReplayPhase",

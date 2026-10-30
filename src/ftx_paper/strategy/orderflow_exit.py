@@ -74,15 +74,6 @@ def evaluate_exit_plan_rule(
     """Evaluate one frozen rule using only bars after the entry bar."""
     if rule.level is None:
         return ExitPlanEvaluation(rule, False, "exit_level_unavailable")
-    if rule.score_direction is not None and rule.score_margin is not None:
-        if decision_scores is None or any(value is None for value in decision_scores):
-            return ExitPlanEvaluation(rule, False, "exit_context_scores_unavailable")
-        own, opposing = (
-            decision_scores if rule.score_direction == "long" else decision_scores[::-1]
-        )
-        assert own is not None and opposing is not None
-        if own - opposing < rule.score_margin:
-            return ExitPlanEvaluation(rule, False, "exit_score_mismatch")
     candidates = tuple(bars[entry_bar_index + 1:])
     if not candidates:
         return ExitPlanEvaluation(rule, False, "pending")
@@ -115,6 +106,15 @@ def evaluate_exit_plan_rule(
         armed=False,
     )
     if response.status is ResponseOutcomeStatus.CONFIRMED:
+        if rule.score_direction is not None and rule.score_margin is not None:
+            if decision_scores is None or any(value is None for value in decision_scores):
+                return ExitPlanEvaluation(rule, False, "exit_context_scores_unavailable")
+            own, opposing = (
+                decision_scores if rule.score_direction == "long" else decision_scores[::-1]
+            )
+            assert own is not None and opposing is not None
+            if own - opposing < rule.score_margin:
+                return ExitPlanEvaluation(rule, False, "exit_score_mismatch")
         return ExitPlanEvaluation(rule, True, "exit_triggered")
     return ExitPlanEvaluation(rule, False, "exit_response_pending")
 

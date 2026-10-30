@@ -2,8 +2,11 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from ftx_paper.execution.events import ExecutionNotification
-from ftx_paper.strategy import OpportunityStatus, SetupOpportunity
+from ftx_paper.strategy import (
+    IntentStatus, OpportunityStatus, SetupOpportunity, TradeIntent, arm_intent, record_trigger,
+)
 from ftx_paper.strategy.orderflow import OrderflowPolicy
+from ftx_paper.strategy.orderflow_trigger import TriggerObservation
 
 
 UTC = timezone.utc
@@ -16,6 +19,33 @@ def _opportunity():
         expires_at=formed + timedelta(minutes=15), entry_lower=99,
         entry_upper=100, failure_boundary=98, evidence_ids=("e1",),
     )
+
+
+def test_intent_lifecycle_preserves_setup_and_trigger_causality() -> None:
+    opportunity = _opportunity()
+    intent = TradeIntent(
+        intent_id="intent-1", setup_id=opportunity.setup.setup_id, regime_version="1",
+        direction="long", status=IntentStatus.CONFIRMATION_FOUND,
+        created_at=opportunity.setup.formed_at, trigger_price=100.0,
+        failure_boundary=98.0, expiry=opportunity.setup.expires_at,
+        setup_version=opportunity.setup.version, lifecycle_id=opportunity.lifecycle_id,
+    )
+    armed = arm_intent(
+        intent=intent, setup=opportunity.setup, regime="2",
+        at=opportunity.setup.formed_at,
+    )
+    triggered = record_trigger(
+        intent=armed,
+        observation=TriggerObservation(
+            intent_id=armed.intent_id, observed_at="2026-01-01T09:21:00+00:00",
+            available_at="2026-01-01T09:21:00+00:00", crossed=True, eligible=True,
+            price=100.5, reason="entry boundary crossed",
+        ),
+    )
+    assert armed.status is IntentStatus.ARMED
+    assert armed.regime_version == "2"
+    assert triggered.status is IntentStatus.TRIGGERED
+    assert triggered.trigger_price == 100.5
 
 
 def test_filled_execution_group_invalidates_unfilled_siblings() -> None:
