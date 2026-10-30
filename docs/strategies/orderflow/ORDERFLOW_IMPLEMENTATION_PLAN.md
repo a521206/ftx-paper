@@ -130,6 +130,11 @@ implementation and live is not a separate strategy implementation.
   capture mode, but it may not change policy calculations.
 - `ReplayMachine`-style orchestration, file loading, batch iteration, and replay
   capture must not be inserted into the live callback path.
+- Temporary phase/parity harnesses may load bounded Paper inputs and emit
+  intermediate artifacts while the port is being verified, but they are not
+  production replay engines or strategy owners. They must not be called by the
+  live callback path and must be retired once the shared canonical transition
+  boundary is wired for Paper live and replay.
 - Live and replay have separate mutable owners for transport, clock, persistence,
   and recovery, but never separate orderflow state machines. A canonical state
   snapshot must be sufficient to continue a live session and to reproduce the
@@ -396,11 +401,12 @@ Phase 3 parity verification record:
   unverified. Paper 5m observations retain all contributing 1m lineage IDs.
 - Both repositories normalize `HH:MM` source times consistently. Manifest
   hashes are compared before detailed records and report the first mismatch.
-- Added `scripts/orderflow/phase3_parity_harness.py` to run both exporters and
-  compare the five Layer 1 sections with hash-first manifests and first-field
-  mismatch reporting. The harness returned `MATCHED` for `2026-09-29`,
-  `2026-09-01`, `2026-09-15`, `2026-09-18`, and `2026-10-01` using the
-  canonical and Paper runtime databases.
+- Added `scripts/orderflow/orderflow_replay.py` as a temporary executable
+  Phase 3.5 evidence harness. It loads bounded raw session rows through the
+  Paper source resolver, prepares the Phase 3 observation/evidence prefixes,
+  and emits one evidence-only artifact record per source row. It is not the
+  production replay engine, does not own strategy state or policy, and must be
+  retired when Paper live/replay uses the shared canonical transition boundary.
 - `tests/strategies/orderflow`: 16 passed, with focused parity tests also
   passing in both repositories. Ruff and Pyright passed in both repositories.
 - `.venv\Scripts\ruff.exe check .`: passed.
@@ -599,8 +605,8 @@ ordering:
 - Project comparable records using the parity contract's common record shape:
   `kind`, `occurred_at`, `observed_at`, `available_at`, `sequence`, `identity`,
   `causal_parent_id`, `values`, and `unavailable`.
-- Serialize the Paper projection deterministically for comparison. This is a
-  parity artifact projection, not a new canonical domain model.
+- Serialize the Paper evidence publication deterministically for comparison.
+  This is a parity artifact, not a new canonical domain model.
 
 ### Phase 3.5 Exit Gate
 
@@ -613,7 +619,7 @@ ordering:
 - Focused tests cover ATR availability, opening/prior-day publication,
   session-open value availability, extrema generation replacement, source
   lineage, frozen bands, VWAP calculation version, immutable context versions,
-  unavailable evidence, and deterministic projection.
+  unavailable evidence, and deterministic evidence serialization.
 - The Phase 3.5 harness runs the Phase 3 exporter first, invokes the Paper
   producer on its aggregate artifact, obtains the canonical comparison payload
   through the pinned canonical replay/reporting path, compares manifests before
@@ -626,19 +632,37 @@ ordering:
 ### Phase 3.5 Implementation Record
 
 - `src/ftx_paper/strategies/orderflow/evidence/` now owns the reusable
-  artifact-driven producer and deterministic evidence projection.
+  artifact-driven producer and deterministic evidence serialization.
 - The producer validates the Phase 3 aggregate envelope, preserves explicit
   unavailable evidence, and invokes the ported ATR, session-level, extrema,
   VWAP, value, and context contracts through `EvidenceAdapter`.
-- `scripts/orderflow/phase3_parity_harness.py` invokes the producer after the
-  Phase 3 exporter. Without a host evidence adapter it reports `UNAVAILABLE`,
-  never fabricated parity.
-- The harness accepts `--canonical-evidence` and `--paper-evidence`, adapts both
-  serialized publications through the same producer, compares Phase 3.5
-  manifests before records, and reports the first field mismatch.
+- `scripts/orderflow/orderflow_replay.py` runs an `OrderflowReplayEngine`
+  against raw session rows selected through the Paper futures source resolver.
+  It prepares prior-session inputs, derives observations, and emits one
+  canonical-shaped replay record per source row with Phase 3.5 evidence as of
+  that row's decision clock.
+- The runner accepts `--date`, `--runtime-dir`, and an optional `--output`. It
+  emits only the bounded Phase 3.5 evidence replay artifact; Phase 4 facts,
+  execution, and comparison/reporting remain out of scope. Missing evidence
+  stays `UNAVAILABLE` and is never treated as parity.
 - Focused producer tests and the complete `tests/strategies/orderflow` suite
-  pass. Canonical-vs-Paper Phase 3.5 evidence parity remains deferred until
-  Paper host evidence adapters are supplied.
+  pass.
+- `scripts/orderflow/compare_canonical_replay.py` runs the canonical
+  NiftyZoning exporter/replay and the Paper exporter/replay in isolated
+  subprocesses. It compares Phase 3 source/aggregate sections first, then
+  compares the canonical Phase 3.5 projection with Paper evidence using
+  manifest-first diagnostics.
+
+### Temporary Harness Retirement
+
+`scripts/orderflow/orderflow_replay.py` exists only to generate bounded
+Phase 3.5 evidence artifacts during the staged port. Its raw-row loading,
+prefix iteration, and artifact projection are harness orchestration, not a
+second orderflow implementation. Production Paper live and replay must invoke
+the same canonical transition boundary with separate input/clock adapters.
+Once that path can produce the required evidence and replay facts, remove this
+script and any harness-only artifact assumptions; do not promote it into the
+live callback path or retain it as a parallel replay engine.
 
 Phase 4 input contract:
 

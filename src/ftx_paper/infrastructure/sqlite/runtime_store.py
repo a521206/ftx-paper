@@ -543,6 +543,23 @@ class SqliteRuntimeStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def read_market_bars_between(self, start_date: str, end_date: str) -> list[dict[str, Any]]:
+        """Read normalized futures bars across an inclusive IST date range."""
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                """
+                SELECT symbol, exchange, minute, open, high, low, close, volume,
+                       open_interest, instrument_type, expiry, strike, option_type,
+                       source, ingested_at
+                FROM market_bars
+                WHERE substr(minute, 1, 10) BETWEEN ? AND ?
+                ORDER BY minute, exchange, symbol
+                """,
+                (start_date, end_date),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def read_dates(self) -> list[str]:
         with self._connect() as connection:
             rows = connection.execute(

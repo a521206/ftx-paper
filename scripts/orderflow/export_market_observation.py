@@ -59,7 +59,7 @@ def _load_rows_for_date(session_date: str, runtime_dir: Path) -> list[dict[str, 
         if str(row.get("symbol")) == identity.symbol
         and str(row.get("expiry", ""))[:10] == identity.expiry
         and str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
-        and SESSION_OPEN_MINUTES <= _minute_of_day(_minute(row["minute"])) <= SESSION_DATA_END_MINUTES
+        and SESSION_OPEN_MINUTES <= _minute_of_day(_minute(row["minute"])) < SESSION_DATA_END_MINUTES
     ]
     selected.sort(key=lambda row: str(row["minute"]))
     if not selected:

@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Protocol, Sequence
 
-from ..evidence_publication import AtrPublication, EvidencePublication, publish_phase4a_evidence
+from ..evidence_publication import AtrPublication, publish_phase4a_evidence
 from ..hierarchy import MarketContext
 from ..orderflow_common import Aggregate
 from ..state_machine_types import LocationRegistry, SessionLevels
@@ -25,39 +24,6 @@ class EvidenceAdapter(Protocol):
     def prior_value(self, session_date: str) -> ValuePublication: ...
 
     def contexts(self, session_date: str) -> Sequence[MarketContext]: ...
-
-
-class UnavailableEvidenceAdapter:
-    """Explicitly unavailable host evidence for artifact-only harness runs."""
-
-    def atr(self, session_date: str, symbol: str) -> AtrPublication:
-        del session_date, symbol
-        return AtrPublication.unavailable("missing_atr_adapter")
-
-    def session_levels(self, session_date: str) -> SessionLevels | None:
-        del session_date
-        return None
-
-    def prior_session(self, session_date: str) -> str | None:
-        del session_date
-        return None
-
-    def prior_value(self, session_date: str) -> ValuePublication:
-        del session_date
-        return ValuePublication(None, None, None, (), "missing_prior_session_value_evidence")
-
-    def contexts(self, session_date: str) -> Sequence[MarketContext]:
-        del session_date
-        return ()
-
-
-@dataclass(frozen=True, slots=True)
-class Phase35Evidence:
-    """Evidence publication plus the source scope used to create it."""
-
-    session_date: str
-    source_fingerprint: str
-    publication: EvidencePublication
 
 
 def _text(value: object, field: str) -> str:
@@ -131,77 +97,60 @@ def _artifact_aggregates(artifact: dict[str, object], session_date: str) -> dict
     return result
 
 
-class Phase35Producer:
-    """Reproduce canonical publication ordering from a Phase 3 artifact."""
-
-    def produce(self, artifact: dict[str, object], *, session_date: str, adapter: EvidenceAdapter) -> Phase35Evidence:
-        aggregates = _artifact_aggregates(artifact, session_date)
-        first = next((item for item in aggregates["1m"] + aggregates["5m"]), None)
-        if first is None:
-            raise ValueError("Phase 3 artifact has no aggregates")
-        atr = adapter.atr(session_date, first.symbol)
-        unavailable: list[str] = []
-        if atr.value is None:
-            unavailable.append(atr.unavailable_reason or "missing_atr")
-
-        registry = LocationRegistry(f"{first.symbol}:{first.expiry}:{first.contract_type}:1m")
-        levels = adapter.session_levels(session_date)
-        prior_session = adapter.prior_session(session_date)
-        if levels is None:
-            unavailable.append("missing_session_levels")
-        elif atr.value is not None:
-            registry.publish_session_levels(
-                levels, source_session=session_date, prior_session=prior_session, atr=atr.value,
-            )
-        elif levels is not None:
-            unavailable.append("session_levels_waiting_for_atr")
-
-        measurements: list[VwapMeasurement] = []
-        if atr.value is not None:
-            completed_5m = tuple(
-                item for item in aggregates["5m"]
-                if item.source_bar_count == 5 and item.available_at >= item.end_time
-            )
-            if completed_5m:
-                high = max(completed_5m, key=lambda item: item.high)
-                low = min(completed_5m, key=lambda item: item.low)
-                registry.publish_session_extreme(
-                    "SESSION_HIGH", high.high, high, atr=atr.value,
-                )
-                registry.publish_session_extreme(
-                    "SESSION_LOW", low.low, low, atr=atr.value,
-                )
-            for timeframe in ("1m", "5m"):
-                measurements.extend(causal_vwap_prefix(
-                    aggregates[timeframe], session_date=session_date,
-                ))
-            for measurement in measurements:
-                registry.publish_vwap(
-                    value=measurement.value, available_at=measurement.available_at,
-                    source_session=session_date, source_aggregate_id=measurement.source_aggregate_id,
-                    source_observation_id=measurement.source_observation_id,
-                    timeframe=measurement.timeframe, atr=atr.value,
-                )
-        else:
-            unavailable.append("vwap_locations_waiting_for_atr")
-
-        return Phase35Evidence(
-            session_date=session_date,
-            source_fingerprint=str(artifact["source_fingerprint"]),
-            publication=publish_phase4a_evidence(
-                atr=atr,
-                locations=registry.records.values(),
-                vwap_measurements=measurements,
-                prior_value=adapter.prior_value(session_date),
-                contexts=adapter.contexts(session_date),
-                unavailable=unavailable,
-                context_stream_id=getattr(adapter, "context_stream_id", None),
-                location_stream_id=getattr(adapter, "location_stream_id", None),
-            ),
-        )
-
-
 def produce_evidence(
     artifact: dict[str, object], *, session_date: str, adapter: EvidenceAdapter,
-) -> Phase35Evidence:
-    return Phase35Producer().produce(artifact, session_date=session_date, adapter=adapter)
+) -> dict[str, object]:
+    aggregates = _artifact_aggregates(artifact, session_date)
+    first = next((item for item in aggregates["1m"] + aggregates["5m"]), None)
+    if first is None:
+        raise ValueError("aggregate artifact has no aggregates")
+    atr = adapter.atr(session_date, first.symbol)
+    unavailable: list[str] = []
+    if atr.value is None:
+        unavailable.append(atr.unavailable_reason or "missing_atr")
+
+    registry = LocationRegistry(f"{first.symbol}:{first.expiry}:{first.contract_type}:1m")
+    levels = adapter.session_levels(session_date)
+    prior_session = adapter.prior_session(session_date)
+    if levels is None:
+        unavailable.append("missing_session_levels")
+    elif atr.value is not None:
+        registry.publish_session_levels(
+            levels, source_session=session_date, prior_session=prior_session, atr=atr.value,
+        )
+    else:
+        unavailable.append("session_levels_waiting_for_atr")
+
+    measurements: list[VwapMeasurement] = []
+    if atr.value is not None:
+        registry.publish_session_extrema(
+            aggregates["5m"], session_date=session_date, atr=atr.value,
+        )
+        for timeframe in ("1m", "5m"):
+            measurements.extend(causal_vwap_prefix(
+                aggregates[timeframe], session_date=session_date,
+            ))
+        for measurement in measurements:
+            registry.publish_vwap(
+                value=measurement.value, available_at=measurement.available_at,
+                source_session=session_date, source_aggregate_id=measurement.source_aggregate_id,
+                source_observation_id=measurement.source_observation_id,
+                timeframe=measurement.timeframe, atr=atr.value,
+            )
+    else:
+        unavailable.append("vwap_locations_waiting_for_atr")
+
+    return {
+        "session_date": session_date,
+        "source_fingerprint": str(artifact["source_fingerprint"]),
+        "publication": publish_phase4a_evidence(
+            atr=atr,
+            locations=registry.records.values(),
+            vwap_measurements=measurements,
+            prior_value=adapter.prior_value(session_date),
+            contexts=adapter.contexts(session_date),
+            unavailable=unavailable,
+            context_stream_id=getattr(adapter, "context_stream_id", None),
+            location_stream_id=getattr(adapter, "location_stream_id", None),
+        ),
+    }
