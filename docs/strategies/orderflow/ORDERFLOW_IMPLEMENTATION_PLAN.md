@@ -409,9 +409,13 @@ remain follow-up work.
 
 ## Phase 4: Port And Verify Layer 2 - Context, Values, Permissions, And Locations
 
+Status: Contract and pure-behavior port complete; runtime parity deferred to
+Phase 9.
 
-Port and validate the canonical context and location behavior using the exact
-Layer 1 outputs.
+Port and validate the canonical context and location contracts using exact
+Layer 1-shaped inputs. This phase does not claim Paper runtime or DB-backed
+context/location parity; Paper's orderflow runtime is still a scaffold until
+the host adapter phase.
 
 Port only the canonical context, value, permission, and location modules and
 their newly required direct dependencies. Do not port response, opportunity, or
@@ -427,21 +431,23 @@ Canonical scope:
 - causal ATR inputs, VWAP prefix measurements, and their source-observation
   lineage where required by location bands or context.
 
-The runtime context store is the `MarketContextStore`/`ReplayContext` path in
-`state_machine_types.py`. `market_context_history.py` is an artifact-only
-projection and must not be treated as the runtime context owner.
+The canonical runtime context store is the `MarketContextStore`/`ReplayContext`
+path in `state_machine_types.py`. The ported store and deterministic contracts
+are tested here, but runtime ownership and persistence integration are deferred
+to Phase 9. `market_context_history.py` is an artifact-only projection and must
+not be treated as the runtime context owner.
 
 Paper may provide stored prior-session references through an adapter, but it may
 not define replacement rules, fallback values, permissions, or location priority.
 
-Parity gate:
+Phase 4 gate:
 
-- Every context and location record has the same identity, generation, evidence,
-  availability, and timestamp as canonical output.
-- A later replacement cannot change an earlier as-of result.
-- Missing prior inputs produce the same unavailable result and reason.
-- Live and replay invoke the same ported context and location implementation;
-  transport and input data are not compared.
+- Canonical context/location/value/permission tests pass against the ported
+  contracts and deterministic projections.
+- Immutable generations, replacement lineage, as-of resolution, causal
+  timestamps, source-observation lineage, and explicit unavailable reasons are
+  covered without reconstructing facts from presentation output.
+- No Paper runtime parity claim is made while the host adapter is absent.
 
 ## Phase 5: Port And Verify Layer 3 - Interactions And Responses
 
@@ -579,6 +585,13 @@ Required work:
   owner. Do not route them through the deleted orderflow coordinator.
 - Persist canonical decisions and lifecycle facts through existing Paper runtime
   event and store boundaries using an explicit versioned adapter schema.
+- Wire the persisted `context_location` phase stream at this boundary. It must
+  be produced from the canonical runtime context owner, include source
+  observation IDs and causal parents, and remain `INCOMPLETE` or `UNAVAILABLE`
+  when ATR, prior-session value, context, or location evidence is absent.
+- Run the DB-backed context/location parity matrix for source-matched dates
+  only, beginning with `2026-09-15` and `2026-10-01`. Compare manifests before
+  records and stop at the first mismatch. Do not include `2026-10-29`.
 - Add API and CLI projections only as views of canonical facts and Paper accounting
   facts; they must not recompute decisions.
 - Define startup recovery so interrupted Paper sessions become `STOPPED` with an
