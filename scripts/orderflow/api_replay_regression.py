@@ -28,6 +28,7 @@ CANONICAL = {
     "gross_reward_points": 155.2143,
     "achieved_risk_reward": 6.1443,
 }
+MAX_POLL_INTERVAL = 2.0
 
 
 def _request(url: str, *, method: str = "GET", payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -89,6 +90,7 @@ def run(base_url: str, *, timeout: float, interval: float) -> int:
         raise RuntimeError("replay API response did not include run_id")
 
     deadline = time.monotonic() + timeout
+    poll_interval = interval
     while True:
         status = _request(f"{root}/api/v1/replay/{run_id}")
         state = status.get("status")
@@ -96,7 +98,9 @@ def run(base_url: str, *, timeout: float, interval: float) -> int:
             break
         if time.monotonic() >= deadline:
             raise RuntimeError(f"replay {run_id} did not complete within {timeout:g}s")
-        time.sleep(interval)
+        if poll_interval > 0:
+            time.sleep(poll_interval)
+            poll_interval = min(MAX_POLL_INTERVAL, poll_interval * 2)
 
     if state != "completed":
         raise RuntimeError(f"replay {run_id} ended with status {state!r}: {status.get('error')}")
