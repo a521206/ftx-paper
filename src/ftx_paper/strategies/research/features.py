@@ -82,7 +82,18 @@ class LiveFeatureCalculator:
     ) -> LiveFeatures:
         """Calculate canonical event-time market fields from a causal prefix."""
         if len(prefix) < 2:
-            raise ValueError("an event requires at least two completed prefix bars")
+            typical = (current.high + current.low + current.close) / 3
+            return LiveFeatures(
+                vwap=typical,
+                atr=None,
+                session_high=current.high,
+                session_low=current.low,
+                opening_range_high=None,
+                opening_range_low=None,
+                return_1=None,
+                prior_day_high=prior_day_high,
+                prior_day_low=prior_day_low,
+            )
         features = self.calculate(prefix)
         session = _session_bars(prefix)
         if not session:

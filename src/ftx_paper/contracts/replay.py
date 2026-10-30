@@ -60,7 +60,7 @@ def detach_replay_value(value: Any) -> Any:
 def _validate_report(value: Mapping[str, Any]) -> dict[str, Any]:
     if value.get("schema_version") != REPLAY_REPORT_SCHEMA_VERSION:
         raise ValueError("unsupported replay report schema version")
-    if value.get("report_type") != "paper_orderflow":
+    if value.get("report_type") != "paper_replay":
         raise ValueError("unsupported replay report type")
     return detach_replay_value(value)
 
@@ -143,8 +143,7 @@ class ReplaySummary:
     values: Mapping[str, Any]
 
     REQUIRED_FIELDS = frozenset({
-        "setup_candidates", "location_interactions", "entries_filled",
-        "gross_reward_points", "achieved_risk_reward",
+        "decisions_emitted", "orders_filled", "gross_pnl", "risk_reward",
     })
 
     def __post_init__(self) -> None:

@@ -9,10 +9,10 @@ from hashlib import sha256
 from typing import TYPE_CHECKING
 
 from ftx_paper.contracts import OrderSide
-from ftx_paper.market.location import Cell, Location
+from ftx_paper.strategies.research.location import Cell, Location
 
 if TYPE_CHECKING:
-    from ftx_paper.market.location import TransitionPattern
+    from ftx_paper.strategies.research.location import TransitionPattern
 
 STRATEGY_NAME = "ftx-paper-research"
 STRATEGY_VERSION = "0.4.0-pipeline-research-aligned"

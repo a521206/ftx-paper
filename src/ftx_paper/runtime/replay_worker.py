@@ -18,9 +18,8 @@ from ftx_paper.contracts.replay import (
 )
 from ftx_paper.domain.capital import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE, CapitalRuntimeContext
 from ftx_paper.market import (
-    AggregatorConfig, Cell, CompletedBarAggregator, FeatureService, InstrumentKey,
+    AggregatorConfig, CompletedBarAggregator, InstrumentKey,
 )
-from ftx_paper.market.requirements import FeatureRequirement
 from ftx_paper.domain import AccountAggregate, PortfolioState
 from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.runtime.engine import PaperEngine
@@ -109,7 +108,7 @@ class _ScopedEvents(list[dict[str, Any]]):
 
 @dataclass(frozen=True, slots=True)
 class TradeSettlement:
-    cell: Cell
+    cell: str
     entry_bar: int
     exit_bar: int
     realized_pnl: float
@@ -193,8 +192,8 @@ class ReplayWorker:
     def compare_paired_replay(
         diagnostic: Mapping[str, Any], executable: Mapping[str, Any],
     ) -> dict[str, Any]:
-        """Report that paired orderflow comparison is unavailable during scaffolding."""
-        return {"status": "INCOMPLETE", "reason": "canonical orderflow port not installed", "diagnostic": diagnostic, "executable": executable}
+        """Report that paired strategy comparison is unavailable without a comparator."""
+        return {"status": "INCOMPLETE", "reason": "strategy comparator not configured", "diagnostic": diagnostic, "executable": executable}
 
     def input_manifest(
         self,
@@ -413,7 +412,6 @@ class ReplayWorker:
         max_drawdown = 0.0
         last_portfolio: PortfolioState | None = None
         last_strategy_metadata = None
-        available_dates = self._dates()
         expiry_dates = self.store.read_expiry_dates()
         # This engine/strategy is private to this replay run and never shared
         # with RuntimeSession, its broker, ledger, or risk state.
@@ -447,17 +445,6 @@ class ReplayWorker:
                 bar for bar in bars
                 if str(bar.instrument.instrument_type).upper() in {"FUT", "FUTURES"}
             )
-            prior_day_high, prior_day_low = self._prior_day_levels(date, available_dates)
-            # Historical replay databases may not contain the imported expiry
-            # calendar. Infer an expiry session from the option bars themselves
-            # so adaptive stops use the same expiry widening as canonical.
-            effective_expiry_dates = set(expiry_dates)
-            if any(
-                str(bar.instrument.expiry or "")[:10] == date
-                and str(bar.instrument.instrument_type).upper() in {"CE", "PE"}
-                for bar in bars
-            ):
-                effective_expiry_dates.add(date)
             capital_context = CapitalRuntimeContext(self.capital_profile, environment="replay")
             replay_state = ReplayRuntimeState(
                 portfolio=portfolio,
@@ -478,9 +465,7 @@ class ReplayWorker:
                     enabled_vehicles=tuple(vehicles),
                     portfolio=replay_state.portfolio,
                     capital_context=replay_state.capital_context,
-                    prior_day_high=prior_day_high,
-                    prior_day_low=prior_day_low,
-                    expiry_dates=frozenset(effective_expiry_dates),
+                    expiry_dates=frozenset(expiry_dates),
                 ),
             )
             last_portfolio = portfolio
@@ -498,11 +483,7 @@ class ReplayWorker:
             last_portfolio = replay_state.portfolio
             # Each date gets a fresh position/risk session while cumulative
             # capital is carried by the authoritative PortfolioState.
-            aggregator = self._aggregator(
-                bars,
-                tuple(getattr(getattr(strategy, "policy", None), "required_features", ())),
-            )
-            feature_service = FeatureService(None)
+            aggregator = self._aggregator(bars)
             open_trades: list[dict[str, Any]] = []
             daily_reset_emitted = False
             # Synthetic is a reporting-only view of the accepted futures
@@ -549,7 +530,6 @@ class ReplayWorker:
             for bar in bars:
                 if cancel.is_set():
                     break
-                feature_service.ingest(bar)
                 bundle = aggregator.ingest(bar)
                 if bundle is None:
                     continue
@@ -567,12 +547,6 @@ class ReplayWorker:
                     ).isoformat(),
                     source="replay",
                     payload={"bundle_id": bundle.bundle_id},
-                )
-                bundle = feature_service.enrich(
-                    bundle,
-                    prior_day_high=prior_day_high,
-                    prior_day_low=prior_day_low,
-                    expiry_dates=tuple(str(item) for item in effective_expiry_dates),
                 )
                 # Synthetic contract selection is anchored to the spot/index
                 # level, matching the Paper entry contract rule. Futures is
@@ -942,7 +916,7 @@ class ReplayWorker:
                             )
                             engine.settle_exit(order.client_order_id, filled=settlement is not None)
                             if settlement is not None:
-                                engine.record_exit(strategy_id=order.strategy_id, cell=realized.cell.name,
+                                engine.record_exit(strategy_id=order.strategy_id, cell=realized.cell,
                                                    reason=order.reason, entry_bar=realized.entry_bar,
                                                    exit_bar=engine.bars_seen, date=date, vehicle=order.vehicle,
                                                    direction="long" if order.side is OrderSide.SELL else "short",
@@ -1312,7 +1286,7 @@ class ReplayWorker:
                                 "timestamp": exit_timestamp, "quantity": order.quantity,
                             })
                         engine.record_exit(strategy_id=order.strategy_id,
-                                           cell=realized.cell.name, reason=order.reason,
+                                           cell=realized.cell, reason=order.reason,
                                            entry_bar=realized.entry_bar, exit_bar=engine.bars_seen,
                                            date=date, vehicle=order.vehicle,
                                            direction="long" if order.side.value == "SELL" else "short",
@@ -1499,7 +1473,7 @@ class ReplayWorker:
         persisted_record_dicts: tuple[dict[str, Any], ...] = ()
         report = {
             "schema_version": 1,
-            "report_type": "paper_orderflow",
+            "report_type": "paper_replay",
             "session_date": session_date,
             "summary": summary,
             "metrics": summary,
@@ -1556,49 +1530,21 @@ class ReplayWorker:
     def _build_summary(
         events: list[dict[str, Any]], trades: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        setup_events = [item for item in events if item.get("reason") == "setup_candidate_formed"]
-        interaction_events = [item for item in events if item.get("reason") == "location_interaction_observed"]
-        futures_trades = [item for item in trades if item.get("vehicle") == "futures"]
+        decisions = [item for item in events if is_parity_decision_event(str(item.get("event_type", "")), item)]
         risk_rewards = [
             float(item["gross_pnl_rs"]) / float(item["initial_risk_rs"])
-            for item in futures_trades
+            for item in trades
             if item.get("initial_risk_rs") not in (None, 0)
         ]
-        unique_interactions = {
-            str(item.get("interaction_id")) for item in interaction_events
-            if item.get("interaction_id") is not None
-        }
-        canonical_interactions = {
-            str(item.get("interaction_id")) for item in interaction_events
-            if str(item.get("location", "")).upper() in {"OR_HIGH", "OR_LOW", "SESSION_HIGH", "SESSION_LOW"}
-        }
-        by_timeframe: dict[str, int] = {}
-        by_location: dict[str, int] = {}
-        for item in interaction_events:
-            timeframe = str(item.get("timeframe", ""))
-            location = str(item.get("location", "")).upper()
-            by_timeframe[timeframe] = by_timeframe.get(timeframe, 0) + 1
-            by_location[location] = by_location.get(location, 0) + 1
         return {
-            "setup_candidates": len({str(item.get("opportunity_id")) for item in setup_events}),
-            "location_interactions": len(canonical_interactions),
-            "entries_filled": len(futures_trades),
-            "gross_reward_points": round(
-                sum(float(item.get("gross_pnl_rs") or 0.0) for item in futures_trades), 4,
-            ),
-            "achieved_risk_reward": round(sum(risk_rewards), 2),
+            "decisions_emitted": len(decisions),
+            "orders_filled": len(trades),
+            "gross_pnl": round(sum(float(item.get("gross_pnl_rs") or 0.0) for item in trades), 4),
+            "risk_reward": round(sum(risk_rewards), 2),
             "metric_lineage": {
-                "setup_candidate_event_count": len(setup_events),
-                "setup_candidate_unique_count": len({str(item.get("opportunity_id")) for item in setup_events}),
-                "location_interaction_event_count": len(interaction_events),
-                "location_interaction_unique_count": len(unique_interactions),
-                "canonical_location_interaction_unique_count": len(canonical_interactions),
-                "location_interaction_by_timeframe": by_timeframe,
-                "location_interaction_by_location": by_location,
-                "futures_trade_count": len(futures_trades),
-                "futures_trades_missing_initial_risk": sum(
-                    1 for item in futures_trades if item.get("initial_risk_rs") is None
-                ),
+                "decision_event_count": len(decisions),
+                "trade_count": len(trades),
+                "trades_missing_initial_risk": sum(1 for item in trades if item.get("initial_risk_rs") is None),
                 "risk_reward_component_count": len(risk_rewards),
             },
         }
@@ -1762,33 +1708,13 @@ class ReplayWorker:
         cell = trade.get("cell")
         if not isinstance(cell, str):
             raise TypeError("settled trade cell must be a canonical name")
-        parsed_cell = Cell.parse(cell)
         entry_bar = trade.get("entry_bar", 0)
         if not isinstance(entry_bar, int) or isinstance(entry_bar, bool):
             raise TypeError("settled trade entry_bar must be an integer")
-        return TradeSettlement(parsed_cell, entry_bar, len(trades), net_pnl)
+        return TradeSettlement(cell, entry_bar, len(trades), net_pnl)
 
     def _dates(self) -> list[str]:
         return self.store.read_dates()
-
-    def _prior_day_levels(
-        self, session_date: str, available_dates: list[str] | None = None,
-    ) -> tuple[float | None, float | None]:
-        """Return the preceding stored futures high/low for replay context.
-
-        Pipeline replays seed each date with the immediately preceding
-        trading day's futures range. Paper dates are evaluated independently
-        for positions and risk, but their feature context must retain this
-        causal cross-date input.
-        """
-        dates = sorted(self._dates() if available_dates is None else available_dates)
-        prior = [value for value in dates if value < session_date]
-        if not prior:
-            return None, None
-        source = self._resolve_source(prior[-1])
-        if source is None:
-            return None, None
-        return max(float(row["high"]) for row in source.bars), min(float(row["low"]) for row in source.bars)
 
     def _resolve_source(self, session_date: str) -> Any | None:
         if session_date not in self._source_cache:
@@ -1869,7 +1795,6 @@ class ReplayWorker:
     @staticmethod
     def _aggregator(
         bars: tuple[MarketBar, ...],
-        feature_requirements: tuple[FeatureRequirement, ...] = (),
     ) -> CompletedBarAggregator:
         roles = {}
         for bar in bars:
@@ -1883,7 +1808,6 @@ class ReplayWorker:
             roles,
             AggregatorConfig(
                 required_roles=(MarketRole.FUTURES,), deadline_seconds=0,
-                feature_requirements=feature_requirements,
             ),
         )
 

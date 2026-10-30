@@ -181,6 +181,174 @@ To add a strategy:
 5. Run the same replay inputs against the new strategy and compare decisions,
    fills, and audit events before enabling it for a runtime session.
 
+### Strategy-Neutral Host Boundary
+
+The strategy extension point is intentionally narrower than the runtime host.
+Adding or removing a strategy must not require changes to the common market
+clock, bundle contract, replay worker, account owner, or generic API routes.
+The shared processing path is:
+
+```text
+broker/input adapter -> normalized MarketBar -> market decision clock
+    -> strategy-neutral DecisionBundle -> Strategy
+    -> DecisionEvent / OrderIntent -> runtime authorization and reservation
+    -> PaperExecutionCoordinator / PaperBroker -> PortfolioState
+    -> runtime events, persistence, and API projections
+```
+
+Ownership is divided as follows:
+
+- `contracts` and `domain` own stable market, decision, order, execution,
+  portfolio, capital, reservation, and settlement contracts. They must not
+  import a concrete strategy, runtime, API, broker adapter, or infrastructure.
+- `market` owns broker-neutral normalization, role mapping, completed-bar
+  aggregation, decision-clock ordering, deadlines, incomplete-input diagnostics,
+  and bundle timing only. It does not compute strategy features or own a feature
+  cache. `DecisionBundle` carries bars and generic input diagnostics, but must
+  not contain strategy context, observations, callbacks, or feature artifacts.
+- `strategies` own configuration, metadata, deterministic policy state,
+  strategy-specific context and evidence, evaluation, snapshots, and execution
+  notification handling. Strategies must not read SQLite, call brokers, own the
+  clock, authorize orders, or mutate the portfolio.
+- `runtime` owns feed lifecycle, feature ingestion, bundle dispatch, account
+  context, shared portfolio state, authorization, execution, settlement,
+  persistence, recovery, and health. It must not branch on strategy names or
+  instantiate strategy-specific producers, context stores, or report builders.
+- `replay` is a bounded host operation that drives the same bundle and strategy
+  transition as live processing. It owns input scope, deterministic clock
+  control, isolated replay state, generic capture, and comparison only.
+- `api` exposes generic attributed projections for decisions, orders, trades,
+  diagnostics, replay runs, and shared positions/capital. Strategy-specific
+  views are optional projections and must not be required for execution.
+- The composition root is the only place that maps configured strategy names to
+  constructors and unions generic strategy requirements before constructing the
+  market clock.
+
+Shared contracts must remain strategy-neutral. Strategies receive the completed
+bundle and own feature calculation, historical warmup, feature caches, and
+feature availability semantics. The runtime may provide immutable market bars
+and bounded input history through neutral ports, but it must not calculate or
+cache strategy features. Replay artifacts use generic source/run,
+decision-lifecycle, execution/settlement, and portfolio ledger layers, with
+strategy ID and metadata used only for attribution.
+
+Live and replay may differ in input source, clock control, persistence, and
+capture mode, but they must call the same strategy transition. A fixed input
+prefix processed incrementally and through bounded replay must produce the same
+decision prefix. Strategy-specific ATR, context materialization, source
+preparation, and reporting belong to the strategy or an explicit strategy
+adapter, never to generic market or runtime helpers.
+
+The architectural removal test is mandatory: deleting a strategy package and its
+composition registration must leave generic market aggregation, runtime
+lifecycle, replay, persistence, API projections, and other strategies importable
+and behaviorally unchanged.
+
+### Strategy Registration And Composition
+
+Strategy registration is explicit, centralized, and composition-owned. A
+strategy package exposes its own factory and neutral requirements; it does not
+register itself through import side effects and it does not know about sibling
+strategies.
+
+The application composition root builds a catalog from definitions:
+
+```text
+StrategyDefinition(strategy_id, factory, requirements, metadata)
+    -> StrategyCatalog
+    -> live MultiStrategyEngine
+    -> replay StrategySelector
+    -> union of market requirements
+```
+
+The catalog is the only component that maps configured strategy IDs to concrete
+factories. It provides strategy creation, enabled-strategy metadata, and the
+union of neutral requirements needed to construct the market clock. The same
+catalog or selector is injected into live and replay construction.
+
+`api.create_app()` must receive already-composed runtime and replay dependencies;
+it must not instantiate a registry or import concrete strategy factories.
+`RuntimeSession`, `ReplayWorker`, and `market` must not contain strategy-name
+branches. Configuration controls which definitions are included, while the
+catalog remains an ordinary dependency that can be replaced in tests.
+
+Adding a strategy requires only:
+
+1. Implement its strategy and factory under `ftx_paper.strategies.<name>`.
+2. Add one definition in the application composition root.
+3. Add strategy tests and host-boundary tests.
+
+Removing a strategy removes its definition and package without changing generic
+market, runtime, replay, persistence, API, or other strategy code. The catalog
+must not expose mutable `PortfolioState` or broker objects to strategies. Runtime
+account ownership remains behind read-only decision context and execution-event
+notifications.
+
+### Boundary Migration Plan
+
+Implement the redesign in ordered phases. Each phase must pass its exit gate
+before the next phase changes behavior.
+
+#### Phase 1: Freeze generic contracts
+
+- Remove feature snapshots, feature services, and feature providers from
+  `DecisionBundle` and the market aggregator.
+- Move feature requirements, calculation, cache, and warmup protocols into each
+  strategy package.
+- Preserve generic bar normalization, bundle timing, incomplete-input handling,
+  and feature ingestion.
+- Restore generic replay summary fields and result validation.
+
+Exit gate: market and generic replay tests pass without importing a concrete
+strategy package.
+
+#### Phase 2: Establish the composition catalog
+
+- Define `StrategyDefinition`, `StrategyCatalog`, `StrategyFactory`, and neutral
+  `StrategyRequirements` in application/shared ports.
+- Make research and orderflow factories package-local and sibling-independent.
+- Register enabled definitions only in application composition.
+- Inject the same catalog/selector into live and replay construction.
+
+Exit gate: API, runtime, and replay construct no concrete strategy factory and a
+test strategy can be added or removed by changing composition only.
+
+#### Phase 3: Remove host policy ownership
+
+- Move all feature calculation, ATR/context warmup, source preparation, and
+  policy state behind strategy-owned adapters.
+- Remove strategy-name branches and strategy-specific imports from `market` and
+  `runtime`.
+- Make strategy construction inputs read-only snapshots or neutral value ports.
+- Keep `PortfolioState`, authorization, reservations, and execution owned by
+  runtime.
+
+Exit gate: deleting a strategy package and its composition definition leaves
+  generic live and replay behavior unchanged.
+
+#### Phase 4: Make replay and API generic
+
+- Make replay artifacts and summaries strategy-neutral with attribution only.
+- Move optional strategy reports behind an injected report adapter.
+- Remove strategy-specific report types and endpoints from generic runtime/API
+  code.
+- Ensure API composition receives dependencies rather than creating a catalog.
+
+Exit gate: replay and API tests pass with a minimal test strategy and no
+strategy-specific imports in generic workers or routes.
+
+#### Phase 5: Verify, simplify, and remove legacy traces
+
+- Run architecture-boundary checks, focused tests, Ruff, and Pyright.
+- Review all changed code for duplicate factories, compatibility shims, stale
+  aliases, dead exports, strategy-name branches, and obsolete report fields.
+- Delete legacy orderflow coupling rather than preserving fallback paths.
+- Repeat review and simplification until the forbidden-coupling search is empty.
+
+Final gate: adding or removing a strategy changes only its package, composition
+definitions, and strategy/host tests; no legacy strategy traces remain in common
+market, runtime, replay, API, or contracts code.
+
 ## Broker Extension
 
 Broker integrations are adapters, not domain objects. Keep provider-specific

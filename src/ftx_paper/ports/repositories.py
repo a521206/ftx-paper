@@ -2,17 +2,13 @@
 
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import date
-from typing import TYPE_CHECKING, Protocol
+from typing import Protocol
 
 from ftx_paper.contracts import MarketBar
 from .records import (
     AuthToken, ProcessLease, ReplayRun, RuntimeContract, RuntimeStatus,
     StoredEvent,
 )
-
-if TYPE_CHECKING:
-    from ftx_paper.market.feature_cache import FeatureCacheKey, FeatureSnapshot
-
 
 class EventRepository(Protocol):
     def append(self, event_type: str, payload: Mapping[str, object], idempotency_key: str | None = None) -> bool: ...
@@ -22,14 +18,6 @@ class EventRepository(Protocol):
 class MarketBarRepository(Protocol):
     def append(self, bars: Iterable[MarketBar], source: str) -> None: ...
     def read_for_date(self, session_date: str) -> Sequence[MarketBar]: ...
-
-
-class FeatureRepository(Protocol):
-    def read_feature_snapshot(self, key: "FeatureCacheKey") -> "FeatureSnapshot | None": ...
-    def read_feature_snapshot_for_session(
-        self, *, feature_set: str, instrument: str, session_date: str,
-    ) -> "FeatureSnapshot | None": ...
-    def write_feature_snapshot(self, snapshot: "FeatureSnapshot") -> None: ...
 
 
 class ReplayRepository(Protocol):

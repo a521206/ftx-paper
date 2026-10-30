@@ -69,13 +69,14 @@ def build_entry_order(
     exit_plan = exit_plan_from_payload(proposal.get("exit_plan"))
     if any(rule.required and rule.level is None for rule in exit_plan):
         return None
+    strategy_id = string("strategy_id") or "strategy"
     return OrderIntent(
-        client_order_id=f"orderflow-entry:{lifecycle_id}",
+        client_order_id=f"{strategy_id}-entry:{lifecycle_id}",
         instrument=instrument,
         side=OrderSide.BUY if direction == "long" else OrderSide.SELL,
         quantity=quantity,
         limit_price=float(trigger_price) if trigger_price is not None else None,
-        reason="causally_accepted_orderflow_opportunity",
+        reason="accepted_strategy_opportunity",
         cell=string("cell"),
         stop_price=float(stop_price),
         stop_policy=string("stop_policy"),
@@ -85,7 +86,7 @@ def build_entry_order(
         entry_bar=integer("entry_bar"),
         trigger_price=float(trigger_price) if trigger_price is not None else None,
         requested_fill_price=number("requested_fill_price") or (float(trigger_price) if trigger_price is not None else None),
-        strategy_id=string("strategy_id"),
+        strategy_id=strategy_id,
         execution_group_id=string("execution_group_id"),
         lifecycle_id=lifecycle_id,
         setup_availability=string("setup_availability"),

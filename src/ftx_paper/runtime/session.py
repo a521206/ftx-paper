@@ -19,11 +19,10 @@ from ftx_paper.contracts import (
     validate_decision_view,
     role_to_key,
 )
-from ftx_paper.market import AggregatorConfig, CompletedBarAggregator, FeatureService, InstrumentKey, LiveMarketNormalizer
+from ftx_paper.market import AggregatorConfig, CompletedBarAggregator, InstrumentKey, LiveMarketNormalizer
 from ftx_paper.domain import AccountAggregate
 from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.strategies.shared.protocol import Strategy
-from ftx_paper.market.requirements import feature_union
 from ftx_paper.execution.cost import futures_cost
 from ftx_paper.execution.settlement import ExitValidationError, validate_exit_order
 from .engine import MultiStrategyEngine, PaperEngine, StrategyDispatchError
@@ -150,10 +149,6 @@ class RuntimeSession:
         self._started = threading.Event()
         self._market_wait = threading.Event()
         self._aggregator: CompletedBarAggregator | None = None
-        self._feature_service = FeatureService(
-            self.store.feature_repository()
-            if callable(getattr(self.store, "feature_repository", None)) else None,
-        )
         self._last_execution_fill: LastExecutionFill | None = None
         self._feed_lease_id: str | None = None
         self._event_sequence = 0
@@ -346,7 +341,6 @@ class RuntimeSession:
                 role_map,
                 AggregatorConfig(
                     required_roles=(MarketRole.FUTURES,), deadline_seconds=10.0,
-                    feature_requirements=feature_union(policies),
                 ),
             )
             if self.broker_factory:
@@ -359,8 +353,6 @@ class RuntimeSession:
                 self.live_state.broker = self.broker
             if not isinstance(self.broker, PaperBroker):
                 raise TypeError("runtime order execution must use PaperBroker")
-            # Keep enough recent futures history locally to warm the causal
-            # 14-session ATR on a fresh Paper deployment.
             backfill_kwargs: dict[str, Any] = {"contract_store": self.store, "days": 20}
             if provider == "xts":
                 backfill_kwargs["stop_event"] = self._stop_event
@@ -370,8 +362,6 @@ class RuntimeSession:
                 return
             _validate_required_backfill(cast(Sequence[Mapping[str, Any]], resolved), backfill)
             self.store.append_market_bars(backfill, source="historical_backfill")
-            for historical_bar in sorted(backfill, key=lambda item: item.timestamp):
-                self._feature_service.ingest(historical_bar)
             access_token = self._wait_for_session_readiness(is_nse_market_open)
             if access_token is None:
                 self._release_feed_lease()
@@ -1203,19 +1193,10 @@ class RuntimeSession:
             }, f"bar_closed:{bar_key}", timestamp=bar.timestamp.isoformat())
             if self._aggregator is None:
                 return
-            self._feature_service.ingest(bar)
             expired = tuple(self._aggregator.expire(now=time.monotonic()))
             bundle = self._aggregator.ingest(bar)
             for incomplete in expired:
                 self._record_incomplete(incomplete)
-            if bundle is not None:
-                strategy = getattr(self.engine, "strategy", None)
-                bundle = self._feature_service.enrich(
-                    bundle,
-                    prior_day_high=getattr(strategy, "prior_day_high", None),
-                    prior_day_low=getattr(strategy, "prior_day_low", None),
-                    expiry_dates=tuple(str(item) for item in getattr(strategy, "expiry_dates", ())),
-                )
             def execute_exit(action):
                 return self._settle_live_order(
                     action.intent,

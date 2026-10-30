@@ -8,9 +8,9 @@ from ftx_paper.market.bundles import DecisionBundle
 from ftx_paper.config import IST, NIFTY_LOT_SIZE
 from ftx_paper.contracts import MarketBar, MarketRole, OptionRole, OrderIntent, OrderRole, Role, synthetic_future_quote, role_to_key
 from ftx_paper.execution.cost import FUTURES_RTD_COST_PER_LOT
-from ftx_paper.market.features import vix_open_and_event
-from ftx_paper.market.location import (
-    Cell, Location, LocationDetector, TransitionKind, TransitionPattern,
+from .features import LiveFeatureCalculator, option_pcr_at_event, vix_open_and_event
+from .location import (
+    Cell, Location, LocationDetector, LocationFeatures, TransitionKind, TransitionPattern,
     transition_patterns_allow,
 )
 from .risk import RiskConfig, RiskEngine, VehicleRiskLimits
@@ -179,6 +179,7 @@ class IndependentLiveDecisionEngine:
             (Session.AFTERNOON, item.cell): item for item in AFTERNOON_CELL_POLICIES
         })
         self._futures: list = []
+        self._feature_calculator = LiveFeatureCalculator()
         self._previous_vix = None
         self._vix_history: list = []
         self._location_detector = LocationDetector()
@@ -276,9 +277,7 @@ class IndependentLiveDecisionEngine:
                 self.risk_gate.reset_segment()
             self._decision_segment = decision_segment
             self._decision_session = decision_session
-        snapshot_values = bundle.feature_snapshot.values if bundle.feature_snapshot is not None else {}
-        pcr = snapshot_values.get("pcr")
-        pcr = float(pcr) if pcr is not None else None
+        pcr: float | None = None
         base = {"decision_at": decision_at.isoformat(), "bundle_id": bundle.bundle_id,
                  "strategy_version": self.version, "config_hash": self.config_hash,
                  "vehicle": "futures",
@@ -308,13 +307,9 @@ class IndependentLiveDecisionEngine:
         if current_vix is not None:
             self._previous_vix = current_vix
             self._vix_history.append(current_vix)
-            snapshot_vix_open = snapshot_values.get("vix_open")
-            if snapshot_vix_open is not None:
-                self._vix_open = float(snapshot_vix_open)
-            else:
-                opening, _ = vix_open_and_event(tuple(self._vix_history), current_vix)
-                if opening is not None:
-                    self._vix_open = opening
+            opening, _ = vix_open_and_event(tuple(self._vix_history), current_vix)
+            if opening is not None:
+                self._vix_open = opening
         # Canonical decisions require an event-time VIX value, but its absence
         # must not prevent candidate evaluation.  A prior VIX observation is
         # retained only for opening-value calculation; it is never carried
@@ -333,12 +328,30 @@ class IndependentLiveDecisionEngine:
             }),)
         futures = bundle.bars[MarketRole.FUTURES]
         self._futures.append(futures)
-        location_features = bundle.feature_snapshot.location_features if bundle.feature_snapshot is not None else None
+        pcr = option_pcr_at_event(
+            (bundle.supporting_inputs or {}).get("bars"), futures,
+            expiry_dates=self.expiry_dates,
+        )
+        computed_features = self._feature_calculator.calculate_event(
+            tuple(self._futures[:-1]), futures,
+            prior_day_high=self.prior_day_high, prior_day_low=self.prior_day_low,
+        )
+        location_features = LocationFeatures(
+            vwap=computed_features.vwap,
+            session_high=computed_features.session_high,
+            session_low=computed_features.session_low,
+            atr=computed_features.atr if computed_features.atr is not None else 0.0,
+            opening_range_high=computed_features.opening_range_high,
+            opening_range_low=computed_features.opening_range_low,
+            opening_range_complete=(
+                computed_features.opening_range_high is not None
+                and computed_features.opening_range_low is not None
+            ),
+            prior_day_high=computed_features.prior_day_high,
+            prior_day_low=computed_features.prior_day_low,
+        )
         if len(self._futures) < 3:
-            if location_features is None:
-                self._location_detector.observe(futures)
-            else:
-                self._location_detector.observe(futures, features=location_features)
+            self._location_detector.observe(futures, features=location_features)
             if vix_bar is None:
                 decision_id = sha256(f"{bundle.bundle_id}:missing_vix".encode()).hexdigest()[:24]
                 return (CandidateDecision({
@@ -349,11 +362,7 @@ class IndependentLiveDecisionEngine:
                 }),)
             return (LiveDecision("WARMUP", {**base, "outcome": "recorded", "reason": "insufficient_history", "feature_values": {}}),)
         prior = tuple(self._futures[:-1])
-        location_snapshot = (
-            self._location_detector.observe(futures)
-            if location_features is None
-            else self._location_detector.observe(futures, features=location_features)
-        )
+        location_snapshot = self._location_detector.observe(futures, features=location_features)
         if location_snapshot is None:
             if vix_bar is None:
                 decision_id = sha256(f"{bundle.bundle_id}:missing_vix".encode()).hexdigest()[:24]

@@ -58,8 +58,8 @@ def test_replay_result_requires_only_canonical_fields() -> None:
         "schema_version": 1,
         "execution_scope": "replay",
         "ledger_scope": "replay",
-        "summary": {"setup_candidates": 0, "location_interactions": 0, "entries_filled": 0,
-                     "gross_reward_points": 0.0, "achieved_risk_reward": None},
+        "summary": {"decisions_emitted": 0, "orders_filled": 0,
+                     "gross_pnl": 0.0, "risk_reward": None},
         "events": [],
         "shadow_trades": [],
         "shadow_ledger": [],
@@ -76,8 +76,8 @@ def test_replay_result_requires_shadow_trades() -> None:
         "schema_version": 1,
         "execution_scope": "replay",
         "ledger_scope": "replay",
-        "summary": {"setup_candidates": 0, "location_interactions": 0, "entries_filled": 0,
-                     "gross_reward_points": 0.0, "achieved_risk_reward": None},
+        "summary": {"decisions_emitted": 0, "orders_filled": 0,
+                     "gross_pnl": 0.0, "risk_reward": None},
         "events": [],
         "shadow_ledger": [],
         "authoritative_trades": [],
@@ -91,8 +91,8 @@ def test_replay_result_requires_shadow_trades() -> None:
 def test_replay_result_rejects_ambiguous_aliases() -> None:
     result = {
         "run_id": "run-1", "schema_version": 1, "execution_scope": "replay", "ledger_scope": "replay",
-        "summary": {"setup_candidates": 0, "location_interactions": 0, "entries_filled": 0,
-                     "gross_reward_points": 0.0, "achieved_risk_reward": None},
+        "summary": {"decisions_emitted": 0, "orders_filled": 0,
+                     "gross_pnl": 0.0, "risk_reward": None},
         "events": [], "shadow_trades": [], "shadow_ledger": [],
         "authoritative_trades": [], "authoritative_ledger": [], "parity_artifact": None,
         "trades": [],
@@ -104,11 +104,11 @@ def test_replay_result_rejects_ambiguous_aliases() -> None:
 def test_replay_result_round_trips_versioned_paper_report() -> None:
     result = {
         "run_id": "run-1", "schema_version": 1, "execution_scope": "replay", "ledger_scope": "replay",
-        "summary": {"setup_candidates": 0, "location_interactions": 0, "entries_filled": 0,
-                     "gross_reward_points": 0.0, "achieved_risk_reward": None},
+        "summary": {"decisions_emitted": 0, "orders_filled": 0,
+                     "gross_pnl": 0.0, "risk_reward": None},
         "events": [], "shadow_trades": [], "shadow_ledger": [],
         "authoritative_trades": [], "authoritative_ledger": [], "parity_artifact": None,
-        "report": {"schema_version": 1, "report_type": "paper_orderflow", "actions": []},
+        "report": {"schema_version": 1, "report_type": "paper_replay", "actions": []},
     }
     assert ReplayResult.from_mapping(result).to_dict() == result
 
@@ -120,12 +120,12 @@ def test_replay_result_round_trips_versioned_paper_report() -> None:
 def test_replay_result_rejects_incompatible_report_envelopes(
     field: str, value: object, message: str,
 ) -> None:
-    report = {"schema_version": 1, "report_type": "paper_orderflow", "actions": []}
+    report = {"schema_version": 1, "report_type": "paper_replay", "actions": []}
     report[field] = value
     result = {
         "run_id": "run-1", "schema_version": 1, "execution_scope": "replay", "ledger_scope": "replay",
-        "summary": {"setup_candidates": 0, "location_interactions": 0, "entries_filled": 0,
-                     "gross_reward_points": 0.0, "achieved_risk_reward": None},
+        "summary": {"decisions_emitted": 0, "orders_filled": 0,
+                     "gross_pnl": 0.0, "risk_reward": None},
         "events": [], "shadow_trades": [], "shadow_ledger": [],
         "authoritative_trades": [], "authoritative_ledger": [], "parity_artifact": None,
         "report": report,
@@ -155,19 +155,13 @@ def test_replay_summary_exposes_metric_lineage_without_changing_canonical_counts
 
     summary = ReplayWorker._build_summary(events, trades)
 
-    assert summary["setup_candidates"] == 1
-    assert summary["location_interactions"] == 1
-    assert summary["entries_filled"] == 2
-    assert summary["achieved_risk_reward"] == 2.0
+    assert summary["decisions_emitted"] == 0
+    assert summary["orders_filled"] == 3
+    assert summary["gross_pnl"] == 1074.0
+    assert summary["risk_reward"] == 1001.0
     assert summary["metric_lineage"] == {
-        "setup_candidate_event_count": 2,
-        "setup_candidate_unique_count": 1,
-        "location_interaction_event_count": 3,
-        "location_interaction_unique_count": 3,
-        "canonical_location_interaction_unique_count": 1,
-        "location_interaction_by_timeframe": {"1m": 1, "5m": 2},
-        "location_interaction_by_location": {"OR_HIGH": 1, "VWAP": 2},
-        "futures_trade_count": 2,
-        "futures_trades_missing_initial_risk": 1,
-        "risk_reward_component_count": 1,
+        "decision_event_count": 0,
+        "trade_count": 3,
+        "trades_missing_initial_risk": 1,
+        "risk_reward_component_count": 2,
     }

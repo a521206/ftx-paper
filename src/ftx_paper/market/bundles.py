@@ -1,17 +1,11 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 import time
 from typing import Iterable, Mapping, TypedDict
 
 from ftx_paper.contracts import MarketBar, MarketRole, Role, market_minute_key, parse_role, role_to_key
-from ftx_paper.market.requirements import FeatureRequirement, feature_union
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from ftx_paper.market.feature_cache import FeatureSnapshot
-    from ftx_paper.strategies.shared.policy_contract import StrategyPolicy
 
 
 class SupportingInputs(TypedDict, total=False):
@@ -34,15 +28,9 @@ class DecisionBundle:
     required_roles: tuple[Role | str, ...]
     missing_roles: tuple[Role | str, ...] = ()
     supporting_inputs: SupportingInputs | None = None
-    feature_snapshot: "FeatureSnapshot | None" = None
-
     @property
     def complete(self) -> bool:
         return not self.missing_roles
-
-    def with_feature_snapshot(self, snapshot: "FeatureSnapshot") -> "DecisionBundle":
-        return replace(self, feature_snapshot=snapshot)
-
 
 @dataclass(frozen=True, slots=True)
 class InstrumentKey:
@@ -58,7 +46,6 @@ class AggregatorConfig:
 
     required_roles: tuple[Role, ...] = (MarketRole.FUTURES, MarketRole.VIX)
     deadline_seconds: float = 10.0
-    feature_requirements: tuple[FeatureRequirement, ...] = ()
 
     def __post_init__(self) -> None:
         normalized_roles = tuple(parse_role(role) for role in self.required_roles)
@@ -67,21 +54,6 @@ class AggregatorConfig:
             raise ValueError("required roles must be non-empty and unique")
         if self.deadline_seconds < 0:
             raise ValueError("deadline_seconds must be non-negative")
-
-    @classmethod
-    def from_policies(
-        cls,
-        policies: tuple["StrategyPolicy", ...],
-        *,
-        required_roles: tuple[Role, ...] = (MarketRole.FUTURES, MarketRole.VIX),
-        deadline_seconds: float = 10.0,
-    ) -> "AggregatorConfig":
-        return cls(
-            required_roles=required_roles,
-            deadline_seconds=deadline_seconds,
-            feature_requirements=feature_union(policies),
-        )
-
 
 class CompletedBarAggregator:
     """Emit one futures-clocked bundle per date/minute.

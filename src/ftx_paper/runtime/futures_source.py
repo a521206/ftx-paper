@@ -6,19 +6,12 @@ from dataclasses import asdict, dataclass
 from datetime import date as date_type, datetime
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
-from typing import Any, cast
+from typing import Any
 
 from ftx_paper.config import IST, SESSION_DATA_END_MINUTES, SESSION_OPEN_MINUTES
 from ftx_paper.contracts import (
     FuturesContract, Instrument, MarketBar, SELECTION_POLICY_VERSION, parse_expiry,
     select_front_futures_contract,
-)
-from ftx_paper.market.feature_cache import (
-    ORDERFLOW_DAILY_ATR_FEATURE_SET,
-    FeatureSnapshot,
-    build_orderflow_daily_atr_snapshot,
-    daily_atr_from_snapshot,
 )
 
 
@@ -237,77 +230,7 @@ def virtual_continuous_bar(bar: MarketBar) -> MarketBar:
     )
 
 
-def materialize_orderflow_daily_atr(store: Any, session_date: str) -> float | None:
-    """Materialize and return the causal ATR needed by a live session.
-
-    The current session is excluded. Historical bars remain Paper-owned and
-    are resolved with the same source policy used by replay.
-    """
-    repository_factory = getattr(store, "feature_repository", None)
-    if not callable(repository_factory):
-        return None
-    repository = repository_factory()
-    reader = getattr(repository, "read_feature_snapshot_for_session", None)
-    writer = getattr(repository, "write_feature_snapshot", None)
-    if not callable(reader) or not callable(writer):
-        return None
-
-    existing = reader(
-        feature_set=ORDERFLOW_DAILY_ATR_FEATURE_SET,
-        instrument="NIFTY",
-        session_date=session_date,
-    )
-    existing_value = (
-        daily_atr_from_snapshot(existing)
-        if isinstance(existing, FeatureSnapshot) else None
-    )
-    resolver = FuturesSessionSourceResolver(store)
-    completed: list[tuple[str, Sequence[Mapping[str, object]]]] = []
-    available_dates = cast(Sequence[object], store.read_dates())
-    for prior_date in sorted(str(value) for value in available_dates if str(value) < session_date):
-        source = resolver.resolve(prior_date)
-        if source is None or not _complete_daily_session(source.bars):
-            continue
-        completed.append((prior_date, source.bars))
-    if len(completed) < 14:
-        return existing_value
-
-    sessions = completed[-14:]
-    prior_rows = completed[-15][1] if len(completed) >= 15 else ()
-    prior_close = None
-    if prior_rows:
-        prior_day_rows = tuple(
-            row for row in sorted(prior_rows, key=lambda item: str(item["minute"]))
-            if str(row["minute"])[11:16] < "15:00"
-        )
-        if prior_day_rows:
-            close_value = prior_day_rows[-1].get("close")
-            if isinstance(close_value, (int, float)) and not isinstance(close_value, bool):
-                prior_close = float(close_value)
-    artifact = build_orderflow_daily_atr_snapshot(
-        session_date, sessions, prior_close=prior_close,
-    )
-    if (
-        isinstance(existing, FeatureSnapshot)
-        and existing_value is not None
-        and existing.key.input_fingerprint == artifact.key.input_fingerprint
-    ):
-        return existing_value
-    writer(artifact)
-    return daily_atr_from_snapshot(artifact)
-
-
-def _complete_daily_session(rows: Sequence[Mapping[str, object]]) -> bool:
-    if not rows:
-        return False
-    minutes = [str(row.get("minute", ""))[11:16] for row in rows]
-    expected = []
-    for minute in range(SESSION_OPEN_MINUTES, SESSION_DATA_END_MINUTES):
-        expected.append(f"{minute // 60:02d}:{minute % 60:02d}")
-    return minutes == expected
-
-
 __all__ = [
     "FuturesSessionSource", "FuturesSessionSourceResolver", "SessionSourceIdentity",
-    "materialize_orderflow_daily_atr", "virtual_continuous_bar",
+    "virtual_continuous_bar",
 ]

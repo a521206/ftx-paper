@@ -684,7 +684,7 @@ def build_parity_artifact(
     requested_to = str(request.get("date_to") or session_date)[:10]
     replay_input = _replay_input(metadata)
     scope = {
-        "source_contract": request.get("source_contract", "orderflow-replay-v1"),
+        "source_contract": request.get("source_contract", "paper-replay-v1"),
         "requested_date_from": requested_from,
         "requested_date_to": requested_to,
         "effective_date_from": session_date,
@@ -699,15 +699,7 @@ def build_parity_artifact(
         "ledger_scope": str(result.get("ledger_scope") or "replay"),
         "capture_mode": request.get("capture_mode", metadata.get("capture_mode", "full")),
         "capital_profile": request.get("capital_profile", {"name": "research"}),
-        "strategy_configuration": request.get("strategy_configuration", {
-            "candidate_states_are_actionable": False,
-            "cost_basis": "gross_before_costs",
-            "dynamic_session_extrema": "updated from completed 5m aggregates at their available_at",
-            "entry_basis": "5m structural candidate plus causal 1m displacement or 5m recovery retest",
-            "exit_basis": "owner-authorized 1m or 5m policy signal",
-            "registered_locations": ["OR_LOW", "OR_HIGH", "PD_LOW", "PD_HIGH", "SESSION_HIGH", "SESSION_LOW"],
-            "research_only": True,
-        }),
+        "strategy_configuration": request.get("strategy_configuration", {}),
         "replay_input": replay_input,
         "counts": {
             "selected_source_rows": int(metadata.get("selected_source_rows", 0)),
@@ -717,8 +709,6 @@ def build_parity_artifact(
             "processed_decision_bars": int(metadata.get("processed_decision_bars", result.get("bars_seen", 0))),
         },
     }
-    if metadata.get("orderflow_daily_atr"):
-        scope["orderflow_daily_atr"] = _jsonable(metadata["orderflow_daily_atr"])
     replay_identity = replay_input.get("identity", ())
     input_identity = replay_identity[0] if replay_identity else None
     coverage = _coverage(

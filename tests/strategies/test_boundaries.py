@@ -3,7 +3,7 @@ import subprocess
 import sys
 
 from ftx_paper.domain import RESEARCH_CAPITAL_PROFILE
-from ftx_paper.application import StrategyRegistry
+from ftx_paper.application import build_strategy_catalog
 from ftx_paper.strategies import orderflow as orderflow_entry
 from ftx_paper.strategies import research as research_entry
 from ftx_paper.strategies.research import ResearchStrategyFactory
@@ -18,9 +18,9 @@ def test_research_factory_constructs_research_only() -> None:
     assert strategy.metadata.version
 
 
-def test_strategy_registry_selects_orderflow_explicitly() -> None:
-    registry = StrategyRegistry(capital_profile=RESEARCH_CAPITAL_PROFILE)
-    strategy = registry.create(
+def test_strategy_catalog_selects_orderflow_explicitly() -> None:
+    catalog = build_strategy_catalog(RESEARCH_CAPITAL_PROFILE)
+    strategy = catalog.create(
         "ftx-paper-orderflow", StrategyContext(),
     )
 

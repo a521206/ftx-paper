@@ -1,6 +1,5 @@
 from datetime import datetime, timezone
 from threading import Event
-from types import SimpleNamespace
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
@@ -12,7 +11,7 @@ from ftx_paper.runtime.store import _json_safe
 from ftx_paper.market import DecisionBundle, CompletedBarAggregator
 from ftx_paper.runtime.engine import EngineResult, PaperEngine
 from ftx_paper.runtime.replay_worker import ReplayWorker
-from ftx_paper.application import StrategyRegistry
+from ftx_paper.application import build_strategy_catalog
 from ftx_paper.runtime.futures_source import FuturesSessionSourceResolver
 from ftx_paper.runtime import RuntimeSession, RuntimeStore
 from ftx_paper.domain.capital import ResearchCapitalProfile
@@ -49,12 +48,12 @@ def test_replay_and_runtime_share_paper_engine_bundle_path(monkeypatch, tmp_path
 
     monkeypatch.setattr(PaperEngine, "on_bundle", record_bundle)
     bar = MarketBar(
-        Instrument("NIFTY", "NFO", "FUT", None),
+        Instrument("NIFTY26JANFUT", "NFO", "FUT", None),
         datetime(2026, 1, 1, 4, 50, tzinfo=timezone.utc),
         100, 102, 99, 101,
     )
     aggregator = CompletedBarAggregator(
-            {("NFO", "NIFTY"): MarketRole.FUTURES},
+            {("NFO", "NIFTY26JANFUT"): MarketRole.FUTURES},
         required_roles=(MarketRole.FUTURES,), deadline_seconds=0,
     )
     bundle = aggregator.ingest(bar)
@@ -64,7 +63,7 @@ def test_replay_and_runtime_share_paper_engine_bundle_path(monkeypatch, tmp_path
     RuntimeSession(runtime_store, None, [], engine=PaperEngine())._process_bundle(bundle, source="live")
 
     replay = ReplayWorker(
-        RuntimeStore(tmp_path / "replay"), strategy_selector=StrategyRegistry(),
+        RuntimeStore(tmp_path / "replay"), strategy_selector=build_strategy_catalog(),
     )
     replay._bars = lambda session_date, **_kwargs: (bar,)
     result = replay._execute({"session_date": "2026-01-01", "strategy_id": "ftx-paper-research"}, Event())
@@ -112,53 +111,6 @@ def test_replay_worker_stop_cancels_active_job(monkeypatch):
     assert worker._thread is not None
     assert not worker._thread.is_alive()
     assert store.runs[run_id]["status"] == "cancelled"
-
-
-def test_replay_seeds_prior_day_futures_levels(tmp_path):
-    store = RuntimeStore(tmp_path / "replay-context")
-    store.append_market_bars((
-        MarketBar(
-            Instrument("NIFTY26JANFUT", "NFO", "FUTURES", "2026-01-29"),
-            datetime(2026, 1, 1, 4, 0, tzinfo=timezone.utc),
-            100, 110, 90, 105,
-        ),
-    ), source="fixture")
-    store.append_market_bars((
-        MarketBar(
-            Instrument("NIFTY26JANFUT", "NFO", "FUTURES", "2026-01-29"),
-            datetime(2026, 1, 2, 4, 0, tzinfo=timezone.utc),
-            101, 111, 91, 106,
-        ),
-    ), source="fixture")
-
-    worker = ReplayWorker(store)
-    assert worker._prior_day_levels("2026-01-02") == (110.0, 90.0)
-
-
-def test_replay_prior_day_levels_use_selected_session_source(tmp_path):
-    store = RuntimeStore(tmp_path / "rollover-context")
-    store.append_market_bars((
-        MarketBar(
-            Instrument("NIFTY26JANFUT", "NFO", "FUTURES", "2026-01-29"),
-            datetime(2026, 1, 1, 4, 0, tzinfo=timezone.utc),
-            100, 110, 90, 105,
-        ),
-        MarketBar(
-            Instrument("NIFTY26FEBFUT", "NFO", "FUTURES", "2026-02-26"),
-            datetime(2026, 1, 1, 4, 0, tzinfo=timezone.utc),
-            200, 220, 180, 205,
-        ),
-    ), source="fixture")
-
-    worker = ReplayWorker(store)
-    assert worker._prior_day_levels("2026-01-02") == (110.0, 90.0)
-
-
-def test_replay_prior_day_levels_respect_explicit_empty_date_source(tmp_path, monkeypatch):
-    worker = ReplayWorker(RuntimeStore(tmp_path))
-    monkeypatch.setattr(worker, "_dates", lambda: pytest.fail("unexpected date-source fallback"))
-
-    assert worker._prior_day_levels("2026-01-02", available_dates=[]) == (None, None)
 
 
 def test_replay_bars_use_rollover_selected_futures_contract(tmp_path):
@@ -253,7 +205,6 @@ def test_replay_prior_day_levels_follow_rollover_source_independently(tmp_path):
     ), source="fixture")
 
     worker = ReplayWorker(store)
-    assert worker._prior_day_levels("2026-09-29") == (110.0, 90.0)
     provenance = worker.input_manifest("2026-09-29")["futures_source"]
     assert provenance["selected_symbol"] == "NIFTY"
     assert provenance["selected_expiry"] == ""
@@ -302,11 +253,9 @@ def test_replay_resolves_current_then_prior_source_once(tmp_path):
     resolver = RecordingResolver()
     worker = ReplayWorker(store, futures_source_resolver=resolver)
     bars = worker._bars("2026-09-29")
-    levels = worker._prior_day_levels("2026-09-29")
     manifest = worker.input_manifest("2026-09-29")
 
     assert {bar.instrument.symbol for bar in bars} == {"NIFTY"}
-    assert levels == (23124.1, 22792.9)
     assert manifest["provenance"]["current"]["selected_symbol"] == "NIFTY"
     assert manifest["selected_source_rows"] == 1
     assert manifest["filtered_source_rows"] == 0
@@ -351,14 +300,13 @@ def test_replay_marks_expired_only_futures_input_unavailable(tmp_path):
     worker = ReplayWorker(store)
     assert not [bar for bar in worker._bars("2026-09-30")
                 if str(bar.instrument.instrument_type).upper() in {"FUT", "FUTURES"}]
-    assert worker._prior_day_levels("2026-09-30") == (None, None)
 
 
 def test_closed_bar_is_processed_under_session_lifecycle(tmp_path):
     store = RuntimeStore(tmp_path)
     session = RuntimeSession(store, None, [], engine=PaperEngine())
     session._aggregator = CompletedBarAggregator(
-        {("NFO", "NIFTY"): MarketRole.FUTURES},
+        {("NFO", "NIFTY26JANFUT"): MarketRole.FUTURES},
         required_roles=(MarketRole.FUTURES,), deadline_seconds=0,
     )
     session.feed = Feed(session.on_closed_bar)
@@ -413,7 +361,7 @@ def test_incomplete_bundle_is_diagnosed_without_advancing_completion(tmp_path):
     store = RuntimeStore(tmp_path)
     session = RuntimeSession(store, None, [], engine=PaperEngine())
     session._aggregator = CompletedBarAggregator({
-            ("NFO", "NIFTY"): MarketRole.FUTURES,
+                ("NFO", "NIFTY26JANFUT"): MarketRole.FUTURES,
         ("NSE", "INDIA VIX"): MarketRole.VIX,
     }, deadline_seconds=0)
     store.write_status({"state": "RUNNING"})
@@ -743,40 +691,6 @@ def test_startup_backfill_requires_futures_and_vix_inputs():
             ),
             bars,
         )
-
-
-def test_live_orderflow_prior_context_uses_latest_complete_prior_session(monkeypatch, tmp_path):
-    valid_rows = tuple({
-        "symbol": "NIFTY26SEP", "exchange": "NFO", "instrument_type": "FUT",
-        "expiry": "2026-09-24", "minute": f"2026-09-14T{9 + (15 + index) // 60:02d}:{(15 + index) % 60:02d}:00+05:30",
-        "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5,
-        "volume": 1, "open_interest": 1,
-    } for index in range(375))
-    incomplete_rows = valid_rows[:-1]
-
-    class Store:
-        def read_status(self):
-            return {}
-
-        def read_dates(self):
-            return ("2026-09-13", "2026-09-14")
-
-    class Resolver:
-        def __init__(self, _store):
-            pass
-
-        def resolve(self, session_date):
-            rows = incomplete_rows if session_date == "2026-09-14" else valid_rows
-            return SimpleNamespace(bars=rows)
-
-    monkeypatch.setattr(session_module, "FuturesSessionSourceResolver", Resolver)
-    session = RuntimeSession(Store(), None, [], engine=PaperEngine())
-    session._initialize_orderflow_prior_context("2026-09-15")
-
-    assert len(session._orderflow_producer._prior_bars) == 375
-    assert session._orderflow_producer._prior_close == 100.5
-    assert session._orderflow_producer._prior_value_high == 101.0
-    assert session._orderflow_producer._prior_value_low == 99.0
 
 
 def test_runtime_session_rejects_non_flat_intraday_startup(tmp_path):

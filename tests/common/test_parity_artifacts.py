@@ -20,7 +20,7 @@ def _artifact() -> dict:
         "metadata": {"timezone": "UTC", "normalized_fingerprint": "fixture",
                      "selected_source_rows": 1, "filtered_source_rows": 0,
                      "completed_source_rows": 1, "gap_rows": 0,
-                     "orderflow_daily_atr": [{"value": 12.5, "source_fingerprint": "atr-fixture"}]},
+                     "input_provenance": {"source": "fixture"}},
     }
     return build_parity_artifact(
         result,
@@ -34,9 +34,7 @@ def test_artifact_uses_only_four_layers() -> None:
     validate_parity_artifact(artifact)
     assert set(artifact["layers"]) == set(PARITY_LAYERS)
     assert "p9" not in artifact and "p10" not in artifact
-    assert artifact["scope"]["orderflow_daily_atr"] == [
-        {"value": 12.5, "source_fingerprint": "atr-fixture"}
-    ]
+    assert "orderflow_daily_atr" not in artifact["scope"]
 
 
 def test_artifact_resequences_restarted_producer_decision_stream() -> None:
@@ -94,7 +92,7 @@ def test_observed_empty_layers_are_matchable() -> None:
     assert artifact["manifest"]["layers"]["execution_settlement"]["status"] == "UNAVAILABLE"
 
 
-def test_orderflow_scope_uses_canonical_session_and_vehicle_fields() -> None:
+def test_scope_uses_canonical_session_and_vehicle_fields() -> None:
     artifact = build_parity_artifact(
         {"strategy": {}, "bars_seen": 1, "metadata": {"normalized_fingerprint": "fixture"}},
         request={"session_date": "2026-01-05", "strategy_id": "ftx-paper-orderflow", "vehicles": ["futures"]},
@@ -119,7 +117,7 @@ def test_scope_uses_selected_source_fingerprint_and_neutral_contract() -> None:
         request={"session_date": "2026-09-29", "strategy_id": "ftx-paper-orderflow"},
     )
     scope = artifact["scope"]
-    assert scope["source_contract"] == "orderflow-replay-v1"
+    assert scope["source_contract"] == "paper-replay-v1"
     assert scope["replay_input"]["identity"] == ["normalized-fingerprint"]
     assert scope["counts"]["processed_decision_bars"] == 375
 
@@ -127,8 +125,8 @@ def test_scope_uses_selected_source_fingerprint_and_neutral_contract() -> None:
 def test_decision_diagnostics_exposes_paper_stage_and_reason_counts() -> None:
     records = [
         {"kind": "recorded", "values": {"decision_stage": "trigger", "outcome": "recorded", "reason": "trigger_observation"}},
-        {"kind": "rejected", "values": {"decision_stage": "trigger", "outcome": "rejected", "reason": "no_orderflow_interaction"}},
-        {"kind": "accepted", "values": {"decision_stage": "admission", "outcome": "accepted", "reason": "orderflow_admission"}},
+        {"kind": "rejected", "values": {"decision_stage": "trigger", "outcome": "rejected", "reason": "no_interaction"}},
+        {"kind": "accepted", "values": {"decision_stage": "admission", "outcome": "accepted", "reason": "strategy_admission"}},
     ]
 
     diagnostics = decision_diagnostics(records)

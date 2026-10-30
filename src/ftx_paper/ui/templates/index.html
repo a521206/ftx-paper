@@ -1065,23 +1065,6 @@
       .causal-meta { grid-template-columns: repeat(2, 1fr); }
     }
 
-    .orderflow-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 14px; }
-    .orderflow-stat, .orderflow-location, .orderflow-sequence, .orderflow-action { background: var(--md-surface-container-low); color: var(--md-on-surface); border: 1px solid var(--md-outline-variant); border-radius: 10px; padding: 14px; }
-    .orderflow-stat strong { display: block; font-size: 1.05rem; margin-top: 5px; }
-    .orderflow-action { border-color: var(--md-primary); margin-bottom: 14px; }
-    .orderflow-action h2 { margin: 0 0 12px; font-size: 1.45rem; }
-    .orderflow-action-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; }
-    .orderflow-action-grid span, .orderflow-location span { display: block; color: var(--md-on-surface-variant); font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; }
-    .orderflow-action-grid strong { display: block; margin-top: 4px; }
-    .orderflow-locations { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }
-    .orderflow-location h3 { margin: 0 0 9px; font-size: 1rem; }
-    .orderflow-location p { margin: 7px 0 0; }
-    .orderflow-sequence { padding: 14px; overflow: hidden; }
-    .orderflow-sequence > .section-head { position: sticky; top: 0; z-index: 1; background: var(--md-surface-container-low); padding-bottom: 10px; }
-    .orderflow-sequence-row { border-bottom: 1px solid var(--md-outline-variant); }
-    .orderflow-sequence-row summary { display: grid; grid-template-columns: 150px 1fr 1fr 90px 1.4fr; gap: 10px; align-items: center; padding: 11px 8px; }
-    .orderflow-sequence-row:last-child { border-bottom: 0; }
-    .orderflow-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
     .context-header { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 14px; }
     .context-header h1 { margin: 0 0 4px; font-size: 28px; line-height: 1.1; }
     .context-header p { margin: 0; color: var(--md-on-surface-variant); }
@@ -1108,16 +1091,8 @@
     .context-state > div { padding: 12px; border: 1px solid var(--md-outline-variant); border-radius: 8px; background: var(--md-surface); }
     .context-state strong { display: block; margin-top: 5px; overflow-wrap: anywhere; }
     .context-location-meta { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 9px; }
-    .context-section.orderflow-sequence { max-height: 620px; overflow-y: auto; }
     .context-timeline { position: relative; padding-left: 22px; }
     .context-timeline::before { content: ''; position: absolute; left: 7px; top: 8px; bottom: 8px; width: 2px; background: var(--md-outline-variant); }
-    .orderflow-sequence-row { position: relative; }
-    .orderflow-sequence-row::before { content: ''; position: absolute; left: -19px; top: 17px; width: 9px; height: 9px; border-radius: 50%; background: var(--md-primary); border: 2px solid var(--md-surface-container-low); }
-    .orderflow-sequence-row summary { display: grid; grid-template-columns: 72px 1fr 1fr auto; gap: 10px; align-items: center; padding: 13px 4px; }
-    .orderflow-sequence-row:nth-of-type(even) { background: var(--md-surface); }
-    .orderflow-sequence-row summary > span { min-width: 0; overflow-wrap: anywhere; }
-    @media (max-width: 800px) { .orderflow-grid, .orderflow-locations, .orderflow-action-grid, .orderflow-columns, .context-state { grid-template-columns: 1fr 1fr; } .context-hero { grid-template-columns: repeat(2, minmax(0, 1fr)); } .context-hero .context-read { grid-column: 1 / -1; } .context-main { grid-template-columns: 1fr; } .context-rail { position: static; } .orderflow-sequence-row summary { grid-template-columns: 72px 1fr auto; } .orderflow-sequence-row summary span:nth-child(3) { grid-column: 2; } }
-    @media (max-width: 480px) { .orderflow-grid, .orderflow-locations, .orderflow-action-grid, .orderflow-columns, .context-state { grid-template-columns: 1fr; } }
     @media (max-width: 480px) { .context-header { display: block; } .context-diagnostic { display: inline-block; margin-top: 8px; } .context-hero { grid-template-columns: 1fr; } .context-hero .context-read { grid-column: auto; } .context-strip { display: flex; } .context-strip > div { flex: 0 0 135px; } .context-state { grid-template-columns: 1fr; } }
   </style>
 </head>
@@ -1135,11 +1110,9 @@
     <nav>
       {% for item in [
         ('dashboard', 'Dashboard'),
-        ('orderflow', 'Orderflow'),
         ('decisions', 'Decision review'),
         ('positions', 'Positions'),
         ('trades', 'Trades'),
-        ('market-context', 'Orderflow context'),
         ('capital', 'Capital'),
         ('replay', 'Replay'),
         ('activity', 'Activity')
@@ -1255,7 +1228,7 @@
       return `${path}${separator}strategy_id=${encodeURIComponent(selectedStrategy)}`;
     }
     function replayStrategyId(strategyId) {
-      return strategyId || 'ftx-paper-orderflow';
+      return strategyId || '';
     }
     let replaySelectionInFlight = false;
     const replaySearch = new URLSearchParams(location.search);
@@ -1743,8 +1716,8 @@
             ['Rejected', rejected],
             ['Exits', exits],
             ['Shadow trades', trades],
-            ['Gross reward points', summary.gross_reward_points == null ? '—' : summary.gross_reward_points],
-            ['Achieved R:R', summary.achieved_risk_reward == null ? '—' : summary.achieved_risk_reward],
+             ['Gross P&L', summary.gross_pnl == null ? '—' : summary.gross_pnl],
+             ['Risk/reward', summary.risk_reward == null ? '—' : summary.risk_reward],
              ['Scored decisions', summary.decisions_scored ?? '—'],
           ].map(([label, value]) => `<div class="replay-metric"><div class="label">${label}</div><div class="value">${esc(value)}</div></div>`).join('')}
         </div>
@@ -2129,10 +2102,6 @@
         </div>`;
       } else if (page === 'activity') {
         body = activityPage(data.events.events || []);
-      } else if (page === 'market-context') {
-        body = orderflowContextPage(data.orderflow || {});
-      } else if (page === 'orderflow') {
-        body = orderflowPage(data.orderflow || {});
       } else {
         body = `<div class="card">
           <h2>${page[0].toUpperCase() + page.slice(1)}</h2>
@@ -2300,8 +2269,6 @@
           activity: {
             decisions: strategyQuery(`/api/v1/decisions?${new URLSearchParams({ date: decisionDate, limit: '100' }).toString()}`),
           },
-          'market-context': { orderflow: `/api/v1/orderflow?${new URLSearchParams({ date: decisionDate, strategy_id: 'ftx-paper-orderflow' }).toString()}` },
-          orderflow: { orderflow: `/api/v1/orderflow?${new URLSearchParams({ date: decisionDate, strategy_id: 'ftx-paper-orderflow' }).toString()}` },
         }[page] || {};
 
         const responseEntries = await Promise.all(
@@ -2318,7 +2285,6 @@
         const capital = responseData.capital || {};
         const positions = responseData.positions || { positions: [] };
         const trades = responseData.trades || { trades: [] };
-        const orderflow = responseData.orderflow || {};
         const decisionsData = responseData.decisions || { decisions: [] };
         const events = page === 'activity'
           ? { events: (decisionsData.decisions || []).map((item) => ({
@@ -2336,7 +2302,6 @@
           capital,
           positions,
           trades,
-          orderflow,
           decisions: decisionsData,
           events,
           replays,

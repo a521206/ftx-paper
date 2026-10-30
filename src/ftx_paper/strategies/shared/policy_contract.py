@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Protocol
 from ftx_paper.domain.decision_context import DecisionContext
 from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.contracts import OrderIntent
-from ftx_paper.market.requirements import FeatureRequirement, feature_union
 
 if TYPE_CHECKING:
     from ftx_paper.market.bundles import DecisionBundle
@@ -46,9 +45,6 @@ class StrategyPolicy(Protocol):
     @property
     def execution_mode(self) -> ExecutionMode: ...
 
-    @property
-    def required_features(self) -> tuple[FeatureRequirement, ...]: ...
-
     def evaluate(
         self,
         bundle: DecisionBundle,
@@ -62,9 +58,7 @@ class StrategyPolicy(Protocol):
 
 __all__ = [
     "ExecutionMode",
-    "FeatureRequirement",
     "PolicyDecision",
     "PolicyOutput",
     "StrategyPolicy",
-    "feature_union",
 ]

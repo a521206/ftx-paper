@@ -14,8 +14,7 @@ from ftx_paper.runtime.store import RuntimeStore
 from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.runtime.parity_artifacts import PARITY_LAYERS, read_parity_artifact
 from ftx_paper.application.runtime_operations import RuntimeOperations
-from ftx_paper.application.strategy_registry import StrategyRegistry
-from ftx_paper.domain.capital import ResearchCapitalProfile, RESEARCH_CAPITAL_PROFILE
+from ftx_paper.domain.capital import ResearchCapitalProfile
 from ftx_paper.runtime.events import (
     EXECUTION_EVENT_TYPES, RISK_EVENT_TYPES, DecisionTimestampError,
 )
@@ -30,15 +29,14 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
                replay_worker: ReplayWorker | None = None,
                capital_profile: ResearchCapitalProfile | None = None,
                runtime_operations: RuntimeOperations | None = None,
-               broker_auth: Any | None = None) -> Flask:
+               broker_auth: Any | None = None,
+               strategy_selector: Any | None = None) -> Flask:
     app = Flask(__name__)
     store.recover_interrupted()
     effective_auth = broker_auth or zerodha_auth
     session = session or RuntimeSession(store, effective_auth, [])
-    replay_worker = replay_worker or ReplayWorker(
-        store, capital_profile=capital_profile or RESEARCH_CAPITAL_PROFILE,
-        strategy_selector=StrategyRegistry(capital_profile=capital_profile or RESEARCH_CAPITAL_PROFILE),
-    )
+    if replay_worker is None:
+        raise ValueError("replay_worker must be composed by the application root")
     operations = runtime_operations or RuntimeOperations(session, replay_worker, controller)
 
     def json_safe(value: Any) -> Any:

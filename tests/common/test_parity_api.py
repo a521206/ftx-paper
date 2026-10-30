@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from ftx_paper.api.app import create_app
+from ftx_paper.runtime.replay_worker import ReplayWorker
 from ftx_paper.runtime.parity_artifacts import build_parity_artifact
 from ftx_paper.runtime.store import RuntimeStore
 
@@ -35,7 +36,7 @@ def _stored_replay(tmp_path):
 
 def test_parity_manifest_and_layer_endpoints_are_bounded(tmp_path) -> None:
     store, run_id, artifact = _stored_replay(tmp_path)
-    client = create_app(store).test_client()
+    client = create_app(store, replay_worker=ReplayWorker(store)).test_client()
 
     manifest = client.get(f"/api/v1/replay/{run_id}/parity/manifest")
     assert manifest.status_code == 200
@@ -50,7 +51,7 @@ def test_parity_manifest_and_layer_endpoints_are_bounded(tmp_path) -> None:
 
 def test_parity_layer_endpoint_rejects_invalid_pagination(tmp_path) -> None:
     store, run_id, _ = _stored_replay(tmp_path)
-    client = create_app(store).test_client()
+    client = create_app(store, replay_worker=ReplayWorker(store)).test_client()
 
     response = client.get(f"/api/v1/replay/{run_id}/parity/decision?limit=1001")
 
@@ -59,7 +60,8 @@ def test_parity_layer_endpoint_rejects_invalid_pagination(tmp_path) -> None:
 
 
 def test_legacy_event_routes_are_not_exposed(tmp_path) -> None:
-    client = create_app(RuntimeStore(tmp_path)).test_client()
+    fresh_store = RuntimeStore(tmp_path)
+    client = create_app(fresh_store, replay_worker=ReplayWorker(fresh_store)).test_client()
 
     for path in ("/api/v1/events", "/api/v1/logs", "/api/v1/audit"):
         assert client.get(path).status_code == 404

@@ -8,7 +8,8 @@ import pytest
 
 from ftx_paper.broker import PaperBroker
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole, OrderIntent, OrderRole, OrderSide, parse_role, role_to_key, select_synthetic_quote
-from ftx_paper.market import CompletedBarAggregator, DecisionBundle, LiveFeatureCalculator, option_pcr_at_event, vix_open_and_event
+from ftx_paper.market import CompletedBarAggregator, DecisionBundle
+from ftx_paper.strategies.research.features import LiveFeatureCalculator, option_pcr_at_event, vix_open_and_event
 from ftx_paper.strategies.research import ConfiguredLiveStrategy
 from ftx_paper.strategies.shared.exits import ExitStateMachine, PositionState
 from ftx_paper.strategies.research.decision import CandidateDecision, IndependentLiveDecisionEngine
@@ -20,7 +21,7 @@ from ftx_paper.strategies.research.adaptive_stop import adaptive_stop_bp
 from ftx_paper.domain import PortfolioState
 from ftx_paper.runtime.engine import PaperEngine
 from ftx_paper.execution import PaperExecutionCoordinator
-from ftx_paper.market.location import Cell, Location, LocationFeatures, LocationSnapshot
+from ftx_paper.strategies.research.location import Cell, Location, LocationFeatures, LocationSnapshot
 from ftx_paper.strategies.research.decision import _configured_policies_for_cell
 from ftx_paper.strategies.research.config import Session
 from ftx_paper.runtime.replay_worker import ReplayWorker
@@ -501,7 +502,7 @@ def test_setup_policy_can_trade_vwap_as_a_research_reference() -> None:
 
 def test_orderflow_templates_and_research_policies_are_separate() -> None:
     from ftx_paper.strategies.research.config import SESSION_POLICIES
-    from ftx_paper.strategies.shared.templates import TRADE_TEMPLATES
+    from ftx_paper.strategies.orderflow.templates import TRADE_TEMPLATES
 
     assert all("VWAP" not in {location.value for location in template.locations} for template in TRADE_TEMPLATES.values())
     assert "or_vwap" in {template.stop_policy.value for template in TRADE_TEMPLATES.values()}
@@ -1071,7 +1072,7 @@ def test_live_decision_engine_evaluates_cell_before_rejecting_missing_vix(monkey
     engine = IndependentLiveDecisionEngine(
         version="test", config_hash="hash", capital=CAPITAL_CONFIG.initial_capital,
     )
-    monkeypatch.setattr(engine._location_detector, "observe", lambda _bar: snapshot)
+    monkeypatch.setattr(engine._location_detector, "observe", lambda _bar, **_kwargs: snapshot)
 
     events = ()
     for index in range(3):

@@ -191,12 +191,6 @@ class SqliteRuntimeStore:
         connection.execute(f"PRAGMA busy_timeout = {int(timeout * 1000)}")
         return connection
 
-    def feature_repository(self):
-        """Return the SQLite feature repository without leaking it to runtime layers."""
-        from .feature_repository import SqliteFeatureRepository
-
-        return SqliteFeatureRepository(self.database, read_only=self._read_only)
-
     def initialize(self) -> None:
         """Create the runtime directory and schema for a writable store."""
         self.root.mkdir(parents=True, exist_ok=True)
@@ -272,24 +266,6 @@ class SqliteRuntimeStore:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS feature_cache (
-                    cache_key TEXT PRIMARY KEY,
-                    instrument TEXT NOT NULL,
-                    session_date TEXT NOT NULL,
-                    timeframe TEXT NOT NULL,
-                    cutoff_minute TEXT NOT NULL,
-                    feature_set TEXT NOT NULL,
-                    calculator_version TEXT NOT NULL,
-                    parameters_json TEXT NOT NULL,
-                    input_fingerprint TEXT NOT NULL,
-                    values_json TEXT NOT NULL,
-                    source_bar_ids_json TEXT NOT NULL,
-                    provenance_json TEXT NOT NULL,
-                    availability TEXT NOT NULL,
-                    computed_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS ix_feature_cache_lookup
-                    ON feature_cache(session_date, instrument, timeframe, cutoff_minute);
                 CREATE TABLE IF NOT EXISTS runtime_contracts (
                     provider TEXT NOT NULL DEFAULT 'unknown',
                     exchange TEXT NOT NULL,
