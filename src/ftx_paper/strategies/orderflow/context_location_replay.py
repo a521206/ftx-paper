@@ -7,19 +7,19 @@ used to reconstruct a causal fact.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import math
 from typing import Any
 
+from .evidence_publication import EvidencePublication
 from .hierarchy import MarketContext
 from .location_observation import LocationObservation
 from .market_observation import MarketObservation, observe_market
 from .orderflow_common import Aggregate
 from .runtime_boundary import CompletedObservation, ReplayInputAdapter
 from .state_machine_types import LocationRecord, LocationRegistry, MarketContextStore
-from .value_publication import ValuePublication
-from .vwap_location import causal_vwap_prefix
 
 
 def _instant(value: str) -> datetime:
@@ -30,14 +30,14 @@ def _timestamp(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
-def _context_as_of(store: MarketContextStore, available_at: str) -> MarketContext | None:
-    contexts = [
-        context
-        for versions in store.versions.values()
-        for context in versions
-        if context.available_at <= available_at
-    ]
-    return max(contexts, key=lambda context: (context.available_at, context.context_id, context.version), default=None)
+def _context_as_of(
+    store: MarketContextStore,
+    available_at: str,
+    context_stream_id: str | None,
+) -> MarketContext | None:
+    if context_stream_id is None:
+        return None
+    return store.latest_as_of(context_stream_id, available_at)
 
 
 def _location_observation(
@@ -130,15 +130,11 @@ def replay_context_location(
     rows: list[dict[str, Any]],
     *,
     session_date: str,
-    contexts: Iterable[MarketContext] = (),
-    prior_rows: Iterable[Mapping[str, Any]] = (),
-    prior_value: ValuePublication | None = None,
-    atr: float | None = None,
+    evidence: EvidencePublication,
 ) -> ContextLocationReplay:
     """Replay completed aggregates and emit point-in-time causal facts."""
     return _replay_market(
-        observe_market(rows), session_date=session_date, contexts=contexts,
-        prior_rows=prior_rows, prior_value=prior_value, atr=atr,
+        observe_market(rows), session_date=session_date, evidence=evidence,
     )
 
 
@@ -146,10 +142,7 @@ def replay_context_location_artifact(
     payload: Mapping[str, Any],
     *,
     session_date: str,
-    contexts: Iterable[MarketContext] = (),
-    prior_rows: Iterable[Mapping[str, Any]] = (),
-    prior_value: ValuePublication | None = None,
-    atr: float | None = None,
+    evidence: EvidencePublication,
 ) -> ContextLocationReplay:
     """Replay the completed aggregate sections emitted by Phase 3."""
     raw_aggregates = payload.get("aggregates")
@@ -160,24 +153,36 @@ def replay_context_location_artifact(
         raw_items = raw_aggregates.get(timeframe)
         if not isinstance(raw_items, Sequence) or isinstance(raw_items, (str, bytes)):
             raise ValueError(f"Phase 3 artifact is missing {timeframe} aggregates")
-        aggregates[timeframe] = tuple(
-            Aggregate(
+        parsed: list[Aggregate] = []
+        for item in raw_items:
+            if not isinstance(item, Mapping):
+                raise ValueError(f"Phase 3 artifact contains an invalid {timeframe} aggregate")
+            if str(item["timeframe"]) != timeframe:
+                raise ValueError(f"Phase 3 {timeframe} section contains a mismatched timeframe")
+            numbers = {
+                key: float(item[key]) for key in ("open", "high", "low", "close")
+            }
+            if any(not math.isfinite(value) for value in numbers.values()):
+                raise ValueError(f"Phase 3 artifact contains non-finite {timeframe} prices")
+            aggregate = Aggregate(
                 str(item["time"]), str(item["end_time"]), str(item["available_at"]),
-                str(item["timeframe"]), int(item["source_bar_count"]),
-                float(item["open"]), float(item["high"]), float(item["low"]),
-                float(item["close"]), int(item["volume"]), str(item["symbol"]),
+                timeframe, int(item["source_bar_count"]), numbers["open"], numbers["high"],
+                numbers["low"], numbers["close"], int(item["volume"]), str(item["symbol"]),
                 str(item["expiry"]), str(item["contract_type"]), str(item["session_date"]),
                 str(item["source_fingerprint"]),
             )
-            for item in raw_items if isinstance(item, Mapping)
-        )
+            if aggregate.available_at < aggregate.end_time:
+                raise ValueError("Phase 3 aggregate is available before completion")
+            if timeframe == "5m" and aggregate.source_bar_count != 5:
+                raise ValueError("Phase 3 5m aggregate must contain five source bars")
+            parsed.append(aggregate)
+        aggregates[timeframe] = tuple(parsed)
     source_fingerprint = str(payload.get("source_fingerprint", ""))
     if not source_fingerprint:
         raise ValueError("Phase 3 artifact is missing source_fingerprint")
     market = MarketObservation(aggregates, (), {}, source_fingerprint)
     return _replay_market(
-        market, session_date=session_date, contexts=contexts,
-        prior_rows=prior_rows, prior_value=prior_value, atr=atr,
+        market, session_date=session_date, evidence=evidence,
     )
 
 
@@ -185,72 +190,52 @@ def _replay_market(
     market: MarketObservation,
     *,
     session_date: str,
-    contexts: Iterable[MarketContext],
-    prior_rows: Iterable[Mapping[str, Any]],
-    prior_value: ValuePublication | None,
-    atr: float | None,
+    evidence: EvidencePublication,
 ) -> ContextLocationReplay:
     observations = _completed_observations(market.aggregates, session_date=session_date)
     source = ReplayInputAdapter()
     source.process(observations)
     store = MarketContextStore()
-    for context in contexts:
+    for context in evidence.contexts:
         store.publish(context)
-    registry = LocationRegistry(f"orderflow:{session_date}")
+    registry = LocationRegistry(evidence.location_stream_id or f"orderflow:{session_date}")
+    for location in evidence.locations:
+        registry.register(location)
     aggregates = sorted(
         (item for timeframe in ("1m", "5m") for item in market.aggregates[timeframe] if item.session_date == session_date),
         key=lambda item: (item.available_at, item.timeframe, item.time),
     )
-    first_five = next((item for item in aggregates if item.timeframe == "5m"), None)
-    initialized = False
-    running_high: float | None = None
-    running_low: float | None = None
-    vwap_prefix: dict[str, list[Aggregate]] = {"1m": [], "5m": []}
     facts: list[dict[str, Any]] = []
     for aggregate in aggregates:
         unavailable: list[str] = []
-        if atr is None:
-            unavailable.append("missing_atr")
-        if first_five is None:
-            unavailable.append("missing_opening_range")
-        elif aggregate.available_at < first_five.available_at:
+        unavailable.extend(
+            reason for reason in evidence.unavailable
+            if reason != "atr_not_yet_available"
+        )
+        if evidence.atr.value is None:
+            unavailable.append(evidence.atr.unavailable_reason or "missing_atr")
+        elif evidence.atr.available_at is not None and aggregate.available_at < evidence.atr.available_at:
+            unavailable.append("atr_not_yet_available")
+        opening = registry.resolve_as_of("OR_LOW", aggregate.available_at)
+        if opening is None:
+            unavailable.append(
+                "missing_opening_range"
+                if registry.resolve("OR_LOW") is None
+                else "opening_range_not_yet_available"
+            )
+        elif aggregate.available_at < opening.available_at:
             unavailable.append("opening_range_not_yet_available")
-        elif not initialized and aggregate is first_five and atr is not None:
-            registry.register_opening_range(
-                first_five.low, first_five.high, first_five.available_at,
-                source_session=session_date, atr=atr,
-            )
-            prior = tuple(prior_rows)
-            if prior:
-                registry.register_prior_day_extremes(
-                    min(float(item["low"]) for item in prior),
-                    max(float(item["high"]) for item in prior),
-                    first_five.available_at,
-                    source_session=str(prior[0].get("session_date", "prior")), atr=atr,
-                )
-            initialized = True
-        if aggregate.timeframe == "5m" and atr is not None:
-            running_high = aggregate.high if running_high is None else max(running_high, aggregate.high)
-            running_low = aggregate.low if running_low is None else min(running_low, aggregate.low)
-            registry.publish_session_extreme("SESSION_HIGH", running_high, aggregate, atr=atr)
-            registry.publish_session_extreme("SESSION_LOW", running_low, aggregate, atr=atr)
-        if atr is not None:
-            vwap_prefix[aggregate.timeframe].append(aggregate)
-            measurement = causal_vwap_prefix(vwap_prefix[aggregate.timeframe], session_date=session_date)[-1]
-            registry.publish_vwap(
-                value=measurement.value, available_at=aggregate.available_at,
-                source_session=session_date, source_aggregate_id=aggregate.time,
-                source_observation_id=measurement.source_observation_id,
-                timeframe=aggregate.timeframe, atr=atr,
-            )
-        context = _context_as_of(store, aggregate.available_at)
+        context_stream_id = evidence.context_stream_id
+        if context_stream_id is None:
+            context_ids = {item.context_id for item in evidence.contexts}
+            context_stream_id = next(iter(context_ids), None) if len(context_ids) == 1 else None
+        context = _context_as_of(store, aggregate.available_at, context_stream_id)
         if context is None:
             unavailable.append("missing_context")
         if (
-            prior_value is None
-            or prior_value.reference is None
-            or prior_value.available_at is None
-            or _timestamp(prior_value.available_at) > _timestamp(_instant(aggregate.available_at))
+            evidence.prior_value.reference is None
+            or evidence.prior_value.available_at is None
+            or _timestamp(evidence.prior_value.available_at) > _timestamp(_instant(aggregate.available_at))
         ):
             unavailable.append("missing_prior_session_value_evidence")
         available_locations = tuple(
@@ -259,11 +244,16 @@ def _replay_market(
         )
         if not available_locations:
             unavailable.append("missing_location_evidence")
-        child_ids = tuple(
-            f"aggregate:1m:{item.time}" for item in market.aggregates["1m"]
-            if aggregate.timeframe == "5m" and aggregate.time <= item.time <= aggregate.end_time
+        children = _causal_children(aggregate, market.aggregates["1m"])
+        child_ids = tuple(f"aggregate:1m:{item.time}" for item in children)
+        location_values = (
+            tuple(
+                _location_observation(aggregate, record, child_observation_ids=child_ids)
+                for record in available_locations
+            )
+            if aggregate.timeframe != "5m" or len(children) == 5
+            else ()
         )
-        location_values = tuple(_location_observation(aggregate, record, child_observation_ids=child_ids) for record in available_locations)
         facts.append(_context_fact(aggregate, context, location_values, unavailable))
     return ContextLocationReplay(tuple(item.to_dict() for item in source.state.events), tuple(facts))
 
@@ -276,10 +266,10 @@ def _completed_observations(aggregates: Mapping[str, Sequence[Aggregate]], *, se
         for aggregate in aggregates[timeframe]:
             if aggregate.session_date != session_date:
                 continue
-            lineage = tuple(
-                identities[item.time] for item in one_minute
-                if aggregate.time <= item.time <= aggregate.end_time
-            ) if timeframe == "5m" else ()
+            children = _causal_children(aggregate, one_minute)
+            if timeframe == "5m" and len(children) != 5:
+                continue
+            lineage = tuple(identities[item.time] for item in children) if timeframe == "5m" else ()
             result.append(CompletedObservation(
                 identity=f"aggregate:{timeframe}:{aggregate.time}",
                 observed_at=_instant(aggregate.end_time),
@@ -288,6 +278,24 @@ def _completed_observations(aggregates: Mapping[str, Sequence[Aggregate]], *, se
                 lineage=lineage,
             ))
     return tuple(sorted(result, key=lambda item: (item.available_at, item.identity)))
+
+
+def _causal_children(
+    aggregate: Aggregate,
+    one_minute: Sequence[Aggregate],
+) -> tuple[Aggregate, ...]:
+    if aggregate.timeframe != "5m":
+        return ()
+    children = tuple(
+        item for item in one_minute
+        if aggregate.time <= item.time <= aggregate.end_time
+        and item.available_at <= aggregate.available_at
+    )
+    expected = tuple(
+        (_instant(aggregate.time) + timedelta(minutes=offset)).strftime("%Y-%m-%dT%H:%M")
+        for offset in range(5)
+    )
+    return children if tuple(item.time for item in children) == expected else ()
 
 
 __all__ = ["ContextLocationReplay", "replay_context_location", "replay_context_location_artifact"]

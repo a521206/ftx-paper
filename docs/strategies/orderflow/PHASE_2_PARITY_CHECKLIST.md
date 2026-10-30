@@ -1,4 +1,4 @@
-# Phase 2 Parity Checklist
+# Phases 2-4 Parity Checklist
 
 Authority: the pinned NiftyZoning commit recorded in
 `ORDERFLOW_IMPLEMENTATION_PLAN.md` and
@@ -48,8 +48,8 @@ phase is ported and its canonical tests pass.
 
 | Layer | Canonical modules and symbols | Direct closure and contract facts | Host boundary and entry behavior | Tests / status |
 |---|---|---|---|---|
-| Source and replay | `state_machine_source.py`: `source_fingerprint`, `canonical_source_rows`, `source_metadata`; `market_observation.py`: `MarketObservation`, `ObservationGap`, `observe_market`, `rows_available_for_observation`, `derive_session_levels`; `orderflow_common.py`: `Aggregate`, `ObservationIssue`, `build_aggregate_result`, `canonical_timestamp`; `state_machine.py`: `ReplayMachine.step`, `process_bar` | Ordered unique source rows; duplicate rejection; completed 1m/5m aggregates; gap and incomplete-parent issues; observed/available timestamps and parent lineage; unavailable reasons remain explicit | Paper supplies normalized market input only. Live publishes one completed observation; replay supplies bounded stored input. Adapters do not aggregate, score, or repair gaps. | Canonical source/observation tests plus Paper boundary prefix test; `PENDING` |
-| Context and locations | `value_publication.py`; `opening_gap_policy.py`; `location_observation.py`: `LocationObservation`; `location_geometry.py`: `LocationBand`; `vwap_location.py`: `causal_vwap_prefix`; `state_machine_types.py`: `MarketContextStore`, `LocationRegistry`, `LocationRecord`, `SessionLevels`; artifact `market_context_history.py` | Immutable context versions; location generations, aliases, geometry, ownership, priority, as-of resolution, permissions, gap transitions, source lineage, availability, and unavailable evidence | Canonical owns replacement and permission rules. Paper may provide prior-session inputs and persist snapshots, never fallback values or priority. Same boundary in live/replay. | Canonical context/location tests plus Paper scaffold reachability test; `PENDING` |
+| Source and replay | `state_machine_source.py`: `source_fingerprint`, `canonical_source_rows`, `source_metadata`; `market_observation.py`: `MarketObservation`, `ObservationGap`, `observe_market`, `rows_available_for_observation`, `derive_session_levels`; `orderflow_common.py`: `Aggregate`, `ObservationIssue`, `build_aggregate_result`, `canonical_timestamp`; `state_machine.py`: `ReplayMachine.step`, `process_bar` | Ordered unique source rows; duplicate rejection; completed 1m/5m aggregates; gap and incomplete-parent issues; observed/available timestamps and parent lineage; unavailable reasons remain explicit | Paper supplies normalized market input only. Live publishes one completed observation; replay supplies bounded stored input. Adapters do not aggregate, score, or repair gaps. | Phase 3 source/observation parity and Paper adapter gates: **COMPLETE** |
+| Context and locations | `value_publication.py`; `opening_gap_policy.py`; `location_observation.py`: `LocationObservation`; `location_geometry.py`: `LocationBand`; `vwap_location.py`: `causal_vwap_prefix`; `state_machine_types.py`: `MarketContextStore`, `LocationRegistry`, `LocationRecord`, `SessionLevels`; artifact `market_context_history.py` | Immutable context versions; location generations, aliases, geometry, ownership, priority, as-of resolution, permissions, gap transitions, source lineage, availability, and unavailable evidence | Canonical owns replacement and permission rules. Paper may provide prior-session inputs and persist snapshots, never fallback values or priority. Same boundary in live/replay. | Phase 4 contracts and runtime-neutral replay are covered; host publication wiring and DB parity remain **INCOMPLETE** |
 | Interactions and responses | `interactions.py`: `InteractionSnapshot`, lifecycle enums; `interaction_detector.py`: `InteractionDetector`, transitions; `response.py`: response status/policy symbols | Independent 1m/5m episode clocks; frozen contact/reference lineage; departure/close/expiry; response arming, acceptance, rejection, confirmation, invalidation, expiry; terminal interaction never implies response | Paper supplies canonical inputs and consumes events. No Paper detector, response policy, or location wrapper. Live incremental and replay bounded calls share implementation. | Canonical interaction/response tests plus boundary scaffold; `PENDING` |
 | Opportunities and setup lifecycle | `opportunity.py`: `SetupOpportunity`; `opportunity_timeout.py`: timeout advancement; `opportunity_coordinator.py`; `templates.py`: canonical templates; `lifecycle.py` | Candidate/setup identity, parent context and response lineage, formation availability, counted timeout evidence, invalidation, supersession, retest, expiry, execution-group eligibility, unavailable outcomes | Canonical owns lifecycle and identity. Paper accounting is outside this layer; adapters only transport facts. | Canonical opportunity/lifecycle tests plus boundary scaffold; `PENDING` |
 | Intents, admission, allocation, execution | `intent_policy.py`; `active_position_gate.py`; `allocation.py`; `execution.py`: `ExecutionCoordinator`; `lifecycle.py`: execution state; `state_machine_types.py`: `ExecutionProposal`, `ExecutionConstraints` | Admission predicates and unavailable results; permission/active-position/allocation/risk gates; reservation, authorization, trigger, fills, partial fills, stops, settlement and orderflow ledger mutations with causal timing | Canonical execution owner is authoritative. Paper owns only paper-account mapping; no second coordinator, broker submission, or capital-ledger duplicate. | Canonical intent/execution tests plus boundary scaffold; `PENDING` |
@@ -68,3 +68,92 @@ state machine, replay file orchestration, or live feed callback was added.
 
 The contract/runtime-boundary gate is recorded in the implementation plan only
 after the targeted tests and static checks pass.
+
+## Phase 3 Gate: Source And Market Observation
+
+Canonical source: the pinned NiftyZoning `state_machine_source.py`,
+`market_observation.py`, and aggregate portions of `state_machine_types.py`.
+Paper must project this source contract and must not create a second market
+observation policy.
+
+Required parity facts:
+
+- Source identity, fingerprint, metadata, strict ordering, and duplicate
+  rejection match the canonical contract.
+- Session filtering, session boundaries, completed 1m bars, aligned 5m
+  aggregates, incomplete-parent issues, and source gaps remain explicit.
+- Observed timestamps, available timestamps, and parent lineage are preserved.
+- Live publishes one completed observation at a time; replay consumes a bounded,
+  ordered aggregate artifact. Neither path evaluates context or trading policy.
+- Phase 3 does not calculate ATR, VWAP, context scores, locations, permissions,
+  interactions, opportunities, or execution decisions.
+
+Phase 3 verification status:
+
+- Canonical and Paper source/observation tests pass with package-root import
+  changes only where required.
+- Paper live and replay adapters expose the same canonical input shape.
+- Source parity manifests are compared before detailed records and report
+  `MATCHED`, `MISMATCHED`, or `INCOMPLETE` explicitly.
+- Extended multi-date edge cases and any uncommitted repair work remain follow-up
+  items unless recorded in `ORDERFLOW_IMPLEMENTATION_PLAN.md`.
+
+## Phase 4 Gate: Context, Values, Permissions, And Locations
+
+Canonical source: the pinned NiftyZoning context, value, permission, geometry,
+VWAP, and state-machine publication contracts. Paper may translate supplied
+canonical or host-stored publications, but it must not reproduce strategy rules.
+
+Required ownership rules:
+
+- `OpeningGapPolicy`, value-profile completeness, location replacement, VWAP
+  calculation, permissions, and location priority remain canonical-owned.
+- Missing ATR, value, context, level, or location evidence stays explicitly
+  unavailable. Paper must not infer it from snapshots or presentation output.
+- Canonical `LocationRecord` and `MarketContext` stream identities are preserved
+  through the Paper evidence boundary; records are not rewritten to fit Paper
+  identifiers.
+- Live and replay resolve immutable publications as-of their availability and
+  share the same causal evidence contract.
+
+### Phase 4A: Evidence Publication
+
+Input is the Phase 3 aggregate artifact plus explicit ATR, prior-session value,
+prior-session level, location, VWAP, and context publications. The evidence
+adapter validates envelopes, provenance, stream identity, finite geometry inputs,
+and unavailable reasons only. It does not derive missing levels, fallback values,
+permissions, or replacement generations.
+
+### Phase 4B: Causal Context/Location Replay
+
+Replay advances one completed 1m/5m clock and emits `source_observation` and
+`context_location` facts. Every fact must preserve:
+
+- as-of context and location generation resolution;
+- source aggregate and source observation IDs;
+- causal parent and child lineage, including exactly five causally available 1m
+  children for a 5m location observation;
+- observed and available timestamps, with availability never preceding
+  observation; and
+- explicit unavailable reasons rather than inferred strategy state.
+
+Presentation/history projections may validate and display captured facts, but may
+not reconstruct runtime context or location evidence.
+
+### Phase 4C: Combined Parity Harness
+
+The Phase 4C entry point runs the Phase 3 source exporter, supplies its artifact
+to the Phase 4A evidence boundary, runs Phase 4B replay, and compares source and
+context/location streams. It must not require a manually prepared Paper facts
+artifact or reconstruct facts from snapshots.
+
+Phase 4 verification status:
+
+- Deterministic context, value, permission, geometry, VWAP, immutable-history,
+  and causal replay contracts are covered by focused tests.
+- The runtime-neutral replay shell is available when explicit evidence
+  publications are supplied.
+- Host-runtime publication wiring and DB-backed context/location parity remain
+  `UNAVAILABLE` until the producer adapter is complete.
+- No Phase 5 interaction, response, opportunity, lifecycle, or execution policy
+  is enabled by this checklist.

@@ -415,10 +415,9 @@ remain follow-up work.
 ## Phase 4: Port And Verify Layer 2 - Context, Values, Permissions, And Locations
 
 Status: Deterministic contracts and the runtime-neutral replay shell are
-ported. Phase 4 evidence publication and producer wiring remain incomplete;
-persisted host runtime parity remains deferred to Phase 9. No Phase 3.5 is
-needed: Phase 4 consumes the Phase 3 aggregate artifact and assembles its own
-canonical-owned evidence inputs.
+ported. Phase 3.5 evidence publication and producer wiring remain incomplete;
+persisted host runtime parity remains deferred to Phase 9. Phase 4 consumes the
+Phase 3.5 evidence publication and assembles its replay inputs.
 
 Port and validate the canonical context and location contracts using exact
 Layer 1-shaped inputs. This phase does not claim Paper runtime or DB-backed
@@ -438,6 +437,65 @@ Canonical scope:
 - directional/regime permissions and gap recovery;
 - causal ATR inputs, VWAP prefix measurements, and their source-observation
   lineage where required by location bands or context.
+
+### Canonical Implementation References
+
+The following files and symbols in the pinned NiftyZoning repository are the
+source of truth for this phase. Paths are relative to
+`C:\Users\agraw\Python\NiftyZoning` and must be traced to canonical commit
+`8114f553392ad01dd032aecfed0031a3bc08e2f8`:
+
+- `src/orderflow/hierarchy.py`: `Permission`, `RegimePermission`,
+  `ContextVersionRef`, `MarketContext`, `ContextObservation`, and
+  `classify_context_relation`. These define immutable context identity,
+  causal parent/child evidence, and directional permission semantics.
+- `src/orderflow/state_machine_types.py`: `SessionLevels`, `LocationRecord`,
+  `LocationRegistry`, `MarketContextStore`, `ObservationState`, and
+  `ReplayContext`. In particular, trace `LocationRegistry.publish_session_levels`,
+  `publish_session_extrema`, `publish_vwap`, `resolve_as_of`, and
+  `available_as_of`, together with `MarketContextStore.publish`, `resolve`, and
+  `latest_as_of`. `ReplayContext.publish_context` is the canonical runtime
+  publication boundary; `market_context_history.py` is not the runtime owner.
+- `src/orderflow/location_geometry.py`: `BAND_ATR_FRACTION` and
+  `LocationBand`, including immutable band construction and intersection rules.
+- `src/orderflow/location_observation.py`: `LocationObservation`, including
+  timeframe, source-observation, child-observation, generation, and causal
+  timestamp validation.
+- `src/orderflow/value_publication.py`: `prior_profile_is_complete` and
+  `publish_value_references`. The direct dependency closure is
+  `src/ict/bars.py`, `src/ict/features.py`,
+  `src/ict/replay/reference_streams.py`, `src/ict/value_profile.py`, and
+  `src/replay/value_references.py`; these determine profile completeness,
+  prior-session references, and their session-open availability.
+- `src/orderflow/opening_gap_policy.py`: `OpeningGapState`,
+  `OpeningGapPolicy.classify`, `transition`, and `regime_for`. These own gap
+  classification, acceptance/reclaim/return/expiry transitions, and long/short
+  permissions; Paper must not reproduce these rules.
+- `src/orderflow/vwap_location.py`: `VwapCalculationConfig`,
+  `VwapMeasurement`, and `causal_vwap_prefix`. VWAP is a completed-prefix
+  measurement with source aggregate identity, availability, lineage, and a
+  versioned calculation method.
+- `src/orderflow/state_machine.py`: canonical composition and chronological
+  ownership. Trace `ReplayMachine.__init__`, opening-reference resolution,
+  `OpeningGapPolicy.transition`/`regime_for` calls, VWAP publication through
+  `causal_vwap_prefix`, context publication through `ReplayContext.publish_context`,
+  `publish_session_extrema`, and location resolution through
+  `LocationRegistry.resolve_as_of`. This is the orchestration reference for
+  later causal replay wiring, not a request to copy replay-only file loading
+  into Paper live callbacks.
+- `src/orderflow/market_context_history.py`: `project_history` and
+  `project_saved_session` are artifact-only projections. They may validate and
+  present captured context/location facts, but must not be used to reconstruct
+  runtime context or infer unavailable evidence.
+
+Canonical tests to port or run unchanged, apart from package-root import
+changes, are `tests/test_orderflow_hierarchy.py`,
+`tests/test_orderflow_state_machine_types.py`,
+`tests/test_orderflow_value_publication.py`, `tests/test_orderflow_vwap.py`,
+and `tests/test_orderflow_market_context_history.py`. The relevant contract
+assertions include immutable context versions, causal availability, frozen ATR
+geometry, generation replacement and as-of resolution, prior-session profile
+publication, completed-prefix VWAP, and artifact-only projection behavior.
 
 The canonical runtime context store is the `MarketContextStore`/`ReplayContext`
 path in `state_machine_types.py`. The ported store and deterministic contracts
@@ -459,7 +517,7 @@ Phase 4 gate:
 
 Phase 4 composition:
 
-- **Phase 4A - Evidence publication:** consume the Phase 3 aggregate artifact
+- **Phase 3.5 - Evidence publication:** consume the Phase 3 aggregate artifact
   and publish causal ATR, VWAP, opening/session levels, prior-session rows and
   levels, prior-session value references, and context generations. Evidence is
   either an explicit available publication or an explicit unavailable reason;
@@ -469,18 +527,59 @@ Phase 4 composition:
   `source_observation` and `context_location` facts with generations, source
   IDs, causal parents, timestamps, lineage, and unavailable reasons.
 - **Phase 4C - Combined parity harness:** run the Phase 3 source exporter,
-  feed its artifact into Phase 4A/4B, then compare source and context/location
+  feed its artifact into Phase 3.5/4B, then compare source and context/location
   streams. It must not require a manually prepared Paper facts artifact.
+
+## Phase 3.5 - Implement The Evidence Producer
+
+Status: Pending. The immutable publication contracts exist, but the producer
+that assembles them from the Phase 3 aggregate artifact and canonical evidence
+adapters is not yet implemented.
+
+Required work:
+
+- Add one reusable Phase 3.5 producer boundary in the orderflow package. The
+  harness and any later runtime adapter must call this boundary rather than
+  deriving evidence in a script.
+- Consume the validated Phase 3 aggregate artifact without re-aggregating raw
+  bars or reading presentation snapshots.
+- Publish an explicit causal `AtrPublication`, including source observation ID,
+  lineage, observed timestamp, available timestamp, and unavailable reason.
+- Publish canonical opening-range, prior-day, and developing session extreme
+  locations through `LocationRegistry`, preserving stream identity, generation,
+  parent extreme lineage, frozen ATR bands, source aggregate IDs, and causal
+  availability. Prior-day levels must retain their session-open availability.
+- Publish completed-prefix VWAP measurements and matching VWAP locations through
+  `causal_vwap_prefix` and the canonical calculation version.
+- Publish prior-session value references through `publish_prior_session_value`,
+  preserving profile lineage and session-open availability. Missing value
+  evidence remains explicitly unavailable.
+- Accept context generations from the canonical context publication adapter,
+  preserving context stream identity, version, parent context ID, source
+  provenance, and available timestamp. Do not reconstruct context from
+  snapshots, scores, or presentation output.
+- Serialize the resulting `EvidencePublication` deterministically for parity
+  comparison, including all unavailable reasons and publication provenance.
+
+Phase 3.5 exit gate:
+
+- Canonical and Paper invoke the same producer contract with their respective
+  host evidence adapters and produce structurally complete or explicitly
+  unavailable publications for `2026-09-15` and `2026-10-01` only.
+- Focused tests cover available evidence, missing evidence, prior-day
+  session-open availability, stream identity, generation replacement, source
+  lineage, bands, calculation versions, and first-field mismatch reporting.
+- The Phase 3.5 harness runs the Phase 3 exporter first, invokes the producer on
+  its aggregate artifact, compares publication manifests before records, and
+  reports the first stream/field mismatch.
+- No Phase 4B chronological replay, Phase 4C combined policy parity, runtime,
+  database, API, or Paper-specific derivation is included in this phase.
 
 Phase 4 input contract:
 
 ```text
 Phase 3 market observation artifact
-    + ATR publication
-    + prior-session value publication
-    + prior-session rows/levels
-    + context publications/generations
-    -> Phase 4 evidence publication
+    -> Phase 3.5 evidence publication
     -> Phase 4 causal replay
     -> Phase 4 parity artifact
 ```

@@ -5,11 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from types import MappingProxyType
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 from .orderflow_common import Aggregate, ObservationIssue, ObservationIssueKind, build_aggregate_result, canonical_timestamp
 from .state_machine_source import source_fingerprint
-from .state_machine_types import SessionLevels
 
 MARKET_CLOSE_TIME = "15:30"
 
@@ -20,14 +19,6 @@ def rows_available_for_observation(rows: list[dict[str, Any]]) -> list[dict[str,
 
 def _row_timestamp(row: Mapping[str, Any]) -> str:
     return canonical_timestamp(f"{row['session_date']}T{str(row['time']).split('T')[-1][:5]}")
-
-
-def derive_session_levels(aggregates5: Sequence[Aggregate], prior_rows: Sequence[Mapping[str, Any]], session_date: str) -> SessionLevels:
-    first = next((item for item in aggregates5 if item.available_at), None)
-    if first is None:
-        raise ValueError(f"no completed 5m context available for {session_date}")
-    return SessionLevels(float(first.low), float(first.high), min((float(row["low"]) for row in prior_rows), default=None),
-        max((float(row["high"]) for row in prior_rows), default=None), first.available_at, f"{session_date}T09:15")
 
 
 @dataclass(frozen=True, slots=True)

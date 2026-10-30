@@ -1,8 +1,8 @@
-"""Compare canonical and Paper Layer 1 market-observation artifacts.
+"""Compare Phase 3 artifacts and supplied Phase 4A publications.
 
-The harness runs both repositories' exporters for one or more session dates,
-compares the deterministic source-observation sections, and reports the first
-field-level mismatch after hash-first manifest comparison.
+The harness runs both repositories' Phase 3 exporters first.  Phase 4A then
+consumes the resulting aggregate artifacts and explicitly supplied evidence
+publications.  It does not reconstruct evidence or run Phase 4B replay.
 """
 
 from __future__ import annotations
@@ -17,12 +17,7 @@ import sys
 import tempfile
 from typing import Any
 
-from ftx_paper.strategies.orderflow import (
-    build_phase4_artifact,
-    compare_phase4_manifests,
-    replay_context_location_artifact,
-)
-
+from ftx_paper.config import PaperConfig
 
 SECTIONS = (
     "source_fingerprint",
@@ -31,7 +26,23 @@ SECTIONS = (
     "issues",
     "session_boundaries",
 )
-DEFAULT_DATE = "2026-09-29"
+PHASE4A_FIELDS = (
+    "atr",
+    "locations",
+    "vwap_measurements",
+    "prior_value",
+    "contexts",
+    "unavailable",
+    "context_stream_id",
+    "location_stream_id",
+)
+ALLOWED_DATES = ("2026-09-15", "2026-10-01")
+DEFAULT_DATES = list(ALLOWED_DATES)
+_AGGREGATE_FIELDS = {
+    "time", "end_time", "available_at", "timeframe", "source_bar_count",
+    "open", "high", "low", "close", "volume", "symbol", "expiry",
+    "contract_type", "session_date", "source_fingerprint",
+}
 
 
 def _digest(value: Any) -> str:
@@ -80,6 +91,104 @@ def compare_payloads(canonical: dict[str, Any], paper: dict[str, Any]) -> dict[s
     return {"verdict": "MATCHED", "manifest": manifest}
 
 
+def _validate_phase3_artifact(payload: dict[str, Any]) -> None:
+    """Reject malformed Phase 3 artifacts before they reach Phase 4A."""
+    required = {"artifact_type", "schema_version", "source_fingerprint", "aggregates", *SECTIONS}
+    if payload.get("artifact_type") != "canonical_p2_market_observation":
+        raise ValueError("invalid Phase 3 artifact type")
+    if payload.get("schema_version") != 1:
+        raise ValueError("invalid Phase 3 schema version")
+    if not required <= set(payload):
+        raise ValueError("Phase 3 artifact envelope is incomplete")
+    if not isinstance(payload["source_fingerprint"], str) or not payload["source_fingerprint"]:
+        raise ValueError("Phase 3 source_fingerprint is required")
+    aggregates = payload["aggregates"]
+    if not isinstance(aggregates, dict) or set(aggregates) != {"1m", "5m"}:
+        raise ValueError("Phase 3 aggregates must contain exactly 1m and 5m")
+    for timeframe, items in aggregates.items():
+        if not isinstance(items, list):
+            raise ValueError(f"Phase 3 {timeframe} aggregates must be a list")
+        for item in items:
+            if not isinstance(item, dict) or not _AGGREGATE_FIELDS <= set(item):
+                raise ValueError(f"Phase 3 {timeframe} aggregate is incomplete")
+            if item["timeframe"] != timeframe:
+                raise ValueError(f"Phase 3 {timeframe} aggregate has mismatched timeframe")
+
+
+def _publication_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    value = payload.get("phase4a_evidence", payload)
+    if not isinstance(value, dict):
+        raise ValueError("Phase 4A publication must be an object")
+    return value
+
+
+def _phase4a_manifest(publication: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    manifest: dict[str, Any] = {}
+    for field in PHASE4A_FIELDS:
+        if field not in publication:
+            manifest[field] = {
+                "status": "UNAVAILABLE", "observed": False, "reason": f"missing_{field}_publication",
+                "count": 0, "sha256": _digest(None),
+            }
+            continue
+        value = publication[field]
+        if field in {"locations", "vwap_measurements", "contexts", "unavailable"} and not isinstance(value, list):
+            return {}, f"Phase 4A {field} must be a list"
+        if field in {"context_stream_id", "location_stream_id"} and value is not None and not isinstance(value, str):
+            return {}, f"Phase 4A {field} must be a string or null"
+        manifest[field] = {
+            "status": "MATCHED", "observed": True,
+            "count": len(value) if isinstance(value, list) else 1,
+            "sha256": _digest(value),
+        }
+    return manifest, None
+
+
+def compare_phase4a_evidence(
+    canonical: dict[str, Any], paper: dict[str, Any],
+) -> dict[str, Any]:
+    """Compare supplied Phase 4A publications, manifest before records."""
+    try:
+        canonical_value = _publication_payload(canonical)
+        paper_value = _publication_payload(paper)
+        canonical_manifest, canonical_error = _phase4a_manifest(canonical_value)
+        paper_manifest, paper_error = _phase4a_manifest(paper_value)
+    except ValueError as exc:
+        return {"status": "INCOMPLETE", "reason": str(exc)}
+    if canonical_error or paper_error:
+        return {
+            "status": "INCOMPLETE", "reason": canonical_error or paper_error,
+            "canonical": canonical_error, "paper": paper_error,
+        }
+    for field in PHASE4A_FIELDS:
+        left = canonical_manifest[field]
+        right = paper_manifest[field]
+        if left["status"] != "MATCHED" or right["status"] != "MATCHED":
+            statuses = {left["status"], right["status"]}
+            status = "INCOMPLETE" if "INCOMPLETE" in statuses else "UNAVAILABLE"
+            return {"status": status, "field": field, "canonical": left, "paper": right}
+        if (left["count"], left["sha256"]) == (right["count"], right["sha256"]):
+            continue
+        difference = _first_difference(canonical_value.get(field), paper_value.get(field))
+        return {
+            "status": "MISMATCHED", "field": field, "manifest": {
+                "canonical": canonical_manifest, "paper": paper_manifest,
+            }, "first_mismatch": difference,
+        }
+    return {"status": "MATCHED", "manifest": {"canonical": canonical_manifest, "paper": paper_manifest}}
+
+
+def _load_publication(path: Path, session_date: str) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(payload, dict) and isinstance(payload.get("phase4a_evidence"), dict):
+        payload = payload["phase4a_evidence"]
+    if isinstance(payload, dict) and session_date in payload:
+        payload = payload[session_date]
+    if not isinstance(payload, dict):
+        raise ValueError("supplied Phase 4A publication is not an object")
+    return payload
+
+
 def _run_exporter(
     command: list[str],
     *,
@@ -115,6 +224,8 @@ def compare_date(
     paper_runtime_dir: Path,
     canonical_python: str,
     paper_python: str,
+    canonical_evidence: Path | None = None,
+    paper_evidence: Path | None = None,
 ) -> dict[str, Any]:
     """Run both exporters and compare one trading date."""
     with tempfile.TemporaryDirectory(prefix="orderflow-phase3-parity-") as temporary:
@@ -156,92 +267,52 @@ def compare_date(
                 "canonical": canonical_status,
                 "paper": paper_status,
             }
+        try:
+            _validate_phase3_artifact(canonical)
+            _validate_phase3_artifact(paper)
+        except ValueError as exc:
+            return {"date": session_date, "phase3": compare_payloads(canonical, paper), "phase4a": {"status": "INCOMPLETE", "reason": str(exc)}}
         phase3_result = compare_payloads(canonical, paper)
-        phase4_result = compare_phase4_date(
-            session_date,
-            canonical_root=canonical_root,
-            canonical_python=canonical_python,
-            paper_payload=paper,
-        )
-        return {"date": session_date, "phase3": phase3_result, "phase4": phase4_result}
-
-
-def _canonical_phase4_facts(root: Path, session_date: str, python: str) -> dict[str, Any]:
-    source = """
-import json
-import sys
-from src.orderflow.research_replay import load_session_inputs, replay_sessions
-from src.orderflow.state_machine_types import ExecutionConstraints
-session_date = sys.argv[1]
-number = int(session_date.replace('-', ''))
-result = replay_sessions(load_session_inputs([number], [session_date]), constraints=ExecutionConstraints(), replay_mode='diagnostic')[session_date]
-facts = result.get('parity_phase_facts', {})
-if not isinstance(facts, dict):
-    raise ValueError('canonical replay did not return parity facts')
-print(json.dumps(facts, default=str))
-"""
-    completed = subprocess.run(
-        [python, "-c", source, session_date], cwd=root, check=True,
-        capture_output=True, text=True,
-    )
-    payload = json.loads(completed.stdout)
-    if not isinstance(payload, dict):
-        raise ValueError("canonical replay facts must be an object")
-    return payload
-
-
-def compare_phase4_date(
-    session_date: str,
-    *,
-    canonical_root: Path,
-    canonical_python: str,
-    paper_payload: dict[str, Any],
-) -> dict[str, Any]:
-    """Build Phase 4 from the Phase 3 Paper artifact and compare it."""
-    canonical_facts = _canonical_phase4_facts(canonical_root, session_date, canonical_python)
-    paper_replay = replay_context_location_artifact(paper_payload, session_date=session_date)
-    canonical = build_phase4_artifact(
-        run_id=f"canonical-{session_date}", producer={"name": "NiftyZoning"},
-        scope={"date": session_date}, payload={"parity_phase_facts": canonical_facts},
-    )
-    paper = build_phase4_artifact(
-        run_id=f"paper-{session_date}", producer={"name": "ftx-paper"},
-        scope={"date": session_date}, payload={"parity_phase_facts": paper_replay.parity_phase_facts()},
-    )
-    return compare_phase4_manifests(
-        canonical, paper,
-        canonical_records=lambda stream: canonical["phase_streams"][stream],
-        paper_records=lambda stream: paper["phase_streams"][stream],
-        streams=("source_observation", "context_location"),
-    )
+        if canonical_evidence is None or paper_evidence is None:
+            phase4_result = {"status": "UNAVAILABLE", "reason": "supplied_phase4a_publications_required"}
+        else:
+            try:
+                phase4_result = compare_phase4a_evidence(
+                    _load_publication(canonical_evidence, session_date),
+                    _load_publication(paper_evidence, session_date),
+                )
+            except (OSError, json.JSONDecodeError, ValueError) as exc:
+                phase4_result = {"status": "INCOMPLETE", "reason": str(exc)}
+        return {"date": session_date, "phase3": phase3_result, "phase4a": phase4_result}
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--date", action="append", dest="dates", default=None)
-    parser.add_argument("--canonical-root", type=Path, required=True)
-    parser.add_argument("--paper-runtime-dir", type=Path, required=True)
-    parser.add_argument(
-        "--paper-root", type=Path,
-        default=Path(__file__).resolve().parents[2],
-    )
-    parser.add_argument("--canonical-python", default=sys.executable)
-    parser.add_argument("--paper-python", default=sys.executable)
+    parser.add_argument("--date", action="append", dest="dates", choices=ALLOWED_DATES, default=None)
     args = parser.parse_args(argv)
-    dates = args.dates or [DEFAULT_DATE]
+    dates = args.dates or DEFAULT_DATES
+    paper_root = Path(__file__).resolve().parents[2]
+    canonical_root = paper_root.parent / "NiftyZoning"
+    canonical_python_path = canonical_root / ".venv" / "Scripts" / "python.exe"
+    canonical_python = str(canonical_python_path if canonical_python_path.exists() else sys.executable)
+    paper_runtime_dir = PaperConfig.from_env().runtime_dir
     results = [
         compare_date(
             date,
-            canonical_root=args.canonical_root,
-            paper_root=args.paper_root,
-            paper_runtime_dir=args.paper_runtime_dir,
-            canonical_python=args.canonical_python,
-            paper_python=args.paper_python,
+            canonical_root=canonical_root,
+            paper_root=paper_root,
+            paper_runtime_dir=paper_runtime_dir,
+            canonical_python=canonical_python,
+            paper_python=sys.executable,
         )
         for date in dates
     ]
     print(json.dumps(results, indent=2, sort_keys=True))
-    return 0 if all(item["verdict"] == "MATCHED" for item in results) else 1
+    return 0 if all(
+        item.get("phase3", {}).get("verdict") == "MATCHED"
+        and item.get("phase4a", {}).get("status") == "MATCHED"
+        for item in results
+    ) else 1
 
 
 if __name__ == "__main__":
