@@ -95,6 +95,16 @@ class LocationRegistry:
             running_low = aggregate.low if running_low is None else min(running_low, aggregate.low)
         return tuple(published)
 
+    def publish_session_extreme(self, alias: str, price: float, aggregate: Aggregate, *, atr: float) -> LocationRecord | None:
+        """Publish one cumulative session extreme at its causal availability."""
+        previous = self.resolve_as_of(alias, aggregate.available_at)
+        if previous is not None and previous.price == price:
+            return None
+        return self._register_level(
+            alias, price, aggregate.available_at, aggregate.session_date,
+            frozen_atr=atr, source_aggregate_id=aggregate.time,
+        )
+
     def _register_level(self, alias: str, price: float, available_at: str, source_session: str, *, frozen_atr: float | None, source_aggregate_id: str | None = None) -> LocationRecord:
         if frozen_atr is None:
             raise ValueError("location bands require a frozen ATR")

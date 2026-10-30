@@ -90,3 +90,11 @@ def test_interaction_response_stream_preserves_explicit_incomplete_evidence() ->
     assert records == ()
     assert coverage["status"] == "INCOMPLETE"
     assert coverage["observed"] is True
+
+
+def test_comparison_can_stop_at_phase4_context_stream() -> None:
+    facts = {stream: [] for stream in PHASE_STREAMS}
+    canonical = build_phase4_artifact(run_id="c", producer={"name": "canonical"}, scope={}, payload={"parity_phase_facts": facts})
+    paper = build_phase4_artifact(run_id="p", producer={"name": "paper"}, scope={}, payload={"parity_phase_facts": facts})
+
+    assert compare_phase4_manifests(canonical, paper, streams=("source_observation", "context_location"))["status"] == "MATCHED"

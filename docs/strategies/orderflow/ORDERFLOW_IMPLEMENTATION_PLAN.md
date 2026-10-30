@@ -414,9 +414,11 @@ remain follow-up work.
 
 ## Phase 4: Port And Verify Layer 2 - Context, Values, Permissions, And Locations
 
-Status: Contract and pure-behavior port complete. Causal runtime parity is
-INCOMPLETE and requires the Phase 4 harness extension and Phase 4.5 below;
-host persistence remains deferred to Phase 9.
+Status: Deterministic contracts and the runtime-neutral replay shell are
+ported. Phase 4 evidence publication and producer wiring remain incomplete;
+persisted host runtime parity remains deferred to Phase 9. No Phase 3.5 is
+needed: Phase 4 consumes the Phase 3 aggregate artifact and assembles its own
+canonical-owned evidence inputs.
 
 Port and validate the canonical context and location contracts using exact
 Layer 1-shaped inputs. This phase does not claim Paper runtime or DB-backed
@@ -455,29 +457,67 @@ Phase 4 gate:
   covered without reconstructing facts from presentation output.
 - No Paper runtime parity claim is made while the host adapter is absent.
 
+Phase 4 composition:
+
+- **Phase 4A - Evidence publication:** consume the Phase 3 aggregate artifact
+  and publish causal ATR, VWAP, opening/session levels, prior-session rows and
+  levels, prior-session value references, and context generations. Evidence is
+  either an explicit available publication or an explicit unavailable reason;
+  Phase 4 must not infer missing values from presentation snapshots.
+- **Phase 4B - Causal context/location replay:** advance one shared completed
+  1m/5m clock, resolve every publication as-of its availability, and emit
+  `source_observation` and `context_location` facts with generations, source
+  IDs, causal parents, timestamps, lineage, and unavailable reasons.
+- **Phase 4C - Combined parity harness:** run the Phase 3 source exporter,
+  feed its artifact into Phase 4A/4B, then compare source and context/location
+  streams. It must not require a manually prepared Paper facts artifact.
+
+Phase 4 input contract:
+
+```text
+Phase 3 market observation artifact
+    + ATR publication
+    + prior-session value publication
+    + prior-session rows/levels
+    + context publications/generations
+    -> Phase 4 evidence publication
+    -> Phase 4 causal replay
+    -> Phase 4 parity artifact
+```
+
+The Phase 4 evidence adapter owns the translation of stored or canonical
+publications into this contract. It does not define replacement rules,
+fallback values, permissions, or location priority. Those remain canonical
+domain behavior.
+
 Phase 4 parity verification record:
 
 - The ported context, value, permission, location, geometry, VWAP, opening-gap,
-  immutable-history, and explicit-unavailable contracts are covered by 45
-  focused Paper tests.
+  immutable-history, causal replay, and explicit-unavailable contracts are
+  covered by focused Paper tests.
 - Canonical context/value/history parity tests pass in the canonical repository.
 - Source-observation parity remains `MATCHED` for `2026-09-15` and
   `2026-10-01`; `2026-10-29` is excluded because its source is mismatched.
-- Paper does not yet emit persisted runtime `context_location` facts. The Phase
-  4 context/location behavioral parity stream therefore remains `UNAVAILABLE`,
-  not `MATCHED`, until Phase 9 wires the canonical runtime owner to the Paper
-  store and replay boundary.
+- The runtime-neutral replay boundary can emit explicit causal
+  `source_observation` and `context_location` streams when Phase 4 evidence
+  publications are supplied. Paper does not yet provide those publications
+  from its host runtime, so DB-backed context/location parity remains
+  `UNAVAILABLE` rather than `MATCHED`.
 
-Phase 4 pending work:
+Phase 4 implementation record:
 
-- Extend the current direct-domain parity harness to drive context and location
-  resolution from chronological completed observations rather than final
-  `location_interactions` snapshots.
-- Capture point-in-time location generations, source-observation IDs, causal
-  parents, availability timestamps, and explicit unavailable outcomes at each
-  replay clock step.
-- Keep final context/location snapshots as assertions only; they must not drive
-  the causal input stream.
+- `context_location_replay.py` advances the shared completed-observation clock,
+  resolves context and locations as-of availability, and emits point-in-time
+  generations, source IDs, causal parents, timestamps, lineage, and explicit
+  unavailable reasons.
+- `replay_context_location_artifact()` consumes the completed aggregate sections
+  emitted by Phase 3 without re-aggregating raw bars.
+- The combined Phase 3 harness is the intended Phase 4C entry point; it must
+  supply Phase 4 evidence through the evidence adapter before claiming parity.
+- `phase5_parity_harness.py` compares explicit source/context streams and keeps
+  missing streams unavailable; it no longer reconstructs facts from snapshots.
+- `phase6_parity_harness.py` no longer offers snapshot-based Phase 5 fallback
+  generation; Paper lifecycle facts must be supplied explicitly.
 
 ## Phase 4.5: Add The Causal Interaction Replay Boundary
 

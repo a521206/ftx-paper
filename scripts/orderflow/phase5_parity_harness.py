@@ -25,6 +25,10 @@ _INTERACTION_KINDS = {
     "interaction_created", "interaction_ended", "location_interaction_observed",
 }
 _RESPONSE_KINDS = {"response_confirmed", "response_invalidated", "response_expired"}
+_REQUIRED_PHASE_FIELDS = {
+    "kind", "occurred_at", "observed_at", "available_at", "identity",
+    "causal_parent_id", "values", "unavailable",
+}
 
 
 def _aware(value: str) -> str:
@@ -82,15 +86,47 @@ def _normalized_canonical(canonical: dict[str, Any]) -> dict[str, Any]:
     return {"interaction_response": output}
 
 
+def _phase_records(records: Any) -> list[dict[str, Any]]:
+    if not isinstance(records, list):
+        return []
+    output: list[dict[str, Any]] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        if _REQUIRED_PHASE_FIELDS <= record.keys():
+            output.append(record)
+            continue
+        observed = record.get("observed_at") or record.get("timestamp") or record.get("time")
+        available = record.get("available_at") or observed
+        identity = record.get("identity") or record.get("observation_id") or record.get("event_id")
+        if not all(isinstance(value, str) for value in (observed, available, identity)):
+            continue
+        parent = record.get("causal_parent_id") or record.get("causal_parent_key")
+        output.append({
+            "kind": str(record.get("kind", "phase_fact")),
+            "occurred_at": _aware(str(observed)),
+            "observed_at": _aware(str(observed)),
+            "available_at": _aware(str(available)),
+            "identity": identity,
+            "causal_parent_id": parent,
+            "values": record,
+            "unavailable": list(record.get("unavailable", ())),
+        })
+    return output
+
+
 def compare(*, canonical_facts: dict[str, Any], paper_facts: dict[str, Any], session_date: str) -> dict[str, Any]:
-    defaults = {
-        "source_observation": [], "context_location": [], "interaction_response": [],
-        "opportunity_lifecycle": [], "intent_admission": [], "trigger_exit": [],
+    canonical_payload = {
+        stream: _phase_records(canonical_facts[stream])
+        for stream in canonical_facts
+        if stream in {"source_observation", "context_location", "opportunity_lifecycle", "intent_admission", "trigger_exit"}
     }
-    canonical_payload = dict(defaults)
     canonical_payload["interaction_response"] = _normalized_canonical(canonical_facts)["interaction_response"]
-    paper_payload = dict(defaults)
-    paper_payload["interaction_response"] = paper_facts.get("interaction_response", [])
+    paper_payload = {
+        stream: _phase_records(paper_facts[stream])
+        for stream in paper_facts
+        if stream in {"source_observation", "context_location", "interaction_response", "opportunity_lifecycle", "intent_admission", "trigger_exit"}
+    }
     canonical = build_phase4_artifact(run_id=f"canonical-{session_date}", producer={"name": "NiftyZoning"},
                                       scope={"date": session_date}, payload={"parity_phase_facts": canonical_payload})
     paper = build_phase4_artifact(run_id=f"paper-{session_date}", producer={"name": "ftx-paper"},

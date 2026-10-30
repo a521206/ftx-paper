@@ -17,6 +17,12 @@ import sys
 import tempfile
 from typing import Any
 
+from ftx_paper.strategies.orderflow import (
+    build_phase4_artifact,
+    compare_phase4_manifests,
+    replay_context_location_artifact,
+)
+
 
 SECTIONS = (
     "source_fingerprint",
@@ -150,7 +156,64 @@ def compare_date(
                 "canonical": canonical_status,
                 "paper": paper_status,
             }
-        return {"date": session_date, **compare_payloads(canonical, paper)}
+        phase3_result = compare_payloads(canonical, paper)
+        phase4_result = compare_phase4_date(
+            session_date,
+            canonical_root=canonical_root,
+            canonical_python=canonical_python,
+            paper_payload=paper,
+        )
+        return {"date": session_date, "phase3": phase3_result, "phase4": phase4_result}
+
+
+def _canonical_phase4_facts(root: Path, session_date: str, python: str) -> dict[str, Any]:
+    source = """
+import json
+import sys
+from src.orderflow.research_replay import load_session_inputs, replay_sessions
+from src.orderflow.state_machine_types import ExecutionConstraints
+session_date = sys.argv[1]
+number = int(session_date.replace('-', ''))
+result = replay_sessions(load_session_inputs([number], [session_date]), constraints=ExecutionConstraints(), replay_mode='diagnostic')[session_date]
+facts = result.get('parity_phase_facts', {})
+if not isinstance(facts, dict):
+    raise ValueError('canonical replay did not return parity facts')
+print(json.dumps(facts, default=str))
+"""
+    completed = subprocess.run(
+        [python, "-c", source, session_date], cwd=root, check=True,
+        capture_output=True, text=True,
+    )
+    payload = json.loads(completed.stdout)
+    if not isinstance(payload, dict):
+        raise ValueError("canonical replay facts must be an object")
+    return payload
+
+
+def compare_phase4_date(
+    session_date: str,
+    *,
+    canonical_root: Path,
+    canonical_python: str,
+    paper_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Build Phase 4 from the Phase 3 Paper artifact and compare it."""
+    canonical_facts = _canonical_phase4_facts(canonical_root, session_date, canonical_python)
+    paper_replay = replay_context_location_artifact(paper_payload, session_date=session_date)
+    canonical = build_phase4_artifact(
+        run_id=f"canonical-{session_date}", producer={"name": "NiftyZoning"},
+        scope={"date": session_date}, payload={"parity_phase_facts": canonical_facts},
+    )
+    paper = build_phase4_artifact(
+        run_id=f"paper-{session_date}", producer={"name": "ftx-paper"},
+        scope={"date": session_date}, payload={"parity_phase_facts": paper_replay.parity_phase_facts()},
+    )
+    return compare_phase4_manifests(
+        canonical, paper,
+        canonical_records=lambda stream: canonical["phase_streams"][stream],
+        paper_records=lambda stream: paper["phase_streams"][stream],
+        streams=("source_observation", "context_location"),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

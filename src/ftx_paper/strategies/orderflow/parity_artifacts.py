@@ -119,11 +119,14 @@ def build_phase4_artifact(*, run_id: str, producer: Mapping[str, Any], scope: Ma
     }
 
 
-def compare_phase4_manifests(canonical: Mapping[str, Any], paper: Mapping[str, Any], *, canonical_records: Any = None, paper_records: Any = None) -> dict[str, Any]:
+def compare_phase4_manifests(canonical: Mapping[str, Any], paper: Mapping[str, Any], *, canonical_records: Any = None, paper_records: Any = None, streams: Sequence[str] = PHASE_STREAMS) -> dict[str, Any]:
     """Compare streams in order, fetching records only after hash mismatch."""
     left_streams = canonical.get("manifest", {}).get("streams", {})
     right_streams = paper.get("manifest", {}).get("streams", {})
-    for stream in PHASE_STREAMS:
+    unknown = set(streams) - set(PHASE_STREAMS)
+    if unknown:
+        raise ValueError(f"unknown phase streams: {sorted(unknown)}")
+    for stream in streams:
         left = left_streams.get(stream, {})
         right = right_streams.get(stream, {})
         if left.get("status") != "MATCHED" or right.get("status") != "MATCHED":
