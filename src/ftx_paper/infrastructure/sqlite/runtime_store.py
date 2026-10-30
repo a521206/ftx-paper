@@ -5,6 +5,7 @@ import os
 import sqlite3
 import sys
 import threading
+import zlib
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, TypedDict
@@ -67,6 +68,38 @@ def _json_safe(value: Any, *, path: str) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     raise TypeError(f"{path} contains unsupported JSON value of type {type(value).__name__}")
+
+
+_REPLAY_RESULT_CHUNK_BYTES = 4 * 1024 * 1024
+_REPLAY_RESULT_STORAGE = "replay_result_chunks"
+
+
+def _encode_replay_result(value: dict[str, Any]) -> tuple[str, list[bytes]]:
+    """Compress and split results so no SQLite value grows without bound."""
+    payload = json.dumps(
+        _json_safe(value, path="replay result"), separators=(",", ":"), ensure_ascii=True,
+    ).encode("utf-8")
+    compressed = zlib.compress(payload, level=6)
+    chunks = [compressed[offset:offset + _REPLAY_RESULT_CHUNK_BYTES]
+              for offset in range(0, len(compressed), _REPLAY_RESULT_CHUNK_BYTES)]
+    descriptor = json.dumps({"__storage__": _REPLAY_RESULT_STORAGE, "version": 1, "chunks": len(chunks)})
+    return descriptor, chunks
+
+
+def _decode_replay_result(connection: sqlite3.Connection, run_id: str, value: str | None) -> Any:
+    if not value:
+        return None
+    descriptor = json.loads(value)
+    if not isinstance(descriptor, dict) or descriptor.get("__storage__") != _REPLAY_RESULT_STORAGE:
+        return descriptor
+    rows = connection.execute(
+        "SELECT payload FROM replay_result_chunks WHERE run_id=? ORDER BY chunk_index", (run_id,)
+    ).fetchall()
+    expected = int(descriptor.get("chunks", -1))
+    if len(rows) != expected:
+        raise ValueError(f"replay result chunks missing for {run_id}")
+    compressed = b"".join(bytes(row[0]) for row in rows)
+    return json.loads(zlib.decompress(compressed).decode("utf-8"))
 
 
 def _pid_is_alive(pid: int) -> bool:
@@ -276,6 +309,14 @@ class SqliteRuntimeStore:
                     broker_order_id TEXT,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS replay_result_chunks (
+                    run_id TEXT NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    payload BLOB NOT NULL,
+                    PRIMARY KEY (run_id, chunk_index)
+                );
+                CREATE INDEX IF NOT EXISTS ix_replay_result_chunks_run
+                    ON replay_result_chunks(run_id, chunk_index);
                 """
             )
             connection.execute(
@@ -308,6 +349,9 @@ class SqliteRuntimeStore:
     def compact_replay_runs(self) -> int:
         """Remove legacy all-date and duplicate replay snapshots."""
         with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM replay_result_chunks WHERE run_id NOT IN (SELECT run_id FROM replay_runs)"
+            )
             cursor = connection.execute(
                 """
                 DELETE FROM replay_runs
@@ -749,34 +793,53 @@ class SqliteRuntimeStore:
     def update_replay_run(self, run_id: str, *, status: str, result: dict[str, Any] | None = None,
                           error: str | None = None) -> None:
         with self._connect() as connection:
+            encoded_result = None
+            chunks: list[bytes] = []
+            if result is not None:
+                encoded_result, chunks = _encode_replay_result(result)
             connection.execute(
                 "UPDATE replay_runs SET status=?, result=COALESCE(?, result), error=?, updated_at=? WHERE run_id=?",
-                (status, json.dumps(_json_safe(result, path="replay result")) if result is not None else None,
-                 error, self._now(), run_id),
+                (status, encoded_result, error, self._now(), run_id),
             )
+            if result is not None:
+                connection.execute("DELETE FROM replay_result_chunks WHERE run_id=?", (run_id,))
+                connection.executemany(
+                    "INSERT INTO replay_result_chunks(run_id, chunk_index, payload) VALUES (?, ?, ?)",
+                    ((run_id, index, payload) for index, payload in enumerate(chunks)),
+                )
 
     def transition_replay_run(self, run_id: str, *, expected_status: str, status: str,
                               result: dict[str, Any] | None = None, error: str | None = None) -> bool:
         """Guard replay state changes so racing workers cannot overwrite terminal state."""
         with self._connect() as connection:
+            encoded_result = None
+            chunks: list[bytes] = []
+            if result is not None:
+                encoded_result, chunks = _encode_replay_result(result)
             cursor = connection.execute(
                 "UPDATE replay_runs SET status=?, result=COALESCE(?, result), error=?, updated_at=? "
                 "WHERE run_id=? AND status=?",
-                (status, json.dumps(_json_safe(result, path="replay result")) if result is not None else None,
+                (status, encoded_result,
                  error, self._now(), run_id, expected_status),
             )
+            if cursor.rowcount == 1 and result is not None:
+                connection.execute("DELETE FROM replay_result_chunks WHERE run_id=?", (run_id,))
+                connection.executemany(
+                    "INSERT INTO replay_result_chunks(run_id, chunk_index, payload) VALUES (?, ?, ?)",
+                    ((run_id, index, payload) for index, payload in enumerate(chunks)),
+                )
             return cursor.rowcount == 1
 
     def read_replay_run(self, run_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
             connection.row_factory = sqlite3.Row
             row = connection.execute("SELECT * FROM replay_runs WHERE run_id=?", (run_id,)).fetchone()
-        if row is None:
-            return None
-        value = dict(row)
-        value["request"] = json.loads(value["request"])
-        value["result"] = json.loads(value["result"]) if value["result"] else None
-        return value
+            if row is None:
+                return None
+            value = dict(row)
+            value["request"] = json.loads(value["request"])
+            value["result"] = _decode_replay_result(connection, run_id, value["result"])
+            return value
 
     def read_replay_runs(self, limit: int = 100) -> list[dict[str, Any]]:
         with self._connect() as connection:
@@ -837,6 +900,7 @@ class SqliteRuntimeStore:
     def clear_replay_runs(self) -> int:
         """Delete diagnostic replay history without touching live runtime data."""
         with self._connect() as connection:
+            connection.execute("DELETE FROM replay_result_chunks")
             cursor = connection.execute("DELETE FROM replay_runs")
             deleted = cursor.rowcount
         return deleted
@@ -847,6 +911,11 @@ class SqliteRuntimeStore:
         if not normalized:
             return 0
         with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM replay_result_chunks WHERE run_id IN "
+                "(SELECT run_id FROM replay_runs WHERE substr(json_extract(request, '$.session_date'), 1, 10) = ?)",
+                (normalized,),
+            )
             cursor = connection.execute(
                 "DELETE FROM replay_runs "
                 "WHERE substr(json_extract(request, '$.session_date'), 1, 10) = ?",

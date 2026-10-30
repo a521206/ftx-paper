@@ -1,6 +1,7 @@
 # Keep this file focused on small store behavior; do not reintroduce broad
 # lease/process-thread tests or artificial ReplayWorker thread stubs here.
 from datetime import datetime
+import hashlib
 import sqlite3
 from threading import Event, Thread
 from time import sleep
@@ -111,6 +112,30 @@ def test_runtime_store_compaction_keeps_inflight_replay_runs(tmp_path):
     reopened = RuntimeStore(tmp_path)
 
     assert reopened.read_replay_run("queued-run") is not None
+
+
+def test_runtime_store_chunks_large_replay_results(tmp_path):
+    store = RuntimeStore(tmp_path)
+    store.create_replay_run("large-run", {"session_date": "2026-01-05"})
+    large_value = "".join(
+        hashlib.sha256(str(index).encode()).hexdigest() for index in range(200_000)
+    )
+    result = {"parity_artifact": {"layers": {"decision": [{"values": large_value}]}}}
+
+    store.update_replay_run("large-run", status="completed", result=result)
+
+    restored = store.read_replay_run("large-run")
+    assert restored is not None
+    assert restored["result"] == result
+    with store._connect() as connection:
+        descriptor = connection.execute(
+            "SELECT result FROM replay_runs WHERE run_id=?", ("large-run",)
+        ).fetchone()[0]
+        chunk_count = connection.execute(
+            "SELECT COUNT(*) FROM replay_result_chunks WHERE run_id=?", ("large-run",)
+        ).fetchone()[0]
+    assert '"__storage__": "replay_result_chunks"' in descriptor
+    assert chunk_count > 1
 
 
 def test_runtime_store_waits_for_replay_read_lock(tmp_path):
