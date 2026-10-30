@@ -9,7 +9,12 @@ from enum import StrEnum
 from typing import cast
 
 from .orderflow_contract import OrderflowObservation
-from .orderflow_location import LocationRecord, LocationRegistry, is_diagnostic_location
+from .orderflow_location import (
+    LocationObservation,
+    LocationRecord,
+    LocationRegistry,
+    is_diagnostic_location,
+)
 
 
 class InteractionStatus(StrEnum):
@@ -319,6 +324,16 @@ def _freeze_projections(interaction: LocationInteraction) -> LocationInteraction
     return replace(interaction, frozen_projections=latest)
 
 
+@dataclass(frozen=True, slots=True)
+class InteractionTransition:
+    """State changes produced by one completed timeframe observation."""
+
+    interaction: LocationInteraction
+    observation: LocationObservation | None = None
+    created: bool = False
+    departed: bool = False
+
+
 class InteractionDetector:
     """One detector per timeframe; references are never mutated after creation."""
 
@@ -336,16 +351,18 @@ class InteractionDetector:
         self._processed_observations: set[str] = set()
         self._session_first_observed_at: dict[str, datetime] = {}
 
-    def observe(
+    def observe_transition(
         self,
         location: LocationRecord,
         observation: OrderflowObservation,
         *,
+        location_observation: LocationObservation | None = None,
         atr: float | None = None,
         band_contact: bool | None = None,
         observation_id: str | None = None,
         projection_sources: Mapping[str, tuple[OrderflowObservation, ...]] | None = None,
-    ) -> LocationInteraction | None:
+    ) -> InteractionTransition | None:
+        """Apply one completed observation and return its lifecycle transition."""
         if observation.timeframe != self.timeframe:
             return None
         if location.timeframe and location.timeframe != self.timeframe:
@@ -364,8 +381,19 @@ class InteractionDetector:
             raise ValueError("interaction candle must be causally complete")
         processed_id = observation_id or observation.observation_id
         key = _active_key(location.alias, self.timeframe, location.generation)
+        was_active = key in self._active
+
+        def transition(interaction: LocationInteraction) -> InteractionTransition:
+            return InteractionTransition(
+                interaction=interaction,
+                observation=location_observation,
+                created=not was_active,
+                departed=interaction.status is InteractionStatus.ENDED,
+            )
+
         if processed_id in self._processed_observations:
-            return self._active.get(key)
+            interaction = self._active.get(key)
+            return transition(interaction) if interaction is not None else None
         if observation.context is None or observation.context.availability_status != "available":
             return None
         if self.timeframe == "5m":
@@ -411,7 +439,7 @@ class InteractionDetector:
             or item.observed_at == observation.observed_at
             for item in interaction.contact_candles
         ):
-            return interaction
+            return transition(interaction)
         candle = InteractionCandle(
             observation.observation_id, observation.timeframe,
             observation.observed_at, observation.available_at, close_value, high_value, low_value,
@@ -491,7 +519,7 @@ class InteractionDetector:
             if not interaction.synthetic_snapshots:
                 interaction = _append_projection(interaction, interaction.contact_candles)
             self._active[key] = interaction
-            return interaction
+            return transition(interaction)
         if not inside:
             assert interaction.band_lower is not None and interaction.band_upper is not None
             terminal_side = _close_side(close_value, interaction.band_lower, interaction.band_upper)
@@ -525,11 +553,11 @@ class InteractionDetector:
             ended = _append_projection(ended, ended.contact_candles)
             self._active.pop(key, None)
             self._closed.append(ended)
-            return ended
+            return transition(ended)
         advanced = replace(interaction, contact_candles=(*interaction.contact_candles, candle))
         advanced = _append_projection(advanced, advanced.contact_candles)
         self._active[key] = advanced
-        return advanced
+        return transition(advanced)
 
     def advance_projections(
         self, sources: Mapping[str, tuple[OrderflowObservation, ...]], *, as_of: datetime,
@@ -586,7 +614,7 @@ class InteractionDetector:
                 for value in (close, high, low)
             ):
                 continue
-            result = self.observe(
+            result = self.observe_transition(
                 location, observation,
                 atr=observation.context.frozen_atr if observation.context is not None else None,
                 band_contact=location.band.intersects(
@@ -595,7 +623,7 @@ class InteractionDetector:
                 observation_id=f"registry:{observation.observation_id}:{location.location_id}",
             )
             if result is not None:
-                updated.append(result)
+                updated.append(result.interaction)
         return tuple(updated)
 
     def record_score(
@@ -1012,5 +1040,5 @@ class InteractionDetector:
 
 __all__ = [
     "EvidenceLineage", "HypothesisState", "InteractionCandle", "InteractionCloseReason", "InteractionDetector", "ProjectionSnapshot", "SyntheticScoreSnapshot",
-    "InteractionStatus", "LocationInteraction",
+    "InteractionStatus", "LocationInteraction", "InteractionTransition",
 ]

@@ -726,16 +726,22 @@ class OrderflowPolicy:
                     **lifecycle_values,
                 }))
         detector = self._location_detectors[observation.timeframe]
-        closed_before = len(detector.closed_interactions)
-        interaction = detector.observe(
+        transition = detector.observe_transition(
             location,
             observation,
+            location_observation=location_observation,
             atr=observation.context.frozen_atr if observation.context is not None else None,
             band_contact=location_observation.band_contact,
             observation_id=location_key,
             projection_sources=projection_sources,
         )
-        for ended in detector.closed_interactions[closed_before:]:
+        interaction = transition.interaction if transition is not None else None
+        ended_interaction = (
+            transition.interaction
+            if transition is not None and transition.departed
+            else None
+        )
+        for ended in (ended_interaction,) if ended_interaction is not None else ():
             lifecycle_events.append(PolicyDecision({
                 **base, "decision_stage": "lifecycle", "outcome": "rejected",
                 "reason": ended.close_reason.value if ended.close_reason else "interaction_ended",
