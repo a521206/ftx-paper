@@ -70,55 +70,56 @@ print(json.dumps(facts, default=str))
     if not isinstance(payload, dict):
         raise ValueError("canonical replay did not return parity facts")
     records = payload.pop("_canonical_records", None)
-    if isinstance(records, list):
-        lifecycle = []
-        setup_identity = {
-            str(item.get("lifecycle_id")): str(item.get("causal_identity"))
-            for item in payload.get("_canonical_setups", [])
-            if isinstance(item, dict) and item.get("lifecycle_id") and item.get("causal_identity")
-        }
-        setup_by_signature = {
-            (str(item.get("location")), str(item.get("template_id")), str(item.get("origin_evidence_id"))): str(item.get("causal_identity"))
-            for item in payload.get("_canonical_setups", [])
-            if isinstance(item, dict) and item.get("causal_identity")
-        }
-        setup_by_location_evidence = {
-            (str(item.get("location")), str(item.get("origin_evidence_id"))): str(item.get("causal_identity"))
-            for item in payload.get("_canonical_setups", [])
-            if isinstance(item, dict) and item.get("causal_identity")
-        }
-        for event in records:
-            if not isinstance(event, dict) or event.get("kind") not in {
-                "opportunity_outcome", "lifecycle_formed", "setup_invalidated",
-                "setup_expired", "setup_superseded", "opportunity_timeout",
-            }:
-                continue
-            parent = event.get("causal_parent_id")
-            if parent is None:
-                context = event.get("parent_context")
-                parent = context.get("context_id") if isinstance(context, dict) else event.get("interaction_id")
-            evidence_ids = event.get("evidence_ids") or ()
-            identity = (
-                event.get("causal_identity")
-                or setup_identity.get(str(event.get("lifecycle_id")))
-                or setup_by_signature.get((str(event.get("location")), str(event.get("template_id")), str(evidence_ids[-1] if evidence_ids else "")))
-                or setup_by_location_evidence.get((str(event.get("location")), str(event.get("interaction_id"))))
-                or event.get("lifecycle_id") or event.get("interaction_id")
-            )
-            observed = event.get("observed_at") or event.get("formation_at")
-            available = event.get("available_at") or event.get("formation_available_at")
-            if not all(isinstance(value, str) for value in (identity, observed, available)):
-                continue
-            observed_text = str(observed)
-            available_text = str(available)
-            lifecycle.append({
-                "kind": str(event["kind"]), "occurred_at": _aware(observed_text),
-                "observed_at": _aware(observed_text), "available_at": _aware(available_text),
-                "identity": identity, "causal_parent_id": parent,
-                "values": event, "unavailable": [],
-            })
-        payload["opportunity_lifecycle"] = lifecycle
-        payload["_canonical_records"] = records
+    if not isinstance(records, list):
+        raise ValueError("canonical replay did not provide lifecycle records")
+    lifecycle = []
+    setup_identity = {
+        str(item.get("lifecycle_id")): str(item.get("causal_identity"))
+        for item in payload.get("_canonical_setups", [])
+        if isinstance(item, dict) and item.get("lifecycle_id") and item.get("causal_identity")
+    }
+    setup_by_signature = {
+        (str(item.get("location")), str(item.get("template_id")), str(item.get("origin_evidence_id"))): str(item.get("causal_identity"))
+        for item in payload.get("_canonical_setups", [])
+        if isinstance(item, dict) and item.get("causal_identity")
+    }
+    setup_by_location_evidence = {
+        (str(item.get("location")), str(item.get("origin_evidence_id"))): str(item.get("causal_identity"))
+        for item in payload.get("_canonical_setups", [])
+        if isinstance(item, dict) and item.get("causal_identity")
+    }
+    for event in records:
+        if not isinstance(event, dict) or event.get("kind") not in {
+            "opportunity_outcome", "lifecycle_formed", "setup_invalidated",
+            "setup_expired", "setup_superseded", "opportunity_timeout",
+        }:
+            continue
+        parent = event.get("causal_parent_id")
+        if parent is None:
+            context = event.get("parent_context")
+            parent = context.get("context_id") if isinstance(context, dict) else event.get("interaction_id")
+        evidence_ids = event.get("evidence_ids") or ()
+        identity = (
+            event.get("causal_identity")
+            or setup_identity.get(str(event.get("lifecycle_id")))
+            or setup_by_signature.get((str(event.get("location")), str(event.get("template_id")), str(evidence_ids[-1] if evidence_ids else "")))
+            or setup_by_location_evidence.get((str(event.get("location")), str(event.get("interaction_id"))))
+            or event.get("lifecycle_id") or event.get("interaction_id")
+        )
+        observed = event.get("observed_at") or event.get("formation_at")
+        available = event.get("available_at") or event.get("formation_available_at")
+        if not all(isinstance(value, str) for value in (identity, observed, available)):
+            raise ValueError("canonical lifecycle event is missing causal timestamps or identity")
+        observed_text = str(observed)
+        available_text = str(available)
+        lifecycle.append({
+            "kind": str(event["kind"]), "occurred_at": _aware(observed_text),
+            "observed_at": _aware(observed_text), "available_at": _aware(available_text),
+            "identity": identity, "causal_parent_id": parent,
+            "values": event, "unavailable": [],
+        })
+    payload["opportunity_lifecycle"] = lifecycle
+    payload["_canonical_records"] = records
     return payload
 
 
@@ -296,11 +297,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--date", required=True, choices=sorted(ALLOWED_DATES))
     parser.add_argument("--canonical-root", type=Path, required=True)
     parser.add_argument("--paper-facts", type=Path, required=True)
+    parser.add_argument("--generate-paper-from-phase5", action="store_true")
     parser.add_argument("--canonical-python", default=sys.executable)
     args = parser.parse_args(argv)
     canonical_facts = _canonical_facts(args.canonical_root, args.date, args.canonical_python)
     paper_facts = _load_paper_facts(args.paper_facts)
-    if not paper_facts:
+    if args.generate_paper_from_phase5:
         paper_facts = _paper_facts_from_phase5(canonical_facts)
     result = compare(canonical_facts=canonical_facts, paper_facts=paper_facts, session_date=args.date)
     print(json.dumps(result, indent=2, sort_keys=True, default=str))

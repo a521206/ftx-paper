@@ -96,6 +96,8 @@ class SetupOpportunity:
     timeout_evidence_timeframe: str = "5m"
     timeout_counted_source_ids: list[str] = field(default_factory=list)
     timeout_counted_snapshot_ids: list[str] = field(default_factory=list)
+    retest_touched: bool = False
+    retest_confirmed: bool = False
     _events: tuple[LifecycleEvent, ...] = field(default=(), repr=False)
 
     def __post_init__(self) -> None:
@@ -122,7 +124,28 @@ class SetupOpportunity:
             return LifecycleStage.EXPIRED
         if self.status is OpportunityStatus.SUPERSEDED:
             return LifecycleStage.SUPERSEDED
+        if self.retest_confirmed:
+            return LifecycleStage.RETEST_CONFIRMED
+        if self.retest_touched:
+            return LifecycleStage.WAITING_FOR_RETEST
         return LifecycleStage.RESPONSE_CONFIRMED if self.response_evidence_ids else LifecycleStage.OBSERVING_LOCATION
+
+    def mark_retest(self, *, at: str, confirmed: bool = False, evidence: Mapping[str, Any] | None = None) -> None:
+        at = canonical_timestamp(at)
+        if not self.active or at < self.formation_available_at:
+            raise ValueError("retest evidence requires an available active lifecycle")
+        if self.retest_confirmed and not confirmed:
+            return
+        self.retest_touched = True
+        self.retest_confirmed = self.retest_confirmed or confirmed
+        self.record({
+            "kind": "retest_confirmed" if confirmed else "retest_touched",
+            "observed_at": at, "available_at": at, "evidence": dict(evidence or {}),
+            "stage_after": self.stage.value,
+        })
+
+    def execution_group_eligible(self, claimed_groups: Mapping[str, str]) -> bool:
+        return self.active and (self.execution_group_id is None or self.execution_group_id not in claimed_groups)
 
     @property
     def events(self) -> tuple[LifecycleEvent, ...]:
@@ -156,8 +179,8 @@ class SetupOpportunity:
         at = canonical_timestamp(at)
         if at < self.formation_available_at:
             raise ValueError("supersession cannot precede formation")
+        self.record({"kind": "setup_superseded", "reason": reason, "observed_at": at, "available_at": at, "stage_after": LifecycleStage.SUPERSEDED.value})
         self.status = OpportunityStatus.SUPERSEDED
-        self._events += (LifecycleEvent(f"{self.lifecycle_id}:{len(self._events)}", self.lifecycle_id, len(self._events), "setup_superseded", at, at, None, {"kind": "setup_superseded", "reason": reason}),)
 
     def to_dict(self) -> dict[str, Any]:
         return {"lifecycle_id": self.lifecycle_id, "candidate_id": self.candidate_id, "direction": self.direction.value, "status": self.status.value, "stage": self.stage.value, "causal_identity": self.causal_identity, "response_evidence_ids": list(self.response_evidence_ids), "response_evidence_lineage": [asdict(item) for item in self.response_evidence_lineage], "parent_context": asdict(self.parent_context) if self.parent_context else None, "events": [asdict(item) for item in self._events]}

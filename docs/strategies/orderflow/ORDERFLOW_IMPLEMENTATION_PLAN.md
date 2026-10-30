@@ -467,8 +467,10 @@ Phase 4 parity verification record:
 Validate canonical observations, interaction episodes, response hypotheses, and
 response outcomes before opportunity formation.
 
-Status: Complete for the deterministic canonical contract gate. Paper runtime and
-database parity remains incomplete and is deferred to Phase 9.
+Status: INCOMPLETE. The pure opportunity/setup contracts are present, but the
+deterministic canonical contract gate remains open pending independent Paper
+Phase 5-input generation and full lifecycle parity. Runtime and database parity
+remain deferred to Phase 9.
 
 Port only the canonical interaction and response modules and their newly required
 direct dependencies. Do not preserve the deleted Paper interaction or response
@@ -534,17 +536,20 @@ Parity gate:
   close reasons match canonical output.
 - Duplicate/retry replay is idempotent and does not create duplicate candidates.
 
-Phase 6 verification record:
+Current Phase 6 verification record:
 
 - Canonical opportunity and timeout tests pass (30 tests) at the pinned baseline.
 - Paper Phase 6 opportunity, setup, timeout, lineage, future-evidence, and
   deterministic identity tests pass together with the Phase 4/5 gates (18 tests).
-- Opportunity/setup contracts preserve causal identity, parent context, response
-  evidence lineage, lifecycle stages, explicit expiry/invalidation/supersession,
-  and duplicate timeout observation idempotence.
+- Opportunity/setup contracts currently cover causal identity, parent context,
+  response evidence lineage, retest stages, explicit expiry/invalidation/
+  supersession, execution-group eligibility, and duplicate timeout observation
+  idempotence.
 - Ruff, Pyright, and `git diff --check` pass for the changed Paper scope.
-- No runtime/database parity claim is made; Phase 9 remains the host integration
-  and persistence gate.
+- The canonical-vs-Paper replay harness currently reports mismatches for both
+  source-matched dates; no Phase 6 parity gate is claimed until those are
+  resolved. No runtime/database parity claim is made; Phase 9 remains the host
+  integration and persistence gate.
 
 ## Phase 7: Port And Verify Intents, Admission, Allocation, And Execution
 

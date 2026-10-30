@@ -57,6 +57,33 @@ def test_timeout_duplicate_retry_is_idempotent_and_lifecycle_close_reasons_are_e
     assert life.events[-1].payload["reason"] == "timeout"
 
 
+def test_retest_and_supersession_are_causal_and_execution_group_eligibility_is_explicit() -> None:
+    bar = _bar("20")
+    life = SetupOpportunity("life", Direction.LONG, bar.session_date, bar.symbol, "orderflow", bar.time, bar.available_at, "candidate", None, "PD_LOW", 100.0, bar, 102.0, 99.0, execution_group_id="group-1")
+    assert life.execution_group_eligible({})
+    life.mark_retest(at="2026-09-15T09:21", evidence={"bar": "09:20"})
+    assert life.stage is LifecycleStage.WAITING_FOR_RETEST
+    life.mark_retest(at="2026-09-15T09:22", confirmed=True)
+    assert life.stage is LifecycleStage.RETEST_CONFIRMED
+    assert not life.execution_group_eligible({"group-1": "winner"})
+    life.supersede(at="2026-09-15T09:23", reason="replacement")
+    assert life.status is OpportunityStatus.SUPERSEDED
+    assert life.events[-1].payload["stage_after"] == LifecycleStage.SUPERSEDED.value
+    with pytest.raises(ValueError, match="precede formation"):
+        SetupOpportunity("future", Direction.LONG, bar.session_date, bar.symbol, "orderflow", bar.time, bar.available_at, "candidate", None, "PD_LOW", 100.0, bar, 102.0, 99.0).supersede(at="2026-09-15T09:19")
+
+
+def test_incomplete_timeout_projection_does_not_advance_count() -> None:
+    bar = _bar("20")
+    life = SetupOpportunity("life", Direction.LONG, bar.session_date, bar.symbol, "orderflow", bar.time, bar.available_at, "candidate", None, "PD_LOW", 100.0, bar, 102.0, 99.0)
+    from ftx_paper.strategies.orderflow.interactions import ProjectionSnapshot
+    interaction = _interaction(bar)
+    interaction.synthetic["5m"].snapshots = [ProjectionSnapshot("5m", 100, 101, 99, 100, 1, (bar.time,), bar.time, "2026-09-15T09:26", "2026-09-15T09:25")]
+    result = advance_opportunity_timeout(life, interaction=interaction.evaluation_snapshot(), evidence=(), as_of="2026-09-15T09:30")
+    assert result.added_units == 0
+    assert life.timeout_count == 0
+
+
 def _lifecycle_fact(*, identity: str = "opp-1", timeout_count: int = 2, close_reason: str | None = None) -> dict[str, object]:
     return {
         "kind": "opportunity_lifecycle",

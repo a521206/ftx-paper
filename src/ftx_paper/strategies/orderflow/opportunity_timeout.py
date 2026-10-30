@@ -32,7 +32,10 @@ def advance_opportunity_timeout(opportunity: SetupOpportunity, *, interaction: I
     snapshots_added: list[str] = []
     expiry: str | None = None
     for snapshot in sorted(snapshots, key=lambda item: item.available_at):
-        if not opportunity.formation_available_at < snapshot.available_at <= as_of:
+        if (
+            not opportunity.formation_available_at < snapshot.available_at <= as_of
+            or snapshot.available_at < snapshot.last_source_end
+        ):
             continue
         snapshot_id = ":".join((interaction.interaction_id if interaction else "", "5m", ",".join(snapshot.source_candle_ids)))
         if snapshot_id in counted_snapshots:

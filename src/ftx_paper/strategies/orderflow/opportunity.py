@@ -104,7 +104,12 @@ def evaluate_response(template: TradeTemplate, interaction: Any, bars: Sequence[
         and _value(bar, "available_at") <= as_of
         and _value(bar, "available_at") <= f"{_value(bar, 'session_date')}T{template.expiry_at}"
     )
-    if any(_value(bar, "available_at") > as_of or _value(bar, "available_at") < interaction_available for bar in available):
+    if any(
+        _value(bar, "available_at") > as_of
+        or _value(bar, "available_at") < interaction_available
+        or _value(bar, "available_at") > f"{_value(bar, 'session_date')}T{template.expiry_at}"
+        for bar in available
+    ):
         raise ValueError("response evidence is outside the evaluation boundary")
     available = tuple(sorted(available, key=lambda item: (_value(item, "time"), _value(item, "available_at"))))
     if not available:
@@ -124,7 +129,7 @@ def evaluate_response(template: TradeTemplate, interaction: Any, bars: Sequence[
     if evaluation.status is ResponseOutcomeStatus.INVALIDATED:
         return OpportunityOutcome(OpportunityOutcomeStatus.CONTRADICTED, "reference_crossed_after_contact", observed, available_at, evidence, evidence_lineage=lineage, policy_version=template.policy_version, template=template, as_of=as_of)
     if evaluation.status is not ResponseOutcomeStatus.CONFIRMED:
-        status = OpportunityOutcomeStatus.EXPIRED if spec.expired(session_date=as_of[:10], as_of=as_of) else OpportunityOutcomeStatus.PENDING
+        status = OpportunityOutcomeStatus.EXPIRED if spec.expired(session_date=str(_value(interaction, "session_date")), as_of=as_of) else OpportunityOutcomeStatus.PENDING
         return OpportunityOutcome(status, "response_window_expired" if status is OpportunityOutcomeStatus.EXPIRED else "response_window_open", observed, available_at, evidence, evidence_lineage=lineage, policy_version=template.policy_version, template=template, as_of=as_of)
     candle = evaluation.confirmation_candle
     if candle is None:
