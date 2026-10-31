@@ -93,7 +93,9 @@ class ReplayMachine:
             )
             newly_available = [
                 item for item in self._interaction_response
-                if coerce_timestamp(str(item.get("available_at", clock))) <= clock_instant
+                if coerce_timestamp(str(item.get(
+                    "_publication_available_at", item.get("available_at", clock),
+                ))) <= clock_instant
                 and (str(item.get("kind", "")), str(item.get("identity", "")))
                 not in emitted_interaction_keys
             ]
@@ -139,6 +141,7 @@ class ReplayMachine:
     def _normalize_event(self, event: dict[str, Any]) -> dict[str, Any]:
         """Publish canonical neutral identity and causal-parent references."""
         event_data = dict(event)
+        event_data.pop("_publication_available_at", None)
         values = event_data.get("values")
         if isinstance(values, dict):
             for key in (

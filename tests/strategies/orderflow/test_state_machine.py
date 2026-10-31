@@ -95,6 +95,32 @@ def test_replay_machine_emits_causal_interaction_facts_once_at_availability() ->
     assert len(state.interaction_response) == 1
 
 
+def test_replay_machine_preserves_later_publication_of_repeated_causal_fact() -> None:
+    fact = {
+        "kind": "response_confirmed",
+        "identity": "response-1:evaluation:1",
+        "observed_at": "2026-10-30T09:19",
+        "available_at": "2026-10-30T09:20",
+        "_publication_available_at": "2026-10-30T09:25",
+    }
+    machine = ReplayMachine(
+        [
+            {"time": "09:20", "session_date": "2026-10-30"},
+            {"time": "09:25", "session_date": "2026-10-30"},
+        ],
+        evidence_events=(),
+        evidence_at_clock=lambda _clock: {"contexts": []},
+        session_date="2026-10-30",
+        interaction_response=(fact,),
+    )
+
+    records, _ = machine.run()
+
+    assert records[0]["events"] == []
+    assert records[1]["events"][0]["available_at"] == "2026-10-30T09:20"
+    assert "_publication_available_at" not in records[1]["events"][0]
+
+
 def test_replay_machine_gates_utc_fact_against_local_replay_clock() -> None:
     rows = [
         {"time": "09:15", "session_date": "2026-10-30"},

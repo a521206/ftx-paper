@@ -753,9 +753,10 @@ policy; it supplies the chronological orchestration required to exercise the
 already ported domain contracts.
 
 Status: Boundary implemented. Deterministic interaction/response primitives,
-canonical PD dispatch, and chronological first-mismatch comparison are now
-available. Cross-repository event parity and ATR-dependent context/location
-parity remain exit gates; Phase 9 runtime/database integration is deferred.
+canonical policy dispatch, and chronological first-mismatch comparison are now
+available. Cross-repository Phase 4.5 parity is established for the validated
+2026-10-01 replay; Phase 3.5/4 ATR-dependent context/location variance remains
+accepted input variance. Phase 9 runtime/database integration is deferred.
 
 Next implementation slice:
 
@@ -796,6 +797,24 @@ Phase 4.5 parity gate:
 - Phase 5 comparison reports the first causal mismatch from this stream.
 - No Paper fallback, template selection rule, or response outcome exists unless
   the corresponding canonical implementation has the same behavior.
+
+Phase 4.5 verification record:
+
+- The 2026-10-01 Canonical/Paper replay comparison reports `MATCHED` for the
+  `interaction_response` stream. Phase 3 is `MATCHED`; Phase 3.5 and Phase 4
+  report only bounded ATR-dependent `INPUT_VARIANCE`.
+- The remaining Phase 4.5 mismatch was a Paper replay bug. Canonical evaluates
+  standard interactions only when a new 5-minute confirmation context is
+  available, preserves repeated evaluations for active interactions, and keeps
+  their original causal timestamps. Paper previously dispatched on every
+  availability clock and deduplicated repeated facts by `(kind, identity)`.
+- Paper now dispatches on the canonical 5-minute boundary, preserves later
+  publication order separately from causal timestamps, and retains frozen
+  interaction provenance for VWAP responses. Ended interactions remain gated
+  and cannot produce later policy facts.
+- The VWAP ordering/provenance regression and delayed repeated-fact publication
+  are covered by focused tests. The changed Paper files pass Pyright and Ruff;
+  the focused orderflow suite passes 25 tests.
 
 ## Phase 5: Port And Verify Layer 3 - Interactions And Responses
 

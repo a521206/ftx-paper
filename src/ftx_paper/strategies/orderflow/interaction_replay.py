@@ -130,23 +130,6 @@ def _publish_replaced_interactions(
                         observed_at=aggregate.end_time,
                         available_at=aggregate.available_at,
                     ))
-            facts.append(_fact(
-                "reference_invalidated",
-                f"reference_invalidated:{record.alias}:{record.generation}",
-                None,
-                {
-                    "reference_id": record.alias,
-                    "old_reference_id": previous.location_id,
-                    "old_generation": previous.generation,
-                    "new_reference_id": record.location_id,
-                    "new_generation": record.generation,
-                },
-                observed_at=record.created_at,
-                available_at=record.available_at,
-            ))
-
-
-
 def replay_interaction_response(
     aggregates: Mapping[str, Sequence[Aggregate]], context: ContextLocationReplay,
     registry: LocationRegistry, *, templates: Mapping[tuple[str, str], TradeTemplate] = TRADE_TEMPLATES,
@@ -210,6 +193,7 @@ def replay_interaction_response(
     published_records: set[tuple[str, int]] = set()
     clock_available: datetime | None = None
     clock_available5: list[Aggregate] = []
+    dispatched_available5: datetime | None = None
     for current in all_bars:
         source = f"aggregate:{current.timeframe}:{nifty_label(current.time)}"
         current_available = current.available_at
@@ -219,14 +203,21 @@ def replay_interaction_response(
             # Canonical handle_bar has a hard phase boundary: every interaction
             # transition at the availability clock is published before policy
             # dispatch for that same clock.
-            _dispatch_structure(
-                detector=detector,
-                templates=templates,
-                available5=clock_available5,
-                as_of=clock_available,
-                facts=facts,
-                role_context_emitted=role_context_emitted,
-            )
+            latest_available5 = clock_available5[-1].available_at if clock_available5 else None
+            # Defer a boundary dispatch when the next clock is publishing a
+            # new 5m bar; Canonical evaluates that bar after its transitions.
+            if latest_available5 != dispatched_available5 and (
+                not available5 or available5[-1].available_at != current_available
+            ):
+                _dispatch_structure(
+                    detector=detector,
+                    templates=templates,
+                    available5=clock_available5,
+                    as_of=clock_available,
+                    facts=facts,
+                    role_context_emitted=role_context_emitted,
+                )
+                dispatched_available5 = latest_available5
         clock_available = current_available
         clock_available5 = available5
         if available5:
@@ -262,6 +253,30 @@ def replay_interaction_response(
             snap = transition.interaction.snapshot()
             iid = transition.interaction.interaction_id
             observation = transition.observation
+            source = detector.interactions.get(iid)
+            source_observation_id = (
+                source.reference_provenance.get("source_observation_id")
+                if source is not None else None
+            )
+            if snap["location"] == "VWAP" and iid not in vwap_emitted and snap["pre_contact_side"]:
+                for candle in snap["candles"][1:]:
+                    confirmed = (
+                        snap["pre_contact_side"] == "BELOW" and candle["close"] >= snap["band_low"]
+                    ) or (
+                        snap["pre_contact_side"] == "ABOVE" and candle["close"] <= snap["band_high"]
+                    )
+                    if confirmed:
+                        vwap_emitted.add(iid)
+                        facts.append(_fact("response_confirmed", f"{iid}:VWAP", iid, {
+                            "interaction_id": iid, "location": "VWAP",
+                            "timeframe": snap["timeframe"],
+                            "reference_generation": snap["reference_generation"],
+                            "response_status": "CONFIRMED", "response_reason": "causal_vwap_rejection",
+                            "source_observation_id": source_observation_id,
+                            "evidence_ids": [candle["candle_id"]],
+                            "current_available_at": current.available_at,
+                        }, observed_at=candle["end_time"], available_at=candle["available_at"]))
+                        break
             if replay_mode == "FULL" and observation is not None and transition.interaction.status.value == "ACTIVE":
                 interaction_key = f"{observation.location.upper()}:{observation.timeframe}:{observation.reference_generation}"
                 decision_id = hashlib.sha256(
@@ -313,39 +328,25 @@ def replay_interaction_response(
                     "timeframe": transition.interaction.timeframe,
                     "reference_generation": transition.interaction.reference_generation,
                     "reason": snap["close_reason"],
-                    "source_observation_id": observation.source_observation_id if observation is not None else None,
+                    "source_observation_id": (
+                        detector.interactions[iid].reference_provenance.get("source_observation_id")
+                        if iid in detector.interactions else None
+                    ),
                     "terminal_candle_id": snap["terminal_candle_id"],
                     "terminal_close_side": snap["terminal_close_side"],
                 }, observed_at=snap["candles"][-1]["end_time"],
                    available_at=snap["candles"][-1]["available_at"]))
-            if snap["location"] == "VWAP" and iid not in vwap_emitted and snap["pre_contact_side"]:
-                for candle in snap["candles"][1:]:
-                    confirmed = (
-                        snap["pre_contact_side"] == "BELOW" and candle["close"] >= snap["band_low"]
-                    ) or (
-                        snap["pre_contact_side"] == "ABOVE" and candle["close"] <= snap["band_high"]
-                    )
-                    if confirmed:
-                        vwap_emitted.add(iid)
-                        facts.append(_fact("response_confirmed", f"{iid}:VWAP", iid, {
-                            "interaction_id": iid, "location": "VWAP",
-                            "timeframe": snap["timeframe"],
-                            "reference_generation": snap["reference_generation"],
-                            "response_status": "CONFIRMED", "response_reason": "causal_vwap_rejection",
-                            "source_observation_id": observation.source_observation_id if observation else None,
-                            "evidence_ids": [candle["candle_id"]],
-                            "current_available_at": current.available_at,
-                        }, observed_at=candle["end_time"], available_at=candle["available_at"]))
-                        break
     if clock_available is not None:
-        _dispatch_structure(
-            detector=detector,
-            templates=templates,
-            available5=clock_available5,
-            as_of=clock_available,
-            facts=facts,
-            role_context_emitted=role_context_emitted,
-        )
+        latest_available5 = clock_available5[-1].available_at if clock_available5 else None
+        if latest_available5 != dispatched_available5:
+            _dispatch_structure(
+                detector=detector,
+                templates=templates,
+                available5=clock_available5,
+                as_of=clock_available,
+                facts=facts,
+                role_context_emitted=role_context_emitted,
+            )
     interaction_facts = tuple(
         item for item in facts if item["kind"] != "opportunity_outcome"
     )
@@ -365,6 +366,25 @@ def _dispatch_structure(
     role_context_emitted: set[str],
 ) -> None:
     """Run the canonical structure phase after all interaction publications."""
+    dispatch_start = len(facts)
+
+    def emission_identity(kind: str, identity: str) -> str:
+        count = sum(
+            1 for item in facts[:dispatch_start]
+            if item["kind"] == kind
+            and item["identity"] == identity
+        )
+        return identity if count == 0 else f"{identity}:evaluation:{count}"
+
+    def append_policy_fact(kind: str, identity: str, parent: str, values: Mapping[str, Any], *,
+                           observed_at: str, available_at: str) -> None:
+        fact = _fact(
+            kind, identity, parent, values,
+            observed_at=observed_at, available_at=available_at,
+        )
+        fact["_publication_available_at"] = serialize_utc(as_of)
+        facts.append(fact)
+
     for state in reversed(tuple(detector.interactions.values())):
         interaction = state.evaluation_snapshot()
         if interaction.status.value != "ACTIVE" or interaction.location == "VWAP":
@@ -398,17 +418,18 @@ def _dispatch_structure(
             ))
         for evaluation in evaluations:
             outcome = evaluation.outcome
-            identity = evaluation.identity or f"{iid}:{evaluation.template.template_id}:{outcome.status.value}"
+            base_identity = evaluation.identity or f"{iid}:{evaluation.template.template_id}:{outcome.status.value}"
+            identity = emission_identity("opportunity_outcome", base_identity)
             response = outcome.response
             if response is not None:
-                facts.append(_fact("hypothesis_arbitrated", identity, iid, {
+                append_policy_fact("hypothesis_arbitrated", emission_identity("hypothesis_arbitrated", identity), iid, {
                     "interaction_id": iid, "location": interaction.location,
                     "template_id": evaluation.template.template_id,
                     "response_type": evaluation.template.response_type.value,
                     "direction": response.direction.value,
                     "arbitration_selected": evaluation.selected,
                     "arbitration_reason": evaluation.arbitration_reason,
-                }, observed_at=response.observed_at, available_at=response.available_at))
+                }, observed_at=response.observed_at, available_at=response.available_at)
             facts.append(_fact("opportunity_outcome", identity, iid, {
                 "interaction_id": iid,
                 "location": interaction.location,
@@ -424,13 +445,13 @@ def _dispatch_structure(
                 "evidence_lineage": [dataclasses.asdict(item) for item in outcome.evidence_lineage],
             }, observed_at=outcome.observed_at, available_at=outcome.available_at))
             if response is not None and not is_pd:
-                facts.append(_fact("response_confirmed", identity, iid, {
+                append_policy_fact("response_confirmed", emission_identity("response_confirmed", identity), iid, {
                     "interaction_id": iid, "location": interaction.location,
                     "template_id": evaluation.template.template_id,
                     "response_type": evaluation.template.response_type.value,
                     "direction": response.direction.value,
                     "evidence_ids": list(response.evidence_ids),
-                }, observed_at=response.observed_at, available_at=response.available_at))
+                }, observed_at=response.observed_at, available_at=response.available_at)
 
 
 __all__ = ["InteractionResponseReplay", "replay_interaction_response"]
