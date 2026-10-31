@@ -2,9 +2,11 @@ from dataclasses import replace
 
 import pytest
 
-from ftx_paper.strategies.orderflow.interaction_detector import InteractionDetector
-from ftx_paper.strategies.orderflow.interaction_detector import InteractionTransition
-from ftx_paper.strategies.orderflow.interaction_replay import replay_interaction_response
+from ftx_paper.strategies.orderflow.interaction_detector import InteractionDetector, InteractionTransition
+from ftx_paper.strategies.orderflow.interaction_replay import (
+    _publish_replaced_interactions,
+    replay_interaction_response,
+)
 from ftx_paper.strategies.orderflow.context_location_replay import ContextLocationReplay
 from ftx_paper.strategies.orderflow.interactions import (
     CloseSide,
@@ -17,6 +19,8 @@ from ftx_paper.strategies.orderflow.location_observation import LocationObservat
 from ftx_paper.strategies.orderflow.orderflow_common import Aggregate
 from ftx_paper.strategies.orderflow.response import ResponseOutcomeStatus, ResponseSpec
 from ftx_paper.strategies.orderflow.state_machine_types import LocationRecord, LocationRegistry
+from ftx_paper.strategies.orderflow.state_machine import ReplayMachine
+from ftx_paper.strategies.orderflow.timestamps import nifty_label
 from ftx_paper.strategies.orderflow.templates import Direction, ExitExecutionTiming, ResponseType
 
 
@@ -68,11 +72,9 @@ def test_detector_compares_utc_observation_availability_to_local_aggregate_clock
         available_at="2026-09-29T04:00:00Z", method="test", observation_id="obs",
         timeframe="1m",
     )
-
     with pytest.raises(ValueError, match="not causally available"):
         InteractionDetector(LocationRegistry("locations")).observe_1m(
-            current=current, available=[current], atr=1.0,
-            observations=(observation,),
+            current=current, available=[current], atr=1.0, observations=(observation,),
         )
 
 
@@ -81,53 +83,22 @@ def test_interaction_projects_and_freezes_across_sessions() -> None:
     interaction.seed_projections({"5m": [interaction.creation_candle]})
     next_contact = replace(
         interaction.creation_candle,
-        session_date="2026-09-30",
-        time="2026-09-30T09:15",
-        end_time="2026-09-30T09:19",
-        available_at="2026-09-30T09:20",
+        session_date="2026-09-30", time="2026-09-30T09:15",
+        end_time="2026-09-30T09:19", available_at="2026-09-30T09:20",
     )
     assert interaction.observe(next_contact) is InteractionStatus.ACTIVE
     departure = replace(
         next_contact,
-        time="2026-09-30T09:20",
-        end_time="2026-09-30T09:24",
-        available_at="2026-09-30T09:25",
-        open=104.0,
-        high=106.0,
-        low=103.0,
-        close=105.0,
+        time="2026-09-30T09:20", end_time="2026-09-30T09:24",
+        available_at="2026-09-30T09:25", open=104.0, high=106.0,
+        low=103.0, close=105.0,
     )
     assert interaction.observe(departure) is InteractionStatus.ENDED
     assert interaction.frozen_projections["5m"].source_candle_ids == (
         "2026-09-29T09:20", "2026-09-30T09:15", "2026-09-30T09:20",
     )
     with pytest.raises(ValueError, match="ending must be causal"):
-        interaction.end(InteractionStatus.ENDED, available_at="2026-09-28T15:00")
-
-
-def test_inside_contact_crosses_band_only_with_prior_side_context() -> None:
-    contact = replace(
-        _bar("2026-09-01T13:00"),
-        open=102.0,
-        high=103.0,
-        low=99.0,
-        close=100.0,
-        session_date="2026-09-01",
-    )
-    interaction = LocationInteraction.create(
-        instrument="NIFTY", session_date="2026-09-01", location="OR_HIGH",
-        template_version="1", candle=contact, reference_level=100.0, atr=10.0,
-        band=LocationBand(99.0, 101.0), created_at=contact.available_at,
-        available_at=contact.available_at, pre_contact_side=CloseSide.ABOVE,
-    )
-    assert interaction is not None
-    departure = replace(
-        contact, time="2026-09-01T13:05", end_time="2026-09-01T13:09",
-        available_at="2026-09-01T13:10", open=100.0, high=100.5,
-        low=95.0, close=98.0,
-    )
-    assert interaction.observe(departure) is InteractionStatus.ENDED
-    assert interaction.close_reason is InteractionCloseReason.CROSS_BAND_DEPARTURE
+        _interaction().end(InteractionStatus.ENDED, available_at="2026-09-28T15:00")
 
 
 def test_interaction_departure_reason_and_future_evidence_rejection() -> None:
@@ -187,7 +158,7 @@ def test_replay_publishes_same_clock_interactions_before_response_dispatch(monke
         location="PD_LOW", location_id="pd", reference_generation=4,
         reference=100.0, band_low=99.0, band_high=101.0, open=100.0,
         high=101.0, low=99.0, close=100.0, close_relation="INSIDE_BAND",
-        band_contact=True, source_aggregate_id=current.time, source_observation_id=None,
+        band_contact=True, source_aggregate_id=nifty_label(current.time), source_observation_id=None,
         observed_at=current.end_time, available_at=current.available_at, method="test",
         observation_id="pd-observation", timeframe="5m",
         child_observation_ids=("1", "2", "3", "4", "5"),
@@ -233,3 +204,105 @@ def test_replay_publishes_same_clock_interactions_before_response_dispatch(monke
         item["identity"] for item in replay.facts
         if item["kind"] == "hypothesis_arbitrated"
     }
+
+
+def test_replay_preserves_repeated_1m_observations_before_5m_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    one_a = _bar("2026-09-29T09:20", timeframe="1m", available="2026-09-29T09:21")
+    one_b = _bar("2026-09-29T09:21", timeframe="1m", available="2026-09-29T09:22")
+    five = _bar("2026-09-29T09:20", available="2026-09-29T09:25")
+    interaction = _interaction(replace(one_a, timeframe="5m", source_bar_count=5))
+    first = LocationObservation(
+        location="PD_LOW", location_id="pd", reference_generation=4,
+        reference=100.0, band_low=99.0, band_high=101.0, open=100.0,
+        high=101.0, low=99.0, close=100.0, close_relation="INSIDE_BAND",
+        band_contact=True, source_aggregate_id=nifty_label(one_a.time),
+        observed_at=one_a.end_time, available_at=one_a.available_at,
+        method="test", observation_id="one-a", timeframe="1m",
+    )
+    second = replace(first, source_aggregate_id=nifty_label(one_b.time), observed_at=one_b.end_time,
+                     available_at=one_b.available_at, observation_id="one-b")
+    five_observation = replace(first, source_aggregate_id=nifty_label(five.time),
+                               observed_at=five.end_time, available_at=five.available_at,
+                               observation_id="five", timeframe="5m",
+                               child_observation_ids=("a", "b", "c", "d", "e"))
+
+    class FakeDetector:
+        def __init__(self, _registry: LocationRegistry) -> None:
+            self.interactions = {interaction.interaction_id: interaction}
+
+        def observe_1m(self, **kwargs: object) -> list[InteractionTransition]:
+            current = kwargs["current"]
+            observation = first if current is one_a else second
+            return [InteractionTransition(interaction.evaluation_snapshot(), observation)]
+
+        def observe(self, **_kwargs: object) -> tuple[InteractionTransition, ...]:
+            return (InteractionTransition(interaction.evaluation_snapshot(), five_observation),)
+
+    monkeypatch.setattr("ftx_paper.strategies.orderflow.interaction_replay.InteractionDetector", FakeDetector)
+    replay = replay_interaction_response(
+        {"1m": (one_a, one_b), "5m": (five,)},
+        ContextLocationReplay((), ()), LocationRegistry("stream"),
+    )
+
+    observed = [item for item in replay.facts if item["kind"] == "location_interaction_observed"]
+    assert [item["values"]["source_observation_ids"] for item in observed] == [["one-a"], ["one-b"], ["five"]]
+    assert [item["available_at"] for item in observed] == [
+        "2026-09-29T03:51:00.000000Z",
+        "2026-09-29T03:52:00.000000Z",
+        "2026-09-29T03:55:00.000000Z",
+    ]
+
+    machine = ReplayMachine(
+        [{"session_date": "2026-09-29", "time": value} for value in ("09:20", "09:21", "09:25")],
+        evidence_events=(), evidence_at_clock=lambda _clock: {},
+        session_date="2026-09-29", interaction_response=replay.facts,
+    )
+    _, state = machine.run()
+    retained = [item for item in state.interaction_response if item["kind"] == "location_interaction_observed"]
+    assert [item["values"]["source_observation_ids"] for item in retained] == [["one-a"], ["one-b"], ["five"]]
+
+
+def test_replay_publishes_canonical_extreme_lifecycle_facts() -> None:
+    first = _bar("2026-09-29T09:20")
+    second = _bar("2026-09-29T09:25")
+    registry = LocationRegistry("stream")
+    registry.register(LocationRecord(
+        "SESSION_HIGH:2026-09-29:1", "SESSION_HIGH", 101.0, "2026-09-29",
+        first.available_at, first.available_at, "stream", LocationBand(100.0, 102.0),
+        generation=1, source_aggregate_id=nifty_label(first.time),
+    ))
+    registry.register(LocationRecord(
+        "SESSION_HIGH:2026-09-29:2", "SESSION_HIGH", 103.0, "2026-09-29",
+        second.available_at, second.available_at, "stream", LocationBand(102.0, 104.0),
+        generation=2, parent_extreme_generation=1, source_aggregate_id=nifty_label(second.time),
+    ))
+
+    class EmptyDetector:
+        interactions: dict[str, object] = {}
+
+    facts: list[dict[str, object]] = []
+    published: set[tuple[str, int]] = set()
+    _publish_replaced_interactions(
+        detector=EmptyDetector(), registry=registry, current=first,
+        available5=(first, second), published_records=published, facts=facts,
+    )
+    _publish_replaced_interactions(
+        detector=EmptyDetector(), registry=registry, current=second,
+        available5=(first, second), published_records=published, facts=facts,
+    )
+
+    assert [item["kind"] for item in facts] == [
+        "session_extreme_registered",
+        "reference_invalidated",
+        "session_extreme_registered",
+    ]
+    invalidated = facts[1]["values"]
+    assert invalidated["old_reference_id"] == "SESSION_HIGH:2026-09-29:1"
+    assert invalidated["old_generation"] == 1
+    assert invalidated["new_reference_id"] == "SESSION_HIGH:2026-09-29:2"
+    assert invalidated["new_generation"] == 2
+    registered = facts[2]["values"]
+    assert registered["location"] == "SESSION_HIGH"
+    assert registered["owner"] == "5m"

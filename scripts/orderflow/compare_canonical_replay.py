@@ -551,7 +551,15 @@ def _run_json(
         command, cwd=cwd, env=_environment(cwd, paper_root=paper_root), capture_output=True, text=True,
     )
     if result.returncode:
-        return None, (result.stderr or result.stdout).strip() or "subprocess failed"
+        if output is not None and output.is_file():
+            try:
+                return None, output.read_text(encoding="utf-8").strip()
+            except OSError:
+                pass
+        return None, (
+            (result.stderr or result.stdout).strip()
+            or f"subprocess failed (exit code {result.returncode})"
+        )
     try:
         payload = json.loads(output.read_text(encoding="utf-8")) if output is not None else json.loads(result.stdout)
     except (OSError, json.JSONDecodeError) as exc:

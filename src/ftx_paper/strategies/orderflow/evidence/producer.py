@@ -70,7 +70,7 @@ def _aggregate(value: object, *, timeframe: str) -> Aggregate:
     )
 
 
-def _artifact_aggregates(artifact: dict[str, object], session_date: str) -> dict[str, tuple[Aggregate, ...]]:
+def _validate_artifact(artifact: dict[str, object]) -> str:
     if artifact.get("artifact_type") != "canonical_p2_market_observation":
         raise ValueError("invalid Phase 3 artifact type")
     if artifact.get("schema_version") != 1:
@@ -78,6 +78,11 @@ def _artifact_aggregates(artifact: dict[str, object], session_date: str) -> dict
     source_fingerprint = artifact.get("source_fingerprint")
     if not isinstance(source_fingerprint, str) or not source_fingerprint:
         raise ValueError("Phase 3 source_fingerprint is required")
+    return source_fingerprint
+
+
+def _artifact_aggregates(artifact: dict[str, object], session_date: str) -> dict[str, tuple[Aggregate, ...]]:
+    _validate_artifact(artifact)
     raw = artifact.get("aggregates")
     if not isinstance(raw, dict) or set(raw) != {"1m", "5m"}:
         raise ValueError("Phase 3 aggregates must contain exactly 1m and 5m")
@@ -99,6 +104,7 @@ def _artifact_aggregates(artifact: dict[str, object], session_date: str) -> dict
 def produce_evidence(
     artifact: dict[str, object], *, session_date: str, adapter: EvidenceAdapter,
 ) -> dict[str, object]:
+    source_fingerprint = _validate_artifact(artifact)
     aggregates = _artifact_aggregates(artifact, session_date)
     first = next((item for item in aggregates["1m"] + aggregates["5m"]), None)
     if first is None:
@@ -141,7 +147,7 @@ def produce_evidence(
 
     return {
         "session_date": session_date,
-        "source_fingerprint": str(artifact["source_fingerprint"]),
+        "source_fingerprint": source_fingerprint,
         "publication": publish_phase4a_evidence(
             atr=atr,
             locations=registry.records.values(),

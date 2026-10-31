@@ -73,7 +73,9 @@ def causal_vwap_prefix(
         numerator += typical_price * volume
         denominator += volume
         value = numerator / denominator if denominator else typical_price
-        source_identity = f"{aggregate.source_fingerprint}:{session_date}:{aggregate.timeframe}:{nifty_label(aggregate.time)}:{config.version}:{value:.12g}:{volume:.12g}"
+        # Keep causal timestamps as UTC datetimes; this label is identity-only.
+        timestamp_identity = nifty_label(aggregate.time)
+        source_identity = f"{aggregate.source_fingerprint}:{session_date}:{aggregate.timeframe}:{timestamp_identity}:{config.version}:{value:.12g}:{volume:.12g}"
         source_observation_id = hashlib.sha256(source_identity.encode("utf-8")).hexdigest()[:24]
         measurements.append(VwapMeasurement(
             aggregate.timeframe, session_date, nifty_label(aggregate.time), aggregate.end_time,

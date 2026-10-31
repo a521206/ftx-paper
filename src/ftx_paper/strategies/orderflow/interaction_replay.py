@@ -60,6 +60,107 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
+def _publish_replaced_interactions(
+    *,
+    detector: InteractionDetector,
+    registry: LocationRegistry,
+    current: Aggregate,
+    available5: Sequence[Aggregate],
+    published_records: set[tuple[str, int]],
+    facts: list[dict[str, Any]],
+) -> None:
+    """End active episodes when a newer location generation is published."""
+    def source_aggregate(record: Any) -> Aggregate:
+        matches = tuple(
+            item for item in available5
+            if nifty_label(item.time) == record.source_aggregate_id
+        )
+        if not matches:
+            raise ValueError(
+                f"location source aggregate is unavailable: {record.source_aggregate_id}"
+            )
+        return matches[0]
+
+    available = tuple(registry.available_as_of(current.available_at))
+    for record in available:
+        if record.alias not in {"SESSION_HIGH", "SESSION_LOW"}:
+            continue
+        key = (record.location_id, record.generation)
+        if key in published_records:
+            continue
+        previous = max(
+            (
+                item
+                for item in registry.records.values()
+                if item.alias == record.alias
+                and item.generation != record.generation
+                and (item.location_id, item.generation) in published_records
+            ),
+            key=lambda item: (item.available_at, item.generation),
+            default=None,
+        )
+        published_records.add(key)
+        if previous is not None and previous.price != record.price:
+            aggregate = source_aggregate(record)
+            for interaction in tuple(detector.interactions.values()):
+                if (
+                    interaction.status.value == "ACTIVE"
+                    and str(interaction.location) == record.alias
+                ):
+                    ended = detector.end(
+                        interaction.interaction_id,
+                        available_at=record.available_at,
+                        close_reason="REFERENCE_REPLACED",
+                    )
+                    snapshot = ended.snapshot()
+                    facts.append(_fact(
+                        "interaction_ended", ended.interaction_id,
+                        ended.interaction_id,
+                        {
+                            "interaction_id": ended.interaction_id,
+                            "location": str(ended.location),
+                            "timeframe": ended.timeframe,
+                            "reference_generation": ended.reference_generation,
+                            "reason": snapshot["close_reason"],
+                            "source_observation_id": interaction.reference_provenance.get(
+                                "source_observation_id"
+                            ),
+                            "terminal_candle_id": snapshot["terminal_candle_id"],
+                        },
+                        observed_at=aggregate.end_time,
+                        available_at=aggregate.available_at,
+                    ))
+            facts.append(_fact(
+                "reference_invalidated",
+                f"reference_invalidated:{record.alias}:{record.generation}",
+                None,
+                {
+                    "reference_id": record.alias,
+                    "old_reference_id": previous.location_id,
+                    "old_generation": previous.generation,
+                    "new_reference_id": record.location_id,
+                    "new_generation": record.generation,
+                },
+                observed_at=record.created_at,
+                available_at=record.available_at,
+            ))
+
+        aggregate = source_aggregate(record)
+        facts.append(_fact(
+            "session_extreme_registered",
+            f"session_extreme_registered:{record.alias}:{record.generation}",
+            f"aggregate:5m:{nifty_label(aggregate.time)}",
+            {
+                "location": record.alias,
+                "reference_level": record.price,
+                "owner": "5m",
+                "evidence_timeframe": "5m",
+            },
+            observed_at=aggregate.end_time,
+            available_at=record.available_at,
+        ))
+
+
 def replay_interaction_response(
     aggregates: Mapping[str, Sequence[Aggregate]], context: ContextLocationReplay,
     registry: LocationRegistry, *, templates: Mapping[tuple[str, str], TradeTemplate] = TRADE_TEMPLATES,
@@ -115,11 +216,12 @@ def replay_interaction_response(
             deferred_vwap.append(record)
         else:
             published_registry.register(record)
-    vwap_published = False
+    vwap_registered: set[tuple[str, int]] = set()
     detector = InteractionDetector(published_registry)
     facts: list[dict[str, Any]] = []
     vwap_emitted: set[str] = set()
     role_context_emitted: set[str] = set()
+    published_records: set[tuple[str, int]] = set()
     clock_available: datetime | None = None
     clock_available5: list[Aggregate] = []
     for current in all_bars:
@@ -141,10 +243,21 @@ def replay_interaction_response(
             )
         clock_available = current_available
         clock_available5 = available5
-        if available5 and not vwap_published:
+        if available5:
             for record in deferred_vwap:
+                key = (record.location_id, record.generation)
+                if record.available_at > current_available or key in vwap_registered:
+                    continue
                 published_registry.register(record)
-            vwap_published = True
+                vwap_registered.add(key)
+        _publish_replaced_interactions(
+            detector=detector,
+            registry=published_registry,
+            current=current,
+            available5=available5,
+            published_records=published_records,
+            facts=facts,
+        )
         typed = tuple(
             item for item in observations.get(source, ())
             if item.available_at <= current_available
@@ -188,13 +301,17 @@ def replay_interaction_response(
                     },
                 }
                 facts.append(_fact(
-                    "location_interaction_observed", iid,
-                    f"aggregate:{current.timeframe}:{current.time}", observation_values,
+                    # An interaction can publish one observation per completed
+                    # candle. Keep each causal observation distinct while
+                    # retaining the interaction ID as its parent.
+                    "location_interaction_observed",
+                    f"{iid}:{observation.observation_id}",
+                    f"aggregate:{current.timeframe}:{nifty_label(current.time)}", observation_values,
                     observed_at=observation.observed_at,
                     available_at=observation.available_at,
                 ))
             if transition.created:
-                facts.append(_fact("interaction_created", iid, f"aggregate:{current.timeframe}:{current.time}", {
+                facts.append(_fact("interaction_created", iid, f"aggregate:{current.timeframe}:{nifty_label(current.time)}", {
                     "interaction_id": iid, "location": str(transition.interaction.location),
                     "timeframe": transition.interaction.timeframe,
                     "reference_generation": transition.interaction.reference_generation,

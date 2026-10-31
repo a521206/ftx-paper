@@ -23,6 +23,7 @@ from ftx_paper.strategies.orderflow.parity_artifacts import (
 ALLOWED_DATES = {"2026-09-15", "2026-10-01", "2026-10-05"}
 _INTERACTION_KINDS = {
     "interaction_created", "interaction_ended", "location_interaction_observed",
+    "reference_invalidated", "session_extreme_registered",
 }
 _RESPONSE_KINDS = {"response_confirmed", "response_invalidated", "response_expired"}
 _REQUIRED_PHASE_FIELDS = {

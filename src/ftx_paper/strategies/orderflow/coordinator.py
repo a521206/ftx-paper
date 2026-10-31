@@ -161,7 +161,7 @@ class OrderflowCoordinator:
             events.append({
                 "kind": "location_interaction_observed",
                 "identity": f"location_interaction_observed:{interaction_id}:{observation.observation_id}",
-                "causal_parent_id": f"aggregate:{clock.timeframe}:{clock.time}",
+                "causal_parent_id": f"aggregate:{clock.timeframe}:{nifty_label(clock.time)}",
                 "observed_at": observation.observed_at,
                 "available_at": observation.available_at,
                 "values": {
@@ -175,8 +175,8 @@ class OrderflowCoordinator:
             })
         if transition.created:
             events.append({
-                "kind": "interaction_created", "identity": f"interaction_created:{interaction_id}:{clock.time}",
-                "causal_parent_id": f"aggregate:{clock.timeframe}:{clock.time}",
+                "kind": "interaction_created", "identity": f"interaction_created:{interaction_id}:{nifty_label(clock.time)}",
+                "causal_parent_id": f"aggregate:{clock.timeframe}:{nifty_label(clock.time)}",
                 "observed_at": clock.end_time, "available_at": clock.available_at,
                 "values": {"interaction_id": interaction_id, "location": str(transition.interaction.location),
                             "timeframe": transition.interaction.timeframe, "reference_generation": transition.interaction.reference_generation,
@@ -187,7 +187,7 @@ class OrderflowCoordinator:
             })
         if transition.departed:
             events.append({
-                "kind": "interaction_ended", "identity": f"interaction_ended:{interaction_id}:{clock.time}",
+                "kind": "interaction_ended", "identity": f"interaction_ended:{interaction_id}:{nifty_label(clock.time)}",
                 "causal_parent_id": interaction_id, "observed_at": clock.end_time, "available_at": clock.available_at,
                 "values": {"interaction_id": interaction_id, "location": str(transition.interaction.location),
                             "timeframe": transition.interaction.timeframe, "reference_generation": transition.interaction.reference_generation,

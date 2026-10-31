@@ -53,13 +53,16 @@ def _aggregate(value: dict[str, Any], timeframe: str) -> Aggregate:
     )
 
 
-def _location_registry(evidence: dict[str, Any]) -> LocationRegistry:
+def _location_registry(evidence: dict[str, Any], session_date: str) -> LocationRegistry:
     stream_id = str(evidence.get("location_stream_id") or "orderflow:replay")
     registry = LocationRegistry(stream_id)
     for item in evidence.get("locations", ()):
         if not isinstance(item, dict):
             continue
         band = item.get("band", {})
+        source_aggregate_id = item.get("source_aggregate_id")
+        if source_aggregate_id is not None:
+            source_aggregate_id = session_minute(session_date, str(source_aggregate_id))
         registry.register(LocationRecord(
             str(item["location_id"]), str(item["alias"]), float(item["price"]),
              str(item.get("source_session") or "current"), coerce_timestamp(str(item["created_at"])),
@@ -67,7 +70,7 @@ def _location_registry(evidence: dict[str, Any]) -> LocationRegistry:
             LocationBand(float(band["low"]), float(band["high"])),
             generation=int(item.get("generation", 1)), frozen_atr=item.get("frozen_atr"),
             parent_extreme_generation=item.get("parent_extreme_generation"),
-            source_aggregate_id=item.get("source_aggregate_id"),
+             source_aggregate_id=source_aggregate_id,
             source_observation_id=item.get("source_observation_id"),
             timeframe=str(item.get("timeframe", "")), source_method=item.get("source_method"),
         ))
@@ -319,7 +322,7 @@ class OrderflowReplayEngine:
                 for timeframe in ("1m", "5m")
             }
             interaction_replay = replay_interaction_response(
-                aggregates, phase4_replay, _location_registry(final_evidence),
+                aggregates, phase4_replay, _location_registry(final_evidence, session_date),
             )
             interaction_response = interaction_replay.facts
         machine = ReplayMachine(
