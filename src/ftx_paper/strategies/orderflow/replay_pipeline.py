@@ -331,6 +331,10 @@ class OrderflowReplayEngine:
 
         final_evidence = _as_of_evidence(final_state.evidence, final_clock)
         locations = final_evidence["locations"]
+        interaction_phase_facts = (
+            interaction_replay.parity_phase_facts()
+            if interaction_replay is not None else {}
+        )
         source_identity = {
             "symbol": rows[0]["symbol"],
             "expiry": rows[0]["expiry"],
@@ -362,6 +366,9 @@ class OrderflowReplayEngine:
             "parity_phase_facts": {
                 "context_publication": list(final_state.context_publications),
                 **phase4_replay.parity_phase_facts(),
+                # ReplayMachine owns the normalized interaction stream. The producer replay
+                # contributes only its distinct opportunity stream.
+                **({"opportunity_lifecycle": interaction_phase_facts["opportunity_lifecycle"]} if interaction_phase_facts else {}),
                 **({"interaction_response": list(final_state.interaction_response)} if include_interactions else {}),
             },
             "evidence": final_evidence,
