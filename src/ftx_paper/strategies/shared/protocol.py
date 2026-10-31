@@ -10,12 +10,13 @@ from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.contracts import OrderIntent
 
 
-class StrategyDecision(Protocol):
-    """Neutral decision fact emitted by any strategy implementation."""
+@dataclass(frozen=True, slots=True)
+class StrategyDecision:
+    """Neutral event envelope emitted by any strategy implementation."""
 
     event_type: str
     payload: Mapping[str, object]
-    order: OrderIntent | None
+    order: OrderIntent | None = None
 
 
 @dataclass(frozen=True, slots=True)

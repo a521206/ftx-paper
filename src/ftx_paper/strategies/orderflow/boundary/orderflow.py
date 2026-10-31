@@ -5,8 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from ftx_paper.execution.events import ExecutionNotification
-from ftx_paper.strategies.shared.protocol import StrategyMetadata
-from ftx_paper.strategies.research.decision import LiveDecision
+from ftx_paper.strategies.shared.protocol import StrategyDecision, StrategyMetadata
 from ftx_paper.strategies.orderflow.causal_events import CausalEventRegistry
 from ftx_paper.contracts import MarketBar, MarketRole
 from ftx_paper.strategies.orderflow.coordinator import OrderflowClockInput, OrderflowCoordinator
@@ -46,10 +45,10 @@ class OrderflowStrategy:
             observed_at=serialize_utc(require_utc(bar.timestamp)),
             available_at=serialize_utc(require_utc(bar.timestamp)),
         )
-        decisions: list[LiveDecision] = [LiveDecision("SOURCE_OBSERVATION", event)]
+        decisions: list[StrategyDecision] = [StrategyDecision("SOURCE_OBSERVATION", event)]
         if self._coordinator is not None and bar.volume is not None:
             advance = self._coordinator.advance(OrderflowClockInput(self._aggregate(bar)))
-            decisions.extend(LiveDecision(str(item["kind"]).upper(), item) for item in advance.events)
+            decisions.extend(StrategyDecision(str(item["kind"]).upper(), item) for item in advance.events)
         return tuple(decisions)
 
     @staticmethod

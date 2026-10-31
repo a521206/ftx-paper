@@ -31,7 +31,6 @@ from ftx_paper.strategies.orderflow.canonical.ict.value_profile.records import (
     ValueProfileResult,
     ValueProfileSnapshot,
 )
-from ftx_paper.strategies.orderflow.canonical.ict.value_profile.store import DatabaseDailyProfileStore
 from ftx_paper.strategies.orderflow.canonical.ict.value_profile.temporal import TemporalGap, TemporalValidation, validate_profile_stream
 from ftx_paper.strategies.orderflow.canonical.ict.value_profile.builder import run_value_profile
 from ftx_paper.strategies.orderflow.canonical.ict.value_profile.context import run_profile_context, run_profile_context_by_scope
@@ -53,7 +52,6 @@ __all__ = [
     "ClusterReactionKind",
     "ClusterReactionResult",
     "ClusterReactionStats",
-    "DatabaseDailyProfileStore",
     "HistogramLevels",
     "NearbyReferenceRole",
     "NearbyValueAreaSelection",
