@@ -48,15 +48,18 @@ def _location_observation(
     aggregate: Aggregate,
     record: LocationRecord,
     *,
+    source_fingerprint: str,
     child_observation_ids: tuple[str, ...] = (),
 ) -> LocationObservation:
     close_relation = (
-        "ABOVE_BAND" if aggregate.close > record.band_high
-        else "BELOW_BAND" if aggregate.close < record.band_low
+        "ABOVE" if aggregate.close > record.band_high
+        else "BELOW" if aggregate.close < record.band_low
         else "INSIDE_BAND"
     )
-    source_id = f"aggregate:{aggregate.timeframe}:{aggregate.time}"
-    observation_id = f"location:{record.location_id}:{source_id}"
+    observation_id = (
+        f"{source_fingerprint[:16]}:{aggregate.time}:"
+        f"{aggregate.timeframe}:{record.location_id or f'{record.alias}:{record.generation}'}"
+    )
     return LocationObservation(
         location=record.alias,
         location_id=record.location_id,
@@ -75,13 +78,13 @@ def _location_observation(
         # only the enclosing parity fact is normalized to UTC.
         observed_at=aggregate.end_time,
         available_at=aggregate.available_at,
-        method=record.source_method or "registered_location",
+        method=record.source_method or "replay_location_band_intersection",
         observation_id=observation_id,
         timeframe=aggregate.timeframe,
         child_observation_ids=child_observation_ids,
         source_observation_id=record.source_observation_id,
         reference_source_aggregate_id=record.source_aggregate_id,
-        reference_source_timeframe=record.timeframe or None,
+        reference_source_timeframe=record.timeframe or aggregate.timeframe,
     )
 
 
@@ -259,10 +262,16 @@ def _replay_market(
         if not available_locations:
             unavailable.append("missing_location_evidence")
         children = _causal_children(aggregate, market.aggregates["1m"])
-        child_ids = tuple(f"aggregate:1m:{item.time}" for item in children)
         location_values = (
             tuple(
-                _location_observation(aggregate, record, child_observation_ids=child_ids)
+                _location_observation(
+                    aggregate, record,
+                    source_fingerprint=market.source_fingerprint,
+                    child_observation_ids=tuple(
+                        f"location:{record.location_id}:aggregate:1m:{item.time}"
+                        for item in children
+                    ),
+                )
                 for record in available_locations
             )
             if aggregate.timeframe != "5m" or len(children) == 5

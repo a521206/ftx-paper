@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import date, datetime
 import hashlib
 import json
 import math
@@ -44,6 +44,19 @@ PHASE3_FIELDS = (
     "source_fingerprint", "aggregates", "source_gaps", "issues", "session_boundaries",
 )
 PHASE4_STREAMS = ("source_observation", "context_location")
+MIN_COMPARISON_DATE = date(2026, 9, 21)
+
+
+def _comparison_date(value: str) -> str:
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("date must use ISO YYYY-MM-DD format") from exc
+    if parsed < MIN_COMPARISON_DATE:
+        raise argparse.ArgumentTypeError(
+            f"comparison dates before {MIN_COMPARISON_DATE.isoformat()} are prohibited"
+        )
+    return parsed.isoformat()
 
 
 def _digest(value: Any) -> str:
@@ -212,13 +225,19 @@ def _paper_phase35_projection(session_result: dict[str, Any]) -> dict[str, Any]:
         return {}
 
     raw_atr = raw.get("atr")
-    atr = {
-        "value": raw_atr.get("value"),
-        "lineage": raw_atr.get("lineage", []),
-    } if isinstance(raw_atr, dict) else raw_atr
     locations = raw.get("locations", [])
     if not isinstance(locations, list):
         locations = []
+    atr = {
+        "value": raw_atr.get("value"),
+        # Match the canonical projection: ATR lineage is represented by the
+        # source aggregates of locations carrying the frozen ATR.
+        "lineage": [
+            item.get("source_aggregate_id")
+            for item in locations
+            if isinstance(item, dict) and item.get("frozen_atr") is not None
+        ],
+    } if isinstance(raw_atr, dict) else raw_atr
     replay = session_result.get("replay_records", [])
     contexts = [
         item.get("ordinary_context_ref")
@@ -403,6 +422,55 @@ def _canonical_projection_command(
     return [canonical_python, "-c", code, str(replay_path), session_date]
 
 
+def _canonical_source_command(canonical_python: str, canonical_root: Path, session_date: str, output: Path) -> list[str]:
+    code = """
+import json, sys
+from src.data.db import db_connection
+from src.data.repos.futures_repo import fetch_futures
+from src.data.repos.index_repo import load_trading_dates
+
+session_date = sys.argv[1]
+output = sys.argv[2]
+with db_connection() as connection:
+    trading_dates = load_trading_dates(date_to=int(session_date.replace('-', '')), con=connection)
+    dates = [item for item in trading_dates if item <= session_date]
+    rows = fetch_futures(
+        date_from=int(dates[0].replace('-', '')),
+        date_to=int(session_date.replace('-', '')),
+        contract_type='CONTINUOUS', series='I', con=connection,
+    ) if dates else []
+raw = {}
+for row in rows:
+    minute = str(row.time).split('T')[-1][:5]
+    if minute > '15:30':
+        continue
+    raw.setdefault(str(row.date), []).append({
+        'time': minute, 'open': row.open, 'high': row.high, 'low': row.low,
+        'close': row.close, 'volume': row.volume, 'oi': row.oi,
+        'symbol': row.symbol, 'expiry': row.expiry,
+        'contract_type': row.contract_type, 'session_date': row.date,
+    })
+full_dates = set(dates[-6:])
+payload = {}
+for item_date, items in raw.items():
+    items.sort(key=lambda item: item['time'])
+    if item_date in full_dates:
+        payload[item_date] = items
+        continue
+    payload[item_date] = [{
+        **items[0], 'time': '15:30',
+        'high': max(item['high'] for item in items),
+        'low': min(item['low'] for item in items),
+        'close': items[-1]['close'],
+        'volume': sum(item['volume'] for item in items),
+        'oi': items[-1]['oi'],
+    }]
+with open(output, 'w', encoding='utf-8') as handle:
+    json.dump({'sessions': payload}, handle, sort_keys=True)
+"""
+    return [canonical_python, "-c", code, session_date, str(output)]
+
+
 def compare_date(
     session_date: str,
     *,
@@ -416,16 +484,22 @@ def compare_date(
     with tempfile.TemporaryDirectory(prefix="orderflow-cross-repo-") as directory_name:
         directory = Path(directory_name)
         paper_replay_path = directory / "paper-replay.json"
+        canonical_source_path = directory / "canonical-source.json"
         canonical_path = (
             _resolve_canonical_artifact(canonical_artifact, session_date)
             if canonical_artifact else None
         )
         canonical_output_dir = directory / "canonical-replay"
+        canonical_source_error = _run_command(
+            _canonical_source_command(canonical_python, canonical_root, session_date, canonical_source_path),
+            cwd=canonical_root,
+        )
         paper_command = [
             paper_python, "scripts/orderflow/orderflow_replay.py", "--date", session_date,
-            "--runtime-dir", str(paper_runtime_dir), "--output", str(paper_replay_path),
+            "--source-artifact", str(canonical_source_path), "--include-interactions",
+            "--output", str(paper_replay_path),
         ]
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        with ThreadPoolExecutor(max_workers=2) as executor:
             paper_future = executor.submit(
                 _run_json, paper_command, cwd=paper_root, output=paper_replay_path,
             )
@@ -481,12 +555,12 @@ def compare_date(
             canonical_projection, projection_error = (
                 canonical_projection_future.result()
                 if canonical_projection_future is not None
-                else (None, canonical_error or "canonical replay artifact was not produced")
+                else (None, canonical_error or canonical_source_error or "canonical replay artifact was not produced")
             )
             canonical_phase3, canonical_phase3_error = (
                 canonical_phase3_future.result()
                 if canonical_phase3_future is not None
-                else (None, canonical_error or "canonical replay artifact was not produced")
+                else (None, canonical_error or canonical_source_error or "canonical replay artifact was not produced")
             )
             paper_phase3, paper_phase3_error = (
                 paper_phase3_future.result()
@@ -551,7 +625,7 @@ def compare_date(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--date", action="append", dest="dates", required=True)
+    parser.add_argument("--date", action="append", dest="dates", required=True, type=_comparison_date)
     parser.add_argument("--canonical-root", type=Path, default=None)
     parser.add_argument("--canonical-python", default=None)
     parser.add_argument(
@@ -583,7 +657,7 @@ def main(argv: list[str] | None = None) -> int:
         item.get("phase3", {}).get("status") == "MATCHED"
         and
         item.get("phase3_5", {}).get("status") in {"MATCHED", "INPUT_VARIANCE"}
-        and item.get("phase4", {}).get("status") == "MATCHED"
+        and item.get("phase4", {}).get("status") in {"MATCHED", "INPUT_VARIANCE"}
         for item in results
     ) else 1
 

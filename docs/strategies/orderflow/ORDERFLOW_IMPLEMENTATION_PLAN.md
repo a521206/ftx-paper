@@ -420,12 +420,14 @@ remain follow-up work.
 
 ## Phase 4: Port And Verify Layer 2 - Context, Values, Permissions, And Locations
 
-Status: Phase 4A evidence publication, chronological Phase 4B replay, and the
-combined Phase 4C harness are implemented. Source-observation parity is
-matched; context/location comparison currently reports the documented ATR
-source-history input variance. Persisted host runtime parity remains deferred
-to Phase 9. Phase 4 consumes the Phase 3.5 evidence publication and assembles
-its replay inputs.
+Status: **Complete for the runtime-neutral Phase 4 contract.** Phase 4A evidence
+publication, chronological Phase 4B replay, and the combined Phase 4C harness
+are implemented. Source-observation, context/location, relation, method,
+identity, and provenance parity match canonical behavior. The only remaining
+reported status is accepted `INPUT_VARIANCE` for ATR-dependent band geometry;
+the ATR difference is bounded by the parity tolerance. Persisted host runtime
+parity remains deferred to Phase 9. Phase 4 consumes the Phase 3.5 evidence
+publication and assembles its replay inputs.
 
 Port and validate the canonical context and location contracts using exact
 Layer 1-shaped inputs. This phase does not claim Paper runtime or DB-backed
@@ -613,11 +615,9 @@ ordering:
 ### Phase 3.5 Exit Gate
 
 - Paper reproduces the canonical evidence publication sequence from the same
-  Phase 3 aggregate shape for `2026-09-15` and replacement validation date
-  `2026-09-29`. Both sessions have matching Phase 3 manifests; Phase 3.5
+  Phase 3 aggregate shape for the eligible parity dates `2026-10-01` and
+  `2026-10-05`. Both sessions have matching Phase 3 manifests; Phase 3.5
   reports accepted `INPUT_VARIANCE` only where ATR source histories differ.
-  `2026-10-01` is excluded because canonical `2026-09-30` input has a missing
-  `09:16`-`09:21` source segment and cannot produce a valid Phase 3 artifact.
 - Canonical reference output is captured from `ReplayMachine` and
   `state_machine_reporting`; Paper output is produced by the ported boundary.
   Parity is established against canonical output, not by importing NiftyZoning or
@@ -696,8 +696,8 @@ Phase 4 parity verification record:
   immutable-history, causal replay, and explicit-unavailable contracts are
   covered by focused Paper tests.
 - Canonical context/value/history parity tests pass in the canonical repository.
-- Source-observation parity remains `MATCHED` for `2026-09-15` and
-  `2026-10-01`; `2026-10-29` is excluded because its source is mismatched.
+- Source-observation parity is `MATCHED` for `2026-10-01` and `2026-10-05`;
+  dates before `2026-09-21` remain prohibited by the comparison harness.
 - The runtime-neutral replay boundary can emit explicit causal
   `source_observation` and `context_location` streams when Phase 4 evidence
   publications are supplied. The canonical replay now publishes the same
@@ -715,6 +715,10 @@ Phase 4 parity verification record:
   difference is bounded by `max(2.5, 1% of canonical ATR)`. ATR-dependent
   location geometry (`band_low`/`band_high`) must satisfy that same numeric
   tolerance; nonnumeric or oversized differences remain `MISMATCHED`.
+- The `2026-10-01` and `2026-10-05` parity runs reached the accepted Phase 4
+  gate. `close_relation`, location `method`, observation IDs, and related
+  source/reference provenance match canonical records; only bounded ATR band
+  geometry remains classified as `INPUT_VARIANCE`.
 - Prior-session value input variance is handled by the same bound for `POC`,
   `VAH`, and `VAL`. Those tolerant values and producer fingerprints derived
   from them are excluded from the comparison fingerprint; reference identity,

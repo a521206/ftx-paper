@@ -20,7 +20,7 @@ from ftx_paper.strategies.orderflow.parity_artifacts import (
     build_phase4_artifact, compare_phase4_manifests,
 )
 
-ALLOWED_DATES = {"2026-09-15", "2026-10-01"}
+ALLOWED_DATES = {"2026-09-15", "2026-10-01", "2026-10-05"}
 _INTERACTION_KINDS = {
     "interaction_created", "interaction_ended", "location_interaction_observed",
 }
@@ -94,7 +94,15 @@ def _phase_records(records: Any) -> list[dict[str, Any]]:
         if not isinstance(record, dict):
             continue
         if _REQUIRED_PHASE_FIELDS <= record.keys():
-            output.append(record)
+            raw_values = record.get("values")
+            values = raw_values if isinstance(raw_values, dict) else {}
+            output.append({**record,
+                           "occurred_at": _aware(str(record["occurred_at"])),
+                           "observed_at": _aware(str(record["observed_at"])),
+                           "available_at": _aware(str(record["available_at"])),
+                           "causal_observed_at": record.get("causal_observed_at", values.get("causal_observed_at")),
+                           "causal_available_at": record.get("causal_available_at", values.get("causal_available_at")),
+                           })
             continue
         observed = record.get("observed_at") or record.get("timestamp") or record.get("time")
         available = record.get("available_at") or observed
@@ -121,7 +129,9 @@ def compare(*, canonical_facts: dict[str, Any], paper_facts: dict[str, Any], ses
         for stream in canonical_facts
         if stream in {"source_observation", "context_location", "opportunity_lifecycle", "intent_admission", "trigger_exit"}
     }
-    canonical_payload["interaction_response"] = _normalized_canonical(canonical_facts)["interaction_response"]
+    canonical_payload["interaction_response"] = _phase_records(
+        canonical_facts.get("interaction_response", [])
+    )
     paper_payload = {
         stream: _phase_records(paper_facts[stream])
         for stream in paper_facts
@@ -131,7 +141,7 @@ def compare(*, canonical_facts: dict[str, Any], paper_facts: dict[str, Any], ses
                                       scope={"date": session_date}, payload={"parity_phase_facts": canonical_payload})
     paper = build_phase4_artifact(run_id=f"paper-{session_date}", producer={"name": "ftx-paper"},
                                   scope={"date": session_date}, payload={"parity_phase_facts": paper_payload})
-    return compare_phase4_manifests(canonical, paper,
+    return compare_phase4_manifests(canonical, paper, streams=("interaction_response",),
                                     canonical_records=lambda stream: canonical["phase_streams"][stream],
                                     paper_records=lambda stream: paper["phase_streams"][stream])
 

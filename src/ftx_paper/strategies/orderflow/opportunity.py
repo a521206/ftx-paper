@@ -7,6 +7,7 @@ from enum import StrEnum
 from typing import Any, Sequence
 
 from .hierarchy import StructuralSetup
+from .interactions import candle_identity
 from .lifecycle import EvidenceRef as LifecycleEvidenceRef, SetupOpportunity
 from .orderflow_common import canonical_timestamp
 from .response import ResponseCandle, ResponseOutcomeStatus, build_response_spec, evaluate_response_window
@@ -96,14 +97,42 @@ def evaluate_response(template: TradeTemplate, interaction: Any, bars: Sequence[
     interaction_available = str(_value(interaction, "available_at"))
     if as_of < interaction_available:
         raise ValueError("evaluation as-of cannot precede interaction availability")
-    available = tuple(response_evidence) if response_evidence is not None else tuple(
-        bar for bar in bars
-        if _value(bar, "timeframe") == template.response_timeframe
-        and _value(bar, "available_at") >= interaction_available
-        and _value(bar, "available_at") >= _value(bar, "end_time")
-        and _value(bar, "available_at") <= as_of
-        and _value(bar, "available_at") <= f"{_value(bar, 'session_date')}T{template.expiry_at}"
-    )
+    if getattr(interaction, "sessions_carried", 0) > template.carry_sessions:
+        latest = max((str(_value(bar, "available_at")) for bar in bars if str(_value(bar, "available_at")) <= as_of), default=interaction_available)
+        return OpportunityOutcome(OpportunityOutcomeStatus.EXPIRED, "response_window_expired", latest, latest, template=template, as_of=as_of)
+    available = tuple(response_evidence) if response_evidence is not None else tuple(sorted(
+        (bar for bar in bars
+         if _value(bar, "timeframe") == template.response_timeframe
+         and _value(bar, "symbol") == _value(interaction, "instrument")
+         and _value(bar, "available_at") >= _value(interaction, "creation_candle").available_at
+         and _value(bar, "available_at") >= _value(bar, "end_time")
+         and _value(bar, "available_at") <= as_of
+         and _value(bar, "available_at") <= f"{_value(bar, 'session_date')}T{template.expiry_at}"),
+        key=lambda item: (_value(item, "time"), _value(item, "available_at")),
+    ))
+    if any(
+        _value(bar, "available_at") > as_of
+        or _value(bar, "available_at") < interaction_available
+        or _value(bar, "available_at") > f"{_value(bar, 'session_date')}T{template.expiry_at}"
+        for bar in available
+    ):
+        raise ValueError("response evidence is outside the evaluation boundary")
+    terminal_id = getattr(interaction, "terminal_candle_id", None)
+    if terminal_id is not None:
+        terminal = next((bar for bar in available if candle_identity(bar) == terminal_id or _value(bar, "time") == terminal_id), None)
+        if terminal is not None:
+            available = tuple(bar for bar in available if _value(bar, "time") <= _value(terminal, "time"))
+        else:
+            available = tuple(bar for bar in available if candle_identity(bar) <= terminal_id)
+    contact_index = next((index for index, bar in enumerate(available)
+                          if (_value(bar, "time") == _value(interaction, "creation_candle").time
+                              or _value(bar, "end_time") == _value(interaction, "creation_candle").time)
+                          and _value(bar, "session_date") == _value(interaction, "session_date")), None)
+    if contact_index is None:
+        return OpportunityOutcome(OpportunityOutcomeStatus.PENDING, "contact_not_available", str(_value(interaction, "interaction_started_at")), interaction_available, template=template, as_of=as_of)
+    available = available[contact_index:]
+    sessions = tuple(dict.fromkeys(_value(bar, "session_date") for bar in available))
+    available = tuple(bar for bar in available if sessions.index(_value(bar, "session_date")) <= template.carry_sessions)
     if any(
         _value(bar, "available_at") > as_of
         or _value(bar, "available_at") < interaction_available

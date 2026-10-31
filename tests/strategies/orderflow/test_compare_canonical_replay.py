@@ -35,7 +35,7 @@ def test_phase35_comparison_projection_matches_canonical_schema() -> None:
     }
 
     assert _paper_phase35_projection(result) == {
-        "atr": {"value": 2.5, "lineage": ["atr-1"]},
+        "atr": {"value": 2.5, "lineage": []},
         "locations": result["evidence"]["locations"],
         "vwap_measurements": [{"alias": "VWAP", "location_id": "vwap-1"}],
         "prior_value": {"session_date": "2026-09-28", "value_area_low": 99.0},

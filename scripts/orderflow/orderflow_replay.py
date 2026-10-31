@@ -1,356 +1,63 @@
-"""Temporary Phase 3.5 evidence harness, not the production replay engine.
-
-This runner is intentionally disposable: it creates bounded evidence artifacts
-needed while the canonical orderflow layers are being ported and verified. It
-must be retired once Paper live/replay is wired to the shared canonical
-transition boundary. It must not become a second strategy state machine or be
-called from the live callback path.
-
-The runner mirrors the canonical ``ReplayMachine.from_session_inputs``
-preparation boundary without entering the later interaction, opportunity, or
-execution layers.  It loads the selected futures session from the Paper store,
-builds canonical observations, and emits one canonical-shaped replay record per
-source row with the evidence available at that row's decision clock.
-"""
+"""Compatibility CLI for the production orderflow replay pipeline."""
 
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
-from datetime import date, datetime
 import json
-import math
 from pathlib import Path
-from typing import Any, cast
-from zoneinfo import ZoneInfo
 
 from ftx_paper.config import PaperConfig
-from ftx_paper.runtime import RuntimeStore
-from ftx_paper.runtime.futures_source import FuturesSessionSourceResolver
-from ftx_paper.strategies.orderflow import observe_market
-from ftx_paper.strategies.orderflow.state_machine import ReplayMachine
-from ftx_paper.strategies.orderflow.evidence import (
-    PaperFeatureAdapter,
-    SerializedEvidenceAdapter,
-    evidence_payload,
-    produce_evidence,
-)
-from ftx_paper.strategies.orderflow.context_location_replay import replay_context_location_artifact
-from ftx_paper.strategies.orderflow.evidence_publication import EvidencePublication
-from ftx_paper.strategies.orderflow.canonical.orderflow.value_publication import (
-    prior_profile_is_complete,
-    publish_value_references,
-)
-from ftx_paper.strategies.orderflow.value_publication import (
-    PriorSessionValueReference,
-    ValuePublication,
-)
+from ftx_paper.strategies.orderflow.replay_pipeline import OrderflowReplayEngine, _observation_rows
 
-@dataclass(frozen=True, slots=True)
-class _AvailableAggregate:
-    available_at: str
-    timeframe: str
-    index: int
-    value: dict[str, Any]
-
-
-def _normalize_rows(source: Any, session_date: str) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for row in source.bars:
-        required = ("minute", "open", "high", "low", "close", "volume", "open_interest")
-        if any(field not in row or row[field] is None for field in required):
-            raise ValueError(f"source row is incomplete for {session_date}")
-        try:
-            minute = datetime.fromisoformat(str(row["minute"]))
-        except ValueError as exc:
-            raise ValueError(f"source row has an invalid minute for {session_date}") from exc
-        numeric = [row[field] for field in ("open", "high", "low", "close", "volume", "open_interest")]
-        if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)) for value in numeric):
-            raise ValueError(f"source row has invalid numeric values for {session_date}")
-        rows.append({
-            "time": minute.strftime("%H:%M"),
-            "open": float(row["open"]),
-            "high": float(row["high"]),
-            "low": float(row["low"]),
-            "close": float(row["close"]),
-            "volume": int(row["volume"]),
-            "oi": int(row["open_interest"]),
-            "symbol": "NIFTY",
-            "expiry": "",
-            "contract_type": "CONTINUOUS",
-            "session_date": session_date,
-        })
-    return rows
-
-
-def _load_session_rows(
-    session_date: str, runtime_dir: Path,
-) -> tuple[list[dict[str, Any]], dict[str, tuple[dict[str, Any], ...]]]:
-    store = RuntimeStore.open_read_only(runtime_dir)
-    resolver = FuturesSessionSourceResolver(store)
-    dates = sorted(
-        str(value) for value in store.read_dates()
-        if date.fromisoformat(str(value)).isoformat() <= session_date
-    )
-    rows_by_date: dict[str, tuple[dict[str, Any], ...]] = {}
-    for value in dates:
-        source = resolver.resolve(value)
-        if source is not None:
-            rows_by_date[value] = tuple(_normalize_rows(source, value))
-    rows = rows_by_date.get(session_date)
-    if not rows:
-        raise ValueError(f"continuous futures source is unavailable for {session_date}")
-    return list(rows), rows_by_date
-
-
-def _aggregate_events(observation: Any) -> tuple[_AvailableAggregate, ...]:
-    events: list[_AvailableAggregate] = []
-    for timeframe in ("1m", "5m"):
-        for index, aggregate in enumerate(observation.aggregates[timeframe]):
-            if aggregate.available_at < aggregate.end_time:
-                raise ValueError("aggregate is available before completion")
-            expected_count = 1 if timeframe == "1m" else 5
-            if aggregate.source_bar_count != expected_count:
-                raise ValueError(f"incomplete {timeframe} aggregate at {aggregate.time}")
-            events.append(_AvailableAggregate(
-                aggregate.available_at,
-                timeframe,
-                index,
-                aggregate.to_dict(),
-            ))
-    return tuple(sorted(events, key=lambda item: (item.available_at, item.timeframe, item.index)))
-
-
-def _observation_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Provide canonical timestamps without changing the replay bar contract."""
-    return [
-        {
-            **row,
-            "time": f"{row['session_date']}T{str(row['time']).split('T')[-1][:5]}",
-        }
-        for row in rows
-    ]
-
-
-def _observation_artifact(
-    rows: list[dict[str, Any]],
-) -> tuple[dict[str, Any], tuple[_AvailableAggregate, ...]]:
-    observation = observe_market(_observation_rows(rows))
-    return (
-        {
-            "schema_version": 1,
-            "artifact_type": "canonical_p2_market_observation",
-            "source_fingerprint": observation.source_fingerprint,
-            "aggregates": {
-                timeframe: [item.to_dict() for item in aggregates]
-                for timeframe, aggregates in observation.aggregates.items()
-            },
-        },
-        _aggregate_events(observation),
-    )
-
-
-def _prior_values(
-    rows_by_date: dict[str, tuple[dict[str, Any], ...]],
-) -> dict[str, ValuePublication]:
-    publications: dict[str, ValuePublication] = {}
-    dates = sorted(rows_by_date)
-    for session_date in dates:
-        prior_dates = [value for value in dates if value < session_date]
-        if not prior_dates:
-            continue
-        prior_date = prior_dates[-1]
-        prior_rows = list(rows_by_date[prior_date])
-        rows = list(rows_by_date[session_date])
-        references = publish_value_references(
-            prior_rows,
-            rows,
-            session_date,
-            prior_profile_complete=prior_profile_is_complete(prior_rows),
-        )
-        reference = next(
-            (item for item in references if item.scope == "prior_session"),
-            None,
-        )
-        if reference is None:
-            continue
-        available_at = reference.available_at
-        observed_at = available_at
-        value_reference = PriorSessionValueReference(
-            reference.source_sessions[0],
-            reference.val,
-            reference.poc,
-            reference.vah,
-            datetime.fromisoformat(observed_at).replace(tzinfo=ZoneInfo("Asia/Kolkata")),
-            datetime.fromisoformat(available_at).replace(tzinfo=ZoneInfo("Asia/Kolkata")),
-            (reference.reference_id, reference.fingerprint),
-        )
-        publications[session_date] = ValuePublication(
-            value_reference,
-            value_reference.observed_at,
-            value_reference.available_at,
-            value_reference.lineage,
-        )
-    return publications
-
-
-def _as_of_evidence(evidence: dict[str, Any], clock: str) -> dict[str, Any]:
-    """Expose only publications available at the canonical decision clock."""
-    result = dict(evidence)
-    for field in ("locations", "vwap_measurements", "contexts"):
-        result[field] = [
-            item for item in evidence[field]
-            if item.get("available_at") is None or str(item["available_at"]) <= clock
-        ]
-    atr = evidence.get("atr")
-    if isinstance(atr, dict) and atr.get("available_at") is not None and str(atr["available_at"]) > clock:
-        result["atr"] = {**atr, "value": None, "unavailable_reason": "atr_not_yet_available"}
-        result["unavailable"] = [*result["unavailable"], "atr_not_yet_available"]
-    prior = evidence.get("prior_value")
-    if isinstance(prior, dict) and prior.get("available_at") is not None and str(prior["available_at"]) > clock:
-        result["prior_value"] = {
-            **prior, "reference": None,
-            "unavailable_reason": "prior_value_not_yet_available",
-        }
-        result["unavailable"] = [*result["unavailable"], "prior_value_not_yet_available"]
-    return result
-
-
-class OrderflowReplayEngine:
-    """Replay raw session rows through the bounded canonical evidence layer."""
-
-    def replay(
-        self,
-        rows: list[dict[str, Any]],
-        rows_by_date: dict[str, tuple[dict[str, Any], ...]],
-        *,
-        session_date: str,
-    ) -> dict[str, Any]:
-        if not rows:
-            raise ValueError("replay session has no rows")
-        if any(str(row.get("session_date")) != session_date for row in rows):
-            raise ValueError("replay rows contain a session mismatch")
-        artifact, events = _observation_artifact(rows)
-        adapter = PaperFeatureAdapter(rows_by_date, prior_values=_prior_values(rows_by_date))
-        evidence_events: list[tuple[str, dict[str, Any], dict[str, Any] | None]] = []
-        latest_5m: dict[str, Any] | None = None
-        prefix_aggregates: dict[str, list[dict[str, Any]]] = {"1m": [], "5m": []}
-        for position, event in enumerate(events, start=1):
-            if event.timeframe == "5m":
-                latest_5m = event.value
-            prefix_aggregates[event.timeframe].append(event.value)
-            prefix = {
-                **artifact,
-                "aggregates": {
-                    timeframe: list(values)
-                    for timeframe, values in prefix_aggregates.items()
-                },
-            }
-            evidence_events.append((
-                event.available_at,
-                evidence_payload(
-                    produce_evidence(prefix, session_date=session_date, adapter=adapter),
-                )["evidence"],
-                latest_5m,
-            ))
-
-        event_index = 0
-        current_evidence: dict[str, Any] = {
-            "atr": None,
-            "locations": [],
-            "vwap_measurements": [],
-            "prior_value": None,
-            "contexts": [],
-            "unavailable": ["evidence_not_yet_available"],
-            "context_stream_id": None,
-            "location_stream_id": None,
-        }
-
-        def evidence_at_clock(clock: str) -> dict[str, Any]:
-            nonlocal current_evidence, event_index
-            while event_index < len(evidence_events) and evidence_events[event_index][0] <= clock:
-                current_evidence = evidence_events[event_index][1]
-                event_index += 1
-            return _as_of_evidence(current_evidence, clock)
-
-        machine = ReplayMachine(
-            rows,
-            evidence_events=evidence_events,
-            evidence_at_clock=evidence_at_clock,
-            session_date=session_date,
-        )
-        replay_records, final_state = machine.run()
-
-        final_clock = f"{session_date}T{str(rows[-1]['time'])[:5]}"
-        final_evidence = _as_of_evidence(final_state.evidence, final_clock)
-        locations = final_evidence["locations"]
-        source_identity = {
-            "symbol": rows[0]["symbol"],
-            "expiry": rows[0]["expiry"],
-            "contract_type": rows[0]["contract_type"],
-            "source_fingerprint": artifact["source_fingerprint"],
-        }
-        phase3_artifact = artifact
-        phase4_evidence = cast(EvidencePublication, produce_evidence(
-            phase3_artifact,
-            session_date=session_date,
-            adapter=SerializedEvidenceAdapter({"evidence": final_evidence}),
-        )["publication"])
-        phase4_replay = replay_context_location_artifact(
-            phase3_artifact,
-            session_date=session_date,
-            evidence=phase4_evidence,
-            replay_clock=f"{session_date}T{str(rows[-1]['time']).split('T')[-1][:5]}",
-        )
-
-        return {
-            "artifact_type": "canonical_phase3_5_replay",
-            "schema_version": 1,
-            "causal": True,
-            "capture_mode": "phase3_5",
-            "replay_mode": "evidence",
-            "date": session_date,
-            "session_date": session_date,
-            "source_identity": source_identity,
-            "observation_metadata": {
-                "aggregate_counts": {
-                    timeframe: len(artifact["aggregates"][timeframe])
-                    for timeframe in ("1m", "5m")
-                },
-                "source_fingerprint": artifact["source_fingerprint"],
-            },
-            "phase3_artifact": phase3_artifact,
-            "replay_records": replay_records,
-            "registered_locations": locations,
-            "prior_value": final_evidence["prior_value"],
-            "context_stream_id": final_evidence["context_stream_id"],
-            "parity_phase_facts": {
-                "context_publication": list(final_state.context_publications),
-                **phase4_replay.parity_phase_facts(),
-            },
-            "evidence": final_evidence,
-        }
-
-    def replay_session(self, session_date: str, *, runtime_dir: Path) -> dict[str, Any]:
-        if date.fromisoformat(session_date).isoformat() != session_date:
-            raise ValueError("date must use ISO YYYY-MM-DD format")
-        rows, rows_by_date = _load_session_rows(session_date, runtime_dir)
-        return self.replay(rows, rows_by_date, session_date=session_date)
+__all__ = ["OrderflowReplayEngine", "_observation_rows", "main"]
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--date", required=True, help="ISO trading date")
-    parser.add_argument("--runtime-dir", type=Path, help="Paper runtime directory")
-    parser.add_argument("--output", type=Path, help="Write replay JSON instead of stdout")
+    parser.add_argument("--runtime-dir", type=Path)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--include-interactions", action="store_true")
+    parser.add_argument(
+        "--source-artifact", type=Path,
+        help="JSON mapping of session dates to normalized replay bars",
+    )
     args = parser.parse_args(argv)
     try:
-        runtime_dir = args.runtime_dir or PaperConfig.from_env().runtime_dir
-        result = OrderflowReplayEngine().replay_session(args.date, runtime_dir=runtime_dir)
+        engine = OrderflowReplayEngine()
+        if args.source_artifact is None:
+            result = engine.replay_session(
+                args.date,
+                runtime_dir=args.runtime_dir or PaperConfig.from_env().runtime_dir,
+                include_interactions=args.include_interactions,
+            )
+        else:
+            payload = json.loads(args.source_artifact.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("source artifact must be an object")
+            sessions = payload.get("sessions", payload)
+            if not isinstance(sessions, dict) or not all(isinstance(value, list) for value in sessions.values()):
+                raise ValueError("source artifact must map session dates to bar lists")
+            rows_by_date = {
+                str(session_date): tuple(row for row in rows if isinstance(row, dict))
+                for session_date, rows in sessions.items()
+            }
+            rows = [
+                row for row in rows_by_date.get(args.date, ())
+                if str(row.get("time", ""))[:5] < "15:30"
+            ]
+            if not rows:
+                raise ValueError(f"source artifact has no rows for {args.date}")
+            result = engine.replay(
+                rows,
+                rows_by_date,
+                session_date=args.date,
+                include_interactions=args.include_interactions,
+            )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         result = {"status": "INCOMPLETE", "reason": str(exc)}
     rendered = json.dumps(result, indent=2, sort_keys=True)
-    if args.output is not None and result.get("status") != "INCOMPLETE":
+    if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered + "\n", encoding="utf-8")
     else:

@@ -38,3 +38,10 @@ def test_daily_atr_uses_full_session_ohlc_not_zone_boundaries() -> None:
     )
 
     assert daily_atr("2026-09-15", rows) == 7.714285714285714
+
+
+def test_daily_atr_includes_completed_sessions_with_partial_intraday_coverage() -> None:
+    rows = {f"2026-09-{index:02d}": _rows(f"2026-09-{index:02d}", float(index)) for index in range(1, 16)}
+    rows["2026-09-14"] = rows["2026-09-14"][:1]
+
+    assert daily_atr("2026-09-15", rows) == 5.857142857142857

@@ -91,6 +91,23 @@ def test_context_location_replay_emits_causal_unavailable_then_available_facts()
     assert len(vwap["child_observation_ids"]) == 5
 
 
+def test_location_observation_uses_canonical_relation_method_and_identity() -> None:
+    result = replay_context_location(
+        _rows(), session_date="2026-09-29", evidence=_evidence(_rows()),
+    )
+    early = next(item for item in result.context_location if item["identity"] == "context-location:1m:2026-09-29T09:15")
+    observation = next(
+        item for item in early["values"]["locations"] if item["location"] == "PD_HIGH"
+    )
+    assert observation["close_relation"] == "BELOW"
+    assert observation["method"] == "replay_location_band_intersection"
+    source_fingerprint = observe_market(_rows()).source_fingerprint
+    assert observation["observation_id"].startswith(
+        f"{source_fingerprint[:16]}:2026-09-29T09:15:1m:"
+    )
+    assert observation["reference_source_timeframe"] == "1m"
+
+
 def test_context_location_replay_does_not_infer_missing_atr() -> None:
     result = replay_context_location(
         _rows(5),

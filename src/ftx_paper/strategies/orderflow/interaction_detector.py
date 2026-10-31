@@ -173,9 +173,7 @@ class InteractionDetector:
                 raise ValueError("5m observation is not causally available")
             if len(observation.child_observation_ids) != 5:
                 raise ValueError("incomplete 5m observation cannot reach detector")
-            children = tuple(
-                observations_by_id.get(i) for i in observation.child_observation_ids
-            )
+            children = tuple(observations_by_id.get(i) for i in observation.child_observation_ids)
             if any(child is None for child in children):
                 raise ValueError("5m observation references missing 1m evidence")
             typed = tuple(child for child in children if child is not None)

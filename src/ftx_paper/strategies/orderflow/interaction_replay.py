@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
+import hashlib
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -36,6 +38,7 @@ def _fact(kind: str, identity: str, parent: str | None, snapshot: Mapping[str, A
 def replay_interaction_response(
     aggregates: Mapping[str, Sequence[Aggregate]], context: ContextLocationReplay,
     registry: LocationRegistry, *, templates: Mapping[tuple[str, str], TradeTemplate] = TRADE_TEMPLATES,
+    replay_mode: str = "FULL",
 ) -> InteractionResponseReplay:
     """Advance independent 1m/5m detectors in one availability-ordered clock."""
     one = tuple(aggregates.get("1m", ()))
@@ -67,32 +70,124 @@ def replay_interaction_response(
         observations[source] = tuple(parsed)
     detector = InteractionDetector(registry)
     facts: list[dict[str, Any]] = []
-    emitted: set[tuple[str, str]] = set()
     response_emitted: set[tuple[str, str]] = set()
+    role_emitted: set[str] = set()
+    vwap_emitted: set[str] = set()
     for current in all_bars:
         source = f"aggregate:{current.timeframe}:{current.time}"
-        typed = observations.get(source, ())
         available1 = [item for item in one if item.available_at <= current.available_at]
         available5 = [item for item in five if item.available_at <= current.available_at]
+        typed = tuple(
+            item for item in observations.get(source, ())
+            if item.available_at <= current.available_at
+        )
         if current.timeframe == "1m":
             transitions = detector.observe_1m(current=current, available=available1, atr=None, observations=typed)
         else:
             one_observations = tuple(item for key, values in observations.items() if key.startswith("aggregate:1m:") for item in values if item.available_at <= current.available_at)
+            available_ids = {item.observation_id for item in one_observations}
+            typed = tuple(
+                item for item in typed
+                if all(child_id in available_ids for child_id in item.child_observation_ids)
+            )
             transitions = detector.observe(current=current, available5=available5, available1=available1, atr=None, observations5=typed, observations1=one_observations)
         for transition in transitions:
             snap = transition.interaction.snapshot()
             iid = transition.interaction.interaction_id
-            kind = "interaction_created" if transition.created else "interaction_departure" if transition.departed else "interaction_observed"
-            key = (kind, f"{iid}:{current.time}")
-            if key not in emitted:
-                facts.append(_fact(kind, iid, f"aggregate:{current.timeframe}:{current.time}", snap))
-                emitted.add(key)
-            if transition.departed:
-                facts.append(_fact("interaction_closed", iid, iid, snap))
+            observation = transition.observation
+            if replay_mode == "FULL" and observation is not None and transition.interaction.status.value == "ACTIVE":
+                interaction_key = f"{observation.location.upper()}:{observation.timeframe}:{observation.reference_generation}"
+                decision_id = hashlib.sha256(
+                    f"opportunity|{iid}|{observation.observation_id}".encode()
+                ).hexdigest()[:24]
+                observation_values = {
+                    "interaction_id": iid,
+                    "decision_stage": "opportunity",
+                    "decision_id": decision_id,
+                    "location": observation.location,
+                    "timeframe": observation.timeframe,
+                    "reference_generation": observation.reference_generation,
+                    "source_observation_ids": [observation.observation_id],
+                    "reason": "location_interaction_observed",
+                    "outcome": "observed",
+                    "interaction_key": interaction_key,
+                    "feature_values": {
+                        "open": observation.open,
+                        "high": observation.high,
+                        "low": observation.low,
+                        "close": observation.close,
+                    },
+                }
+                facts.append(_fact(
+                    "location_interaction_observed", iid,
+                    f"aggregate:{current.timeframe}:{current.time}", observation_values,
+                    observed_at=observation.observed_at,
+                    available_at=observation.available_at,
+                ))
+            if transition.created:
+                facts.append(_fact("interaction_created", iid, f"aggregate:{current.timeframe}:{current.time}", {
+                    "interaction_id": iid, "location": str(transition.interaction.location),
+                    "timeframe": transition.interaction.timeframe,
+                    "reference_generation": transition.interaction.reference_generation,
+                    "reference_level": transition.interaction.reference_level,
+                    "band_low": transition.interaction.band_low, "band_high": transition.interaction.band_high,
+                    "source_aggregate_id": observation.source_aggregate_id if observation is not None else None,
+                    "source_observation_id": observation.source_observation_id if observation is not None else None,
+                    "stage": "OBSERVING_LOCATION", "evidence": [current.to_dict()],
+                }, observed_at=current.end_time, available_at=current.available_at))
+            if transition.interaction.status.value == "ENDED" and transition.departed:
+                facts.append(_fact("interaction_ended", iid, iid, {
+                    "interaction_id": iid, "location": str(transition.interaction.location),
+                    "timeframe": transition.interaction.timeframe,
+                    "reference_generation": transition.interaction.reference_generation,
+                    "reason": snap["close_reason"],
+                    "source_observation_id": observation.source_observation_id if observation is not None else None,
+                    "terminal_candle_id": snap["terminal_candle_id"],
+                    "terminal_close_side": snap["terminal_close_side"],
+                }, observed_at=snap["candles"][-1]["end_time"],
+                   available_at=snap["candles"][-1]["available_at"]))
+            if snap["location"] == "VWAP" and iid not in vwap_emitted and snap["pre_contact_side"]:
+                for candle in snap["candles"][1:]:
+                    confirmed = (
+                        snap["pre_contact_side"] == "BELOW" and candle["close"] >= snap["band_low"]
+                    ) or (
+                        snap["pre_contact_side"] == "ABOVE" and candle["close"] <= snap["band_high"]
+                    )
+                    if confirmed:
+                        vwap_emitted.add(iid)
+                        facts.append(_fact("response_confirmed", f"{iid}:VWAP", iid, {
+                            "interaction_id": iid, "location": "VWAP",
+                            "timeframe": snap["timeframe"],
+                            "reference_generation": snap["reference_generation"],
+                            "response_status": "CONFIRMED", "response_reason": "causal_vwap_rejection",
+                            "source_observation_id": observation.source_observation_id if observation else None,
+                            "evidence_ids": [candle["candle_id"]],
+                            "current_available_at": current.available_at,
+                        }, observed_at=candle["end_time"], available_at=candle["available_at"]))
+                        break
             policy = PDPolicy() if snap["location"] in {"PD_LOW", "PD_HIGH"} else StandardLocationPolicy()
             selected = tuple(item for item in templates.values() if snap["location"] in {loc.value for loc in item.locations})
             if selected and current.timeframe == "5m":
-                evaluations = policy.evaluate_hypotheses(selected, transition.interaction, available5, as_of=current.available_at) if isinstance(policy, PDPolicy) else policy.arbitrate(selected, transition.interaction, available5, as_of=current.available_at)
+                if isinstance(policy, PDPolicy) and iid not in role_emitted:
+                    role_emitted.add(iid)
+                    facts.append(_fact("role_context_available", iid, iid, {
+                        "interaction_id": iid, "location": snap["location"],
+                        "role": "SUPPORT" if snap["location"] == "PD_LOW" else "RESISTANCE",
+                    }, observed_at=transition.interaction.interaction_started_at,
+                       available_at=transition.interaction.available_at))
+                role_events: list[dict[str, Any]] = []
+                evaluations = (policy.evaluate_hypotheses(selected, transition.interaction, available5,
+                                                          as_of=current.available_at,
+                                                          emit=role_events.append)
+                               if isinstance(policy, PDPolicy) else
+                               policy.arbitrate(selected, transition.interaction, available5,
+                                                as_of=current.available_at))
+                for role_event in role_events:
+                    facts.append(_fact(
+                        "role_transition", iid, iid, role_event,
+                        observed_at=str(role_event["observed_at"]),
+                        available_at=str(role_event["available_at"]),
+                    ))
                 for evaluation in evaluations:
                     outcome = evaluation.outcome
                     if outcome.status.value == "PENDING":
@@ -101,7 +196,36 @@ def replay_interaction_response(
                     if (identity, outcome.status.value) in response_emitted:
                         continue
                     response_emitted.add((identity, outcome.status.value))
-                    facts.append(_fact("response_confirmed" if outcome.status.value == "RESOLVED" else "response_invalidated" if outcome.status.value == "CONTRADICTED" else "response_expired", identity, iid, {"template_id": evaluation.template.template_id, "status": outcome.status.value, "reason": outcome.reason, "selected": evaluation.selected, "arbitration_reason": evaluation.arbitration_reason, "evidence_ids": list(outcome.evidence_lineage)}, observed_at=outcome.observed_at, available_at=outcome.available_at))
+                    response = outcome.response
+                    if response is not None:
+                        facts.append(_fact("hypothesis_arbitrated", identity, iid, {
+                            "interaction_id": iid, "location": snap["location"],
+                            "template_id": evaluation.template.template_id,
+                            "response_type": evaluation.template.response_type.value,
+                            "direction": response.direction.value,
+                            "arbitration_selected": evaluation.selected,
+                            "arbitration_reason": evaluation.arbitration_reason,
+                        }, observed_at=response.observed_at, available_at=response.available_at))
+                        if snap["location"] not in {"PD_LOW", "PD_HIGH"}:
+                            facts.append(_fact("response_confirmed", identity, iid, {
+                                "interaction_id": iid, "location": snap["location"],
+                                "template_id": evaluation.template.template_id,
+                                "response_type": evaluation.template.response_type.value,
+                                "direction": response.direction.value,
+                                "evidence_ids": list(response.evidence_ids),
+                            }, observed_at=response.observed_at, available_at=response.available_at))
+                    facts.append(_fact("opportunity_outcome", identity, iid, {
+                        "interaction_id": iid, "location": snap["location"],
+                        "template_id": evaluation.template.template_id,
+                        "response_type": evaluation.template.response_type.value,
+                        "direction": response.direction.value if response is not None else evaluation.template.direction.value,
+                        "status": outcome.status.value, "reason": outcome.reason,
+                        "arbitration_selected": evaluation.selected,
+                        "arbitration_reason": evaluation.arbitration_reason,
+                        "as_of": outcome.as_of,
+                        "evidence_ids": list(response.evidence_ids) if response is not None else [item.evidence_id for item in outcome.evidence_lineage],
+                        "evidence_lineage": [dataclasses.asdict(item) for item in outcome.evidence_lineage],
+                    }, observed_at=outcome.observed_at, available_at=outcome.available_at))
     return InteractionResponseReplay(tuple(facts))
 
 

@@ -40,3 +40,30 @@ def test_replay_machine_publishes_evidence_at_each_row_clock() -> None:
     assert state.latest_5m is not None
     assert state.latest_5m["time"] == "2026-10-30T09:15"
     assert state.context_publications == ()
+
+
+def test_replay_machine_emits_causal_interaction_facts_once_at_availability() -> None:
+    rows = [
+        {"time": "09:15", "session_date": "2026-10-30"},
+        {"time": "09:20", "session_date": "2026-10-30"},
+        {"time": "09:21", "session_date": "2026-10-30"},
+    ]
+    fact = {
+        "kind": "interaction_created",
+        "identity": "interaction-1",
+        "available_at": "2026-10-30T09:20",
+    }
+    machine = ReplayMachine(
+        rows,
+        evidence_events=(),
+        evidence_at_clock=lambda _clock: {"contexts": []},
+        session_date="2026-10-30",
+        interaction_response=(fact, fact),
+    )
+    records, state = machine.run()
+    assert records[0]["events"] == []
+    assert len(records[1]["events"]) == 1
+    assert records[1]["events"][0]["identity"] != fact["identity"]
+    assert "neutral_event_key" in records[1]["events"][0]
+    assert records[2]["events"] == []
+    assert len(state.interaction_response) == 1

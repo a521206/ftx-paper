@@ -6,7 +6,7 @@ from ftx_paper.strategies.orderflow.hierarchy import ContextVersionRef
 from ftx_paper.strategies.orderflow.interactions import LocationInteraction
 from ftx_paper.strategies.orderflow.lifecycle import LifecycleStage, OpportunityStatus, SetupOpportunity
 from ftx_paper.strategies.orderflow.location_geometry import LocationBand
-from ftx_paper.strategies.orderflow.opportunity import OpportunityContext, form_opportunity, identify_opportunity, opportunity_identity
+from ftx_paper.strategies.orderflow.opportunity import OpportunityContext, OpportunityOutcomeStatus, evaluate_response, form_opportunity, identify_opportunity, opportunity_identity
 from ftx_paper.strategies.orderflow.opportunity_timeout import advance_opportunity_timeout
 from ftx_paper.strategies.orderflow.orderflow_common import Aggregate
 from ftx_paper.strategies.orderflow.parity_artifacts import build_phase4_artifact, canonical_hash, compare_phase4_manifests
@@ -43,6 +43,27 @@ def test_opportunity_rejects_future_evidence_and_forms_setup_with_parent() -> No
     assert life.causal_identity is None
     assert setup.parent_context_id == "ctx"
     assert life.stage is LifecycleStage.RESPONSE_CONFIRMED
+
+
+def test_response_requires_contact_candle_and_matching_instrument() -> None:
+    contact = _bar("20")
+    interaction = _interaction(contact).evaluation_snapshot()
+    template = TRADE_TEMPLATES[("5m_recovery_breakout", "PD_LOW")]
+    later = replace(contact, time="2026-09-15T09:25", end_time="2026-09-15T09:29", available_at="2026-09-15T09:30", symbol="BANKNIFTY")
+    outcome = evaluate_response(template, interaction, [later], as_of="2026-09-15T09:30")
+    assert outcome.status is OpportunityOutcomeStatus.PENDING
+    assert outcome.reason == "contact_not_available"
+
+
+def test_response_expires_after_carried_session_boundary() -> None:
+    contact = _bar("20")
+    source = _interaction(contact)
+    source.sessions_carried = 2
+    interaction = source.evaluation_snapshot()
+    template = TRADE_TEMPLATES[("5m_recovery_breakout", "PD_LOW")]
+    outcome = evaluate_response(template, interaction, [contact], as_of="2026-09-15T09:30")
+    assert outcome.status is OpportunityOutcomeStatus.EXPIRED
+    assert outcome.reason == "response_window_expired"
 
 
 def test_timeout_duplicate_retry_is_idempotent_and_lifecycle_close_reasons_are_explicit() -> None:
