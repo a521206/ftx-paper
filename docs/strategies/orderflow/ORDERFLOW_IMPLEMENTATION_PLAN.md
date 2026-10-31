@@ -711,6 +711,16 @@ Phase 4 parity verification record:
   `context_location` stream reaches comparison and reports the expected ATR
   source-history variance: canonical ATR-dependent locations are available,
   while Paper preserves explicit ATR-unavailable evidence.
+- Cross-repository comparison accepts `INPUT_VARIANCE` only when the ATR
+  difference is bounded by `max(2.5, 1% of canonical ATR)`. ATR-dependent
+  location geometry (`band_low`/`band_high`) must satisfy that same numeric
+  tolerance; nonnumeric or oversized differences remain `MISMATCHED`.
+- Prior-session value input variance is handled by the same bound for `POC`,
+  `VAH`, and `VAL`. Those tolerant values and producer fingerprints derived
+  from them are excluded from the comparison fingerprint; reference identity,
+  scope, source sessions, availability, and other non-tolerant fields must
+  still match. For `2026-10-05`, the prior profile differences are bounded and
+  report `INPUT_VARIANCE`, not an independent mismatch.
 - Focused Paper Phase 4 replay tests pass (`4 passed`), Ruff and Pyright pass
   for the changed Paper replay files, and canonical Phase 4 projection lint
   passes. Two pre-existing canonical `InteractionDetector` test failures are
@@ -738,10 +748,10 @@ contracts and Phase 5 event-stream parity. It adds no interaction or response
 policy; it supplies the chronological orchestration required to exercise the
 already ported domain contracts.
 
-Status: Next phase. Deterministic interaction/response primitives are ported,
-but canonical policy dispatch and chronological event parity remain blocked
-until this layer exists. Phase 4B/4C now supplies the completed aggregate and
-causal context/location streams required as its input.
+Status: Boundary implemented. Deterministic interaction/response primitives,
+canonical PD dispatch, and chronological first-mismatch comparison are now
+available. Cross-repository event parity and ATR-dependent context/location
+parity remain exit gates; Phase 9 runtime/database integration is deferred.
 
 Next implementation slice:
 

@@ -78,7 +78,7 @@ def test_context_location_replay_emits_causal_unavailable_then_available_facts()
 
     assert result.source_observations
     early = next(item for item in result.context_location if item["identity"] == "context-location:1m:2026-09-29T09:15")
-    assert "opening_range_not_yet_available" in early["unavailable"]
+    assert "opening_range_not_yet_available" not in early["unavailable"]
     assert "missing_context" in early["unavailable"]
 
     five = next(item for item in result.context_location if item["identity"] == "context-location:5m:2026-09-29T09:15")

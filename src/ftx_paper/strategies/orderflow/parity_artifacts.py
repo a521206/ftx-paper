@@ -151,6 +151,24 @@ def compare_phase4_manifests(canonical: Mapping[str, Any], paper: Mapping[str, A
     return {"status": "MATCHED"}
 
 
+def compare_chronological_streams(
+    canonical: Sequence[Mapping[str, Any]], paper: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Compare causal facts in timestamp/sequence order and report the first gap."""
+    left = [normalize_phase_record(item, sequence=index) for index, item in enumerate(canonical)]
+    right = [normalize_phase_record(item, sequence=index) for index, item in enumerate(paper)]
+    for index, (left_item, right_item) in enumerate(zip(left, right)):
+        if left_item != right_item:
+            field, left_value, right_value = _first_mismatch(left_item, right_item)
+            return {"status": "MISMATCHED", "index": index, "field": field,
+                    "canonical_value": left_value, "paper_value": right_value,
+                    "canonical_record": left_item, "paper_record": right_item}
+    if len(left) != len(right):
+        return {"status": "MISMATCHED", "index": min(len(left), len(right)),
+                "reason": "count", "canonical_count": len(left), "paper_count": len(right)}
+    return {"status": "MATCHED", "count": len(left)}
+
+
 def _first_mismatch(left: Any, right: Any, path: str = "") -> tuple[str, Any, Any]:
     """Return the deterministic first differing field in two normalized facts."""
     if isinstance(left, Mapping) and isinstance(right, Mapping):
@@ -169,4 +187,4 @@ def _first_mismatch(left: Any, right: Any, path: str = "") -> tuple[str, Any, An
     return path, left, right
 
 
-__all__ = ["PHASE_STREAMS", "build_phase4_artifact", "canonical_hash", "compare_phase4_manifests", "normalize_phase_record", "phase_facts_from_payload"]
+__all__ = ["PHASE_STREAMS", "build_phase4_artifact", "canonical_hash", "compare_chronological_streams", "compare_phase4_manifests", "normalize_phase_record", "phase_facts_from_payload"]

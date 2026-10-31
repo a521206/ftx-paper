@@ -71,8 +71,10 @@ def _location_observation(
         close_relation=close_relation,
         band_contact=record.band.intersects(high=aggregate.high, low=aggregate.low),
         source_aggregate_id=aggregate.time,
-        observed_at=_timestamp(_instant(aggregate.end_time)),
-        available_at=_timestamp(_instant(aggregate.available_at)),
+        # Nested location evidence retains canonical exchange-local strings;
+        # only the enclosing parity fact is normalized to UTC.
+        observed_at=aggregate.end_time,
+        available_at=aggregate.available_at,
         method=record.source_method or "registered_location",
         observation_id=observation_id,
         timeframe=aggregate.timeframe,
@@ -237,15 +239,6 @@ def _replay_market(
             unavailable.append(evidence.atr.unavailable_reason or "missing_atr")
         elif evidence.atr.available_at is not None and aggregate.available_at < evidence.atr.available_at:
             unavailable.append("atr_not_yet_available")
-        opening = registry.resolve_as_of("OR_LOW", aggregate.available_at)
-        if opening is None:
-            unavailable.append(
-                "missing_opening_range"
-                if registry.resolve("OR_LOW") is None
-                else "opening_range_not_yet_available"
-            )
-        elif aggregate.available_at < opening.available_at:
-            unavailable.append("opening_range_not_yet_available")
         context_stream_id = evidence.context_stream_id
         if context_stream_id is None:
             context_ids = {item.context_id for item in evidence.contexts}

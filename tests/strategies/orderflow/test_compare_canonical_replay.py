@@ -2,6 +2,7 @@ import json
 
 from scripts.orderflow.compare_canonical_replay import (
     _compare_phase35,
+    _bounded_atr_dependent_difference,
     _resolve_canonical_artifact,
     _paper_phase35_projection,
 )
@@ -60,6 +61,40 @@ def test_phase35_atr_variance_is_not_a_match() -> None:
     }}, "replay_records": []}
 
     assert _compare_phase35(canonical, paper)["status"] == "INPUT_VARIANCE"
+
+
+def test_phase35_large_atr_variance_is_not_accepted() -> None:
+    canonical = {"evidence": {"atr": {"value": 100.0}, **{
+        field: [] for field in (
+            "locations", "vwap_measurements", "prior_value", "contexts",
+            "unavailable", "context_stream_id", "location_stream_id",
+        )
+    }}}
+    paper = {"evidence": {"atr": {"value": 110.0}, **{
+        field: [] for field in (
+            "locations", "vwap_measurements", "prior_value", "contexts",
+            "unavailable", "context_stream_id", "location_stream_id",
+        )
+    }}, "replay_records": []}
+
+    result = _compare_phase35(canonical, paper)
+    assert result["status"] == "MISMATCHED"
+    assert result["atr"]["absolute_difference"] == 10.0
+
+
+def test_location_band_variance_uses_same_bound() -> None:
+    assert _bounded_atr_dependent_difference(
+        {"field": "values.locations[0].band_high", "canonical_value": 100.0, "paper_value": 101.0},
+        2.5,
+    )
+    assert not _bounded_atr_dependent_difference(
+        {"field": "values.locations[0].band_high", "canonical_value": 100.0, "paper_value": 110.0},
+        2.5,
+    )
+    assert not _bounded_atr_dependent_difference(
+        {"field": "values.locations[0].method", "canonical_value": "a", "paper_value": "b"},
+        2.5,
+    )
 
 
 def test_canonical_artifact_must_contain_requested_session(tmp_path) -> None:

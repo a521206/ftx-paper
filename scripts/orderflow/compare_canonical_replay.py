@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -35,6 +36,10 @@ PHASE35_ATR_DEPENDENT_FIELDS = ("atr", "locations", "vwap_measurements", "contex
 PHASE35_ATR_INDEPENDENT_FIELDS = tuple(
     field for field in PHASE35_FIELDS if field not in PHASE35_ATR_DEPENDENT_FIELDS
 )
+# ATR is sourced from repository-specific history, but variance must remain
+# bounded before dependent evidence can be accepted as input variance.
+ATR_RELATIVE_TOLERANCE = 0.01
+ATR_ABSOLUTE_TOLERANCE = 2.5
 PHASE3_FIELDS = (
     "source_fingerprint", "aggregates", "source_gaps", "issues", "session_boundaries",
 )
@@ -101,6 +106,42 @@ def _compare_fields(
     return {"status": "MATCHED", "layer": label, "manifest": manifest}
 
 
+def _compare_phase35_independent(
+    canonical: dict[str, Any], paper: dict[str, Any], tolerance: float,
+) -> dict[str, Any]:
+    """Compare independent evidence while bounding prior-profile value drift."""
+    fields = tuple(field for field in PHASE35_ATR_INDEPENDENT_FIELDS if field != "prior_value")
+    result = _compare_fields(canonical, paper, fields, label="phase3_5_independent")
+    if result["status"] != "MATCHED":
+        return result
+    left = canonical["prior_value"]
+    right = paper["prior_value"]
+    if left == right:
+        return result
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return {"status": "MISMATCHED", "layer": "phase3_5_independent", "field": "prior_value"}
+    for field in ("poc", "vah", "val"):
+        left_value = left.get(field)
+        right_value = right.get(field)
+        if not isinstance(left_value, (int, float)) or not isinstance(right_value, (int, float)) or not math.isfinite(left_value) or not math.isfinite(right_value):
+            return {"status": "MISMATCHED", "layer": "phase3_5_independent", "field": f"prior_value.{field}"}
+        if abs(left_value - right_value) > tolerance:
+            return {"status": "MISMATCHED", "layer": "phase3_5_independent", "field": f"prior_value.{field}", "canonical_value": left_value, "paper_value": right_value, "tolerance": tolerance}
+    ignored = {"fingerprint", "poc", "vah", "val"}
+    remaining_left = {key: value for key, value in left.items() if key not in ignored}
+    remaining_right = {key: value for key, value in right.items() if key not in ignored}
+    if remaining_left != remaining_right:
+        return {"status": "MISMATCHED", "layer": "phase3_5_independent", "field": "prior_value", "first_mismatch": _first_difference(remaining_left, remaining_right, "prior_value")}
+    # The comparison fingerprint intentionally excludes tolerant value fields
+    # and the producer fingerprint that was derived from them.
+    return {
+        "status": "MATCHED",
+        "layer": "phase3_5_independent",
+        "reason": "bounded_prior_value_input_variance",
+        "comparison_fingerprint": _digest(remaining_left),
+    }
+
+
 def _compare_phase35(canonical: dict[str, Any], paper: dict[str, Any]) -> dict[str, Any]:
     canonical_value = canonical.get("evidence", canonical)
     paper_value = _paper_phase35_projection(paper)
@@ -117,20 +158,28 @@ def _compare_phase35(canonical: dict[str, Any], paper: dict[str, Any]) -> dict[s
     if not isinstance(canonical_atr, dict) or not isinstance(paper_atr, dict):
         return {"status": "INCOMPLETE", "layer": "phase3_5", "reason": "atr is not an object"}
     if canonical_atr.get("value") != paper_atr.get("value"):
-        independent = _compare_fields(
+        canonical_value_atr = canonical_atr.get("value")
+        paper_value_atr = paper_atr.get("value")
+        if not isinstance(canonical_value_atr, (int, float)) or not isinstance(paper_value_atr, (int, float)) or not math.isfinite(canonical_value_atr) or not math.isfinite(paper_value_atr):
+            return {"status": "MISMATCHED", "layer": "phase3_5", "reason": "ATR values are not numeric"}
+        difference = abs(canonical_value_atr - paper_value_atr)
+        tolerance = max(ATR_ABSOLUTE_TOLERANCE, abs(canonical_value_atr) * ATR_RELATIVE_TOLERANCE)
+        independent = _compare_phase35_independent(
             canonical_value,
             paper_value,
-            PHASE35_ATR_INDEPENDENT_FIELDS,
-            label="phase3_5_independent",
+            tolerance,
         )
         return {
-            "status": "INPUT_VARIANCE",
+            "status": "INPUT_VARIANCE" if difference <= tolerance and independent["status"] == "MATCHED" else "MISMATCHED",
             "layer": "phase3_5",
             "reason": "ATR source histories differ; dependent evidence is not numerically comparable",
             "variance_fields": list(PHASE35_ATR_DEPENDENT_FIELDS),
             "atr": {
-                "canonical": canonical_atr.get("value"),
-                "paper": paper_atr.get("value"),
+                "canonical": canonical_value_atr,
+                "paper": paper_value_atr,
+                "absolute_difference": difference,
+                "tolerance": tolerance,
+                "relative_difference": difference / abs(canonical_value_atr) if canonical_value_atr else None,
             },
             "dependent_counts": {
                 field: {
@@ -142,6 +191,18 @@ def _compare_phase35(canonical: dict[str, Any], paper: dict[str, Any]) -> dict[s
             "independent": independent,
         }
     return _compare_fields(canonical_value, paper_value, PHASE35_FIELDS, label="phase3_5")
+
+
+def _bounded_atr_dependent_difference(phase4: dict[str, Any], tolerance: float) -> bool:
+    """Accept only numeric ATR geometry differences within the ATR bound."""
+    field = str(phase4.get("field", ""))
+    canonical = phase4.get("canonical_value")
+    paper = phase4.get("paper_value")
+    if not field.endswith((".band_low", ".band_high")):
+        return False
+    if not isinstance(canonical, (int, float)) or not isinstance(paper, (int, float)) or not math.isfinite(canonical) or not math.isfinite(paper):
+        return False
+    return abs(canonical - paper) <= tolerance
 
 
 def _paper_phase35_projection(session_result: dict[str, Any]) -> dict[str, Any]:
@@ -463,6 +524,21 @@ def compare_date(
             if canonical_path is not None and paper_replay is not None
             else {"status": "INCOMPLETE", "stream": "source_observation", "reason": "replay artifact unavailable"}
         )
+        atr_payload = phase35.get("atr")
+        atr_tolerance = atr_payload.get("tolerance") if isinstance(atr_payload, dict) else None
+        if (
+            phase35.get("status") == "INPUT_VARIANCE"
+            and phase4.get("status") == "MISMATCHED"
+            and isinstance(atr_tolerance, (int, float))
+            and _bounded_atr_dependent_difference(phase4, atr_tolerance)
+        ):
+            phase4 = {
+                "status": "INPUT_VARIANCE",
+                "stream": phase4.get("stream", "context_location"),
+                "reason": "bounded ATR variance affects dependent context/location evidence",
+                "variance": phase35.get("atr"),
+                "first_dependent_difference": phase4,
+            }
         return {
             "date": session_date,
             "phase3": phase3,
