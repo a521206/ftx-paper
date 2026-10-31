@@ -935,10 +935,10 @@ class ReplayWorker:
             "metrics": summary,
         }
         parity_artifact = None
-        if include_parity_layers:
+        if include_parity_layers and self.parity_projector is not None:
             parity_artifact = self.parity_projector(
                 projection_input, request=request, layer_records=parity_records,
-            ) if self.parity_projector is not None else None
+            )
         canonical_replay_events = canonical_events(
             all_events, run_id=run_id, execution_scope=cast(ExecutionScope, mode),
         )
