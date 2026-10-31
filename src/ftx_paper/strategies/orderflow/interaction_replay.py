@@ -41,9 +41,19 @@ def _fact(kind: str, identity: str, parent: str | None, snapshot: Mapping[str, A
     observed_timestamp = serialize_timestamp(parse_timestamp(observed))
     available_timestamp = serialize_timestamp(parse_timestamp(available))
     return {"kind": kind, "occurred_at": observed_timestamp,
-            "observed_at": observed_timestamp, "available_at": available_timestamp,
-            "identity": identity, "causal_parent_id": parent, "values": dict(snapshot),
-            "unavailable": list(unavailable)}
+             "observed_at": observed_timestamp, "available_at": available_timestamp,
+             "identity": identity, "causal_parent_id": parent, "values": _jsonable(snapshot),
+             "unavailable": list(unavailable)}
+
+
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return serialize_utc(value)
+    if isinstance(value, Mapping):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    return value
 
 
 def replay_interaction_response(

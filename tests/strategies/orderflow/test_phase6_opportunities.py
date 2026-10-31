@@ -1,4 +1,5 @@
 from dataclasses import replace
+from datetime import datetime, timezone
 
 import pytest
 
@@ -29,6 +30,16 @@ def test_identity_is_deterministic_and_template_scoped() -> None:
     args = dict(session_date="2026-09-15", instrument="NIFTY", direction=Direction.LONG, interaction_id="i", reference_generation=2, response_evidence_ids=("b",), formation_at="2026-09-15T09:20", formation_available_at="2026-09-15T09:21")
     assert opportunity_identity(**args) == opportunity_identity(**args)
     assert opportunity_identity(**args, template_id="t") != opportunity_identity(**args)
+
+
+def test_identity_normalizes_datetime_evidence_ids_to_session_labels() -> None:
+    identity = opportunity_identity(
+        session_date="2026-09-15", instrument="NIFTY", direction=Direction.LONG,
+        interaction_id="i", reference_generation=0,
+        response_evidence_ids=(datetime(2026, 9, 15, 3, 50, tzinfo=timezone.utc),),
+        formation_at="2026-09-15T09:20", formation_available_at="2026-09-15T09:21",
+    )
+    assert "2026-09-15T09:20|" in identity
 
 
 def test_opportunity_rejects_future_evidence_and_forms_setup_with_parent() -> None:

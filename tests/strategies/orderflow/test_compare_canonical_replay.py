@@ -6,6 +6,8 @@ from scripts.orderflow.compare_canonical_replay import (
     _bounded_atr_dependent_difference,
     _resolve_canonical_artifact,
     _paper_phase35_projection,
+    _normalize_canonical_timestamps,
+    _normalize_observation_payload,
 )
 from scripts.orderflow.orderflow_replay import _observation_rows
 
@@ -81,6 +83,28 @@ def test_phase35_large_atr_variance_is_not_accepted() -> None:
     result = _compare_phase35(canonical, paper)
     assert result["status"] == "MISMATCHED"
     assert result["atr"]["absolute_difference"] == 10.0
+
+
+def test_canonical_local_minute_timestamps_are_normalized_only_at_comparison_ingress() -> None:
+    record = {
+        "observed_at": "2026-10-01T09:20",
+        "values": {"as_of": "2026-10-01T09:25", "evidence_ids": ["09:25"]},
+    }
+    normalized = _normalize_canonical_timestamps(record, "2026-10-01")
+    assert normalized["observed_at"] == "2026-10-01T03:50:00.000000Z"
+    assert normalized["values"]["as_of"] == "2026-10-01T03:55:00.000000Z"
+    assert normalized["values"]["evidence_ids"] == ["09:25"]
+
+
+def test_observation_comparison_drops_presentation_timestamp_labels() -> None:
+    payload = {"aggregates": {"1m": [{
+        "time": "2026-10-01T09:15", "end_time": "2026-10-01T09:15",
+        "available_at": "2026-10-01T09:16", "time_label": "2026-10-01T09:15",
+        "end_time_label": "2026-10-01T09:15",
+    }]}}
+    normalized = _normalize_observation_payload(payload, "2026-10-01")
+    assert normalized["aggregates"]["1m"][0]["available_at"] == "2026-10-01T03:46:00.000000Z"
+    assert "time_label" not in normalized["aggregates"]["1m"][0]
 
 
 def test_location_band_variance_uses_same_bound() -> None:
@@ -181,3 +205,51 @@ def test_phase45_comparison_accepts_timezone_aware_causal_timestamps(tmp_path) -
         {"parity_phase_facts": {"interaction_response": [record]}},
         "2026-09-29",
     ) == {"status": "MATCHED", "stream": "interaction_response", "count": 1}
+
+
+def test_phase45_comparison_ignores_producer_identity_artifacts(tmp_path) -> None:
+    canonical_record = {
+        "kind": "location_interaction_observed",
+        "occurred_at": "2026-10-01T09:16",
+        "observed_at": "2026-10-01T09:16",
+        "available_at": "2026-10-01T09:16",
+        "identity": "niftyzoning:derived:6a97",
+        "causal_parent_id": "niftyzoning:derived:8fab",
+        "values": {
+            "interaction_id": "NIFTY:2026-10-01:PD_LOW:1m:2026-10-01T09:16",
+            "source_aggregate_id": "aggregate:1m:2026-10-01T09:16",
+            "causal_available_at": "2026-10-01T09:16",
+            "reference_generation": 1,
+            "outcome": "observed",
+        },
+        "unavailable": [],
+    }
+    paper_record = {
+        **canonical_record,
+        "occurred_at": "2026-10-01T03:46:00Z",
+        "observed_at": "2026-10-01T03:46:00Z",
+        "available_at": "2026-10-01T03:46:00Z",
+        "identity": "niftyzoning:derived:c118",
+        "causal_parent_id": "niftyzoning:derived:6396",
+        "interaction_id": canonical_record["values"]["interaction_id"],
+        "causal_available_at": "2026-10-01T03:46:00Z",
+        "values": {
+            "source_aggregate_id": "aggregate:1m:2026-10-01T09:16",
+            "reference_generation": 1,
+            "outcome": "observed",
+        },
+    }
+    artifact = tmp_path / "phase45.json"
+    artifact.write_text(
+        json.dumps({"sessions": {"2026-10-01": {"parity_phase_facts": {"interaction_response": [canonical_record]}}}}),
+        encoding="utf-8",
+    )
+
+    result = _compare_phase45(
+        artifact,
+        {"parity_phase_facts": {"interaction_response": [paper_record]}},
+        "2026-10-01",
+    )
+
+    assert result["status"] == "MATCHED"
+    assert result["ignored_producer_metadata"][0]["canonical_identity"] != result["ignored_producer_metadata"][0]["paper_identity"]

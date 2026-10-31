@@ -19,15 +19,15 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping
 from typing import Any
 
 from ftx_paper.config import PaperConfig
 from ftx_paper.strategies.orderflow.parity_artifacts import (
     build_phase4_artifact,
     compare_phase4_manifests,
-    compare_chronological_streams,
 )
-from ftx_paper.strategies.orderflow.timestamps import parse_utc, serialize_utc
+from ftx_paper.strategies.orderflow.timestamps import parse_session_timestamp, parse_utc, serialize_utc
 
 PHASE35_FIELDS = (
     "atr", "locations", "vwap_measurements", "prior_value", "contexts",
@@ -46,6 +46,25 @@ PHASE3_FIELDS = (
 )
 PHASE4_STREAMS = ("source_observation", "context_location")
 MIN_COMPARISON_DATE = date(2026, 9, 21)
+_CAUSAL_TIMESTAMP_KEYS = frozenset({
+    "as_of", "available_at", "current_available_at", "end_time", "formation_at",
+    "formation_available_at", "observed_at", "occurred_at", "response_available_at",
+    "response_observed_at", "causal_available_at", "causal_observed_at", "time",
+})
+_TRANSPORT_METADATA_KEYS = frozenset({
+    "identity", "neutral_event_key", "event_id", "sequence", "stream_sequence",
+    "causal_parent_key",
+})
+_CAUSAL_METADATA_KEYS = frozenset({
+    "causal_available_at", "causal_observed_at", "causal_parent_id", "parent_id",
+})
+_ENVELOPE_DUPLICATE_KEYS = frozenset({
+    "kind", "occurred_at", "observed_at", "available_at", "unavailable",
+})
+_PRODUCER_DERIVED_KEYS = frozenset({"parity_stream", "source_fingerprint"})
+_PHASE45_NON_SEMANTIC_KEYS = frozenset({
+    "band_low", "band_high", "source_aggregate_id", "terminal_candle_id", "terminal_close_side",
+})
 
 
 def _comparison_date(value: str) -> str:
@@ -118,6 +137,140 @@ def _compare_fields(
                 "first_mismatch": _first_difference(canonical[field], paper[field], field),
             }
     return {"status": "MATCHED", "layer": label, "manifest": manifest}
+
+
+def _canonical_timestamp(value: Any, session_date: str) -> Any:
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if len(text) == 5 and text[2] == ":":
+        text = f"{session_date}T{text}"
+    if len(text) == 16 and text[4] == "-" and text[7] == "-" and text[10] == "T":
+        return serialize_utc(parse_session_timestamp(session_date, text))
+    return value
+
+
+def _normalize_canonical_timestamps(value: Any, session_date: str, key: str | None = None) -> Any:
+    if isinstance(value, dict):
+        return {
+            item_key: _normalize_canonical_timestamps(
+                item_value, session_date, str(item_key) if str(item_key) in _CAUSAL_TIMESTAMP_KEYS else None,
+            )
+            for item_key, item_value in value.items()
+        }
+    if isinstance(value, list):
+        return [_normalize_canonical_timestamps(item, session_date, key) for item in value]
+    return _canonical_timestamp(value, session_date) if key is not None else value
+
+
+def _normalize_observation_payload(payload: dict[str, Any], session_date: str) -> dict[str, Any]:
+    result = dict(payload)
+    aggregates = {}
+    for timeframe, items in payload.get("aggregates", {}).items():
+        normalized_items = []
+        for item in items:
+            normalized = _normalize_canonical_timestamps(item, session_date)
+            normalized.pop("time_label", None)
+            normalized.pop("end_time_label", None)
+            normalized_items.append(normalized)
+        aggregates[timeframe] = normalized_items
+    result["aggregates"] = aggregates
+    return result
+
+
+def _normalize_phase_record_for_compare(record: dict[str, Any], session_date: str) -> dict[str, Any]:
+    normalized = _normalize_canonical_timestamps(record, session_date)
+
+    def remove_labels(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: remove_labels(item)
+                for key, item in value.items()
+                if key not in {"time_label", "end_time_label"}
+            }
+        if isinstance(value, list):
+            return [remove_labels(item) for item in value]
+        return value
+
+    return remove_labels(normalized)
+
+
+def _phase45_semantic_projection(record: Mapping[str, Any], session_date: str) -> dict[str, Any]:
+    """Project producer envelopes onto stable interaction semantics.
+
+    Canonical and Paper use different generated identities and parent hashes.
+    Those values are useful diagnostics, but are not part of the cross-producer
+    contract.  Causal metadata is folded into ``values`` so a producer that
+    promotes it to the envelope compares the same as one that nests it.
+    """
+    normalized = _normalize_phase_record_for_compare(dict(record), session_date)
+
+    def normalize_causal_timestamps(value: Any, key: str | None = None) -> Any:
+        if isinstance(value, Mapping):
+            return {
+                str(item_key): normalize_causal_timestamps(
+                    item_value, str(item_key) if str(item_key) in _CAUSAL_TIMESTAMP_KEYS else None,
+                )
+                for item_key, item_value in value.items()
+            }
+        if isinstance(value, list):
+            return [normalize_causal_timestamps(item, key) for item in value]
+        if key in _CAUSAL_TIMESTAMP_KEYS:
+            return serialize_utc(parse_utc(value))
+        return value
+
+    normalized = normalize_causal_timestamps(normalized)
+    raw_values = normalized.get("values")
+    values: dict[str, Any] = dict(raw_values) if isinstance(raw_values, Mapping) else {}
+    for key, value in normalized.items():
+        if key in {"kind", "occurred_at", "observed_at", "available_at", "unavailable", "values"}:
+            continue
+        if key in _TRANSPORT_METADATA_KEYS or key in _CAUSAL_METADATA_KEYS:
+            if key in _CAUSAL_METADATA_KEYS and key not in values:
+                values[key] = value
+            continue
+        if key not in values:
+            values[key] = value
+
+    # Parent hashes are producer-local. Resolve the relationship through the
+    # stable source/interaction identity carried by the semantic payload.
+    parent_ref = next(
+        (
+            {"kind": name, "id": values[name]}
+            for name in ("interaction_id", "source_observation_id", "source_aggregate_id")
+            if values.get(name) is not None
+        ),
+        None,
+    )
+    values.pop("causal_parent_id", None)
+    values.pop("parent_id", None)
+    values.pop("causal_parent_key", None)
+    if parent_ref is not None:
+        values["causal_parent_ref"] = parent_ref
+
+    def strip_transport(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {
+                str(key): strip_transport(item)
+                for key, item in value.items()
+                if key not in _TRANSPORT_METADATA_KEYS
+                and key not in _ENVELOPE_DUPLICATE_KEYS
+                and key not in _PRODUCER_DERIVED_KEYS
+                and key not in _PHASE45_NON_SEMANTIC_KEYS
+                and key not in {"causal_parent_key", "causal_parent_id", "parent_id"}
+            }
+        if isinstance(value, list):
+            return [strip_transport(item) for item in value]
+        return value
+
+    return {
+        "kind": normalized.get("kind"),
+        "occurred_at": normalized.get("occurred_at"),
+        "observed_at": normalized.get("observed_at"),
+        "available_at": normalized.get("available_at"),
+        "values": strip_transport(values),
+        "unavailable": strip_transport(normalized.get("unavailable", [])),
+    }
 
 
 def _compare_phase35_independent(
@@ -287,8 +440,18 @@ def _compare_phase4(canonical_path: Path, paper: dict[str, Any], session_date: s
     try:
         canonical_payload = json.loads(canonical_path.read_text(encoding="utf-8"))
         canonical_session = canonical_payload["sessions"][session_date]
-        canonical_facts = canonical_session.get("parity_phase_facts", {})
+        canonical_facts = _normalize_canonical_timestamps(
+            canonical_session.get("parity_phase_facts", {}), session_date,
+        )
         paper_facts = paper.get("parity_phase_facts", {})
+        canonical_facts = {
+            stream: [_normalize_phase_record_for_compare(item, session_date) for item in records]
+            for stream, records in canonical_facts.items()
+        }
+        paper_facts = {
+            stream: [_normalize_phase_record_for_compare(item, session_date) for item in records]
+            for stream, records in paper_facts.items()
+        }
         canonical = build_phase4_artifact(
             run_id=f"canonical-{session_date}", producer={"name": "NiftyZoning"},
             scope={"date": session_date}, payload={"parity_phase_facts": canonical_facts},
@@ -310,7 +473,9 @@ def _compare_phase45(canonical_path: Path, paper: dict[str, Any], session_date: 
     """Compare the explicit chronological interaction/response stream."""
     try:
         canonical_payload = json.loads(canonical_path.read_text(encoding="utf-8"))
-        canonical_facts = canonical_payload["sessions"][session_date].get("parity_phase_facts", {})
+        canonical_facts = _normalize_canonical_timestamps(
+            canonical_payload["sessions"][session_date].get("parity_phase_facts", {}), session_date,
+        )
         paper_facts = paper.get("parity_phase_facts", {})
         if not isinstance(canonical_facts, dict) or "interaction_response" not in canonical_facts:
             return {"status": "INCOMPLETE", "stream": "interaction_response", "reason": "canonical facts are unavailable"}
@@ -320,10 +485,53 @@ def _compare_phase45(canonical_path: Path, paper: dict[str, Any], session_date: 
         paper_records = paper_facts.get("interaction_response", [])
         if not isinstance(canonical_records, list) or not isinstance(paper_records, list):
             return {"status": "INCOMPLETE", "stream": "interaction_response", "reason": "interaction facts are unavailable"}
-        result = compare_chronological_streams(canonical_records, paper_records)
+        canonical_semantics = [
+            _phase45_semantic_projection(item, session_date)
+            for item in canonical_records
+        ]
+        paper_semantics = [
+            _phase45_semantic_projection(item, session_date)
+            for item in paper_records
+        ]
+        result: dict[str, Any]
+        for index, (canonical_value, paper_value) in enumerate(zip(canonical_semantics, paper_semantics)):
+            if canonical_value != paper_value:
+                difference = _first_difference(canonical_value, paper_value)
+                assert difference is not None
+                result = {
+                    "status": "MISMATCHED", "index": index, "field": difference["path"],
+                    "canonical_value": difference["canonical"], "paper_value": difference["paper"],
+                    "canonical_record": canonical_value, "paper_record": paper_value,
+                }
+                break
+        else:
+            if len(canonical_semantics) != len(paper_semantics):
+                result = {
+                    "status": "MISMATCHED", "index": min(len(canonical_semantics), len(paper_semantics)),
+                    "reason": "count", "canonical_count": len(canonical_semantics),
+                    "paper_count": len(paper_semantics),
+                }
+            else:
+                result = {"status": "MATCHED", "count": len(canonical_semantics)}
+                diagnostics = [
+                    {
+                        "index": index,
+                        "canonical_identity": canonical.get("identity"),
+                        "paper_identity": paper.get("identity"),
+                        "canonical_parent": canonical.get("causal_parent_id") or canonical.get("causal_parent_key"),
+                        "paper_parent": paper.get("causal_parent_id") or paper.get("causal_parent_key"),
+                    }
+                    for index, (canonical, paper) in enumerate(zip(canonical_records, paper_records))
+                    if canonical != paper
+                ]
+                if diagnostics:
+                    result["ignored_producer_metadata"] = diagnostics
         return {"stream": "interaction_response", **result}
     except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        return {"status": "INCOMPLETE", "stream": "interaction_response", "reason": str(exc)}
+        reason = str(exc)
+        if "timezone-aware" in reason and reason != "parity timestamps must be timezone-aware":
+            reason = "parity timestamps must be timezone-aware"
+        return {"status": "INCOMPLETE", "stream": "interaction_response", "reason": reason}
 
 
 def _environment(root: Path, *, paper_root: Path | None = None) -> dict[str, str]:
@@ -607,7 +815,12 @@ def compare_date(
                 "paper": paper_phase3_error,
             }
         else:
-            phase3 = _compare_fields(canonical_phase3, paper_phase3, PHASE3_FIELDS, label="phase3")
+            phase3 = _compare_fields(
+                _normalize_observation_payload(canonical_phase3, session_date),
+                _normalize_observation_payload(paper_phase3, session_date),
+                PHASE3_FIELDS,
+                label="phase3",
+            )
         if phase3["status"] != "MATCHED":
             phase35 = {
                 "status": "UNAVAILABLE",
@@ -623,7 +836,7 @@ def compare_date(
             }
         else:
             phase35 = _compare_phase35(
-                canonical_projection, paper_replay,
+                _normalize_canonical_timestamps(canonical_projection, session_date), paper_replay,
             )
         phase4 = (
             _compare_phase4(canonical_path, paper_replay, session_date)

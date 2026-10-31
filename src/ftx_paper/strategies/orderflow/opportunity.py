@@ -11,7 +11,7 @@ from typing import Any, Sequence
 from .hierarchy import StructuralSetup
 from .interactions import candle_identity
 from .lifecycle import EvidenceRef as LifecycleEvidenceRef, SetupOpportunity
-from .timestamps import coerce_timestamp, parse_nifty_label, serialize_utc
+from .timestamps import coerce_timestamp, nifty_label, parse_nifty_label, serialize_utc
 from .response import ResponseCandle, ResponseOutcomeStatus, build_response_spec, evaluate_response_window
 from .templates import Direction, ResponseType, TradeTemplate
 
@@ -90,7 +90,11 @@ def _lineage(item: Any) -> EvidenceRef:
 
 
 def opportunity_identity(*, session_date: str, instrument: str, direction: Direction, interaction_id: str, reference_generation: int, response_evidence_ids: tuple[str, ...], formation_at: datetime | str, formation_available_at: datetime | str, template_id: str = "") -> str:
-    fields = (session_date, instrument, direction.value, interaction_id, str(reference_generation), *([template_id] if template_id else []), *response_evidence_ids, serialize_utc(coerce_timestamp(formation_at)), serialize_utc(coerce_timestamp(formation_available_at)))
+    evidence_ids = tuple(
+        nifty_label(value) if isinstance(value, datetime) else str(value)
+        for value in response_evidence_ids
+    )
+    fields = (session_date, instrument, direction.value, interaction_id, str(reference_generation), *([template_id] if template_id else []), *evidence_ids, serialize_utc(coerce_timestamp(formation_at)), serialize_utc(coerce_timestamp(formation_available_at)))
     return "|".join(fields)
 
 
