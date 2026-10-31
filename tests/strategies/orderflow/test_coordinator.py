@@ -1,3 +1,8 @@
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
+from ftx_paper.contracts import Instrument, MarketBar, MarketRole
+from ftx_paper.strategies.orderflow.boundary.orderflow import OrderflowStrategy
 from ftx_paper.strategies.orderflow.coordinator import OrderflowClockInput, OrderflowCoordinator
 from ftx_paper.strategies.orderflow.evidence_publication import AtrPublication
 from ftx_paper.strategies.orderflow.interaction_detector import InteractionTransition
@@ -26,6 +31,23 @@ def test_coordinator_publishes_source_once_and_preserves_missing_evidence() -> N
     assert duplicate.events == ()
     assert duplicate.source_event == first.source_event
     assert coordinator.detector.interactions == {}
+
+
+def test_strategy_delegates_source_publication_to_coordinator() -> None:
+    coordinator = OrderflowCoordinator(LocationRegistry("stream"))
+    strategy = OrderflowStrategy(coordinator=coordinator)
+    bundle = SimpleNamespace(
+        bars={MarketRole.FUTURES: MarketBar(
+            Instrument("NIFTY", "NFO", "FUTURES", "2026-09-29"),
+            datetime(2026, 9, 29, 3, 45, tzinfo=timezone.utc),
+            100.0, 101.0, 99.0, 100.0, 10,
+        )},
+    )
+
+    decisions = strategy.on_bundle(bundle)
+
+    assert [item.event_type for item in decisions] == ["SOURCE_OBSERVATION"]
+    assert decisions[0].payload["identity"] == "aggregate:1m:2026-09-29T09:15"
 
 
 def test_coordinator_publishes_supplied_session_levels_only_with_atr() -> None:

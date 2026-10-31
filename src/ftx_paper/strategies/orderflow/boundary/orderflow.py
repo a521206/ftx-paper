@@ -6,11 +6,10 @@ from collections.abc import Mapping
 
 from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.strategies.shared.protocol import StrategyDecision, StrategyMetadata
-from ftx_paper.strategies.orderflow.causal_events import CausalEventRegistry
 from ftx_paper.contracts import MarketBar, MarketRole
 from ftx_paper.strategies.orderflow.coordinator import OrderflowClockInput, OrderflowCoordinator
 from ftx_paper.strategies.orderflow.orderflow_common import Aggregate
-from ftx_paper.strategies.orderflow.timestamps import require_utc, nifty_label, serialize_utc
+from ftx_paper.strategies.orderflow.timestamps import require_utc, nifty_label
 
 from .orderflow_config import ORDERFLOW_NAME, ORDERFLOW_VERSION, OrderflowConfig
 
@@ -21,7 +20,6 @@ class OrderflowStrategy:
     def __init__(self, *, config: OrderflowConfig | None = None, coordinator: OrderflowCoordinator | None = None) -> None:
         self.config = config or OrderflowConfig()
         self._coordinator = coordinator
-        self._causal_events = coordinator.causal_events if coordinator is not None else CausalEventRegistry()
 
     @property
     def metadata(self) -> StrategyMetadata:
@@ -36,19 +34,13 @@ class OrderflowStrategy:
     def _source_observation(self, bundle: object) -> tuple[object, ...]:
         bars = getattr(bundle, "bars", {})
         bar = bars.get(MarketRole.FUTURES) if isinstance(bars, Mapping) else None
-        if not isinstance(bar, MarketBar):
+        if not isinstance(bar, MarketBar) or self._coordinator is None:
             return ()
-        source_id = f"aggregate:1m:{nifty_label(require_utc(bar.timestamp))}"
-        event = self._causal_events.publish_source_observation(
-            source_id=source_id,
-            session_date=str(getattr(bundle, "trading_date", "")),
-            observed_at=serialize_utc(require_utc(bar.timestamp)),
-            available_at=serialize_utc(require_utc(bar.timestamp)),
-        )
-        decisions: list[StrategyDecision] = [StrategyDecision("SOURCE_OBSERVATION", event)]
-        if self._coordinator is not None and bar.volume is not None:
-            advance = self._coordinator.advance(OrderflowClockInput(self._aggregate(bar)))
-            decisions.extend(StrategyDecision(str(item["kind"]).upper(), item) for item in advance.events)
+        advance = self._coordinator.advance(OrderflowClockInput(self._aggregate(bar)))
+        decisions: list[StrategyDecision] = []
+        if advance.source_event is not None:
+            decisions.append(StrategyDecision("SOURCE_OBSERVATION", advance.source_event))
+        decisions.extend(StrategyDecision(str(item["kind"]).upper(), item) for item in advance.events)
         return tuple(decisions)
 
     @staticmethod
