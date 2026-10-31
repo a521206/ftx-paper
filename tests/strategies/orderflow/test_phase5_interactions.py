@@ -293,16 +293,9 @@ def test_replay_publishes_canonical_extreme_lifecycle_facts() -> None:
         available5=(first, second), published_records=published, facts=facts,
     )
 
-    assert [item["kind"] for item in facts] == [
-        "session_extreme_registered",
-        "reference_invalidated",
-        "session_extreme_registered",
-    ]
-    invalidated = facts[1]["values"]
+    assert [item["kind"] for item in facts] == ["reference_invalidated"]
+    invalidated = facts[0]["values"]
     assert invalidated["old_reference_id"] == "SESSION_HIGH:2026-09-29:1"
     assert invalidated["old_generation"] == 1
     assert invalidated["new_reference_id"] == "SESSION_HIGH:2026-09-29:2"
     assert invalidated["new_generation"] == 2
-    registered = facts[2]["values"]
-    assert registered["location"] == "SESSION_HIGH"
-    assert registered["owner"] == "5m"

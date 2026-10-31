@@ -145,20 +145,6 @@ def _publish_replaced_interactions(
                 available_at=record.available_at,
             ))
 
-        aggregate = source_aggregate(record)
-        facts.append(_fact(
-            "session_extreme_registered",
-            f"session_extreme_registered:{record.alias}:{record.generation}",
-            f"aggregate:5m:{nifty_label(aggregate.time)}",
-            {
-                "location": record.alias,
-                "reference_level": record.price,
-                "owner": "5m",
-                "evidence_timeframe": "5m",
-            },
-            observed_at=aggregate.end_time,
-            available_at=record.available_at,
-        ))
 
 
 def replay_interaction_response(
