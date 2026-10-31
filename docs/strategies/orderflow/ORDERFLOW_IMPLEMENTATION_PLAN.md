@@ -937,10 +937,11 @@ Current Phase 6 verification record:
   supersession, execution-group eligibility, and duplicate timeout observation
   idempotence.
 - Ruff, Pyright, and `git diff --check` pass for the changed Paper scope.
-- The canonical-vs-Paper replay harness currently reports mismatches for both
-  source-matched dates; no Phase 6 parity gate is claimed until those are
-  resolved. No runtime/database parity claim is made; Phase 9 remains the host
-  integration and persistence gate.
+- The canonical-vs-Paper interaction/response replay now reports Phase 4.5
+  `MATCHED` for both source-matched dates. A dedicated Phase 6 lifecycle replay
+  gate remains separate and must be rerun after any lifecycle changes. No
+  runtime/database parity claim is made; Phase 9 remains the host integration
+  and persistence gate.
 
 ## Phase 7: Port And Verify Intents, Admission, Allocation, And Execution
 
