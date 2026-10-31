@@ -23,9 +23,13 @@ from .policies import PDPolicy, StandardLocationPolicy
 @dataclass(frozen=True, slots=True)
 class InteractionResponseReplay:
     facts: tuple[dict[str, Any], ...]
+    opportunity_facts: tuple[dict[str, Any], ...] = ()
 
     def parity_phase_facts(self) -> dict[str, list[dict[str, Any]]]:
-        return {"interaction_response": [dict(item) for item in self.facts]}
+        return {
+            "interaction_response": [dict(item) for item in self.facts],
+            "opportunity_lifecycle": [dict(item) for item in self.opportunity_facts],
+        }
 
 
 def _fact(kind: str, identity: str, parent: str | None, snapshot: Mapping[str, Any], *, unavailable: Sequence[str] = (), observed_at: str | None = None, available_at: str | None = None) -> dict[str, Any]:
@@ -116,11 +120,27 @@ def replay_interaction_response(
     facts: list[dict[str, Any]] = []
     vwap_emitted: set[str] = set()
     role_context_emitted: set[str] = set()
+    clock_available: datetime | None = None
+    clock_available5: list[Aggregate] = []
     for current in all_bars:
         source = f"aggregate:{current.timeframe}:{nifty_label(current.time)}"
         current_available = current.available_at
         available1 = [item for item in one if item.available_at <= current_available]
         available5 = [item for item in five if item.available_at <= current_available]
+        if clock_available is not None and current_available != clock_available:
+            # Canonical handle_bar has a hard phase boundary: every interaction
+            # transition at the availability clock is published before policy
+            # dispatch for that same clock.
+            _dispatch_structure(
+                detector=detector,
+                templates=templates,
+                available5=clock_available5,
+                as_of=clock_available,
+                facts=facts,
+                role_context_emitted=role_context_emitted,
+            )
+        clock_available = current_available
+        clock_available5 = available5
         if available5 and not vwap_published:
             for record in deferred_vwap:
                 published_registry.register(record)
@@ -214,76 +234,100 @@ def replay_interaction_response(
                             "current_available_at": current.available_at,
                         }, observed_at=candle["end_time"], available_at=candle["available_at"]))
                         break
-            if current.timeframe != "5m" or snap["location"] == "VWAP":
+    if clock_available is not None:
+        _dispatch_structure(
+            detector=detector,
+            templates=templates,
+            available5=clock_available5,
+            as_of=clock_available,
+            facts=facts,
+            role_context_emitted=role_context_emitted,
+        )
+    interaction_facts = tuple(
+        item for item in facts if item["kind"] != "opportunity_outcome"
+    )
+    opportunity_facts = tuple(
+        item for item in facts if item["kind"] == "opportunity_outcome"
+    )
+    return InteractionResponseReplay(interaction_facts, opportunity_facts)
+
+
+def _dispatch_structure(
+    *,
+    detector: InteractionDetector,
+    templates: Mapping[tuple[str, str], TradeTemplate],
+    available5: Sequence[Aggregate],
+    as_of: datetime,
+    facts: list[dict[str, Any]],
+    role_context_emitted: set[str],
+) -> None:
+    """Run the canonical structure phase after all interaction publications."""
+    for state in reversed(tuple(detector.interactions.values())):
+        interaction = state.evaluation_snapshot()
+        if interaction.status.value != "ACTIVE" or interaction.location == "VWAP":
+            continue
+        iid = interaction.interaction_id
+        is_pd = interaction.location in {"PD_LOW", "PD_HIGH"}
+        policy = PDPolicy() if is_pd else StandardLocationPolicy()
+        selected = policy.templates_for(tuple(templates.values()), interaction)
+        if not selected:
+            continue
+        role_events: list[dict[str, Any]] = []
+        evaluations = (
+            PDPolicy().evaluate_hypotheses(
+                selected, interaction, available5, as_of=as_of,
+                state=state, emit=role_events.append,
+            )
+            if is_pd else StandardLocationPolicy().arbitrate(
+                selected, interaction, available5, as_of=as_of,
+            )
+        )
+        for role_event in role_events:
+            kind = str(role_event.get("kind", "role_transition"))
+            if kind == "role_context_available" and iid in role_context_emitted:
                 continue
-            is_pd = snap["location"] in {"PD_LOW", "PD_HIGH"}
-            policy = PDPolicy() if is_pd else StandardLocationPolicy()
-            selected = policy.templates_for(tuple(templates.values()), transition.interaction)
-            state = detector.interactions.get(iid)
-            role_events: list[dict[str, Any]] = []
-            if not selected:
-                continue
-            if is_pd:
-                evaluations = PDPolicy().evaluate_hypotheses(
-                    selected, transition.interaction, available5,
-                    as_of=current.available_at, state=state,
-                    emit=role_events.append,
-                )
-            else:
-                evaluations = StandardLocationPolicy().arbitrate(
-                    selected, transition.interaction, available5,
-                    as_of=current.available_at,
-                )
-            for role_event in role_events:
-                kind = str(role_event.get("kind", "role_transition"))
-                # Policy evaluation may revisit the same causal prefix on each
-                # clock tick; publish the interaction context only once in the
-                # replay stream while retaining every role transition.
-                if kind == "role_context_available" and iid in role_context_emitted:
-                    continue
-                if kind == "role_context_available":
-                    role_context_emitted.add(iid)
-                facts.append(_fact(
-                    kind, iid, iid, role_event,
-                    observed_at=str(role_event["observed_at"]),
-                    available_at=str(role_event["available_at"]),
-                ))
-            for evaluation in evaluations:
-                outcome = evaluation.outcome
-                identity = evaluation.identity or f"{iid}:{evaluation.template.template_id}:{outcome.status.value}"
-                response = outcome.response
-                facts.append(_fact("opportunity_outcome", identity, iid, {
-                    "interaction_id": iid,
-                    "location": snap["location"],
+            if kind == "role_context_available":
+                role_context_emitted.add(iid)
+            facts.append(_fact(
+                kind, iid, iid, role_event,
+                observed_at=str(role_event["observed_at"]),
+                available_at=str(role_event["available_at"]),
+            ))
+        for evaluation in evaluations:
+            outcome = evaluation.outcome
+            identity = evaluation.identity or f"{iid}:{evaluation.template.template_id}:{outcome.status.value}"
+            response = outcome.response
+            if response is not None:
+                facts.append(_fact("hypothesis_arbitrated", identity, iid, {
+                    "interaction_id": iid, "location": interaction.location,
                     "template_id": evaluation.template.template_id,
                     "response_type": evaluation.template.response_type.value,
-                    "direction": response.direction.value if response is not None else evaluation.template.direction.value,
-                    "status": outcome.status.value,
-                    "reason": outcome.reason,
+                    "direction": response.direction.value,
                     "arbitration_selected": evaluation.selected,
                     "arbitration_reason": evaluation.arbitration_reason,
-                    "as_of": outcome.as_of,
-                    "evidence_ids": [item.time for item in outcome.evidence],
-                    "evidence_lineage": [dataclasses.asdict(item) for item in outcome.evidence_lineage],
-                }, observed_at=outcome.observed_at, available_at=outcome.available_at))
-                if response is not None:
-                    facts.append(_fact("hypothesis_arbitrated", identity, iid, {
-                        "interaction_id": iid, "location": snap["location"],
-                        "template_id": evaluation.template.template_id,
-                        "response_type": evaluation.template.response_type.value,
-                        "direction": response.direction.value,
-                        "arbitration_selected": evaluation.selected,
-                        "arbitration_reason": evaluation.arbitration_reason,
-                    }, observed_at=response.observed_at, available_at=response.available_at))
-                    if not is_pd:
-                        facts.append(_fact("response_confirmed", identity, iid, {
-                            "interaction_id": iid, "location": snap["location"],
-                            "template_id": evaluation.template.template_id,
-                            "response_type": evaluation.template.response_type.value,
-                            "direction": response.direction.value,
-                            "evidence_ids": list(response.evidence_ids),
-                        }, observed_at=response.observed_at, available_at=response.available_at))
-    return InteractionResponseReplay(tuple(facts))
+                }, observed_at=response.observed_at, available_at=response.available_at))
+            facts.append(_fact("opportunity_outcome", identity, iid, {
+                "interaction_id": iid,
+                "location": interaction.location,
+                "template_id": evaluation.template.template_id,
+                "response_type": evaluation.template.response_type.value,
+                "direction": response.direction.value if response is not None else evaluation.template.direction.value,
+                "status": outcome.status.value,
+                "reason": outcome.reason,
+                "arbitration_selected": evaluation.selected,
+                "arbitration_reason": evaluation.arbitration_reason,
+                "as_of": outcome.as_of,
+                "evidence_ids": [item.time for item in outcome.evidence],
+                "evidence_lineage": [dataclasses.asdict(item) for item in outcome.evidence_lineage],
+            }, observed_at=outcome.observed_at, available_at=outcome.available_at))
+            if response is not None and not is_pd:
+                facts.append(_fact("response_confirmed", identity, iid, {
+                    "interaction_id": iid, "location": interaction.location,
+                    "template_id": evaluation.template.template_id,
+                    "response_type": evaluation.template.response_type.value,
+                    "direction": response.direction.value,
+                    "evidence_ids": list(response.evidence_ids),
+                }, observed_at=response.observed_at, available_at=response.available_at))
 
 
 __all__ = ["InteractionResponseReplay", "replay_interaction_response"]

@@ -311,15 +311,17 @@ class OrderflowReplayEngine:
             evidence=phase4_evidence,
             replay_clock=final_clock,
         )
+        interaction_replay = None
         interaction_response: tuple[dict[str, Any], ...] = ()
         if include_interactions:
             aggregates = {
                 timeframe: tuple(_aggregate(item, timeframe) for item in artifact["aggregates"][timeframe])
                 for timeframe in ("1m", "5m")
             }
-            interaction_response = replay_interaction_response(
+            interaction_replay = replay_interaction_response(
                 aggregates, phase4_replay, _location_registry(final_evidence),
-            ).facts
+            )
+            interaction_response = interaction_replay.facts
         machine = ReplayMachine(
             rows,
             evidence_events=evidence_events,
@@ -366,9 +368,10 @@ class OrderflowReplayEngine:
             "parity_phase_facts": {
                 "context_publication": list(final_state.context_publications),
                 **phase4_replay.parity_phase_facts(),
-                # ReplayMachine owns the normalized interaction stream. The producer replay
-                # contributes only its distinct opportunity stream.
-                **({"opportunity_lifecycle": interaction_phase_facts["opportunity_lifecycle"]} if interaction_phase_facts else {}),
+                # ReplayMachine owns the normalized interaction stream. The
+                # producer replay contributes only its distinct opportunity stream.
+                **({"opportunity_lifecycle": interaction_phase_facts["opportunity_lifecycle"]}
+                   if interaction_phase_facts else {}),
                 **({"interaction_response": list(final_state.interaction_response)} if include_interactions else {}),
             },
             "evidence": final_evidence,

@@ -3,6 +3,9 @@ from dataclasses import replace
 import pytest
 
 from ftx_paper.strategies.orderflow.interaction_detector import InteractionDetector
+from ftx_paper.strategies.orderflow.interaction_detector import InteractionTransition
+from ftx_paper.strategies.orderflow.interaction_replay import replay_interaction_response
+from ftx_paper.strategies.orderflow.context_location_replay import ContextLocationReplay
 from ftx_paper.strategies.orderflow.interactions import (
     CloseSide,
     InteractionCloseReason,
@@ -166,3 +169,67 @@ def test_detector_keeps_one_episode_per_timeframe() -> None:
     assert transitions == []
     assert set(detector.interactions_for("1m"))
     assert detector.interactions_for("1m") is not detector.interactions_for("5m")
+
+
+def test_replay_publishes_same_clock_interactions_before_response_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    creation = _bar("2026-09-29T09:10")
+    current = _bar("2026-09-29T09:15")
+    pd = _interaction(creation)
+    session_high = LocationInteraction.create(
+        instrument="NIFTY", session_date=creation.session_date, location="SESSION_HIGH",
+        template_version="1", candle=creation, reference_level=100.0, atr=10.0,
+        band=LocationBand(99.0, 101.0), created_at=creation.available_at,
+        available_at=creation.available_at, reference_generation=1,
+        pre_contact_side=CloseSide.BELOW,
+    )
+    assert session_high is not None
+    pd_observation = LocationObservation(
+        location="PD_LOW", location_id="pd", reference_generation=4,
+        reference=100.0, band_low=99.0, band_high=101.0, open=100.0,
+        high=101.0, low=99.0, close=100.0, close_relation="INSIDE_BAND",
+        band_contact=True, source_aggregate_id=current.time, source_observation_id=None,
+        observed_at=current.end_time, available_at=current.available_at, method="test",
+        observation_id="pd-observation", timeframe="5m",
+        child_observation_ids=("1", "2", "3", "4", "5"),
+    )
+    high_observation = replace(pd_observation, location="SESSION_HIGH", location_id="high", observation_id="high-observation")
+    transitions = (
+        InteractionTransition(pd.evaluation_snapshot(), pd_observation),
+        InteractionTransition(session_high.evaluation_snapshot(), high_observation),
+    )
+
+    class FakeDetector:
+        def __init__(self, _registry: LocationRegistry) -> None:
+            self.interactions = {pd.interaction_id: pd, session_high.interaction_id: session_high}
+            self._returned = False
+
+        def observe_1m(self, **_kwargs: object) -> list[InteractionTransition]:
+            return []
+
+        def observe(self, **_kwargs: object) -> tuple[InteractionTransition, ...]:
+            if self._returned:
+                return ()
+            self._returned = True
+            return transitions
+
+    monkeypatch.setattr("ftx_paper.strategies.orderflow.interaction_replay.InteractionDetector", FakeDetector)
+    replay = replay_interaction_response(
+        {"1m": (replace(current, timeframe="1m", source_bar_count=1, available_at=current.available_at),), "5m": (current,)},
+        ContextLocationReplay((), ()), LocationRegistry("stream"),
+    )
+
+    assert [item["kind"] for item in replay.facts[:2]] == [
+        "location_interaction_observed", "location_interaction_observed",
+    ]
+    policy_locations = [
+        item["values"]["location"] for item in replay.opportunity_facts
+    ]
+    assert policy_locations.index("SESSION_HIGH") < policy_locations.index("PD_LOW")
+    assert all(item["kind"] != "opportunity_outcome" for item in replay.facts)
+    assert all(item["kind"] == "opportunity_outcome" for item in replay.opportunity_facts)
+    assert {
+        item["identity"] for item in replay.opportunity_facts
+    } >= {
+        item["identity"] for item in replay.facts
+        if item["kind"] == "hypothesis_arbitrated"
+    }
