@@ -8,12 +8,14 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 import hashlib
 import json
 import math
 from types import MappingProxyType
 from typing import Any, TypeAlias, cast
+
+from .timestamps import require_utc, parse_utc, serialize_utc
 
 
 JSONScalar: TypeAlias = None | bool | int | float | str
@@ -21,14 +23,11 @@ JSONValue: TypeAlias = JSONScalar | list["JSONValue"] | dict[str, "JSONValue"]
 FrozenJSONValue: TypeAlias = JSONScalar | tuple["FrozenJSONValue", ...] | Mapping[str, "FrozenJSONValue"]
 
 
-def _utc(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError("causal timestamps must be timezone-aware")
-    return value.astimezone(timezone.utc)
+_utc = require_utc
 
 
 def _timestamp(value: datetime) -> str:
-    return _utc(value).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    return serialize_utc(value)
 
 
 def _freeze(value: JSONValue) -> FrozenJSONValue:
@@ -182,7 +181,7 @@ class BoundaryState:
         last = snapshot.get("last_available_at")
         if last is not None and not isinstance(last, str):
             raise ValueError("canonical snapshot last_available_at must be a string or null")
-        parsed_last = datetime.fromisoformat(last.replace("Z", "+00:00")) if last else None
+        parsed_last = parse_utc(last) if last else None
         return cls(1, tuple(raw_prefix), events, parsed_last)
 
 
@@ -231,9 +230,9 @@ def _event_from_dict(value: Any) -> BoundaryEvent:
         raise ValueError("canonical snapshot event unavailable must be a list of strings")
     return BoundaryEvent(
         kind=value["kind"],
-        occurred_at=datetime.fromisoformat(value["occurred_at"].replace("Z", "+00:00")),
-        observed_at=datetime.fromisoformat(value["observed_at"].replace("Z", "+00:00")),
-        available_at=datetime.fromisoformat(value["available_at"].replace("Z", "+00:00")),
+        occurred_at=parse_utc(value["occurred_at"]),
+        observed_at=parse_utc(value["observed_at"]),
+        available_at=parse_utc(value["available_at"]),
         sequence=value["sequence"], identity=value["identity"],
         causal_parent_id=value.get("causal_parent_id"),
         values=cast(Mapping[str, FrozenJSONValue], raw_values),

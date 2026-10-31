@@ -9,6 +9,7 @@ from ftx_paper.strategies.orderflow import (
 from ftx_paper.strategies.orderflow.orderflow_common import Aggregate
 from ftx_paper.strategies.orderflow.state_machine_types import LocationRegistry
 from ftx_paper.strategies.orderflow.vwap_location import causal_vwap_prefix
+from ftx_paper.strategies.orderflow.timestamps import parse_utc
 
 
 def _rows(count: int = 10) -> list[dict[str, object]]:
@@ -75,6 +76,16 @@ def test_phase4a_keeps_missing_atr_and_prior_levels_explicitly_unavailable() -> 
 def test_phase4a_rejects_non_causal_atr_publication() -> None:
     with pytest.raises(ValueError, match="availability cannot precede"):
         AtrPublication(4.0, "2026-09-29T09:20", "2026-09-29T09:19", "atr:1", ("atr:1",))
+
+
+def test_phase4a_normalizes_mixed_zone_atr_timestamps() -> None:
+    atr = AtrPublication(
+        4.0, "2026-09-29T03:45:00Z", "2026-09-29T09:16:00+05:30",
+        "atr:1", ("atr:1",),
+    )
+
+    assert atr.observed_at == parse_utc("2026-09-29T03:45:00Z")
+    assert atr.available_at == parse_utc("2026-09-29T03:46:00Z")
 
 
 def test_phase4a_does_not_build_bands_before_atr_availability() -> None:

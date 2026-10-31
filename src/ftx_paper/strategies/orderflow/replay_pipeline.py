@@ -7,7 +7,6 @@ from datetime import date, datetime
 import math
 from pathlib import Path
 from typing import Any, cast
-from zoneinfo import ZoneInfo
 
 from ftx_paper.runtime import RuntimeStore
 from ftx_paper.runtime.futures_source import FuturesSessionSourceResolver
@@ -33,10 +32,11 @@ from ftx_paper.strategies.orderflow.value_publication import (
     PriorSessionValueReference,
     ValuePublication,
 )
+from ftx_paper.strategies.orderflow.timestamps import coerce_timestamp, parse_nifty_label
 
 @dataclass(frozen=True, slots=True)
 class _AvailableAggregate:
-    available_at: str
+    available_at: datetime
     timeframe: str
     index: int
     value: dict[str, Any]
@@ -44,7 +44,7 @@ class _AvailableAggregate:
 
 def _aggregate(value: dict[str, Any], timeframe: str) -> Aggregate:
     return Aggregate(
-        str(value["time"]), str(value["end_time"]), str(value["available_at"]),
+        coerce_timestamp(str(value["time"])), coerce_timestamp(str(value["end_time"])), coerce_timestamp(str(value["available_at"])),
         timeframe, int(value["source_bar_count"]), float(value["open"]),
         float(value["high"]), float(value["low"]), float(value["close"]),
         int(value["volume"]), str(value["symbol"]), str(value.get("expiry", "")),
@@ -62,8 +62,8 @@ def _location_registry(evidence: dict[str, Any]) -> LocationRegistry:
         band = item.get("band", {})
         registry.register(LocationRecord(
             str(item["location_id"]), str(item["alias"]), float(item["price"]),
-            str(item.get("source_session") or "current"), str(item["created_at"]),
-            str(item["available_at"]), stream_id,
+             str(item.get("source_session") or "current"), coerce_timestamp(str(item["created_at"])),
+             coerce_timestamp(str(item["available_at"])), stream_id,
             LocationBand(float(band["low"]), float(band["high"])),
             generation=int(item.get("generation", 1)), frozen_atr=item.get("frozen_atr"),
             parent_extreme_generation=item.get("parent_extreme_generation"),
@@ -81,7 +81,7 @@ def _normalize_rows(source: Any, session_date: str) -> list[dict[str, Any]]:
         if any(field not in row or row[field] is None for field in required):
             raise ValueError(f"source row is incomplete for {session_date}")
         try:
-            minute = datetime.fromisoformat(str(row["minute"]))
+            minute = coerce_timestamp(str(row["minute"]), field="source minute")
         except ValueError as exc:
             raise ValueError(f"source row has an invalid minute for {session_date}") from exc
         numeric = [row[field] for field in ("open", "high", "low", "close", "volume", "open_interest")]
@@ -201,8 +201,8 @@ def _prior_values(
             reference.val,
             reference.poc,
             reference.vah,
-            datetime.fromisoformat(observed_at).replace(tzinfo=ZoneInfo("Asia/Kolkata")),
-            datetime.fromisoformat(available_at).replace(tzinfo=ZoneInfo("Asia/Kolkata")),
+            parse_nifty_label(observed_at),
+            parse_nifty_label(available_at),
             (reference.reference_id, reference.fingerprint),
         )
         publications[session_date] = ValuePublication(
@@ -220,14 +220,14 @@ def _as_of_evidence(evidence: dict[str, Any], clock: str) -> dict[str, Any]:
     for field in ("locations", "vwap_measurements", "contexts"):
         result[field] = [
             item for item in evidence[field]
-            if item.get("available_at") is None or str(item["available_at"]) <= clock
+            if item.get("available_at") is None or coerce_timestamp(str(item["available_at"])) <= coerce_timestamp(clock)
         ]
     atr = evidence.get("atr")
-    if isinstance(atr, dict) and atr.get("available_at") is not None and str(atr["available_at"]) > clock:
+    if isinstance(atr, dict) and atr.get("available_at") is not None and coerce_timestamp(str(atr["available_at"])) > coerce_timestamp(clock):
         result["atr"] = {**atr, "value": None, "unavailable_reason": "atr_not_yet_available"}
         result["unavailable"] = [*result["unavailable"], "atr_not_yet_available"]
     prior = evidence.get("prior_value")
-    if isinstance(prior, dict) and prior.get("available_at") is not None and str(prior["available_at"]) > clock:
+    if isinstance(prior, dict) and prior.get("available_at") is not None and coerce_timestamp(str(prior["available_at"])) > coerce_timestamp(clock):
         result["prior_value"] = {
             **prior, "reference": None,
             "unavailable_reason": "prior_value_not_yet_available",
@@ -253,7 +253,7 @@ class OrderflowReplayEngine:
             raise ValueError("replay rows contain a session mismatch")
         artifact, events = _observation_artifact(rows)
         adapter = PaperFeatureAdapter(rows_by_date, prior_values=_prior_values(rows_by_date))
-        evidence_events: list[tuple[str, dict[str, Any], dict[str, Any] | None]] = []
+        evidence_events: list[tuple[datetime, dict[str, Any], dict[str, Any] | None]] = []
         latest_5m: dict[str, Any] | None = None
         prefix_aggregates: dict[str, list[dict[str, Any]]] = {"1m": [], "5m": []}
         for position, event in enumerate(events, start=1):
@@ -289,7 +289,7 @@ class OrderflowReplayEngine:
 
         def evidence_at_clock(clock: str) -> dict[str, Any]:
             nonlocal current_evidence, event_index
-            while event_index < len(evidence_events) and evidence_events[event_index][0] <= clock:
+            while event_index < len(evidence_events) and evidence_events[event_index][0] <= coerce_timestamp(clock):
                 current_evidence = evidence_events[event_index][1]
                 event_index += 1
             return _as_of_evidence(current_evidence, clock)

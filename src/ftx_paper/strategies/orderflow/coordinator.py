@@ -15,6 +15,7 @@ from .evidence_publication import AtrPublication
 from .interaction_detector import InteractionDetector, InteractionTransition
 from .location_observation import LocationObservation
 from .orderflow_common import Aggregate
+from .timestamps import nifty_label
 from .state_machine_types import LocationRegistry, SessionLevels
 from .value_publication import ValuePublication
 from .vwap_location import VwapMeasurement
@@ -70,7 +71,7 @@ class OrderflowCoordinator:
         unavailable instead of being inferred from the final snapshot.
         """
         one = item.one_minute
-        source_id = f"aggregate:{one.timeframe}:{one.time}"
+        source_id = f"aggregate:{one.timeframe}:{nifty_label(one.time)}"
         source_event = self.causal_events.publish_source_observation(
             source_id=source_id,
             session_date=one.session_date,
@@ -99,8 +100,8 @@ class OrderflowCoordinator:
                 self._levels_published.add(key)
         if item.five_minute is not None:
             five = item.five_minute
-            five_id = f"aggregate:{five.timeframe}:{five.time}"
-            if five_id not in {f"aggregate:5m:{bar.time}" for bar in self._five_minute}:
+            five_id = f"aggregate:{five.timeframe}:{nifty_label(five.time)}"
+            if five_id not in {f"aggregate:5m:{nifty_label(bar.time)}" for bar in self._five_minute}:
                 self._five_minute.append(five)
                 self.causal_events.publish_source_observation(
                     source_id=five_id,

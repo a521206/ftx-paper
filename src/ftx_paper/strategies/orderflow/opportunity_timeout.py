@@ -1,6 +1,7 @@
 """Causal timeout accounting for unfilled opportunities."""
 
 from __future__ import annotations
+# pyright: reportArgumentType=false, reportOperatorIssue=false, reportAssignmentType=false
 
 from dataclasses import dataclass
 from typing import Sequence

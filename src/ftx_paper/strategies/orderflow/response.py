@@ -11,6 +11,7 @@ from typing import Generic, TypeVar
 from .location_geometry import LocationBand
 from .templates import Direction, ResponseType, TradeTemplate
 from .interactions import CloseSide
+from .timestamps import coerce_timestamp, parse_nifty_label
 
 T = TypeVar("T")
 H = TypeVar("H", bound=object)
@@ -174,9 +175,9 @@ class ResponseSpec:
             return armed, ResponseOutcomeStatus.CONFIRMED
         return armed, None
 
-    def expired(self, *, session_date: str, as_of: str) -> bool:
+    def expired(self, *, session_date: str, as_of: datetime | str) -> bool:
         return (
-            self.expiry_at is not None and as_of >= f"{session_date}T{self.expiry_at}"
+            self.expiry_at is not None and coerce_timestamp(as_of) >= parse_nifty_label(f"{session_date}T{self.expiry_at}")
         )
 
 

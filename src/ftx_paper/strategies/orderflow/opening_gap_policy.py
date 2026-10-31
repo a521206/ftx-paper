@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
 from .hierarchy import Permission, RegimePermission
+from .timestamps import coerce_timestamp
 
 
 class OpeningGapState(StrEnum):
@@ -21,9 +23,10 @@ class OpeningGapPolicy:
     expiry_bars: int = 5
 
     def classify(self, *, opening: dict[str, Any], prior_low: float | None, prior_high: float | None,
-                 prior_value_low: float | None, prior_value_high: float | None, available_at: str,
+                  prior_value_low: float | None, prior_value_high: float | None, available_at: datetime | str,
                  value_reference_id: str | None = None, value_scope: str | None = None) -> dict[str, object]:
         price = float(opening["open"])
+        available_at = coerce_timestamp(available_at)
         extra = {"value_reference_id": value_reference_id, "value_scope": value_scope} if value_reference_id is not None else {}
         if prior_low is not None and price < prior_low:
             below_value = prior_value_low is not None and price < prior_value_low

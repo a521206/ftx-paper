@@ -10,6 +10,7 @@ from ftx_paper.strategies.orderflow.opportunity import OpportunityContext, Oppor
 from ftx_paper.strategies.orderflow.opportunity_timeout import advance_opportunity_timeout
 from ftx_paper.strategies.orderflow.orderflow_common import Aggregate
 from ftx_paper.strategies.orderflow.parity_artifacts import build_phase4_artifact, canonical_hash, compare_phase4_manifests
+from ftx_paper.strategies.orderflow.policies import PDPolicy
 from ftx_paper.strategies.orderflow.templates import Direction, TRADE_TEMPLATES
 
 
@@ -53,6 +54,36 @@ def test_response_requires_contact_candle_and_matching_instrument() -> None:
     outcome = evaluate_response(template, interaction, [later], as_of="2026-09-15T09:30")
     assert outcome.status is OpportunityOutcomeStatus.PENDING
     assert outcome.reason == "contact_not_available"
+
+
+def test_pd_policy_publishes_role_after_causal_bars_are_evaluated() -> None:
+    contact = _bar("20")
+    interaction = _interaction(contact)
+    post_contact = replace(
+        contact, time="2026-09-15T09:25", end_time="2026-09-15T09:29",
+        available_at="2026-09-15T09:30", high=99.5, low=99.0, close=99.2,
+    )
+    template = TRADE_TEMPLATES[("5m_recovery_breakout", "PD_LOW")]
+    events: list[dict[str, object]] = []
+
+    PDPolicy().evaluate_hypotheses(
+        (template,), interaction.evaluation_snapshot(), (post_contact,),
+        as_of=post_contact.available_at, state=interaction, emit=events.append,
+    )
+
+    assert interaction.pd_role == "RESISTANCE"
+    assert events[0]["kind"] == "role_transition"
+    assert events[0]["role"] == "RESISTANCE"
+    assert events[1]["kind"] == "role_context_available"
+    assert events[1]["role"] == "RESISTANCE"
+    assert events[1]["available_at"] == post_contact.available_at
+
+    no_evidence_events: list[dict[str, object]] = []
+    PDPolicy().evaluate_hypotheses(
+        (template,), interaction.evaluation_snapshot(), (),
+        as_of=contact.available_at, state=interaction, emit=no_evidence_events.append,
+    )
+    assert no_evidence_events == []
 
 
 def test_response_expires_after_carried_session_boundary() -> None:

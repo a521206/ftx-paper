@@ -80,15 +80,38 @@ def test_context_location_replay_emits_causal_unavailable_then_available_facts()
     early = next(item for item in result.context_location if item["identity"] == "context-location:1m:2026-09-29T09:15")
     assert "opening_range_not_yet_available" not in early["unavailable"]
     assert "missing_context" in early["unavailable"]
+    early_vwap = next(
+        item for item in early["values"]["locations"] if item["location"] == "VWAP"
+    )
+    assert early_vwap["available_at"] == "2026-09-29T03:46:00.000000Z"
 
     five = next(item for item in result.context_location if item["identity"] == "context-location:5m:2026-09-29T09:15")
     assert five["causal_parent_id"] == "aggregate:5m:2026-09-29T09:15"
     assert five["unavailable"] == []
     locations = five["values"]["locations"]
     assert isinstance(locations, list)
-    vwap = next(item for item in locations if item["location"] == "VWAP")
+    vwap = next(
+        item for item in locations
+        if item["location"] == "VWAP" and len(item["child_observation_ids"]) == 5
+    )
+    vwap_children = [
+        item for item in locations
+        if item["location"] == "VWAP" and not item["child_observation_ids"]
+    ]
     assert vwap["source_observation_id"]
     assert len(vwap["child_observation_ids"]) == 5
+    assert len(vwap_children) == 5
+    assert tuple(item["observation_id"] for item in vwap_children) == tuple(
+        vwap["child_observation_ids"]
+    )
+    assert all(item["available_at"] == "2026-09-29T03:50:00.000000Z" for item in vwap_children)
+    assert vwap["available_at"] == "2026-09-29T03:50:00.000000Z"
+    source_fingerprint = observe_market(_rows()).source_fingerprint
+    assert all(
+        child.startswith(f"{source_fingerprint[:16]}:")
+        and ":1m:VWAP:2026-09-29:5m:1" in child
+        for child in vwap["child_observation_ids"]
+    )
 
 
 def test_location_observation_uses_canonical_relation_method_and_identity() -> None:

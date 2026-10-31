@@ -6,6 +6,9 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from typing import Any
+from datetime import datetime
+
+from .timestamps import coerce_timestamp, serialize_utc
 
 
 @dataclass(slots=True)
@@ -20,10 +23,12 @@ class CausalEventRegistry:
         *,
         source_id: str,
         session_date: str,
-        observed_at: str,
-        available_at: str,
+        observed_at: datetime | str,
+        available_at: datetime | str,
         source_fingerprint: str | None = None,
     ) -> dict[str, Any]:
+        observed_text = serialize_utc(coerce_timestamp(observed_at))
+        available_text = serialize_utc(coerce_timestamp(available_at))
         existing = self._keys.get(source_id)
         if existing is not None:
             return {
@@ -31,19 +36,19 @@ class CausalEventRegistry:
                 "identity": source_id,
                 "neutral_event_key": existing,
                 "causal_parent_id": None,
-                "observed_at": observed_at,
-                "available_at": available_at,
+                "observed_at": observed_text,
+                "available_at": available_text,
                 "session_date": session_date,
                 "source_fingerprint": source_fingerprint,
             }
-        ordinal_key = (source_id, observed_at, available_at)
+        ordinal_key = (source_id, observed_text, available_text)
         ordinal = self._ordinals.get(ordinal_key, 0)
         self._ordinals[ordinal_key] = ordinal + 1
         basis = {
             "kind": "source_observation",
             "session_date": session_date,
-            "observed_at": observed_at,
-            "available_at": available_at,
+            "observed_at": observed_text,
+            "available_at": available_text,
             "causal_ids": (),
             "level": None,
             "reason": None,
@@ -60,8 +65,8 @@ class CausalEventRegistry:
             "identity": source_id,
             "neutral_event_key": key,
             "causal_parent_id": None,
-            "observed_at": observed_at,
-            "available_at": available_at,
+            "observed_at": observed_text,
+            "available_at": available_text,
             "session_date": session_date,
             "source_fingerprint": source_fingerprint,
         }

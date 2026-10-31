@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 import hashlib
 import json
 from typing import Any, Callable, Iterable, Sequence
 
 from .causal_events import CausalEventRegistry
+from .timestamps import coerce_timestamp, parse_nifty_label
 
 
 EvidenceAtClock = Callable[[str], dict[str, Any]]
 InteractionFactsAtClock = Callable[[str], Sequence[dict[str, Any]]]
-
-
 @dataclass(frozen=True, slots=True)
 class ReplayState:
     """Immutable state exposed after one bounded replay prefix."""
@@ -33,7 +33,7 @@ class ReplayMachine:
         self,
         rows: list[dict[str, Any]],
         *,
-        evidence_events: Iterable[tuple[str, dict[str, Any], dict[str, Any] | None]],
+        evidence_events: Iterable[tuple[datetime | str, dict[str, Any], dict[str, Any] | None]],
         evidence_at_clock: EvidenceAtClock,
         session_date: str,
         interaction_response: Sequence[dict[str, Any]] = (),
@@ -79,7 +79,11 @@ class ReplayMachine:
         ordinary_context_ref = self._state.ordinary_context_ref
         for index, row in enumerate(self._rows):
             clock = f"{self._session_date}T{str(row['time']).split('T')[-1][:5]}"
-            while event_index < len(self._events) and self._events[event_index][0] <= clock:
+            clock_instant = parse_nifty_label(clock)
+            while (
+                event_index < len(self._events)
+                and coerce_timestamp(self._events[event_index][0]) <= clock_instant
+            ):
                 _, _, current_5m = self._events[event_index]
                 event_index += 1
             evidence = dict(self._evidence_at_clock(clock))
@@ -89,7 +93,7 @@ class ReplayMachine:
             )
             newly_available = [
                 item for item in self._interaction_response
-                if item.get("available_at", "") <= clock
+                if coerce_timestamp(str(item.get("available_at", clock))) <= clock_instant
                 and (str(item.get("kind", "")), str(item.get("identity", "")))
                 not in emitted_interaction_keys
             ]
@@ -99,12 +103,20 @@ class ReplayMachine:
                     newly_available.append(dict(item))
             for item in newly_available:
                 parent = str(item.get("causal_parent_id", ""))
+                values = item.get("values")
+                observed_at = str(item.get("causal_observed_at", item.get("observed_at", clock)))
+                available_at = str(item.get("causal_available_at", item.get("available_at", clock)))
                 if parent.startswith("aggregate:"):
+                    source_fingerprint = values.get("source_fingerprint") if isinstance(values, dict) else None
                     self._causal_events.publish_source_observation(
                         source_id=parent,
                         session_date=self._session_date,
-                        observed_at=str(item.get("causal_observed_at", item.get("observed_at", clock))),
-                        available_at=str(item.get("causal_available_at", item.get("available_at", clock))),
+                        observed_at=observed_at,
+                        available_at=available_at,
+                        source_fingerprint=(
+                            str(source_fingerprint)
+                            if source_fingerprint is not None else None
+                        ),
                     )
                 emitted_interaction_keys.add(
                     (str(item.get("kind", "")), str(item.get("identity", "")))
@@ -134,6 +146,9 @@ class ReplayMachine:
                 "opportunity_id", "intent_id", "reservation_id", "order_id",
                 "position_id", "fill_id", "causal_parent_id", "parent_id",
             ):
+                if key not in event_data and values.get(key) is not None:
+                    event_data[key] = values[key]
+            for key in ("level", "reason", "reason_code"):
                 if key not in event_data and values.get(key) is not None:
                     event_data[key] = values[key]
         session_date = str(event_data.get("session_date") or self._session_date)
@@ -200,11 +215,25 @@ class ReplayMachine:
             ) if event_data.get(name) is not None),
             None,
         )
-        event_data.setdefault(
-            "causal_parent_key",
-            self._causal_events.parent_key(str(parent_ref[1])) if parent_ref and str(parent_ref[1]).startswith("aggregate:") else self._neutral_keys_by_causal_id.get((parent_ref[0], str(parent_ref[1])))
-            if parent_ref is not None else None,
+        if (
+            event_data.get("causal_parent_id") is None
+            and event_data.get("interaction_id") is not None
+            and event_data.get("kind") in {
+            "interaction_created", "location_interaction_observed", "interaction_ended",
+            "response_confirmed", "response_invalidated", "response_expired",
+            "role_transition", "hypothesis_arbitrated",
+            }
+        ):
+            parent_ref = ("interaction_id", str(event_data["interaction_id"]))
+        parent_key = (
+            self._causal_events.parent_key(str(parent_ref[1]))
+            if parent_ref and str(parent_ref[1]).startswith("aggregate:")
+            else self._neutral_keys_by_causal_id.get((parent_ref[0], str(parent_ref[1])))
+            if parent_ref is not None else None
         )
+        event_data.setdefault("causal_parent_key", parent_key)
+        if isinstance(values, dict):
+            values.setdefault("causal_parent_key", parent_key)
         for name, value in causal_ids:
             self._neutral_keys_by_causal_id.setdefault((name, value), event_key)
         return event_data

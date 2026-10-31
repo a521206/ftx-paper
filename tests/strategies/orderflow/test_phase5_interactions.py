@@ -10,6 +10,7 @@ from ftx_paper.strategies.orderflow.interactions import (
     LocationInteraction,
 )
 from ftx_paper.strategies.orderflow.location_geometry import LocationBand
+from ftx_paper.strategies.orderflow.location_observation import LocationObservation
 from ftx_paper.strategies.orderflow.orderflow_common import Aggregate
 from ftx_paper.strategies.orderflow.response import ResponseOutcomeStatus, ResponseSpec
 from ftx_paper.strategies.orderflow.state_machine_types import LocationRecord, LocationRegistry
@@ -51,6 +52,25 @@ def test_interaction_identity_lineage_and_duplicate_observation_are_frozen() -> 
 def test_execution_policy_rejects_noncausal_completed_close_same_bar() -> None:
     with pytest.raises(ValueError, match="completed-close exits require next-bar execution"):
         ExitExecutionTiming(evidence="completed_close", order="same_bar")
+
+
+def test_detector_compares_utc_observation_availability_to_local_aggregate_clock() -> None:
+    current = _bar("2026-09-29T09:20", timeframe="1m")
+    observation = LocationObservation(
+        location="PD_LOW", location_id="pd-low", reference_generation=1,
+        reference=100.0, band_low=99.0, band_high=101.0,
+        open=100.0, high=101.0, low=99.0, close=100.0,
+        close_relation="INSIDE_BAND", band_contact=True,
+        source_aggregate_id=current.time, observed_at="2026-09-29T03:55:00Z",
+        available_at="2026-09-29T04:00:00Z", method="test", observation_id="obs",
+        timeframe="1m",
+    )
+
+    with pytest.raises(ValueError, match="not causally available"):
+        InteractionDetector(LocationRegistry("locations")).observe_1m(
+            current=current, available=[current], atr=1.0,
+            observations=(observation,),
+        )
 
 
 def test_interaction_projects_and_freezes_across_sessions() -> None:

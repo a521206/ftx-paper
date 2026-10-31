@@ -1,6 +1,7 @@
 """Runtime-neutral causal interaction and response replay boundary."""
 
 from __future__ import annotations
+# pyright: reportArgumentType=false
 
 import dataclasses
 from dataclasses import dataclass
@@ -11,7 +12,8 @@ from typing import Any
 from .context_location_replay import ContextLocationReplay
 from .interaction_detector import InteractionDetector
 from .location_observation import LocationObservation
-from .orderflow_common import Aggregate
+from .orderflow_common import Aggregate, parse_timestamp, serialize_timestamp
+from .timestamps import nifty_label
 from .state_machine_types import LocationRegistry
 from .templates import TRADE_TEMPLATES, TradeTemplate
 from .policies import PDPolicy, StandardLocationPolicy
@@ -31,8 +33,12 @@ def _fact(kind: str, identity: str, parent: str | None, snapshot: Mapping[str, A
     available = available_at or candle.get("available_at") or snapshot.get("available_at")
     if not isinstance(observed, str) or not isinstance(available, str):
         raise ValueError("interaction parity fact timestamps are required")
-    return {"kind": kind, "occurred_at": observed, "observed_at": observed, "available_at": available,
-            "identity": identity, "causal_parent_id": parent, "values": dict(snapshot), "unavailable": list(unavailable)}
+    observed_timestamp = serialize_timestamp(parse_timestamp(observed))
+    available_timestamp = serialize_timestamp(parse_timestamp(available))
+    return {"kind": kind, "occurred_at": observed_timestamp,
+            "observed_at": observed_timestamp, "available_at": available_timestamp,
+            "identity": identity, "causal_parent_id": parent, "values": dict(snapshot),
+            "unavailable": list(unavailable)}
 
 
 def replay_interaction_response(
@@ -67,24 +73,51 @@ def replay_interaction_response(
                 reference_source_aggregate_id=item.get("reference_source_aggregate_id"),
                 reference_source_timeframe=item.get("reference_source_timeframe"),
             ))
-        observations[source] = tuple(parsed)
-    detector = InteractionDetector(registry)
+        for item in parsed:
+            target = source
+            if item.timeframe == "1m" and item.source_aggregate_id:
+                target = f"aggregate:1m:{item.source_aggregate_id}"
+            existing = {
+                value.observation_id: value
+                for value in observations.get(target, ())
+            }
+            # Context facts are a cumulative stream.  Repeated observation IDs
+            # retain their original point-in-time availability; later facts may
+            # contain the same observation after it has already been published.
+            existing.setdefault(item.observation_id, item)
+            observations[target] = tuple(existing.values())
+    # The final evidence registry contains the complete VWAP history, but
+    # Canonical publishes that history only when the first 5m aggregate is
+    # available. Keep the replay registry at that same causal boundary.
+    published_registry = LocationRegistry(registry.stream_id)
+    deferred_vwap = []
+    for record in registry.records.values():
+        if record.alias == "VWAP":
+            deferred_vwap.append(record)
+        else:
+            published_registry.register(record)
+    vwap_published = False
+    detector = InteractionDetector(published_registry)
     facts: list[dict[str, Any]] = []
-    response_emitted: set[tuple[str, str]] = set()
-    role_emitted: set[str] = set()
     vwap_emitted: set[str] = set()
+    role_context_emitted: set[str] = set()
     for current in all_bars:
-        source = f"aggregate:{current.timeframe}:{current.time}"
-        available1 = [item for item in one if item.available_at <= current.available_at]
-        available5 = [item for item in five if item.available_at <= current.available_at]
+        source = f"aggregate:{current.timeframe}:{nifty_label(current.time)}"
+        current_available = current.available_at
+        available1 = [item for item in one if item.available_at <= current_available]
+        available5 = [item for item in five if item.available_at <= current_available]
+        if available5 and not vwap_published:
+            for record in deferred_vwap:
+                published_registry.register(record)
+            vwap_published = True
         typed = tuple(
             item for item in observations.get(source, ())
-            if item.available_at <= current.available_at
+            if item.available_at <= current_available
         )
         if current.timeframe == "1m":
             transitions = detector.observe_1m(current=current, available=available1, atr=None, observations=typed)
         else:
-            one_observations = tuple(item for key, values in observations.items() if key.startswith("aggregate:1m:") for item in values if item.available_at <= current.available_at)
+            one_observations = tuple(item for key, values in observations.items() if key.startswith("aggregate:1m:") for item in values if item.available_at <= current_available)
             available_ids = {item.observation_id for item in one_observations}
             typed = tuple(
                 item for item in typed
@@ -108,6 +141,7 @@ def replay_interaction_response(
                     "timeframe": observation.timeframe,
                     "reference_generation": observation.reference_generation,
                     "source_observation_ids": [observation.observation_id],
+                    "source_fingerprint": current.source_fingerprint,
                     "reason": "location_interaction_observed",
                     "outcome": "observed",
                     "interaction_key": interaction_key,
@@ -165,67 +199,75 @@ def replay_interaction_response(
                             "current_available_at": current.available_at,
                         }, observed_at=candle["end_time"], available_at=candle["available_at"]))
                         break
-            policy = PDPolicy() if snap["location"] in {"PD_LOW", "PD_HIGH"} else StandardLocationPolicy()
-            selected = tuple(item for item in templates.values() if snap["location"] in {loc.value for loc in item.locations})
-            if selected and current.timeframe == "5m":
-                if isinstance(policy, PDPolicy) and iid not in role_emitted:
-                    role_emitted.add(iid)
-                    facts.append(_fact("role_context_available", iid, iid, {
+            if current.timeframe != "5m" or snap["location"] == "VWAP":
+                continue
+            is_pd = snap["location"] in {"PD_LOW", "PD_HIGH"}
+            policy = PDPolicy() if is_pd else StandardLocationPolicy()
+            selected = policy.templates_for(tuple(templates.values()), transition.interaction)
+            state = detector.interactions.get(iid)
+            role_events: list[dict[str, Any]] = []
+            if not selected:
+                continue
+            if is_pd:
+                evaluations = PDPolicy().evaluate_hypotheses(
+                    selected, transition.interaction, available5,
+                    as_of=current.available_at, state=state,
+                    emit=role_events.append,
+                )
+            else:
+                evaluations = StandardLocationPolicy().arbitrate(
+                    selected, transition.interaction, available5,
+                    as_of=current.available_at,
+                )
+            for role_event in role_events:
+                kind = str(role_event.get("kind", "role_transition"))
+                # Policy evaluation may revisit the same causal prefix on each
+                # clock tick; publish the interaction context only once in the
+                # replay stream while retaining every role transition.
+                if kind == "role_context_available" and iid in role_context_emitted:
+                    continue
+                if kind == "role_context_available":
+                    role_context_emitted.add(iid)
+                facts.append(_fact(
+                    kind, iid, iid, role_event,
+                    observed_at=str(role_event["observed_at"]),
+                    available_at=str(role_event["available_at"]),
+                ))
+            for evaluation in evaluations:
+                outcome = evaluation.outcome
+                identity = evaluation.identity or f"{iid}:{evaluation.template.template_id}:{outcome.status.value}"
+                response = outcome.response
+                facts.append(_fact("opportunity_outcome", identity, iid, {
+                    "interaction_id": iid,
+                    "location": snap["location"],
+                    "template_id": evaluation.template.template_id,
+                    "response_type": evaluation.template.response_type.value,
+                    "direction": response.direction.value if response is not None else evaluation.template.direction.value,
+                    "status": outcome.status.value,
+                    "reason": outcome.reason,
+                    "arbitration_selected": evaluation.selected,
+                    "arbitration_reason": evaluation.arbitration_reason,
+                    "as_of": outcome.as_of,
+                    "evidence_ids": [item.time for item in outcome.evidence],
+                    "evidence_lineage": [dataclasses.asdict(item) for item in outcome.evidence_lineage],
+                }, observed_at=outcome.observed_at, available_at=outcome.available_at))
+                if response is not None:
+                    facts.append(_fact("hypothesis_arbitrated", identity, iid, {
                         "interaction_id": iid, "location": snap["location"],
-                        "role": "SUPPORT" if snap["location"] == "PD_LOW" else "RESISTANCE",
-                    }, observed_at=transition.interaction.interaction_started_at,
-                       available_at=transition.interaction.available_at))
-                role_events: list[dict[str, Any]] = []
-                evaluations = (policy.evaluate_hypotheses(selected, transition.interaction, available5,
-                                                          as_of=current.available_at,
-                                                          emit=role_events.append)
-                               if isinstance(policy, PDPolicy) else
-                               policy.arbitrate(selected, transition.interaction, available5,
-                                                as_of=current.available_at))
-                for role_event in role_events:
-                    facts.append(_fact(
-                        "role_transition", iid, iid, role_event,
-                        observed_at=str(role_event["observed_at"]),
-                        available_at=str(role_event["available_at"]),
-                    ))
-                for evaluation in evaluations:
-                    outcome = evaluation.outcome
-                    if outcome.status.value == "PENDING":
-                        continue
-                    identity = evaluation.identity or f"{iid}:{evaluation.template.template_id}:{outcome.status.value}"
-                    if (identity, outcome.status.value) in response_emitted:
-                        continue
-                    response_emitted.add((identity, outcome.status.value))
-                    response = outcome.response
-                    if response is not None:
-                        facts.append(_fact("hypothesis_arbitrated", identity, iid, {
+                        "template_id": evaluation.template.template_id,
+                        "response_type": evaluation.template.response_type.value,
+                        "direction": response.direction.value,
+                        "arbitration_selected": evaluation.selected,
+                        "arbitration_reason": evaluation.arbitration_reason,
+                    }, observed_at=response.observed_at, available_at=response.available_at))
+                    if not is_pd:
+                        facts.append(_fact("response_confirmed", identity, iid, {
                             "interaction_id": iid, "location": snap["location"],
                             "template_id": evaluation.template.template_id,
                             "response_type": evaluation.template.response_type.value,
                             "direction": response.direction.value,
-                            "arbitration_selected": evaluation.selected,
-                            "arbitration_reason": evaluation.arbitration_reason,
+                            "evidence_ids": list(response.evidence_ids),
                         }, observed_at=response.observed_at, available_at=response.available_at))
-                        if snap["location"] not in {"PD_LOW", "PD_HIGH"}:
-                            facts.append(_fact("response_confirmed", identity, iid, {
-                                "interaction_id": iid, "location": snap["location"],
-                                "template_id": evaluation.template.template_id,
-                                "response_type": evaluation.template.response_type.value,
-                                "direction": response.direction.value,
-                                "evidence_ids": list(response.evidence_ids),
-                            }, observed_at=response.observed_at, available_at=response.available_at))
-                    facts.append(_fact("opportunity_outcome", identity, iid, {
-                        "interaction_id": iid, "location": snap["location"],
-                        "template_id": evaluation.template.template_id,
-                        "response_type": evaluation.template.response_type.value,
-                        "direction": response.direction.value if response is not None else evaluation.template.direction.value,
-                        "status": outcome.status.value, "reason": outcome.reason,
-                        "arbitration_selected": evaluation.selected,
-                        "arbitration_reason": evaluation.arbitration_reason,
-                        "as_of": outcome.as_of,
-                        "evidence_ids": list(response.evidence_ids) if response is not None else [item.evidence_id for item in outcome.evidence_lineage],
-                        "evidence_lineage": [dataclasses.asdict(item) for item in outcome.evidence_lineage],
-                    }, observed_at=outcome.observed_at, available_at=outcome.available_at))
     return InteractionResponseReplay(tuple(facts))
 
 

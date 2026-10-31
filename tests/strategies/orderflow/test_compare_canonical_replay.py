@@ -1,6 +1,7 @@
 import json
 
 from scripts.orderflow.compare_canonical_replay import (
+    _compare_phase45,
     _compare_phase35,
     _bounded_atr_dependent_difference,
     _resolve_canonical_artifact,
@@ -109,3 +110,68 @@ def test_observation_boundary_normalizes_replay_bar_timestamps() -> None:
     rows = [{"session_date": "2026-09-25", "time": "09:15", "close": 100.0}]
 
     assert _observation_rows(rows)[0]["time"] == "2026-09-25T09:15"
+
+
+def test_phase45_comparison_does_not_invent_missing_stream(tmp_path) -> None:
+    artifact = tmp_path / "phase45.json"
+    artifact.write_text(
+        json.dumps({"sessions": {"2026-09-29": {"parity_phase_facts": {}}}}),
+        encoding="utf-8",
+    )
+    assert _compare_phase45(artifact, {"parity_phase_facts": {}}, "2026-09-29") == {
+        "status": "INCOMPLETE",
+        "stream": "interaction_response",
+        "reason": "canonical facts are unavailable",
+    }
+
+
+def test_phase45_comparison_rejects_naive_causal_timestamps(tmp_path) -> None:
+    record = {
+        "kind": "interaction",
+        "occurred_at": "2026-09-29T09:20:00",
+        "observed_at": "2026-09-29T09:20:00",
+        "available_at": "2026-09-29T09:21:00",
+        "identity": "interaction-1",
+        "causal_parent_id": None,
+        "values": {},
+        "unavailable": [],
+    }
+    artifact = tmp_path / "phase45.json"
+    artifact.write_text(
+        json.dumps({"sessions": {"2026-09-29": {"parity_phase_facts": {"interaction_response": [record]}}}}),
+        encoding="utf-8",
+    )
+
+    assert _compare_phase45(
+        artifact,
+        {"parity_phase_facts": {"interaction_response": [record]}},
+        "2026-09-29",
+    ) == {
+        "status": "INCOMPLETE",
+        "stream": "interaction_response",
+        "reason": "parity timestamps must be timezone-aware",
+    }
+
+
+def test_phase45_comparison_accepts_timezone_aware_causal_timestamps(tmp_path) -> None:
+    record = {
+        "kind": "interaction",
+        "occurred_at": "2026-09-29T03:50:00Z",
+        "observed_at": "2026-09-29T03:50:00+00:00",
+        "available_at": "2026-09-29T09:21:00+05:30",
+        "identity": "interaction-1",
+        "causal_parent_id": None,
+        "values": {},
+        "unavailable": [],
+    }
+    artifact = tmp_path / "phase45.json"
+    artifact.write_text(
+        json.dumps({"sessions": {"2026-09-29": {"parity_phase_facts": {"interaction_response": [record]}}}}),
+        encoding="utf-8",
+    )
+
+    assert _compare_phase45(
+        artifact,
+        {"parity_phase_facts": {"interaction_response": [record]}},
+        "2026-09-29",
+    ) == {"status": "MATCHED", "stream": "interaction_response", "count": 1}

@@ -10,8 +10,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 from collections.abc import Iterable
+from datetime import datetime
 
 from .hierarchy import MarketContext
+from .timestamps import coerce_timestamp
 from .state_machine_types import LocationRecord
 from .value_publication import ValuePublication
 from .vwap_location import VwapMeasurement
@@ -20,8 +22,8 @@ from .vwap_location import VwapMeasurement
 @dataclass(frozen=True, slots=True)
 class AtrPublication:
     value: float | None
-    observed_at: str | None
-    available_at: str | None
+    observed_at: datetime | None
+    available_at: datetime | None
     source_observation_id: str | None
     lineage: tuple[str, ...] = ()
     unavailable_reason: str | None = None
@@ -40,12 +42,16 @@ class AtrPublication:
                 or self.available_at is None
             ):
                 raise ValueError("available ATR requires a positive value and timestamps")
-            if self.available_at < self.observed_at:
+            observed_at = coerce_timestamp(self.observed_at, field="ATR observed_at")
+            available_at = coerce_timestamp(self.available_at, field="ATR available_at")
+            if available_at < observed_at:
                 raise ValueError("ATR availability cannot precede observation")
             if not self.source_observation_id or not self.lineage:
                 raise ValueError("available ATR requires source lineage")
             if self.unavailable_reason is not None:
                 raise ValueError("available ATR cannot have an unavailable reason")
+            object.__setattr__(self, "observed_at", observed_at)
+            object.__setattr__(self, "available_at", available_at)
         object.__setattr__(self, "lineage", tuple(self.lineage))
 
     @classmethod

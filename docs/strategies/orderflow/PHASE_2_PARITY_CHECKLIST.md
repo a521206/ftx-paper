@@ -7,7 +7,8 @@ This is a contract and dependency map, not an implementation of later policy.
 
 ## Shared Runtime Boundary
 
-- Canonical owners: `orderflow_common.py` (`canonical_timestamp`, `Aggregate`,
+- Canonical owners: `timestamps.py` (`parse_nifty_label`, `parse_utc`,
+  `require_utc`, `serialize_utc`), `orderflow_common.py` (`Aggregate`,
   `OrderflowEvent`), `state_machine_types.py` (`ReplayContext`, `SourceState`,
   `ObservationState`, `MarketContextStore`), `state_machine.py`
   (`ReplayMachine.step`, `ReplayMachine.process_bar`), and `state_engine.py`
@@ -28,10 +29,14 @@ This is a contract and dependency map, not an implementation of later policy.
   bounded suffix. Duplicate identities are idempotent only when all causal
   evidence matches; conflicting duplicates and earlier available times are
   rejected. Paper owns snapshot persistence and recovery orchestration.
-- Timestamp mapping: the boundary stores timezone-aware UTC timestamps for the
-  parity artifact. The later source port must preserve canonical session-local
-  `YYYY-MM-DDTHH:MM` domain labels and next-minute availability before artifact
-  normalization; Phase 2 does not infer that mapping.
+- Timestamp mapping: every Paper causal field is an aware UTC `datetime`.
+  NiftyZoning `YYYY-MM-DDTHH:MM` values are external labels only and are parsed
+  as `Asia/Kolkata` by the replay/source ingress adapter, then normalized once
+  to UTC. Original session/bar labels remain separate identity/grouping
+  metadata. API, artifact, and parity serialization uses UTC ISO-8601 strings
+  ending in `Z`; causal ordering always compares UTC datetimes, never strings.
+  Naive timestamps are rejected everywhere except the explicit NiftyZoning
+  ingress parser.
 - Live calls one completed observation at a time. Replay processes a bounded,
   timestamp-ordered iterable. Neither adapter invokes the other or evaluates
   policy.

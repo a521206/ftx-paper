@@ -1,4 +1,5 @@
 from __future__ import annotations
+# pyright: reportArgumentType=false, reportOperatorIssue=false
 
 from collections.abc import Sequence
 from typing import Any
@@ -9,10 +10,11 @@ from ..opportunity import DirectionalResponse, OpportunityOutcome, OpportunityOu
 from ..orderflow_common import Aggregate
 from ..response import ResponseCandle, build_response_spec, evaluate_response_hypotheses
 from ..templates import Direction, ResponseType, TradeTemplate
-from .base import HypothesisEvaluation
+from ..timestamps import coerce_timestamp, nifty_label, parse_nifty_label
+from .base import HypothesisEvaluation, LocationPolicy
 
 
-class PDPolicy:
+class PDPolicy(LocationPolicy):
     """Canonical prior-day dispatch with dynamic role and arbitration."""
 
     def evaluate_hypotheses(self, templates: Sequence[TradeTemplate], interaction: InteractionSnapshot,
@@ -62,6 +64,12 @@ class PDPolicy:
                                  self._identity(template, interaction, result))
             for template, result in zip(ordered, results)
         )
+        if eligible and emit is not None:
+            emit({
+                "kind": "role_context_available", "interaction_id": interaction.interaction_id,
+                "location": interaction.location, "role": role,
+                "observed_at": interaction.interaction_started_at, "available_at": as_of,
+            })
         resolved = [item for item in evaluations if item.outcome.status is OpportunityOutcomeStatus.RESOLVED and item.outcome.response]
         winner = min(resolved, key=lambda item: (
             item.outcome.response.available_at if item.outcome.response else "",
@@ -79,8 +87,10 @@ class PDPolicy:
 
     @staticmethod
     def _eligible(interaction: InteractionSnapshot, bars: Sequence[Aggregate], as_of: str, *, expiry_at: str | None = None) -> tuple[Aggregate, ...]:
-        eligible = tuple(sorted((bar for bar in bars if bar.timeframe == "5m" and bar.symbol == interaction.instrument and bar.available_at <= as_of and bar.available_at >= bar.end_time and bar.available_at > interaction.available_at and bar.session_date == interaction.session_date and bar.time > interaction.creation_candle.time and (expiry_at is None or bar.available_at <= f"{interaction.session_date}T{expiry_at}")), key=lambda bar: (bar.time, bar.available_at)))
-        return tuple(bar for bar in eligible if interaction.terminal_candle_id is None or bar.time <= interaction.terminal_candle_id)
+        clock = coerce_timestamp(as_of)
+        expiry = parse_nifty_label(f"{interaction.session_date}T{expiry_at}") if expiry_at is not None else None
+        eligible = tuple(sorted((bar for bar in bars if bar.timeframe == "5m" and bar.symbol == interaction.instrument and bar.available_at <= clock and bar.available_at >= bar.end_time and bar.available_at > interaction.available_at and bar.session_date == interaction.session_date and bar.time > interaction.creation_candle.time and (expiry is None or bar.available_at <= expiry)), key=lambda bar: (bar.time, bar.available_at)))
+        return tuple(bar for bar in eligible if interaction.terminal_candle_id is None or nifty_label(bar.time) <= interaction.terminal_candle_id)
 
     @staticmethod
     def _strict_role(interaction: InteractionSnapshot, bar: Aggregate) -> str | None:

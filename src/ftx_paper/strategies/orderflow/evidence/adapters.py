@@ -1,8 +1,9 @@
 """Adapters for replaying serialized canonical evidence through the producer."""
 
 from __future__ import annotations
+# pyright: reportArgumentType=false
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from ..evidence_publication import AtrPublication
@@ -10,10 +11,11 @@ from ..location_geometry import LocationBand
 from ..state_machine_types import LocationRecord, LocationStatus, SessionLevels
 from ..value_publication import PriorSessionValueReference, ValuePublication
 from .producer import EvidenceAdapter
+from ..timestamps import parse_utc
 
 
 def _datetime(value: Any) -> datetime | None:
-    return datetime.fromisoformat(str(value)) if value is not None else None
+    return parse_utc(str(value), field="evidence timestamp") if value is not None else None
 
 
 def _location(value: Any) -> LocationRecord:
@@ -58,8 +60,8 @@ def _value_publication(value: Any) -> ValuePublication:
         value_area_low=float(reference_value["value_area_low"]),
         point_of_control=float(reference_value["point_of_control"]),
         value_area_high=float(reference_value["value_area_high"]),
-        observed_at=_datetime(reference_value["observed_at"]) or datetime.min,
-        available_at=_datetime(reference_value["available_at"]) or datetime.min,
+         observed_at=_datetime(reference_value["observed_at"]) or datetime(1, 1, 1, tzinfo=timezone.utc),
+         available_at=_datetime(reference_value["available_at"]) or datetime(1, 1, 1, tzinfo=timezone.utc),
         lineage=tuple(reference_value["lineage"]),
     )
     return ValuePublication(

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime
+from datetime import date
 import hashlib
 import json
 import math
@@ -20,13 +20,14 @@ import subprocess
 import sys
 import tempfile
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from ftx_paper.config import PaperConfig
 from ftx_paper.strategies.orderflow.parity_artifacts import (
     build_phase4_artifact,
     compare_phase4_manifests,
+    compare_chronological_streams,
 )
+from ftx_paper.strategies.orderflow.timestamps import parse_utc, serialize_utc
 
 PHASE35_FIELDS = (
     "atr", "locations", "vwap_measurements", "prior_value", "contexts",
@@ -254,8 +255,7 @@ def _paper_phase35_projection(session_result: dict[str, Any]) -> dict[str, Any]:
             and len(lineage) >= 2
             and isinstance(reference.get("available_at"), str)
         ):
-            available_at = datetime.fromisoformat(reference["available_at"])
-            available_at = available_at.astimezone(ZoneInfo("Asia/Kolkata"))
+            available_at = serialize_utc(parse_utc(reference["available_at"]))
             prior_value = {
                 "reference_id": lineage[0],
                 "scope": "prior_session",
@@ -263,7 +263,7 @@ def _paper_phase35_projection(session_result: dict[str, Any]) -> dict[str, Any]:
                 "vah": reference.get("value_area_high"),
                 "val": reference.get("value_area_low"),
                 "source_sessions": [reference.get("session_date")],
-                "available_at": available_at.strftime("%Y-%m-%dT%H:%M"),
+                "available_at": available_at,
                 "fingerprint": lineage[1],
             }
         else:
@@ -304,6 +304,26 @@ def _compare_phase4(canonical_path: Path, paper: dict[str, Any], session_date: s
         )
     except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
         return {"status": "INCOMPLETE", "stream": "source_observation", "reason": str(exc)}
+
+
+def _compare_phase45(canonical_path: Path, paper: dict[str, Any], session_date: str) -> dict[str, Any]:
+    """Compare the explicit chronological interaction/response stream."""
+    try:
+        canonical_payload = json.loads(canonical_path.read_text(encoding="utf-8"))
+        canonical_facts = canonical_payload["sessions"][session_date].get("parity_phase_facts", {})
+        paper_facts = paper.get("parity_phase_facts", {})
+        if not isinstance(canonical_facts, dict) or "interaction_response" not in canonical_facts:
+            return {"status": "INCOMPLETE", "stream": "interaction_response", "reason": "canonical facts are unavailable"}
+        if not isinstance(paper_facts, dict) or "interaction_response" not in paper_facts:
+            return {"status": "INCOMPLETE", "stream": "interaction_response", "reason": "paper facts are unavailable"}
+        canonical_records = canonical_facts.get("interaction_response", [])
+        paper_records = paper_facts.get("interaction_response", [])
+        if not isinstance(canonical_records, list) or not isinstance(paper_records, list):
+            return {"status": "INCOMPLETE", "stream": "interaction_response", "reason": "interaction facts are unavailable"}
+        result = compare_chronological_streams(canonical_records, paper_records)
+        return {"stream": "interaction_response", **result}
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return {"status": "INCOMPLETE", "stream": "interaction_response", "reason": str(exc)}
 
 
 def _environment(root: Path, *, paper_root: Path | None = None) -> dict[str, str]:
@@ -598,6 +618,11 @@ def compare_date(
             if canonical_path is not None and paper_replay is not None
             else {"status": "INCOMPLETE", "stream": "source_observation", "reason": "replay artifact unavailable"}
         )
+        phase45 = (
+            _compare_phase45(canonical_path, paper_replay, session_date)
+            if canonical_path is not None and paper_replay is not None
+            else {"status": "INCOMPLETE", "stream": "interaction_response", "reason": "replay artifact unavailable"}
+        )
         atr_payload = phase35.get("atr")
         atr_tolerance = atr_payload.get("tolerance") if isinstance(atr_payload, dict) else None
         if (
@@ -618,6 +643,7 @@ def compare_date(
             "phase3": phase3,
             "phase3_5": phase35,
             "phase4": phase4,
+            "phase4_5": phase45,
             "canonical_replay": {"status": "MATCHED" if canonical_projection else "INCOMPLETE"},
             "paper_replay": {"status": "MATCHED" if paper_replay else "INCOMPLETE"},
         }
@@ -658,6 +684,7 @@ def main(argv: list[str] | None = None) -> int:
         and
         item.get("phase3_5", {}).get("status") in {"MATCHED", "INPUT_VARIANCE"}
         and item.get("phase4", {}).get("status") in {"MATCHED", "INPUT_VARIANCE"}
+        and item.get("phase4_5", {}).get("status") == "MATCHED"
         for item in results
     ) else 1
 

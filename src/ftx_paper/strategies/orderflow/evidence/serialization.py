@@ -9,11 +9,12 @@ import json
 from types import MappingProxyType
 from collections.abc import Mapping
 from typing import Any
+from ..timestamps import serialize_utc
 
 
 def _json_value(value: Any) -> Any:
     if isinstance(value, datetime):
-        return value.isoformat()
+        return serialize_utc(value)
     if isinstance(value, Enum):
         return value.value
     if is_dataclass(value) and not isinstance(value, type):

@@ -1,15 +1,18 @@
 """Opportunity and setup lifecycle facts, independent of execution."""
 
 from __future__ import annotations
+# pyright: reportArgumentType=false, reportOperatorIssue=false, reportAssignmentType=false
 
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from typing import Any, Mapping
+from datetime import datetime
 
 from .hierarchy import ContextVersionRef
 from .orderflow_common import Aggregate, canonical_timestamp
 from .templates import Direction
+from .timestamps import coerce_timestamp, nifty_label
 
 
 class OpportunityStatus(StrEnum):
@@ -35,14 +38,14 @@ class LifecycleStage(StrEnum):
 class EvidenceRef:
     evidence_id: str
     timeframe: str
-    observed_at: str
-    available_at: str
+    observed_at: datetime
+    available_at: datetime
     source_fingerprint: str
     source_bar_count: int
 
     @classmethod
     def from_aggregate(cls, aggregate: Aggregate) -> "EvidenceRef":
-        return cls(aggregate.time, aggregate.timeframe, aggregate.end_time, aggregate.available_at, aggregate.source_fingerprint, aggregate.source_bar_count)
+        return cls(nifty_label(aggregate.time), aggregate.timeframe, aggregate.end_time, aggregate.available_at, aggregate.source_fingerprint, aggregate.source_bar_count)
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,9 +54,9 @@ class LifecycleEvent:
     lifecycle_id: str
     sequence: int
     kind: str
-    observed_at: str
-    available_at: str
-    effective_at: str | None
+    observed_at: datetime
+    available_at: datetime
+    effective_at: datetime | None
     payload: Mapping[str, Any]
 
 
@@ -64,8 +67,8 @@ class SetupOpportunity:
     session_date: str
     instrument: str
     strategy: str
-    formation_at: str
-    formation_available_at: str
+    formation_at: datetime
+    formation_available_at: datetime
     candidate_id: str
     parent_context: ContextVersionRef | None
     location: str | None
@@ -89,7 +92,7 @@ class SetupOpportunity:
     status: OpportunityStatus = OpportunityStatus.FORMED
     response_episode_id: str | None = None
     execution_group_id: str | None = None
-    clock: str = ""
+    clock: datetime | None = None
     decision_context_required: bool = True
     timeout_limit: int = 6
     timeout_count: int = 0
@@ -104,6 +107,8 @@ class SetupOpportunity:
         self.direction = Direction(self.direction)
         self.formation_at = canonical_timestamp(self.formation_at)
         self.formation_available_at = canonical_timestamp(self.formation_available_at)
+        if self.clock is not None:
+            self.clock = coerce_timestamp(self.clock, field="opportunity.clock")
         if self.formation_available_at < self.formation_at or self.timeout_limit <= 0:
             raise ValueError("invalid causal opportunity timestamps or timeout")
         self.status = OpportunityStatus(self.status)
@@ -130,7 +135,7 @@ class SetupOpportunity:
             return LifecycleStage.WAITING_FOR_RETEST
         return LifecycleStage.RESPONSE_CONFIRMED if self.response_evidence_ids else LifecycleStage.OBSERVING_LOCATION
 
-    def mark_retest(self, *, at: str, confirmed: bool = False, evidence: Mapping[str, Any] | None = None) -> None:
+    def mark_retest(self, *, at: datetime | str, confirmed: bool = False, evidence: Mapping[str, Any] | None = None) -> None:
         at = canonical_timestamp(at)
         if not self.active or at < self.formation_available_at:
             raise ValueError("retest evidence requires an available active lifecycle")
@@ -166,14 +171,14 @@ class SetupOpportunity:
         self._events += (item,)
         return {**payload, "event_id": item.event_id, "lifecycle_sequence": sequence}
 
-    def invalidate(self, *, at: str, reason: str = "", expired: bool = False) -> None:
+    def invalidate(self, *, at: datetime | str, reason: str = "", expired: bool = False) -> None:
         at = canonical_timestamp(at)
         if not self.active or at < self.formation_available_at:
             raise ValueError("invalidation requires an available active lifecycle")
         self.status = OpportunityStatus.EXPIRED if expired else OpportunityStatus.INVALIDATED
         self.record({"kind": "setup_expired" if expired else "setup_invalidated", "reason": reason, "observed_at": at, "available_at": at})
 
-    def supersede(self, *, at: str, reason: str = "superseded") -> None:
+    def supersede(self, *, at: datetime | str, reason: str = "superseded") -> None:
         if not self.active:
             return
         at = canonical_timestamp(at)

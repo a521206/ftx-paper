@@ -14,6 +14,7 @@ import json
 import re
 from types import MappingProxyType
 from typing import Any
+from .timestamps import parse_utc, require_utc, serialize_utc
 
 PROJECTOR_VERSION = "1"
 
@@ -48,12 +49,11 @@ def _fingerprint(value: Any) -> str:
 
 
 def _timestamp(value: Any, *, field: str) -> datetime:
+    if isinstance(value, datetime):
+        return require_utc(value, field=field)
     if not isinstance(value, str):
         raise TypeError(f"{field} must be an ISO timestamp string")
-    try:
-        return datetime.fromisoformat(value)
-    except ValueError as exc:
-        raise ValueError(f"{field} must be an ISO timestamp string") from exc
+    return parse_utc(value, field=field)
 
 
 def _timestamp_after(later: Any, earlier: Any, *, later_field: str, earlier_field: str) -> bool:
@@ -96,8 +96,8 @@ class TimelineRow:
     source_record_ref: str
     candle_id: str
     timeframe: str
-    observed_at: str
-    available_at: str
+    observed_at: datetime
+    available_at: datetime
     primary_state_before: str | None
     primary_state_after: str | None
     market_state_before: str | None
@@ -125,8 +125,8 @@ class TimelineRow:
             "source_record_ref": self.source_record_ref,
             "candle_id": self.candle_id,
             "timeframe": self.timeframe,
-            "observed_at": self.observed_at,
-            "available_at": self.available_at,
+            "observed_at": serialize_utc(self.observed_at),
+            "available_at": serialize_utc(self.available_at),
             "primary_state_before": self.primary_state_before,
             "primary_state_after": self.primary_state_after,
             "market_state_before": self.market_state_before,
@@ -153,8 +153,8 @@ class TimelineRow:
 class IntervalView:
     field: str
     value: Any
-    start_at: str
-    end_at: str | None
+    start_at: datetime
+    end_at: datetime | None
     source_sequences: tuple[int, ...]
     gap_after: bool = False
     source_start_record_ref: str | None = None
@@ -164,8 +164,8 @@ class IntervalView:
         return {
             "field": self.field,
             "value": _jsonable(self.value),
-            "start_at": self.start_at,
-            "end_at": self.end_at,
+            "start_at": serialize_utc(self.start_at),
+            "end_at": serialize_utc(self.end_at) if self.end_at is not None else None,
             "source_sequences": list(self.source_sequences),
             "gap_after": self.gap_after,
             "source_start_record_ref": self.source_start_record_ref,
@@ -316,8 +316,8 @@ def project_history(replay_artifact: Mapping[str, Any]) -> HistoryProjection:
             replay_sequence=sequence,
             source_record_index=index,
             source_record_ref=f"{replay_artifact.get('date', 'unknown')}:{timeframe}:{candle_id}",
-            candle_id=str(candle_id), timeframe=timeframe, observed_at=str(record["timestamp"]),
-            available_at=str(record["available_at"]),
+            candle_id=str(candle_id), timeframe=timeframe, observed_at=_timestamp(record["timestamp"], field="observation timestamp"),
+            available_at=_timestamp(record["available_at"], field="availability timestamp"),
             primary_state_before=record.get("primary_state_before"),
             primary_state_after=record.get("primary_state_after"),
             market_state_before=record.get("market_state_before"),
@@ -345,8 +345,8 @@ def project_history(replay_artifact: Mapping[str, Any]) -> HistoryProjection:
     if len(set(candle_keys)) != len(candle_keys):
         raise ValueError("replay records must map one-to-one to authoritative candles")
     for row in rows:
-        observed_at = _timestamp(row.observed_at, field="observation timestamp")
-        available_at = _timestamp(row.available_at, field="availability timestamp")
+        observed_at = row.observed_at
+        available_at = row.available_at
         try:
             causally_available = available_at >= observed_at
         except TypeError as exc:
@@ -535,7 +535,7 @@ def coalesce_intervals(timeline: Sequence[TimelineRow], specification: IntervalS
     sequences = tuple(row.replay_sequence for row in timeline)
     if sequences != tuple(sorted(sequences)) or len(set(sequences)) != len(sequences):
         raise ValueError("timeline rows must be ordered by unique replay sequence")
-    observed = tuple(_timestamp(row.observed_at, field="observation timestamp") for row in timeline)
+    observed = tuple(row.observed_at for row in timeline)
     if observed != tuple(sorted(observed)):
         raise ValueError("timeline rows must be ordered by observation timestamp")
     for previous, current in zip(timeline, timeline[1:]):
@@ -546,8 +546,8 @@ def coalesce_intervals(timeline: Sequence[TimelineRow], specification: IntervalS
     current_value = _value(start, specification.field, specification.location_id)
     sequences = [start.replay_sequence]
     for row, next_row in zip(timeline, timeline[1:]):
-        current_time = _timestamp(row.observed_at, field="observation timestamp")
-        next_time = _timestamp(next_row.observed_at, field="observation timestamp")
+        current_time = row.observed_at
+        next_time = next_row.observed_at
         expected_step = _expected_step(row.timeframe)
         grid_gap = expected_step is not None and (next_time - current_time).total_seconds() > expected_step
         split = any(_value(row, field, specification.location_id) != _value(next_row, field, specification.location_id) for field in specification.split_fields)

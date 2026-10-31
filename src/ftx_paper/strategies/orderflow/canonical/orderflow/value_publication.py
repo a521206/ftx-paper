@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from ftx_paper.strategies.orderflow.canonical.ict.bars import SourceBar, build_completed_bars
 from ftx_paper.strategies.orderflow.canonical.ict.features import MeasurementConfig
@@ -21,9 +20,7 @@ from ftx_paper.strategies.orderflow.canonical.ict.value_profile import (
     build_daily_profile_record,
 )
 from ftx_paper.strategies.orderflow.canonical.replay.value_references import ValueAreaReference
-
-
-_SESSION_ZONE = ZoneInfo("Asia/Kolkata")
+from ftx_paper.strategies.orderflow.timestamps import parse_nifty_label, parse_utc, serialize_utc
 
 
 def _profile_source_bars(*sessions: list[dict[str, Any]]) -> tuple[SourceBar, ...]:
@@ -31,9 +28,7 @@ def _profile_source_bars(*sessions: list[dict[str, Any]]) -> tuple[SourceBar, ..
     for rows in sessions:
         for row in rows:
             session_date = str(row["session_date"])
-            timestamp = datetime.strptime(
-                f"{session_date} {str(row['time'])[:5]}", "%Y-%m-%d %H:%M",
-            ).replace(tzinfo=_SESSION_ZONE)
+            timestamp = parse_nifty_label(f"{session_date}T{str(row['time'])[:5]}")
             symbol = str(row.get("symbol", "NIFTY"))
             source_bars.append(SourceBar(
                 instrument=symbol,
@@ -91,15 +86,13 @@ def publish_value_references(
             if observation.session_date == session_date
         ),
     )
-    session_open = f"{session_date}T09:15"
+    session_open = serialize_utc(parse_nifty_label(f"{session_date}T09:15"))
     published: list[ValueAreaReference] = []
     for reference in refs:
         available_at = (
             session_open
             if reference.scope == ProfileScope.PRIOR_SESSION.value
-            else datetime.fromisoformat(reference.available_at)
-            .astimezone(_SESSION_ZONE)
-            .strftime("%Y-%m-%dT%H:%M")
+            else serialize_utc(parse_utc(reference.available_at))
         )
         published.append(replace(
             reference,

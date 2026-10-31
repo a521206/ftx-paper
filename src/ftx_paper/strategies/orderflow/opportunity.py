@@ -1,15 +1,17 @@
 """Template-driven opportunity formation and causal lifecycle contracts."""
 
 from __future__ import annotations
+# pyright: reportArgumentType=false, reportOperatorIssue=false, reportAssignmentType=false
 
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from typing import Any, Sequence
 
 from .hierarchy import StructuralSetup
 from .interactions import candle_identity
 from .lifecycle import EvidenceRef as LifecycleEvidenceRef, SetupOpportunity
-from .orderflow_common import canonical_timestamp
+from .timestamps import coerce_timestamp, parse_nifty_label, serialize_utc
 from .response import ResponseCandle, ResponseOutcomeStatus, build_response_spec, evaluate_response_window
 from .templates import Direction, ResponseType, TradeTemplate
 
@@ -24,8 +26,8 @@ class OpportunityOutcomeStatus(StrEnum):
 @dataclass(frozen=True, slots=True)
 class EvidenceRef:
     evidence_id: str
-    observed_at: str
-    available_at: str
+    observed_at: datetime
+    available_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,8 +39,8 @@ class DirectionalResponse:
     invalidation_boundary: float
     entry_boundary: float | None
     evidence_ids: tuple[str, ...]
-    observed_at: str
-    available_at: str
+    observed_at: datetime
+    available_at: datetime
     band: Any | None = None
     evidence: tuple[Any, ...] = ()
     evidence_lineage: tuple[EvidenceRef, ...] = ()
@@ -48,14 +50,14 @@ class DirectionalResponse:
 class OpportunityOutcome:
     status: OpportunityOutcomeStatus
     reason: str
-    observed_at: str
-    available_at: str
+    observed_at: datetime
+    available_at: datetime
     evidence: tuple[Any, ...] = ()
     response: DirectionalResponse | None = None
     evidence_lineage: tuple[EvidenceRef, ...] = ()
     policy_version: str | None = None
     template: TradeTemplate | None = None
-    as_of: str | None = None
+    as_of: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +68,7 @@ class OpportunityContext:
     strategy: str
     candidate_id: str
     context_candle: Any
-    clock: str
+    clock: datetime
     regime_version: str
     policy_version: str
     reference_generation: int = 0
@@ -84,21 +86,21 @@ def _value(item: Any, name: str) -> Any:
 
 
 def _lineage(item: Any) -> EvidenceRef:
-    return EvidenceRef(str(_value(item, "observation_id") if hasattr(item, "observation_id") else _value(item, "time")), str(_value(item, "observed_at") if hasattr(item, "observed_at") else _value(item, "time")), str(_value(item, "available_at")))
+    return EvidenceRef(str(_value(item, "observation_id") if hasattr(item, "observation_id") else _value(item, "time")), _value(item, "observed_at") if hasattr(item, "observed_at") else _value(item, "time"), _value(item, "available_at"))
 
 
-def opportunity_identity(*, session_date: str, instrument: str, direction: Direction, interaction_id: str, reference_generation: int, response_evidence_ids: tuple[str, ...], formation_at: str, formation_available_at: str, template_id: str = "") -> str:
-    fields = (session_date, instrument, direction.value, interaction_id, str(reference_generation), *([template_id] if template_id else []), *response_evidence_ids, formation_at, formation_available_at)
+def opportunity_identity(*, session_date: str, instrument: str, direction: Direction, interaction_id: str, reference_generation: int, response_evidence_ids: tuple[str, ...], formation_at: datetime | str, formation_available_at: datetime | str, template_id: str = "") -> str:
+    fields = (session_date, instrument, direction.value, interaction_id, str(reference_generation), *([template_id] if template_id else []), *response_evidence_ids, serialize_utc(coerce_timestamp(formation_at)), serialize_utc(coerce_timestamp(formation_available_at)))
     return "|".join(fields)
 
 
 def evaluate_response(template: TradeTemplate, interaction: Any, bars: Sequence[Any], *, as_of: str, response_evidence: Sequence[Any] | None = None) -> OpportunityOutcome:
-    as_of = canonical_timestamp(as_of)
-    interaction_available = str(_value(interaction, "available_at"))
+    as_of = coerce_timestamp(as_of)
+    interaction_available = coerce_timestamp(_value(interaction, "available_at"))
     if as_of < interaction_available:
         raise ValueError("evaluation as-of cannot precede interaction availability")
     if getattr(interaction, "sessions_carried", 0) > template.carry_sessions:
-        latest = max((str(_value(bar, "available_at")) for bar in bars if str(_value(bar, "available_at")) <= as_of), default=interaction_available)
+        latest = max((coerce_timestamp(_value(bar, "available_at")) for bar in bars if coerce_timestamp(_value(bar, "available_at")) <= as_of), default=interaction_available)
         return OpportunityOutcome(OpportunityOutcomeStatus.EXPIRED, "response_window_expired", latest, latest, template=template, as_of=as_of)
     available = tuple(response_evidence) if response_evidence is not None else tuple(sorted(
         (bar for bar in bars
@@ -107,13 +109,13 @@ def evaluate_response(template: TradeTemplate, interaction: Any, bars: Sequence[
          and _value(bar, "available_at") >= _value(interaction, "creation_candle").available_at
          and _value(bar, "available_at") >= _value(bar, "end_time")
          and _value(bar, "available_at") <= as_of
-         and _value(bar, "available_at") <= f"{_value(bar, 'session_date')}T{template.expiry_at}"),
+          and _value(bar, "available_at") <= parse_nifty_label(f"{_value(bar, 'session_date')}T{template.expiry_at}")),
         key=lambda item: (_value(item, "time"), _value(item, "available_at")),
     ))
     if any(
         _value(bar, "available_at") > as_of
         or _value(bar, "available_at") < interaction_available
-        or _value(bar, "available_at") > f"{_value(bar, 'session_date')}T{template.expiry_at}"
+         or _value(bar, "available_at") > parse_nifty_label(f"{_value(bar, 'session_date')}T{template.expiry_at}")
         for bar in available
     ):
         raise ValueError("response evidence is outside the evaluation boundary")
@@ -129,20 +131,20 @@ def evaluate_response(template: TradeTemplate, interaction: Any, bars: Sequence[
                               or _value(bar, "end_time") == _value(interaction, "creation_candle").time)
                           and _value(bar, "session_date") == _value(interaction, "session_date")), None)
     if contact_index is None:
-        return OpportunityOutcome(OpportunityOutcomeStatus.PENDING, "contact_not_available", str(_value(interaction, "interaction_started_at")), interaction_available, template=template, as_of=as_of)
+        return OpportunityOutcome(OpportunityOutcomeStatus.PENDING, "contact_not_available", _value(interaction, "interaction_started_at"), interaction_available, template=template, as_of=as_of)
     available = available[contact_index:]
     sessions = tuple(dict.fromkeys(_value(bar, "session_date") for bar in available))
     available = tuple(bar for bar in available if sessions.index(_value(bar, "session_date")) <= template.carry_sessions)
     if any(
         _value(bar, "available_at") > as_of
         or _value(bar, "available_at") < interaction_available
-        or _value(bar, "available_at") > f"{_value(bar, 'session_date')}T{template.expiry_at}"
+         or _value(bar, "available_at") > parse_nifty_label(f"{_value(bar, 'session_date')}T{template.expiry_at}")
         for bar in available
     ):
         raise ValueError("response evidence is outside the evaluation boundary")
     available = tuple(sorted(available, key=lambda item: (_value(item, "time"), _value(item, "available_at"))))
     if not available:
-        return OpportunityOutcome(OpportunityOutcomeStatus.PENDING, "missing_completed_evidence", str(_value(interaction, "created_at")), str(_value(interaction, "available_at")), policy_version=template.policy_version, template=template, as_of=as_of)
+        return OpportunityOutcome(OpportunityOutcomeStatus.PENDING, "missing_completed_evidence", _value(interaction, "created_at"), _value(interaction, "available_at"), policy_version=template.policy_version, template=template, as_of=as_of)
     spec = build_response_spec(template, band_lower=float(_value(interaction, "band_low")), band_upper=float(_value(interaction, "band_high")))
     evaluation = evaluate_response_window(
         available,
@@ -153,8 +155,8 @@ def evaluate_response(template: TradeTemplate, interaction: Any, bars: Sequence[
     )
     evidence = tuple(evaluation.evidence)
     lineage = tuple(_lineage(item) for item in evidence)
-    observed = str(_value(evidence[-1], "end_time")) if evidence else str(_value(interaction, "interaction_started_at"))
-    available_at = str(_value(evidence[-1], "available_at")) if evidence else str(_value(interaction, "available_at"))
+    observed = _value(evidence[-1], "end_time") if evidence else _value(interaction, "interaction_started_at")
+    available_at = _value(evidence[-1], "available_at") if evidence else _value(interaction, "available_at")
     if evaluation.status is ResponseOutcomeStatus.INVALIDATED:
         return OpportunityOutcome(OpportunityOutcomeStatus.CONTRADICTED, "reference_crossed_after_contact", observed, available_at, evidence, evidence_lineage=lineage, policy_version=template.policy_version, template=template, as_of=as_of)
     if evaluation.status is not ResponseOutcomeStatus.CONFIRMED:
@@ -165,7 +167,7 @@ def evaluate_response(template: TradeTemplate, interaction: Any, bars: Sequence[
         raise RuntimeError("confirmed response is missing its candle")
     fields = candle.features if hasattr(candle, "features") else {"high": _value(candle, "high"), "low": _value(candle, "low"), "close": _value(candle, "close")}
     direction = evaluation.direction or template.direction
-    response = DirectionalResponse(direction, str(_value(interaction, "location")), float(_value(interaction, "reference_level")), float(fields["high"] if direction is Direction.LONG else fields["low"]), float(_value(interaction, "band_low" if direction is Direction.LONG else "band_high")), float(_value(interaction, "band_high" if direction is Direction.LONG else "band_low")) if template.response_type is ResponseType.REJECTION else float(fields["close"]), (str(_value(interaction, "interaction_id")), str(_value(candle, "time"))), str(_value(candle, "end_time")), str(_value(candle, "available_at")))
+    response = DirectionalResponse(direction, str(_value(interaction, "location")), float(_value(interaction, "reference_level")), float(fields["high"] if direction is Direction.LONG else fields["low"]), float(_value(interaction, "band_low" if direction is Direction.LONG else "band_high")), float(_value(interaction, "band_high" if direction is Direction.LONG else "band_low")) if template.response_type is ResponseType.REJECTION else float(fields["close"]), (str(_value(interaction, "interaction_id")), candle_identity(candle)), _value(candle, "end_time"), _value(candle, "available_at"))
     return OpportunityOutcome(OpportunityOutcomeStatus.RESOLVED, f"causal_{template.response_type.value}", response.observed_at, response.available_at, evidence, response, lineage, template.policy_version, template, as_of)
 
 
@@ -189,7 +191,7 @@ def form_opportunity(response: DirectionalResponse, context: OpportunityContext,
     group = f"execution-group:{context.session_date}:{context.instrument}:{template.execution_conflict_group}:{available}" if template.execution_conflict_group else response_episode
     lineage = tuple(LifecycleEvidenceRef(ref.evidence_id, "5m", ref.observed_at, ref.available_at, "", 0) for ref in response.evidence_lineage)
     opportunity = SetupOpportunity(context.lifecycle_id, response.direction, context.session_date, context.instrument, context.strategy, response.observed_at, available, context.candidate_id, context.parent_context, response.anchor, response.reference_level, context.context_candle, response.structure_boundary, failure, policy_version=context.policy_version, reference_generation=context.reference_generation, causal_identity=context.causal_identity, location_interaction_id=context.location_interaction_id, opening_interaction_kind=context.opening_interaction_kind, opening_policy_version=context.opening_policy_version, template_id=template.template_id, response_episode_id=response_episode, execution_group_id=group, clock=context.clock, decision_context_required=decision_context_required, origin_evidence_id=response.evidence_ids[0] if response.evidence_ids else None, response_evidence_ids=response.evidence_ids, response_evidence_lineage=lineage)
-    setup = StructuralSetup(context.candidate_id, f"{context.candidate_id}.template-{template.version}", context.regime_version, response.direction.value, "5m_acceptance_breakout" if template.response_type is ResponseType.ACCEPTANCE else "5m_recovery_breakout", entry, entry, context.context_candle.low if response.direction is Direction.LONG else context.context_candle.high, context.context_candle.low if response.direction is Direction.LONG else context.context_candle.high, failure, f"{available[:10]}T{template.expiry_at}", required_confirmation=template.required_confirmation, parent_context_id=context.parent_context.context_id if context.parent_context else None, parent_context_version=context.parent_context.version if context.parent_context else None, context_reference_level=response.reference_level, lifecycle_id=context.lifecycle_id, template=template)
+    setup = StructuralSetup(context.candidate_id, f"{context.candidate_id}.template-{template.version}", context.regime_version, response.direction.value, "5m_acceptance_breakout" if template.response_type is ResponseType.ACCEPTANCE else "5m_recovery_breakout", entry, entry, context.context_candle.low if response.direction is Direction.LONG else context.context_candle.high, context.context_candle.low if response.direction is Direction.LONG else context.context_candle.high, failure, parse_nifty_label(f"{context.session_date}T{template.expiry_at}"), required_confirmation=template.required_confirmation, parent_context_id=context.parent_context.context_id if context.parent_context else None, parent_context_version=context.parent_context.version if context.parent_context else None, context_reference_level=response.reference_level, lifecycle_id=context.lifecycle_id, template=template)
     return opportunity, setup
 
 

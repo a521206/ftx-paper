@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Any
+from datetime import datetime
+
+from .timestamps import coerce_timestamp
+
 
 
 class Permission(StrEnum):
@@ -45,8 +49,8 @@ def _freeze(value: Any) -> Any:
 class MarketContext:
     context_id: str
     version: str
-    timestamp: str
-    available_at: str
+    timestamp: datetime
+    available_at: datetime
     location: str | None
     market_state: str
     long_score: float | None = None
@@ -58,6 +62,10 @@ class MarketContext:
     source_provenance: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "timestamp", coerce_timestamp(self.timestamp, field="context.timestamp"))
+        object.__setattr__(self, "available_at", coerce_timestamp(self.available_at, field="context.available_at"))
+        if self.available_at < self.timestamp:
+            raise ValueError("context availability cannot precede observation")
         object.__setattr__(self, "evidence", _freeze(self.evidence))
         object.__setattr__(self, "source_provenance", _freeze(self.source_provenance))
 
@@ -96,7 +104,7 @@ class StructuralSetup:
     structural_reference: float
     sweep_extreme: float | None
     failure_boundary: float
-    expires_at: str
+    expires_at: datetime
     active: bool = True
     required_confirmation: tuple[str, ...] = ()
     parent_context_id: str | None = None
@@ -108,6 +116,7 @@ class StructuralSetup:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "context_relation", ContextRelation(self.context_relation))
+        object.__setattr__(self, "expires_at", coerce_timestamp(self.expires_at, field="setup.expires_at"))
 
     def invalidated_by(self, *, close: float) -> bool:
         return close < self.failure_boundary if self.direction == "long" else close > self.failure_boundary

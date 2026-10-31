@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from ..market_observation import MarketObservation, observe_market
 from ..runtime_boundary import CompletedObservation, LiveInputAdapter, ReplayInputAdapter
-
-
-def _instant(value: str) -> datetime:
-    return datetime.strptime(value, "%Y-%m-%dT%H:%M").replace(tzinfo=timezone.utc)
+from ..timestamps import nifty_label, require_utc
 
 
 def completed_observations(rows: list[dict[str, Any]]) -> tuple[CompletedObservation, ...]:
@@ -18,7 +14,7 @@ def completed_observations(rows: list[dict[str, Any]]) -> tuple[CompletedObserva
     observation = observe_market(rows)
     one_minute = observation.aggregates["1m"]
     identities = {
-        aggregate.time: f"aggregate:1m:{aggregate.time}"
+        aggregate.time: f"aggregate:1m:{nifty_label(aggregate.time)}"
         for aggregate in one_minute
     }
     output: list[CompletedObservation] = []
@@ -32,9 +28,9 @@ def completed_observations(rows: list[dict[str, Any]]) -> tuple[CompletedObserva
                     if aggregate.time <= item.time <= aggregate.end_time
                 )
             output.append(CompletedObservation(
-                identity=f"aggregate:{timeframe}:{aggregate.time}",
-                observed_at=_instant(aggregate.end_time),
-                available_at=_instant(aggregate.available_at),
+                identity=f"aggregate:{timeframe}:{nifty_label(aggregate.time)}",
+                observed_at=require_utc(aggregate.end_time),
+                available_at=require_utc(aggregate.available_at),
                 values={"aggregate": aggregate.to_dict(), "source_fingerprint": observation.source_fingerprint},
                 lineage=lineage,
             ))

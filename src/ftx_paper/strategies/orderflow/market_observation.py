@@ -7,7 +7,8 @@ from datetime import datetime
 from types import MappingProxyType
 from typing import Any, Mapping
 
-from .orderflow_common import Aggregate, ObservationIssue, ObservationIssueKind, build_aggregate_result, canonical_timestamp
+from .orderflow_common import Aggregate, ObservationIssue, ObservationIssueKind, build_aggregate_result
+from .timestamps import parse_nifty_label
 from .state_machine_source import source_fingerprint
 
 MARKET_CLOSE_TIME = "15:30"
@@ -17,8 +18,8 @@ def rows_available_for_observation(rows: list[dict[str, Any]]) -> list[dict[str,
     return [row for row in rows if str(row["time"]).split("T")[-1][:5] <= MARKET_CLOSE_TIME]
 
 
-def _row_timestamp(row: Mapping[str, Any]) -> str:
-    return canonical_timestamp(f"{row['session_date']}T{str(row['time']).split('T')[-1][:5]}")
+def _row_timestamp(row: Mapping[str, Any]) -> datetime:
+    return parse_nifty_label(f"{row['session_date']}T{str(row['time']).split('T')[-1][:5]}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,7 +46,7 @@ class MarketObservation:
 
 def observe_market(rows: list[dict[str, Any]]) -> MarketObservation:
     observed_rows = rows_available_for_observation(rows)
-    previous: str | None = None
+    previous: datetime | None = None
     for row in observed_rows:
         timestamp = _row_timestamp(row)
         if previous is not None and timestamp <= previous:
@@ -60,11 +61,11 @@ def observe_market(rows: list[dict[str, Any]]) -> MarketObservation:
         if current_date != prior_date:
             boundaries[index] = (prior_date, current_date)
             continue
-        delta = datetime.strptime(_row_timestamp(current), "%Y-%m-%dT%H:%M") - datetime.strptime(_row_timestamp(prior), "%Y-%m-%dT%H:%M")
+        delta = _row_timestamp(current) - _row_timestamp(prior)
         if delta.total_seconds() > 60:
             gaps.append(ObservationGap(index, str(prior["time"]), str(current["time"])))
             covered = any(issue.kind == ObservationIssueKind.MISSING_SOURCE_BAR and issue.session_date == current_date
-                and issue.group_start and issue.group_end and canonical_timestamp(f"{current_date}T{issue.group_start}") <= _row_timestamp(prior) <= canonical_timestamp(f"{current_date}T{issue.group_end}") for issue in issues)
+                and issue.group_start and issue.group_end and parse_nifty_label(f"{current_date}T{issue.group_start}") <= _row_timestamp(prior) <= parse_nifty_label(f"{current_date}T{issue.group_end}") for issue in issues)
             if not covered:
                 issues.append(ObservationIssue(ObservationIssueKind.MISSING_SOURCE_BAR, current_date, None,
                     str(prior["time"])[:5], str(current["time"])[:5], "internal source-bar gap"))

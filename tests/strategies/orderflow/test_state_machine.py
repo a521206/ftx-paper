@@ -67,3 +67,81 @@ def test_replay_machine_emits_causal_interaction_facts_once_at_availability() ->
     assert "neutral_event_key" in records[1]["events"][0]
     assert records[2]["events"] == []
     assert len(state.interaction_response) == 1
+
+
+def test_replay_machine_gates_utc_fact_against_local_replay_clock() -> None:
+    rows = [
+        {"time": "09:15", "session_date": "2026-10-30"},
+        {"time": "09:20", "session_date": "2026-10-30"},
+    ]
+    # 03:47Z is 09:17 Asia/Kolkata and must not be visible at 09:15 local.
+    fact = {
+        "kind": "interaction_created",
+        "identity": "interaction-utc",
+        "available_at": "2026-10-30T03:47:00Z",
+    }
+    machine = ReplayMachine(
+        rows,
+        evidence_events=(),
+        evidence_at_clock=lambda _clock: {"contexts": []},
+        session_date="2026-10-30",
+        interaction_response=(fact,),
+    )
+
+    records, _ = machine.run()
+
+    assert records[0]["events"] == []
+    assert len(records[1]["events"]) == 1
+
+
+def test_interaction_parent_does_not_invent_context_publication_identity() -> None:
+    interaction_id = "NIFTY:2026-10-30:PD_LOW:1m:2026-10-30T09:16"
+    fact = {
+        "kind": "location_interaction_observed",
+        "identity": "interaction-1",
+        "causal_parent_id": "aggregate:1m:2026-10-30T09:16",
+        "observed_at": "2026-10-30T09:16",
+        "available_at": "2026-10-30T09:17",
+        "values": {
+            "interaction_id": interaction_id,
+            "source_fingerprint": "source",
+        },
+    }
+    machine = ReplayMachine(
+        [{"time": "09:17", "session_date": "2026-10-30"}],
+        evidence_events=(),
+        evidence_at_clock=lambda _clock: {"contexts": []},
+        session_date="2026-10-30",
+        interaction_response=(fact,),
+    )
+
+    records, _ = machine.run()
+
+    event = records[0]["events"][0]
+    assert event["causal_parent_id"] == "aggregate:1m:2026-10-30T09:16"
+    assert event["values"]["causal_parent_key"] == event["causal_parent_key"]
+
+
+def test_normalization_preserves_producer_parent_id_alongside_neutral_key() -> None:
+    fact = {
+        "kind": "phase_fact",
+        "identity": "fact-1",
+        "causal_parent_id": "aggregate:1m:2026-10-30T09:16",
+        "observed_at": "2026-10-30T09:16",
+        "available_at": "2026-10-30T09:17",
+        "values": {"source_fingerprint": "source"},
+    }
+    machine = ReplayMachine(
+        [{"time": "09:17", "session_date": "2026-10-30"}],
+        evidence_events=(),
+        evidence_at_clock=lambda _clock: {"contexts": []},
+        session_date="2026-10-30",
+        interaction_response=(fact,),
+    )
+
+    records, _ = machine.run()
+
+    event = records[0]["events"][0]
+    assert event["causal_parent_id"] == "aggregate:1m:2026-10-30T09:16"
+    assert event["causal_parent_key"].startswith("niftyzoning:derived:")
+    assert event["values"]["causal_parent_key"] == event["causal_parent_key"]

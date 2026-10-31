@@ -8,13 +8,13 @@ terminal state.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
 import hashlib
 import json
 from typing import Any
 
+from .timestamps import parse_utc, serialize_utc
+
 PHASE_STREAMS = ("source_observation", "context_location", "interaction_response", "opportunity_lifecycle", "intent_admission", "trigger_exit")
-UTC = timezone.utc
 
 
 def _json(value: object) -> bytes:
@@ -29,12 +29,11 @@ def _timestamp(value: object) -> str:
     if value is None:
         raise ValueError("parity timestamps are required")
     try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError as exc:
+        return serialize_utc(parse_utc(str(value), field="parity timestamp"))
+    except (TypeError, ValueError) as exc:
+        if "timezone-aware" in str(exc):
+            raise ValueError("parity timestamps must be timezone-aware") from exc
         raise ValueError("parity timestamps must be ISO-8601") from exc
-    if parsed.tzinfo is None:
-        raise ValueError("parity timestamps must be timezone-aware")
-    return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _copy(value: Any) -> Any:
@@ -54,7 +53,7 @@ def normalize_phase_record(record: Mapping[str, Any], *, sequence: int) -> dict[
     result["occurred_at"] = _timestamp(result["occurred_at"])
     result["observed_at"] = _timestamp(result["observed_at"])
     result["available_at"] = _timestamp(result["available_at"])
-    if result["available_at"] < result["observed_at"]:
+    if parse_utc(result["available_at"]) < parse_utc(result["observed_at"]):
         raise ValueError("phase record availability precedes observation")
     result["sequence"] = sequence
     if not isinstance(result["identity"], str) or not result["identity"]:

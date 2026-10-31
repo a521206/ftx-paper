@@ -5,10 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any, Iterable
+from datetime import datetime
 
 from .hierarchy import ContextVersionRef, MarketContext
 from .location_geometry import BAND_ATR_FRACTION, LocationBand
 from .orderflow_common import Aggregate
+from .timestamps import coerce_timestamp, nifty_label
 from .lifecycle import EvidenceRef, LifecycleEvent, LifecycleStage, OpportunityStatus, SetupOpportunity  # noqa: F401
 from .opportunity import DirectionalResponse, OpportunityOutcome, OpportunityOutcomeStatus  # noqa: F401
 
@@ -19,8 +21,8 @@ class SessionLevels:
     opening_range_high: float
     prior_day_low: float | None
     prior_day_high: float | None
-    opening_range_available_at: str
-    prior_day_available_at: str
+    opening_range_available_at: datetime
+    prior_day_available_at: datetime
 
 
 class LocationStatus(StrEnum):
@@ -37,8 +39,8 @@ class LocationRecord:
     alias: str
     price: float
     source_session: str
-    created_at: str
-    available_at: str
+    created_at: datetime
+    available_at: datetime
     stream_id: str
     band: LocationBand
     generation: int = 1
@@ -51,6 +53,10 @@ class LocationRecord:
     source_method: str | None = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "created_at", coerce_timestamp(self.created_at, field="location.created_at"))
+        object.__setattr__(self, "available_at", coerce_timestamp(self.available_at, field="location.available_at"))
+        if self.available_at < self.created_at:
+            raise ValueError("location availability cannot precede publication")
         object.__setattr__(self, "status", LocationStatus(self.status))
 
     @property
@@ -90,7 +96,7 @@ class LocationRegistry:
                 if prior is not None and price == prior:
                     continue
                 previous = self.resolve_as_of(alias, aggregate.available_at)
-                published.append((self._register_level(alias, price, aggregate.available_at, session_date, frozen_atr=atr, source_aggregate_id=aggregate.time), previous))
+                published.append((self._register_level(alias, price, aggregate.available_at, session_date, frozen_atr=atr, source_aggregate_id=nifty_label(aggregate.time)), previous))
             running_high = aggregate.high if running_high is None else max(running_high, aggregate.high)
             running_low = aggregate.low if running_low is None else min(running_low, aggregate.low)
         return tuple(published)
@@ -102,10 +108,10 @@ class LocationRegistry:
             return None
         return self._register_level(
             alias, price, aggregate.available_at, aggregate.session_date,
-            frozen_atr=atr, source_aggregate_id=aggregate.time,
+            frozen_atr=atr, source_aggregate_id=nifty_label(aggregate.time),
         )
 
-    def _register_level(self, alias: str, price: float, available_at: str, source_session: str, *, frozen_atr: float | None, source_aggregate_id: str | None = None) -> LocationRecord:
+    def _register_level(self, alias: str, price: float, available_at: datetime, source_session: str, *, frozen_atr: float | None, source_aggregate_id: str | None = None) -> LocationRecord:
         if frozen_atr is None:
             raise ValueError("location bands require a frozen ATR")
         previous = self.resolve_as_of(alias, available_at)
@@ -121,10 +127,10 @@ class LocationRegistry:
         self.register(record)
         return record
 
-    def register_opening_range(self, or_low: float, or_high: float, available_at: str, *, source_session: str = "current", atr: float | None = None) -> tuple[LocationRecord, LocationRecord]:
+    def register_opening_range(self, or_low: float, or_high: float, available_at: datetime, *, source_session: str = "current", atr: float | None = None) -> tuple[LocationRecord, LocationRecord]:
         return (self._register_level("OR_LOW", or_low, available_at, source_session, frozen_atr=atr), self._register_level("OR_HIGH", or_high, available_at, source_session, frozen_atr=atr))
 
-    def register_prior_day_extremes(self, pd_low: float, pd_high: float, available_at: str, *, source_session: str = "prior", atr: float | None = None) -> tuple[LocationRecord, LocationRecord]:
+    def register_prior_day_extremes(self, pd_low: float, pd_high: float, available_at: datetime, *, source_session: str = "prior", atr: float | None = None) -> tuple[LocationRecord, LocationRecord]:
         return (self._register_level("PD_LOW", pd_low, available_at, source_session, frozen_atr=atr), self._register_level("PD_HIGH", pd_high, available_at, source_session, frozen_atr=atr))
 
     def register(self, record: LocationRecord) -> None:
@@ -133,7 +139,7 @@ class LocationRegistry:
         self.records[record.location_id] = record
         self.aliases[record.alias] = record.location_id
 
-    def publish_vwap(self, *, value: float, available_at: str, source_session: str, source_aggregate_id: str, source_observation_id: str, timeframe: str, atr: float) -> LocationRecord:
+    def publish_vwap(self, *, value: float, available_at: datetime, source_session: str, source_aggregate_id: str, source_observation_id: str, timeframe: str, atr: float) -> LocationRecord:
         if timeframe not in {"1m", "5m"}:
             raise ValueError("VWAP records require a 1m or 5m timeframe")
         previous = max((item for item in self.records.values() if item.alias == "VWAP" and item.timeframe == timeframe), key=lambda item: item.generation, default=None)
@@ -152,16 +158,19 @@ class LocationRegistry:
     def resolve(self, alias_or_id: str) -> LocationRecord | None:
         return self.records.get(self.aliases.get(alias_or_id, alias_or_id))
 
-    def resolve_as_of(self, alias: str, available_at: str, *, timeframe: str | None = None) -> LocationRecord | None:
-        return max((item for item in self.records.values() if item.alias == alias and item.available_at <= available_at and (timeframe is None or item.timeframe == timeframe)), key=lambda item: (item.available_at, item.generation), default=None)
+    def resolve_as_of(self, alias: str, available_at: datetime, *, timeframe: str | None = None) -> LocationRecord | None:
+        clock = coerce_timestamp(available_at, field="location lookup")
+        return max((item for item in self.records.values() if item.alias == alias and item.available_at <= clock and (timeframe is None or item.timeframe == timeframe)), key=lambda item: (item.available_at, item.generation), default=None)
 
-    def available_as_of(self, available_at: str) -> Iterable[LocationRecord]:
+    def available_as_of(self, available_at: datetime) -> Iterable[LocationRecord]:
+        clock = coerce_timestamp(available_at, field="location lookup")
         latest: dict[tuple[str, str], LocationRecord] = {}
         for item in self.records.values():
-            if item.available_at > available_at:
+            item_available = item.available_at
+            if item_available > clock:
                 continue
             key = (item.alias, item.timeframe)
-            if key not in latest or (item.available_at, item.generation) > (latest[key].available_at, latest[key].generation):
+            if key not in latest or (item_available, item.generation) > (latest[key].available_at, latest[key].generation):
                 latest[key] = item
         return tuple(item for item in latest.values() if item.status is LocationStatus.ACTIVE)
 
@@ -188,8 +197,9 @@ class MarketContextStore:
     def resolve(self, reference: ContextVersionRef) -> MarketContext | None:
         return next((item for item in self.versions.get(reference.context_id, ()) if item.version == reference.version), None)
 
-    def latest_as_of(self, stream_id: str, available_at: str) -> MarketContext | None:
-        return max((item for item in self.versions.get(stream_id, ()) if item.available_at <= available_at), key=lambda item: item.available_at, default=None)
+    def latest_as_of(self, stream_id: str, available_at: datetime) -> MarketContext | None:
+        clock = coerce_timestamp(available_at, field="context lookup")
+        return max((item for item in self.versions.get(stream_id, ()) if item.available_at <= clock), key=lambda item: item.available_at, default=None)
 
 
 @dataclass

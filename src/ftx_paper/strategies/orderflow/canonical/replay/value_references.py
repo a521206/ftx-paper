@@ -5,9 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from ...timestamps import parse_utc
+
 
 def _parse_timestamp(value: str) -> datetime:
-    return datetime.fromisoformat(value)
+    return parse_utc(value, field="value reference availability")
 
 
 @dataclass(frozen=True, slots=True)

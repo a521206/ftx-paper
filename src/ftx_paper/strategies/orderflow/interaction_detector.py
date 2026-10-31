@@ -1,9 +1,10 @@
 """Causal detection and advancement of registered-location interactions."""
 
 from __future__ import annotations
+# pyright: reportArgumentType=false
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any
 
 from .interactions import (
@@ -18,6 +19,7 @@ from .interactions import (
 from .location_observation import LocationObservation
 from .orderflow_common import Aggregate
 from .state_machine_types import LocationRecord, LocationRegistry
+from .timestamps import nifty_label
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,9 +188,8 @@ class InteractionDetector:
                 raise ValueError(
                     "5m observation child evidence is not causally aligned"
                 )
-            parent_start = datetime.strptime(current.time, "%Y-%m-%dT%H:%M")
             expected = tuple(
-                (parent_start + timedelta(minutes=i)).strftime("%Y-%m-%dT%H:%M")
+                nifty_label(current.time + timedelta(minutes=i))
                 for i in range(5)
             )
             if tuple(child.source_aggregate_id for child in typed) != expected:

@@ -3,13 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 
-
-def _utc(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError("value publication timestamps must be timezone-aware")
-    return value.astimezone(timezone.utc)
+from .timestamps import require_utc
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,8 +21,8 @@ class PriorSessionValueReference:
     def __post_init__(self) -> None:
         if not self.session_date or not self.lineage:
             raise ValueError("value reference requires session date and lineage")
-        observed = _utc(self.observed_at)
-        available = _utc(self.available_at)
+        observed = require_utc(self.observed_at, field="value observed_at")
+        available = require_utc(self.available_at, field="value available_at")
         if available < observed:
             raise ValueError("value availability cannot precede observation")
         if not self.value_area_low <= self.point_of_control <= self.value_area_high:
@@ -56,4 +52,3 @@ class ValuePublication:
             raise ValueError("publication timestamps must match its reference")
         if tuple(self.lineage) != self.reference.lineage:
             raise ValueError("publication lineage must match its reference")
-

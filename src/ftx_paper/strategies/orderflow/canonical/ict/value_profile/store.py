@@ -7,21 +7,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
-from ftx_paper.strategies.orderflow.canonical.ict.domain.time import require_aware
 from ftx_paper.strategies.orderflow.canonical.ict.value_profile.enums import DailyProfileQuality
 from ftx_paper.strategies.orderflow.canonical.ict.value_profile.records import DailyProfileRecord
 from ftx_paper.infrastructure.sqlite.daily_profile_repository import SqliteDailyProfileRepository
+from ftx_paper.strategies.orderflow.timestamps import parse_utc, serialize_utc
 
 
 def _encode_datetime(value: datetime) -> str:
-    require_aware(value, name="daily profile timestamp")
-    return value.isoformat()
+    return serialize_utc(value, field="daily profile timestamp")
 
 
 def _decode_datetime(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value)
-    require_aware(parsed, name="daily profile timestamp")
-    return parsed
+    return parse_utc(value, field="daily profile timestamp")
 
 
 def daily_profile_to_dict(record: DailyProfileRecord) -> dict[str, object]:
@@ -95,7 +92,7 @@ class DatabaseDailyProfileStore:
             return None
         for key in ("window_first_bar_ts", "window_last_bar_ts", "observed_at", "available_at"):
             value = payload[key]
-            payload[key] = value.isoformat() if isinstance(value, datetime) else str(value)
+            payload[key] = serialize_utc(value) if isinstance(value, datetime) else str(value)
         return daily_profile_from_dict(payload)
 
     def load_all(
@@ -113,7 +110,7 @@ class DatabaseDailyProfileStore:
         ):
             for key in ("window_first_bar_ts", "window_last_bar_ts", "observed_at", "available_at"):
                 value = payload[key]
-                payload[key] = value.isoformat() if isinstance(value, datetime) else str(value)
+                payload[key] = serialize_utc(value) if isinstance(value, datetime) else str(value)
             records.append(daily_profile_from_dict(payload))
         return tuple(records)
 

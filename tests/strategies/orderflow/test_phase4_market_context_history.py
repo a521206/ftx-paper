@@ -12,6 +12,11 @@ from ftx_paper.strategies.orderflow.market_context_history import (
     project_history,
     project_saved_session,
 )
+from ftx_paper.strategies.orderflow.timestamps import parse_nifty_label, serialize_utc
+
+
+def _utc(label: str) -> str:
+    return serialize_utc(parse_nifty_label(f"2026-09-29T{label}"))
 
 
 def _artifact() -> dict[str, object]:
@@ -21,9 +26,9 @@ def _artifact() -> dict[str, object]:
         "source": {"source_fingerprint": "source-1", "timestamp_convention": "1m label; completed at next minute", "evaluation_timeframe": "1m"},
         "method": {"policy_version": "test"},
         "replay_records": [
-            {"sequence": 0, "timestamp": "2026-09-29T09:20", "available_at": "2026-09-29T09:21", "primary_state_before": "BALANCE", "primary_state_after": "BALANCE", "market_state_before": "BALANCE", "market_state_after": "BALANCE", "bar": {"time": "09:20", "open": 100.0}, "latest_5m": {"time": "2026-09-29T09:15", "available_at": "2026-09-29T09:20"}, "ordinary_context_ref": {"context_id": "ctx-1", "version": "v1"}, "permission": {"status": "ALLOWED"}, "events": [{"event_id": "evt-0", "kind": "state_transition"}]},
-            {"sequence": 1, "timestamp": "2026-09-29T09:21", "available_at": "2026-09-29T09:22", "primary_state_before": "BALANCE", "primary_state_after": "ARMED", "market_state_before": "BALANCE", "market_state_after": "DISPLACEMENT", "bar": {"time": "09:21", "open": 100.0}, "latest_5m": {"time": "2026-09-29T09:20", "available_at": "2026-09-29T09:25"}, "permission": {"status": "BLOCKED"}, "events": [{"event_id": "evt-1", "kind": "state_transition"}]},
-            {"sequence": 2, "timestamp": "2026-09-29T09:22", "available_at": "2026-09-29T09:23", "primary_state_before": "ARMED", "primary_state_after": "ARMED", "market_state_before": "DISPLACEMENT", "market_state_after": "DISPLACEMENT", "bar": {"time": "09:22", "open": 100.0}, "latest_5m": {"time": "2026-09-29T09:20", "available_at": "2026-09-29T09:25"}, "permission": {"status": "BLOCKED"}, "events": []},
+            {"sequence": 0, "timestamp": _utc("09:20"), "available_at": _utc("09:21"), "primary_state_before": "BALANCE", "primary_state_after": "BALANCE", "market_state_before": "BALANCE", "market_state_after": "BALANCE", "bar": {"time": "09:20", "open": 100.0}, "latest_5m": {"time": "2026-09-29T09:15", "available_at": _utc("09:20")}, "ordinary_context_ref": {"context_id": "ctx-1", "version": "v1"}, "permission": {"status": "ALLOWED"}, "events": [{"event_id": "evt-0", "kind": "state_transition"}]},
+            {"sequence": 1, "timestamp": _utc("09:21"), "available_at": _utc("09:22"), "primary_state_before": "BALANCE", "primary_state_after": "ARMED", "market_state_before": "BALANCE", "market_state_after": "DISPLACEMENT", "bar": {"time": "09:21", "open": 100.0}, "latest_5m": {"time": "2026-09-29T09:20", "available_at": _utc("09:25")}, "permission": {"status": "BLOCKED"}, "events": [{"event_id": "evt-1", "kind": "state_transition"}]},
+            {"sequence": 2, "timestamp": _utc("09:22"), "available_at": _utc("09:23"), "primary_state_before": "ARMED", "primary_state_after": "ARMED", "market_state_before": "DISPLACEMENT", "market_state_after": "DISPLACEMENT", "bar": {"time": "09:22", "open": 100.0}, "latest_5m": {"time": "2026-09-29T09:20", "available_at": _utc("09:25")}, "permission": {"status": "BLOCKED"}, "events": []},
         ],
     }
 
@@ -97,11 +102,11 @@ def test_context_visibility_and_canonical_decision_refs() -> None:
 def test_intervals_split_on_value_and_causal_gap() -> None:
     projection = project_history(_artifact())
     intervals = coalesce_intervals(projection.timeline, IntervalSpecification("market_state_after"))
-    assert [(item.value, item.start_at, item.end_at, item.source_sequences) for item in intervals] == [("BALANCE", "2026-09-29T09:20", "2026-09-29T09:21", (0,)), ("DISPLACEMENT", "2026-09-29T09:21", None, (1, 2))]
+    assert [(item.value, item.start_at, item.end_at, item.source_sequences) for item in intervals] == [("BALANCE", parse_nifty_label("2026-09-29T09:20"), parse_nifty_label("2026-09-29T09:21"), (0,)), ("DISPLACEMENT", parse_nifty_label("2026-09-29T09:21"), None, (1, 2))]
     gap = list(projection.timeline)
-    gap[1] = replace(gap[1], available_at="2026-09-29T09:30")
+    gap[1] = replace(gap[1], available_at=parse_nifty_label("2026-09-29T09:30"))
     gap_intervals = coalesce_intervals(gap, IntervalSpecification("market_state_after"))
-    assert gap_intervals[0].end_at == "2026-09-29T09:21"
+    assert gap_intervals[0].end_at == parse_nifty_label("2026-09-29T09:21")
     assert gap_intervals[1].gap_after is True
 
 
@@ -119,13 +124,13 @@ def test_location_observations_are_causally_checked() -> None:
     artifact = _artifact()
     records = artifact["replay_records"]
     assert isinstance(records, list)
-    observation = {"location": "OR_LOW", "timeframe": "1m", "observation_id": "obs-0", "source_aggregate_id": "2026-09-29T09:15", "reference_generation": 1, "band_low": 99.0, "band_high": 101.0, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "close_relation": "INSIDE_BAND", "observed_at": "2026-09-29T09:19", "available_at": "2026-09-29T09:21"}
+    observation = {"location": "OR_LOW", "timeframe": "1m", "observation_id": "obs-0", "source_aggregate_id": "2026-09-29T09:15", "reference_generation": 1, "band_low": 99.0, "band_high": 101.0, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "close_relation": "INSIDE_BAND", "observed_at": _utc("09:19"), "available_at": _utc("09:21")}
     records[0]["location_observations"] = [observation]
     assert project_history(artifact).timeline[0].location_observations[0]["close_relation"] == "INSIDE_BAND"
     future = _artifact()
     future_records = future["replay_records"]
     assert isinstance(future_records, list)
-    future_records[0]["location_observations"] = [{**observation, "observation_id": "obs-future", "available_at": "2026-09-29T09:30"}]
+    future_records[0]["location_observations"] = [{**observation, "observation_id": "obs-future", "available_at": _utc("09:30")}]
     with pytest.raises(ValueError, match="future location"):
         project_history(future)
 

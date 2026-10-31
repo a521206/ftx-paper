@@ -11,6 +11,7 @@ from ftx_paper.strategies.orderflow.causal_events import CausalEventRegistry
 from ftx_paper.contracts import MarketBar, MarketRole
 from ftx_paper.strategies.orderflow.coordinator import OrderflowClockInput, OrderflowCoordinator
 from ftx_paper.strategies.orderflow.orderflow_common import Aggregate
+from ftx_paper.strategies.orderflow.timestamps import require_utc, nifty_label, serialize_utc
 
 from .orderflow_config import ORDERFLOW_NAME, ORDERFLOW_VERSION, OrderflowConfig
 
@@ -38,12 +39,12 @@ class OrderflowStrategy:
         bar = bars.get(MarketRole.FUTURES) if isinstance(bars, Mapping) else None
         if not isinstance(bar, MarketBar):
             return ()
-        source_id = f"aggregate:1m:{bar.timestamp.isoformat()}"
+        source_id = f"aggregate:1m:{nifty_label(require_utc(bar.timestamp))}"
         event = self._causal_events.publish_source_observation(
             source_id=source_id,
             session_date=str(getattr(bundle, "trading_date", "")),
-            observed_at=bar.timestamp.isoformat(),
-            available_at=bar.timestamp.isoformat(),
+            observed_at=serialize_utc(require_utc(bar.timestamp)),
+            available_at=serialize_utc(require_utc(bar.timestamp)),
         )
         decisions: list[LiveDecision] = [LiveDecision("SOURCE_OBSERVATION", event)]
         if self._coordinator is not None and bar.volume is not None:
@@ -53,8 +54,8 @@ class OrderflowStrategy:
 
     @staticmethod
     def _aggregate(bar: MarketBar) -> Aggregate:
-        timestamp = bar.timestamp.strftime("%Y-%m-%dT%H:%M")
-        session_date = timestamp[:10]
+        timestamp = require_utc(bar.timestamp)
+        session_date = nifty_label(timestamp)[:10]
         return Aggregate(
             timestamp, timestamp, timestamp, "1m", 1, bar.open, bar.high, bar.low,
             bar.close, int(bar.volume or 0), bar.instrument.symbol,

@@ -9,6 +9,7 @@ from ..orderflow_common import Aggregate
 from ..state_machine_types import LocationRegistry, SessionLevels
 from ..value_publication import ValuePublication
 from ..vwap_location import VwapMeasurement, causal_vwap_prefix
+from ..timestamps import coerce_timestamp
 
 
 class EvidenceAdapter(Protocol):
@@ -58,8 +59,8 @@ def _aggregate(value: object, *, timeframe: str) -> Aggregate:
     if not isinstance(aggregate_fingerprint, str) or not aggregate_fingerprint:
         raise ValueError("Phase 3 aggregate source fingerprint is required")
     return Aggregate(
-        _text(value["time"], "time"), _text(value["end_time"], "end_time"),
-        _text(value["available_at"], "available_at"), timeframe,
+        coerce_timestamp(_text(value["time"], "time")), coerce_timestamp(_text(value["end_time"], "end_time")),
+        coerce_timestamp(_text(value["available_at"], "available_at")), timeframe,
         _integer(value["source_bar_count"], "source_bar_count"), _number(value["open"], "open"),
         _number(value["high"], "high"), _number(value["low"], "low"),
         _number(value["close"], "close"), _integer(value["volume"], "volume"),

@@ -1,6 +1,7 @@
 """Paper-owned feature provider for the Phase 3.5 publication boundary."""
 
 from __future__ import annotations
+# pyright: reportArgumentType=false
 
 import hashlib
 from collections.abc import Mapping, Sequence

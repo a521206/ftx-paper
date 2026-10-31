@@ -1,14 +1,17 @@
 """Registered-location interactions and their synthetic projections."""
 
 from __future__ import annotations
+# pyright: reportArgumentType=false, reportOperatorIssue=false, reportAssignmentType=false
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 from typing import Any, Mapping
 
 from .location_geometry import LocationBand
 from .location_observation import LocationObservation
 from .orderflow_common import Aggregate, canonical_timestamp
+from .timestamps import coerce_timestamp, nifty_label, serialize_utc
 
 
 class CandleClassification(StrEnum):
@@ -65,10 +68,10 @@ class InteractionCandle:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "candle_id": self.candle.time,
-            "time": self.candle.time,
-            "end_time": self.candle.end_time,
-            "available_at": self.candle.available_at,
+            "candle_id": nifty_label(self.candle.time),
+            "time": serialize_utc(self.candle.time),
+            "end_time": serialize_utc(self.candle.end_time),
+            "available_at": serialize_utc(self.candle.available_at),
             "timeframe": self.candle.timeframe,
             "open": self.candle.open,
             "high": self.candle.high,
@@ -89,9 +92,9 @@ class ProjectionSnapshot:
     close: float
     volume: float
     source_candle_ids: tuple[str, ...]
-    first_source_start: str
-    last_source_end: str
-    available_at: str
+    first_source_start: datetime
+    last_source_end: datetime
+    available_at: datetime
 
     def __post_init__(self) -> None:
         for name in ("first_source_start", "last_source_end", "available_at"):
@@ -106,17 +109,17 @@ class ProjectionSnapshot:
             "close": self.close,
             "volume": self.volume,
             "source_candle_ids": list(self.source_candle_ids),
-            "first_source_start": self.first_source_start,
-            "last_source_end": self.last_source_end,
-            "available_at": self.available_at,
+            "first_source_start": serialize_utc(self.first_source_start),
+            "last_source_end": serialize_utc(self.last_source_end),
+            "available_at": serialize_utc(self.available_at),
         }
 
 
 @dataclass(frozen=True, slots=True)
 class SyntheticScoreSnapshot:
     context_version: str
-    observed_at: str
-    available_at: str
+    observed_at: datetime
+    available_at: datetime
     source_candle_ids: tuple[str, ...]
     long_score: float | None
     short_score: float | None
@@ -134,8 +137,8 @@ class InteractionSnapshot:
     reference_level: float
     band: LocationBand
     pre_contact_side: CloseSide | None
-    interaction_started_at: str
-    available_at: str
+    interaction_started_at: datetime
+    available_at: datetime
     reference_generation: int
     sessions_carried: int
     status: InteractionStatus
@@ -224,11 +227,11 @@ class SyntheticProjection:
 
 
 def candle_identity(candle: Aggregate) -> str:
-    return candle.time
+    return nifty_label(candle.time)
 
 
 def candle_end_identity(candle: Aggregate) -> str:
-    return candle.end_time
+    return nifty_label(candle.end_time)
 
 
 @dataclass
@@ -246,9 +249,9 @@ class LocationInteraction:
     reference_provenance: Mapping[str, Any]
     initial_close_side: CloseSide
     pre_contact_side: CloseSide | None
-    interaction_started_at: str
-    created_at: str
-    available_at: str
+    interaction_started_at: datetime
+    created_at: datetime
+    available_at: datetime
     reference_generation: int = 0
     sessions_carried: int = 0
     status: InteractionStatus = InteractionStatus.ACTIVE
@@ -263,7 +266,7 @@ class LocationInteraction:
     source_cursors: dict[str, str] = field(default_factory=dict, repr=False)
     pd_role: str | None = None
     pd_role_transition_candle_id: str | None = None
-    pd_role_transition_available_at: str | None = None
+    pd_role_transition_available_at: datetime | None = None
 
     @property
     def band_low(self) -> float:
@@ -309,8 +312,8 @@ class LocationInteraction:
         reference_level: float,
         atr: float,
         band: LocationBand,
-        created_at: str,
-        available_at: str,
+        created_at: datetime | str,
+        available_at: datetime | str,
         reference_provenance: Mapping[str, Any] | None = None,
         pre_contact_side: CloseSide | None = None,
         reference_generation: int = 0,
@@ -333,7 +336,7 @@ class LocationInteraction:
         if not band.intersects(high=high, low=low):
             return None
         return cls(
-            f"{instrument}:{session_date}:{location}:{source_timeframe}:{candle.time}",
+            f"{instrument}:{session_date}:{location}:{source_timeframe}:{nifty_label(candle.time)}",
             instrument,
             session_date,
             location,
@@ -486,12 +489,12 @@ class LocationInteraction:
         self,
         reason: InteractionStatus,
         *,
-        available_at: str,
+        available_at: datetime | str,
         close_reason: InteractionCloseReason | str | None = None,
     ) -> None:
         if reason is InteractionStatus.ACTIVE:
             raise ValueError("active is not a terminal interaction reason")
-        if canonical_timestamp(available_at) < self.available_at:
+        if coerce_timestamp(available_at) < self.available_at:
             raise ValueError("interaction ending must be causal")
         self.status = reason
         self.close_reason = InteractionCloseReason(close_reason or reason.value)
@@ -505,14 +508,14 @@ class LocationInteraction:
         self,
         reason: InteractionStatus,
         *,
-        available_at: str,
+        available_at: datetime | str,
         close_reason: InteractionCloseReason | str,
         completed_sources: Mapping[str, list[Aggregate]] | None = None,
     ) -> None:
         if completed_sources:
             for timeframe, candles in completed_sources.items():
                 for candle in candles:
-                    if candle.available_at <= available_at and candle_identity(
+                    if candle.available_at <= coerce_timestamp(available_at) and candle_identity(
                         candle
                     ) >= candle_identity(self.creation_candle):
                         self.add_projection_candle(candle)

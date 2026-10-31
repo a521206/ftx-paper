@@ -4,32 +4,32 @@ from __future__ import annotations
 
 import hashlib
 import math
-import re
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Iterable, Mapping
+from .timestamps import coerce_timestamp, nifty_label, parse_nifty_label, parse_utc, require_utc, serialize_utc
 
 SESSION_START = 9 * 60 + 15
-_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$")
+parse_timestamp = parse_utc
+serialize_timestamp = serialize_utc
 
 
-def canonical_timestamp(value: str) -> str:
-    value = str(value).strip()
-    if len(value) != 16 or not _TIMESTAMP.fullmatch(value):
-        raise ValueError(f"invalid canonical timestamp: {value!r}")
-    try:
-        datetime.strptime(value, "%Y-%m-%dT%H:%M")
-    except ValueError as exc:
-        raise ValueError(f"invalid timestamp: {value!r}") from exc
-    return value
+def canonical_timestamp(value: str | datetime) -> datetime:
+    """Normalize a causal value, accepting only explicit UTC or ingress labels."""
+    if isinstance(value, datetime):
+        return require_utc(value)
+    text = str(value).strip()
+    if text.endswith("Z") or "+" in text[10:] or "-" in text[10:]:
+        return parse_utc(text)
+    return parse_nifty_label(text)
 
 
 @dataclass(frozen=True, slots=True)
 class Aggregate:
-    time: str
-    end_time: str
-    available_at: str
+    time: datetime
+    end_time: datetime
+    available_at: datetime
     timeframe: str
     source_bar_count: int
     open: float
@@ -45,14 +45,24 @@ class Aggregate:
 
     def __post_init__(self) -> None:
         for name in ("time", "end_time", "available_at"):
-            object.__setattr__(self, name, canonical_timestamp(getattr(self, name)))
+            object.__setattr__(self, name, coerce_timestamp(getattr(self, name), field=f"aggregate.{name}"))
+        if self.available_at < self.end_time:
+            raise ValueError("aggregate availability cannot precede completion")
 
     def to_dict(self) -> dict[str, Any]:
-        return {name: getattr(self, name) for name in (
-            "time", "end_time", "available_at", "timeframe", "source_bar_count",
+        result = {name: getattr(self, name) for name in (
+            "timeframe", "source_bar_count",
             "open", "high", "low", "close", "volume", "symbol", "expiry",
             "contract_type", "session_date", "source_fingerprint",
         )}
+        result.update({
+            "time": serialize_utc(self.time),
+            "end_time": serialize_utc(self.end_time),
+            "available_at": serialize_utc(self.available_at),
+            "time_label": nifty_label(self.time),
+            "end_time_label": nifty_label(self.end_time),
+        })
+        return result
 
 
 class ObservationIssueKind(StrEnum):
@@ -94,11 +104,9 @@ def build_aggregate_result(rows: Iterable[Mapping[str, Any]], timeframe: int) ->
     groups: dict[tuple[str, int], list[Mapping[str, Any]]] = {}
     for row in rows:
         session_date = str(row["session_date"])
-        timestamp = datetime.strptime(
-            f"{session_date}T{str(row['time']).split('T')[-1][:5]}",
-            "%Y-%m-%dT%H:%M",
-        )
-        offset = timestamp.hour * 60 + timestamp.minute - SESSION_START
+        label = f"{session_date}T{str(row['time']).split('T')[-1][:5]}"
+        local_hour, local_minute = (int(part) for part in label[-5:].split(":"))
+        offset = local_hour * 60 + local_minute - SESSION_START
         if offset >= 0:
             start = SESSION_START + (offset // timeframe) * timeframe
             groups.setdefault((session_date, start), []).append(row)
@@ -129,8 +137,8 @@ def build_aggregate_result(rows: Iterable[Mapping[str, Any]], timeframe: int) ->
             f"{str(item['time']).split('T')[-1][:5]}:{item['open']}:{item['high']}:{item['low']}:{item['close']}:{item['volume']}"
             for item in items
         )
-        aggregates.append(Aggregate(f"{session_date}T{_clock(start)}",
-            f"{session_date}T{_clock(start + timeframe - 1)}", f"{session_date}T{_clock(start + timeframe)}",
+        aggregates.append(Aggregate(parse_nifty_label(f"{session_date}T{_clock(start)}"),
+            parse_nifty_label(f"{session_date}T{_clock(start + timeframe - 1)}"), parse_nifty_label(f"{session_date}T{_clock(start + timeframe)}"),
             f"{timeframe}m", len(items), float(first["open"]), max(float(item["high"]) for item in items),
             min(float(item["low"]) for item in items), float(last["close"]), sum(int(item["volume"]) for item in items),
             str(first.get("symbol", "NIFTY")), str(first.get("expiry", "")), str(first.get("contract_type", "FUT")),

@@ -19,6 +19,14 @@ class HypothesisEvaluation:
 
 
 class LocationPolicy:
+    @staticmethod
+    def templates_for(templates: Sequence[TradeTemplate], interaction: InteractionSnapshot) -> tuple[TradeTemplate, ...]:
+        return tuple(
+            template for template in templates
+            if interaction.location in {location.value for location in template.locations}
+            and template.response_timeframe == interaction.timeframe
+        )
+
     def identify(self, template: TradeTemplate, interaction: InteractionSnapshot,
                  bars: Sequence[Aggregate], *, as_of: str) -> tuple[OpportunityOutcome, str | None]:
         raise NotImplementedError

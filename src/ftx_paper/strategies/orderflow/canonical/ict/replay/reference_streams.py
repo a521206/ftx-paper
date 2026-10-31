@@ -14,6 +14,7 @@ from ftx_paper.strategies.orderflow.canonical.ict.value_profile import (
     run_value_profile,
     run_value_profile_with_daily_history,
 )
+from ftx_paper.strategies.orderflow.timestamps import serialize_utc
 from ftx_paper.strategies.orderflow.canonical.ict.value_profile.records import ProfileObservation, ValueProfileSnapshot
 from ftx_paper.strategies.orderflow.canonical.ict.value_profile.store import DailyProfileStore
 from ftx_paper.strategies.orderflow.canonical.replay.value_references import ValueAreaReference
@@ -63,7 +64,7 @@ def value_references_from_snapshots(
             poc=snapshot.poc,
             vah=snapshot.vah,
             val=snapshot.val,
-            available_at=snapshot.available_at.isoformat(),
+             available_at=serialize_utc(snapshot.available_at),
             config_fingerprint=snapshot.config_fingerprint,
             profile_version=snapshot.profile_version,
             source_fingerprints=snapshot.source_bar_fingerprints,
@@ -78,7 +79,7 @@ def value_references_from_snapshots(
             poc=item.poc,
             vah=item.vah,
             val=item.val,
-            available_at=item.available_at.isoformat(),
+             available_at=serialize_utc(item.available_at),
             config_fingerprint=item.config_fingerprint,
             profile_version=item.profile_version,
             source_fingerprints=(item.bar_fingerprint,),
