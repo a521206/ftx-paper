@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
+from datetime import datetime
 import hashlib
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -13,7 +14,7 @@ from .context_location_replay import ContextLocationReplay
 from .interaction_detector import InteractionDetector
 from .location_observation import LocationObservation
 from .orderflow_common import Aggregate, parse_timestamp, serialize_timestamp
-from .timestamps import nifty_label
+from .timestamps import nifty_label, serialize_utc
 from .state_machine_types import LocationRegistry
 from .templates import TRADE_TEMPLATES, TradeTemplate
 from .policies import PDPolicy, StandardLocationPolicy
@@ -31,6 +32,10 @@ def _fact(kind: str, identity: str, parent: str | None, snapshot: Mapping[str, A
     candle = snapshot.get("candles", [{}])[-1] if snapshot.get("candles") else {}
     observed = observed_at or candle.get("end_time") or snapshot.get("available_at")
     available = available_at or candle.get("available_at") or snapshot.get("available_at")
+    if isinstance(observed, datetime):
+        observed = serialize_utc(observed)
+    if isinstance(available, datetime):
+        available = serialize_utc(available)
     if not isinstance(observed, str) or not isinstance(available, str):
         raise ValueError("interaction parity fact timestamps are required")
     observed_timestamp = serialize_timestamp(parse_timestamp(observed))

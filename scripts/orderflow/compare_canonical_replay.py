@@ -401,7 +401,8 @@ def _replay_observation_command(
 ) -> list[str]:
     module = "src.orderflow.market_observation" if canonical else "ftx_paper.strategies.orderflow"
     timestamp_normalization = (
-        "rows=[{**row, 'time': f\"{row['session_date']}T{str(row['time']).split('T')[-1][:5]}\"} for row in rows]; "
+        "from ftx_paper.strategies.orderflow.timestamps import session_minute; "
+        "rows=[{**row, 'time': session_minute(row['session_date'], row['time'])} for row in rows]; "
         if not canonical else ""
     )
     code = (
@@ -445,6 +446,7 @@ def _canonical_projection_command(
 def _canonical_source_command(canonical_python: str, canonical_root: Path, session_date: str, output: Path) -> list[str]:
     code = """
 import json, sys
+from datetime import datetime, time
 from src.data.db import db_connection
 from src.data.repos.futures_repo import fetch_futures
 from src.data.repos.index_repo import load_trading_dates
@@ -461,11 +463,21 @@ with db_connection() as connection:
     ) if dates else []
 raw = {}
 for row in rows:
-    minute = str(row.time).split('T')[-1][:5]
+    value = row.time
+    if isinstance(value, datetime):
+        minute = value.strftime('%H:%M')
+    elif isinstance(value, time):
+        minute = value.strftime('%H:%M')
+    elif isinstance(value, str):
+        text = value.strip()
+        parsed = datetime.fromisoformat(text.replace('Z', '+00:00')) if 'T' in text else time.fromisoformat(text)
+        minute = parsed.strftime('%H:%M')
+    else:
+        raise TypeError('canonical source row time must be a datetime, time, or string')
     if minute > '15:30':
         continue
     raw.setdefault(str(row.date), []).append({
-        'time': minute, 'open': row.open, 'high': row.high, 'low': row.low,
+        'time': f'{row.date}T{minute}', 'open': row.open, 'high': row.high, 'low': row.low,
         'close': row.close, 'volume': row.volume, 'oi': row.oi,
         'symbol': row.symbol, 'expiry': row.expiry,
         'contract_type': row.contract_type, 'session_date': row.date,
@@ -478,7 +490,7 @@ for item_date, items in raw.items():
         payload[item_date] = items
         continue
     payload[item_date] = [{
-        **items[0], 'time': '15:30',
+        **items[0], 'time': f'{item_date}T15:30',
         'high': max(item['high'] for item in items),
         'low': min(item['low'] for item in items),
         'close': items[-1]['close'],

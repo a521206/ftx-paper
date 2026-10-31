@@ -112,6 +112,12 @@ def test_observation_boundary_normalizes_replay_bar_timestamps() -> None:
     assert _observation_rows(rows)[0]["time"] == "2026-09-25T09:15"
 
 
+def test_observation_boundary_preserves_full_replay_artifact_timestamps() -> None:
+    rows = [{"session_date": "2026-09-25", "time": "2026-09-25T09:15", "close": 100.0}]
+
+    assert _observation_rows(rows)[0]["time"] == "2026-09-25T09:15"
+
+
 def test_phase45_comparison_does_not_invent_missing_stream(tmp_path) -> None:
     artifact = tmp_path / "phase45.json"
     artifact.write_text(

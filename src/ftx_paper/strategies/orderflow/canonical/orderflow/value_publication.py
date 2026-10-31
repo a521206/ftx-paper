@@ -20,7 +20,7 @@ from ftx_paper.strategies.orderflow.canonical.ict.value_profile import (
     build_daily_profile_record,
 )
 from ftx_paper.strategies.orderflow.canonical.replay.value_references import ValueAreaReference
-from ftx_paper.strategies.orderflow.timestamps import parse_nifty_label, parse_utc, serialize_utc
+from ftx_paper.strategies.orderflow.timestamps import parse_nifty_label, parse_session_timestamp, parse_utc, serialize_utc
 
 
 def _profile_source_bars(*sessions: list[dict[str, Any]]) -> tuple[SourceBar, ...]:
@@ -28,7 +28,7 @@ def _profile_source_bars(*sessions: list[dict[str, Any]]) -> tuple[SourceBar, ..
     for rows in sessions:
         for row in rows:
             session_date = str(row["session_date"])
-            timestamp = parse_nifty_label(f"{session_date}T{str(row['time'])[:5]}")
+            timestamp = parse_session_timestamp(session_date, row["time"])
             symbol = str(row.get("symbol", "NIFTY"))
             source_bars.append(SourceBar(
                 instrument=symbol,

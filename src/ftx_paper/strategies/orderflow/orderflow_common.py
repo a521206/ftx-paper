@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Iterable, Mapping
-from .timestamps import coerce_timestamp, nifty_label, parse_nifty_label, parse_utc, require_utc, serialize_utc
+from .timestamps import coerce_timestamp, nifty_label, parse_nifty_label, parse_utc, require_utc, serialize_utc, session_minute
 
 SESSION_START = 9 * 60 + 15
 parse_timestamp = parse_utc
@@ -104,7 +104,7 @@ def build_aggregate_result(rows: Iterable[Mapping[str, Any]], timeframe: int) ->
     groups: dict[tuple[str, int], list[Mapping[str, Any]]] = {}
     for row in rows:
         session_date = str(row["session_date"])
-        label = f"{session_date}T{str(row['time']).split('T')[-1][:5]}"
+        label = session_minute(session_date, row["time"])
         local_hour, local_minute = (int(part) for part in label[-5:].split(":"))
         offset = local_hour * 60 + local_minute - SESSION_START
         if offset >= 0:
@@ -115,7 +115,7 @@ def build_aggregate_result(rows: Iterable[Mapping[str, Any]], timeframe: int) ->
     for session_date, start in sorted(groups):
         items = groups[(session_date, start)]
         expected = [_clock(start + index) for index in range(timeframe)]
-        observed = [str(item["time"]).split("T")[-1][:5] for item in items]
+        observed = [session_minute(session_date, item["time"])[-5:] for item in items]
         missing_volume = any(not _usable_volume(item) for item in items)
         if missing_volume:
             issues.append(ObservationIssue(ObservationIssueKind.MISSING_VOLUME, session_date, timeframe,
@@ -134,7 +134,7 @@ def build_aggregate_result(rows: Iterable[Mapping[str, Any]], timeframe: int) ->
             continue
         first, last = items[0], items[-1]
         raw = "|".join(
-            f"{str(item['time']).split('T')[-1][:5]}:{item['open']}:{item['high']}:{item['low']}:{item['close']}:{item['volume']}"
+            f"{session_minute(session_date, item['time'])[-5:]}:{item['open']}:{item['high']}:{item['low']}:{item['close']}:{item['volume']}"
             for item in items
         )
         aggregates.append(Aggregate(parse_nifty_label(f"{session_date}T{_clock(start)}"),

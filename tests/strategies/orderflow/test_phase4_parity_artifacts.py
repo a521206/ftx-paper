@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from ftx_paper.strategies.orderflow.parity_artifacts import (
     PHASE_STREAMS,
     build_phase4_artifact,
@@ -38,6 +40,22 @@ def test_persisted_direct_context_stream_is_accepted_without_reconstruction() ->
     records, coverage = phase_facts_from_payload({"context_location": [_fact()]})
     assert coverage["status"] == "MATCHED"
     assert records[0]["identity"] == "ctx-1"
+
+
+def test_parity_serialization_accepts_timezone_aware_internal_datetimes() -> None:
+    fact = _fact()
+    instant = datetime(2026, 9, 15, 3, 50, tzinfo=timezone.utc)
+    fact.update({"occurred_at": instant, "observed_at": instant, "available_at": instant})
+
+    artifact = build_phase4_artifact(
+        run_id="run-1", producer={"name": "ftx-paper"}, scope={"date": "2026-09-15"},
+        payload={"parity_phase_facts": {"context_location": [fact]}},
+    )
+
+    serialized = artifact["phase_streams"]["context_location"][0]
+    assert serialized["occurred_at"] == "2026-09-15T03:50:00.000000Z"
+    assert serialized["observed_at"] == "2026-09-15T03:50:00.000000Z"
+    assert serialized["available_at"] == "2026-09-15T03:50:00.000000Z"
 
 
 def test_phase4_artifact_is_deterministic_and_hash_first() -> None:
@@ -90,6 +108,18 @@ def test_interaction_response_stream_preserves_explicit_incomplete_evidence() ->
     assert records == ()
     assert coverage["status"] == "INCOMPLETE"
     assert coverage["observed"] is True
+
+
+def test_invalid_timestamp_type_is_reported_as_incomplete() -> None:
+    fact = _fact()
+    fact["available_at"] = 123
+
+    records, coverage = phase_facts_from_payload(
+        {"context_location": [fact]}, "context_location"
+    )
+
+    assert records == ()
+    assert coverage["status"] == "INCOMPLETE"
 
 
 def test_comparison_can_stop_at_phase4_context_stream() -> None:

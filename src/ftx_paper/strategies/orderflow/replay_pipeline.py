@@ -32,7 +32,7 @@ from ftx_paper.strategies.orderflow.value_publication import (
     PriorSessionValueReference,
     ValuePublication,
 )
-from ftx_paper.strategies.orderflow.timestamps import coerce_timestamp, parse_nifty_label
+from ftx_paper.strategies.orderflow.timestamps import coerce_timestamp, nifty_label, session_minute
 
 @dataclass(frozen=True, slots=True)
 class _AvailableAggregate:
@@ -88,7 +88,7 @@ def _normalize_rows(source: Any, session_date: str) -> list[dict[str, Any]]:
         if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)) for value in numeric):
             raise ValueError(f"source row has invalid numeric values for {session_date}")
         rows.append({
-            "time": minute.strftime("%H:%M"),
+            "time": nifty_label(minute),
             "open": float(row["open"]),
             "high": float(row["high"]),
             "low": float(row["low"]),
@@ -142,11 +142,11 @@ def _aggregate_events(observation: Any) -> tuple[_AvailableAggregate, ...]:
 
 
 def _observation_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Provide canonical timestamps without changing the replay bar contract."""
+    """Normalize legacy source labels at the observation ingress boundary."""
     return [
         {
             **row,
-            "time": f"{row['session_date']}T{str(row['time']).split('T')[-1][:5]}",
+            "time": session_minute(str(row["session_date"]), row["time"]),
         }
         for row in rows
     ]
@@ -201,8 +201,8 @@ def _prior_values(
             reference.val,
             reference.poc,
             reference.vah,
-            parse_nifty_label(observed_at),
-            parse_nifty_label(available_at),
+            coerce_timestamp(observed_at),
+            coerce_timestamp(available_at),
             (reference.reference_id, reference.fingerprint),
         )
         publications[session_date] = ValuePublication(
@@ -294,7 +294,7 @@ class OrderflowReplayEngine:
                 event_index += 1
             return _as_of_evidence(current_evidence, clock)
 
-        final_clock = f"{session_date}T{str(rows[-1]['time'])[:5]}"
+        final_clock = session_minute(session_date, rows[-1]["time"])
         final_evidence = _as_of_evidence(
             evidence_events[-1][1] if evidence_events else current_evidence,
             final_clock,

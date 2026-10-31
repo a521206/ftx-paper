@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import pytest
+
 from ftx_paper.strategies.orderflow.state_machine import ReplayMachine
+from ftx_paper.strategies.orderflow.state_machine_source import source_metadata
 
 
 def test_replay_machine_publishes_evidence_at_each_row_clock() -> None:
@@ -40,6 +43,29 @@ def test_replay_machine_publishes_evidence_at_each_row_clock() -> None:
     assert state.latest_5m is not None
     assert state.latest_5m["time"] == "2026-10-30T09:15"
     assert state.context_publications == ()
+
+
+def test_source_metadata_rejects_missing_session_date() -> None:
+    with pytest.raises(ValueError, match="session_date"):
+        source_metadata([{"time": "09:15"}])
+
+
+def test_replay_machine_accepts_full_timestamp_artifact_rows_without_rewriting_bar() -> None:
+    rows = [
+        {"time": "2026-10-30T09:15", "session_date": "2026-10-30"},
+        {"time": "2026-10-30T09:20", "session_date": "2026-10-30"},
+    ]
+    machine = ReplayMachine(
+        rows,
+        evidence_events=(),
+        evidence_at_clock=lambda _clock: {"contexts": []},
+        session_date="2026-10-30",
+    )
+
+    records, _ = machine.run()
+
+    assert records[0]["bar"]["time"] == "2026-10-30T09:15"
+    assert records[0]["timestamp"] == "2026-10-30T09:15"
 
 
 def test_replay_machine_emits_causal_interaction_facts_once_at_availability() -> None:

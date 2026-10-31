@@ -8,18 +8,21 @@ from types import MappingProxyType
 from typing import Any, Mapping
 
 from .orderflow_common import Aggregate, ObservationIssue, ObservationIssueKind, build_aggregate_result
-from .timestamps import parse_nifty_label
+from .timestamps import parse_nifty_label, parse_session_timestamp, session_minute
 from .state_machine_source import source_fingerprint
 
 MARKET_CLOSE_TIME = "15:30"
 
 
 def rows_available_for_observation(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [row for row in rows if str(row["time"]).split("T")[-1][:5] <= MARKET_CLOSE_TIME]
+    return [
+        row for row in rows
+        if session_minute(str(row["session_date"]), row["time"])[-5:] <= MARKET_CLOSE_TIME
+    ]
 
 
 def _row_timestamp(row: Mapping[str, Any]) -> datetime:
-    return parse_nifty_label(f"{row['session_date']}T{str(row['time']).split('T')[-1][:5]}")
+    return parse_session_timestamp(str(row["session_date"]), row["time"])
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +70,12 @@ def observe_market(rows: list[dict[str, Any]]) -> MarketObservation:
             covered = any(issue.kind == ObservationIssueKind.MISSING_SOURCE_BAR and issue.session_date == current_date
                 and issue.group_start and issue.group_end and parse_nifty_label(f"{current_date}T{issue.group_start}") <= _row_timestamp(prior) <= parse_nifty_label(f"{current_date}T{issue.group_end}") for issue in issues)
             if not covered:
-                issues.append(ObservationIssue(ObservationIssueKind.MISSING_SOURCE_BAR, current_date, None,
-                    str(prior["time"])[:5], str(current["time"])[:5], "internal source-bar gap"))
+                issues.append(ObservationIssue(
+                    ObservationIssueKind.MISSING_SOURCE_BAR,
+                    current_date,
+                    None,
+                    session_minute(prior_date, prior["time"])[-5:],
+                    session_minute(current_date, current["time"])[-5:],
+                    "internal source-bar gap",
+                ))
     return MarketObservation({f"{timeframe}m": result.aggregates for timeframe, result in results.items()}, tuple(gaps), boundaries, source_fingerprint(observed_rows), tuple(issues))

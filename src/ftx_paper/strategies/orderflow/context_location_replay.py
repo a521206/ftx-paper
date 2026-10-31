@@ -18,7 +18,7 @@ from .hierarchy import MarketContext
 from .location_observation import LocationObservation
 from .market_observation import MarketObservation, observe_market
 from .orderflow_common import Aggregate
-from .timestamps import coerce_timestamp, nifty_label, serialize_utc
+from .timestamps import coerce_timestamp, nifty_label, serialize_utc, session_minute
 from .runtime_boundary import CompletedObservation, ReplayInputAdapter
 from .state_machine_types import LocationRecord, LocationRegistry, MarketContextStore
 
@@ -156,7 +156,7 @@ def replay_context_location(
         observe_market(rows), session_date=session_date, evidence=evidence,
         replay_clock=max(
             (
-                f"{session_date}T{str(row['time']).split('T')[-1][:5]}"
+                session_minute(session_date, row["time"])
                 for row in rows
             ),
             default="",

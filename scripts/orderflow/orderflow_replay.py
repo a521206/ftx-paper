@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import json
 from pathlib import Path
 
 from ftx_paper.config import PaperConfig
 from ftx_paper.strategies.orderflow.replay_pipeline import OrderflowReplayEngine, _observation_rows
+from ftx_paper.strategies.orderflow.timestamps import session_minute
 
 __all__ = ["OrderflowReplayEngine", "_observation_rows", "main"]
 
@@ -44,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
             }
             rows = [
                 row for row in rows_by_date.get(args.date, ())
-                if str(row.get("time", ""))[:5] < "15:30"
+                if _before_close(row.get("time"), args.date)
             ]
             if not rows:
                 raise ValueError(f"source artifact has no rows for {args.date}")
@@ -63,6 +65,12 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(rendered)
     return 0 if result.get("status") != "INCOMPLETE" else 1
+
+
+def _before_close(value: object, session_date: str) -> bool:
+    if not isinstance(value, (datetime, str)):
+        raise ValueError("source artifact row time must be a timestamp")
+    return session_minute(session_date, value)[-5:] < "15:30"
 
 
 if __name__ == "__main__":

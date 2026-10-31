@@ -19,7 +19,7 @@ from .interactions import (
 from .location_observation import LocationObservation
 from .orderflow_common import Aggregate
 from .state_machine_types import LocationRecord, LocationRegistry
-from .timestamps import nifty_label
+from .timestamps import coerce_timestamp, nifty_label
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +65,7 @@ class InteractionDetector:
         for observation in observations:
             if observation.timeframe != "1m":
                 raise ValueError("1m detector input must contain 1m observations")
-            if observation.source_aggregate_id != current.time:
+            if coerce_timestamp(observation.source_aggregate_id) != current.time:
                 raise ValueError("1m observation does not match the evaluated aggregate")
             if observation.available_at > current.available_at:
                 raise ValueError("1m observation is not causally available")
@@ -167,7 +167,7 @@ class InteractionDetector:
         for observation in observations5:
             if observation.timeframe != "5m":
                 raise ValueError("5m detector input must contain 5m observations")
-            if observation.source_aggregate_id != current.time:
+            if coerce_timestamp(observation.source_aggregate_id) != current.time:
                 raise ValueError(
                     "5m observation does not match the evaluated aggregate"
                 )

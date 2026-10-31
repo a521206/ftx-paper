@@ -9,7 +9,7 @@ import json
 from typing import Any, Callable, Iterable, Sequence
 
 from .causal_events import CausalEventRegistry
-from .timestamps import coerce_timestamp, parse_nifty_label
+from .timestamps import coerce_timestamp, nifty_label, parse_session_timestamp, session_minute
 
 
 EvidenceAtClock = Callable[[str], dict[str, Any]]
@@ -78,8 +78,8 @@ class ReplayMachine:
         emitted_interaction_keys: set[tuple[str, str]] = set()
         ordinary_context_ref = self._state.ordinary_context_ref
         for index, row in enumerate(self._rows):
-            clock = f"{self._session_date}T{str(row['time']).split('T')[-1][:5]}"
-            clock_instant = parse_nifty_label(clock)
+            clock_instant = parse_session_timestamp(self._session_date, row["time"])
+            clock = nifty_label(clock_instant)
             while (
                 event_index < len(self._events)
                 and coerce_timestamp(self._events[event_index][0]) <= clock_instant
@@ -247,9 +247,9 @@ class ReplayMachine:
         ordinary_context_ref: dict[str, str] | None,
         interaction_response: Sequence[dict[str, Any]],
     ) -> dict[str, Any]:
-        timestamp = f"{self._session_date}T{str(row['time']).split('T')[-1][:5]}"
+        timestamp = session_minute(self._session_date, row["time"])
         next_time = (
-            f"{self._session_date}T{str(self._rows[index + 1]['time']).split('T')[-1][:5]}"
+            session_minute(self._session_date, self._rows[index + 1]["time"])
             if index + 1 < len(self._rows) else timestamp
         )
         return {

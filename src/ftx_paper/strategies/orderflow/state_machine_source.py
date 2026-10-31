@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime
 from typing import Any
+
+from .timestamps import session_minute
 
 
 def _integer_or_zero(value: Any) -> int:
@@ -15,28 +18,38 @@ def _integer_or_zero(value: Any) -> int:
 
 
 def canonical_source_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    def minute(value: Any) -> str:
-        text = str(value)
-        return text.split("T", 1)[1][:5] if "T" in text else text[:5]
+    normalized: list[dict[str, Any]] = []
+    for row in rows:
+        session_date = row.get("session_date")
+        if not isinstance(session_date, str) or not session_date:
+            raise ValueError("source row session_date must be a non-empty string")
+        value = row.get("time") or row.get("minute")
+        if not isinstance(value, (datetime, str)):
+            raise ValueError("source row time must be a timestamp")
+        normalized.append({
+            "time": session_minute(session_date, value)[-5:],
+            "open": float(row["open"]), "high": float(row["high"]), "low": float(row["low"]),
+            "close": float(row["close"]), "volume": _integer_or_zero(row.get("volume")),
+            "oi": _integer_or_zero(row.get("oi", row.get("open_interest"))), "symbol": "NIFTY",
+            "expiry": "", "contract_type": "CONTINUOUS", "session_date": session_date,
+        })
+    return normalized
 
-    return [{
-        "time": minute(row.get("time") or row.get("minute")),
-        "open": float(row["open"]), "high": float(row["high"]), "low": float(row["low"]),
-        "close": float(row["close"]), "volume": _integer_or_zero(row.get("volume")),
-        "oi": _integer_or_zero(row.get("oi", row.get("open_interest"))), "symbol": "NIFTY",
-        "expiry": "", "contract_type": "CONTINUOUS", "session_date": str(row.get("session_date") or ""),
-    } for row in rows]
 
-
-def source_fingerprint(rows: list[dict[str, Any]]) -> str:
-    payload = json.dumps(canonical_source_rows(rows), sort_keys=True, separators=(",", ":"), default=str)
+def _fingerprint(rows: list[dict[str, Any]]) -> str:
+    payload = json.dumps(rows, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+def source_fingerprint(rows: list[dict[str, Any]]) -> str:
+    return _fingerprint(canonical_source_rows(rows))
+
+
 def source_metadata(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    times = [str(row["time"])[:5] for row in rows]
+    canonical = canonical_source_rows(rows)
+    times = [str(row["time"]) for row in canonical]
     expected = [f"{9 + (15 + index) // 60:02d}:{(15 + index) % 60:02d}" for index in range(len(times))]
-    fingerprint = source_fingerprint(rows)
+    fingerprint = _fingerprint(canonical)
     return {
         "symbol": sorted({str(row.get("symbol", "")) for row in rows}),
         "contract_type": sorted({str(row.get("contract_type", "")) for row in rows}),

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
+
+from .timestamps import session_minute
 
 @dataclass(frozen=True, slots=True)
 class _DailyFeature:
@@ -13,8 +16,10 @@ class _DailyFeature:
     close: float
 
 
-def _clock(value: object) -> int:
-    hour, minute = (int(item) for item in str(value).split("T")[-1][:5].split(":")[:2])
+def _clock(session_date: str, value: object) -> int:
+    if not isinstance(value, (datetime, str)):
+        raise ValueError("feature row time must be a timestamp")
+    hour, minute = (int(item) for item in session_minute(session_date, value)[-5:].split(":"))
     return hour * 60 + minute
 
 
@@ -27,7 +32,7 @@ def _number(value: object, field: str) -> float:
 def _daily_features(rows_by_date: Mapping[str, Sequence[Mapping[str, object]]]) -> tuple[_DailyFeature, ...]:
     days: list[_DailyFeature] = []
     for session_date in sorted(rows_by_date):
-        rows = sorted(rows_by_date[session_date], key=lambda row: _clock(row["time"]))
+        rows = sorted(rows_by_date[session_date], key=lambda row: _clock(session_date, row["time"]))
         if not rows:
             continue
         days.append(_DailyFeature(

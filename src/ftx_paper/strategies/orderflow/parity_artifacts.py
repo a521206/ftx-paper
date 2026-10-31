@@ -8,11 +8,12 @@ terminal state.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 import hashlib
 import json
 from typing import Any
 
-from .timestamps import parse_utc, serialize_utc
+from .timestamps import parse_causal_timestamp, parse_utc, serialize_utc
 
 PHASE_STREAMS = ("source_observation", "context_location", "interaction_response", "opportunity_lifecycle", "intent_admission", "trigger_exit")
 
@@ -29,7 +30,9 @@ def _timestamp(value: object) -> str:
     if value is None:
         raise ValueError("parity timestamps are required")
     try:
-        return serialize_utc(parse_utc(str(value), field="parity timestamp"))
+        if not isinstance(value, (str, datetime)):
+            raise TypeError("parity timestamp must be a datetime or string")
+        return serialize_utc(parse_causal_timestamp(value, field="parity timestamp"))
     except (TypeError, ValueError) as exc:
         if "timezone-aware" in str(exc):
             raise ValueError("parity timestamps must be timezone-aware") from exc
