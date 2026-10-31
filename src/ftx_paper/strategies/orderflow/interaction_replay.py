@@ -189,8 +189,8 @@ def replay_interaction_response(
     detector = InteractionDetector(published_registry)
     facts: list[dict[str, Any]] = []
     vwap_emitted: set[str] = set()
-    role_context_emitted: set[str] = set()
     published_records: set[tuple[str, int]] = set()
+    resolved_response_emitted: set[tuple[str, str, tuple[str, ...]]] = set()
     clock_available: datetime | None = None
     clock_available5: list[Aggregate] = []
     dispatched_available5: datetime | None = None
@@ -215,7 +215,7 @@ def replay_interaction_response(
                     available5=clock_available5,
                     as_of=clock_available,
                     facts=facts,
-                    role_context_emitted=role_context_emitted,
+                    resolved_response_emitted=resolved_response_emitted,
                 )
                 dispatched_available5 = latest_available5
         clock_available = current_available
@@ -345,7 +345,7 @@ def replay_interaction_response(
                 available5=clock_available5,
                 as_of=clock_available,
                 facts=facts,
-                role_context_emitted=role_context_emitted,
+                resolved_response_emitted=resolved_response_emitted,
             )
     interaction_facts = tuple(
         item for item in facts if item["kind"] != "opportunity_outcome"
@@ -363,7 +363,7 @@ def _dispatch_structure(
     available5: Sequence[Aggregate],
     as_of: datetime,
     facts: list[dict[str, Any]],
-    role_context_emitted: set[str],
+    resolved_response_emitted: set[tuple[str, str, tuple[str, ...]]],
 ) -> None:
     """Run the canonical structure phase after all interaction publications."""
     dispatch_start = len(facts)
@@ -407,10 +407,10 @@ def _dispatch_structure(
         )
         for role_event in role_events:
             kind = str(role_event.get("kind", "role_transition"))
-            if kind == "role_context_available" and iid in role_context_emitted:
-                continue
+            # PD role availability is internal policy state, not a Canonical
+            # interaction/response parity publication.
             if kind == "role_context_available":
-                role_context_emitted.add(iid)
+                continue
             facts.append(_fact(
                 kind, iid, iid, role_event,
                 observed_at=str(role_event["observed_at"]),
@@ -421,15 +421,27 @@ def _dispatch_structure(
             base_identity = evaluation.identity or f"{iid}:{evaluation.template.template_id}:{outcome.status.value}"
             identity = emission_identity("opportunity_outcome", base_identity)
             response = outcome.response
-            if response is not None:
+            response_key = (
+                iid,
+                evaluation.template.template_id,
+                tuple(response.evidence_ids),
+            ) if response is not None else None
+            response_to_publish = (
+                response
+                if response is not None and response_key not in resolved_response_emitted
+                else None
+            )
+            if response_to_publish is not None:
+                assert response_key is not None
+                resolved_response_emitted.add(response_key)
                 append_policy_fact("hypothesis_arbitrated", emission_identity("hypothesis_arbitrated", identity), iid, {
                     "interaction_id": iid, "location": interaction.location,
                     "template_id": evaluation.template.template_id,
                     "response_type": evaluation.template.response_type.value,
-                    "direction": response.direction.value,
+                    "direction": response_to_publish.direction.value,
                     "arbitration_selected": evaluation.selected,
                     "arbitration_reason": evaluation.arbitration_reason,
-                }, observed_at=response.observed_at, available_at=response.available_at)
+                }, observed_at=response_to_publish.observed_at, available_at=response_to_publish.available_at)
             facts.append(_fact("opportunity_outcome", identity, iid, {
                 "interaction_id": iid,
                 "location": interaction.location,
@@ -444,14 +456,14 @@ def _dispatch_structure(
                 "evidence_ids": [item.time for item in outcome.evidence],
                 "evidence_lineage": [dataclasses.asdict(item) for item in outcome.evidence_lineage],
             }, observed_at=outcome.observed_at, available_at=outcome.available_at))
-            if response is not None and not is_pd:
+            if response_to_publish is not None and not is_pd:
                 append_policy_fact("response_confirmed", emission_identity("response_confirmed", identity), iid, {
                     "interaction_id": iid, "location": interaction.location,
                     "template_id": evaluation.template.template_id,
                     "response_type": evaluation.template.response_type.value,
-                    "direction": response.direction.value,
-                    "evidence_ids": list(response.evidence_ids),
-                }, observed_at=response.observed_at, available_at=response.available_at)
+                    "direction": response_to_publish.direction.value,
+                    "evidence_ids": list(response_to_publish.evidence_ids),
+                }, observed_at=response_to_publish.observed_at, available_at=response_to_publish.available_at)
 
 
 __all__ = ["InteractionResponseReplay", "replay_interaction_response"]

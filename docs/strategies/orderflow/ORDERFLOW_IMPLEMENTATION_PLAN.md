@@ -821,9 +821,8 @@ Phase 4.5 verification record:
 Validate canonical observations, interaction episodes, response hypotheses, and
 response outcomes before opportunity formation.
 
-Status: Deterministic primitives and data contracts are ported. Canonical
-policy-dispatch parity and chronological event parity are pending Phase 4.5;
-runtime and database parity remain deferred to Phase 9.
+Status: Complete for the deterministic Canonical contract and Phase 4.5 replay
+parity gate. Runtime and database parity remain deferred to Phase 9.
 
 Phase 5 pending strategy-port repairs:
 
@@ -880,11 +879,21 @@ Phase 5 verification record:
 
 - Canonical `tests/test_orderflow_interactions.py` passes (3 tests) at the pinned
   baseline.
-- Paper Phase 5 interaction/response and existing orderflow tests pass (51 tests).
+- Paper Phase 5 interaction/response and existing orderflow tests pass (50 tests).
 - Independent 1m/5m episode state, causal observation validation, frozen
   reference/source lineage, duplicate idempotence, response arming and terminal
   outcomes, explicit incomplete evidence, and deterministic first-field mismatch
   diagnostics are covered by focused tests.
+- Response evaluation matches Canonical for carry-session expiry,
+  `response_window_expired`, instrument and availability filtering, contact and
+  terminal candle boundaries, as-of filtering, unavailable evidence, and
+  invalidation-before-confirmation ordering.
+- Standard arbitration reasons match Canonical for single latest responses,
+  same-time rejection precedence, and later causal responses superseding prior
+  responses.
+- Regenerated cross-repository replays for `2026-10-01` and `2026-10-05` report
+  Phase 3 `MATCHED`, accepted ATR/prior-value `INPUT_VARIANCE` for Phases 3.5/4,
+  and Phase 4.5 `MATCHED`.
 - Paper runtime/database context-location and interaction/response parity remain
   `INCOMPLETE` until Phase 9 wires the canonical runtime owner and persistence
   boundary; no DB-backed parity claim is made.

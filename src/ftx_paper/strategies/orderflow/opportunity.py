@@ -103,26 +103,35 @@ def evaluate_response(template: TradeTemplate, interaction: Any, bars: Sequence[
     interaction_available = coerce_timestamp(_value(interaction, "available_at"))
     if as_of < interaction_available:
         raise ValueError("evaluation as-of cannot precede interaction availability")
+    interaction_observed = _value(interaction, "interaction_started_at")
+    if template.carry_sessions < 0:
+        raise ValueError("template response timing is invalid")
     if getattr(interaction, "sessions_carried", 0) > template.carry_sessions:
-        latest = max((coerce_timestamp(_value(bar, "available_at")) for bar in bars if coerce_timestamp(_value(bar, "available_at")) <= as_of), default=interaction_available)
+        latest = max(
+            (
+                coerce_timestamp(_value(bar, "available_at"))
+                for bar in bars
+                if coerce_timestamp(_value(bar, "available_at")) <= as_of
+            ),
+            default=interaction_available,
+        )
         return OpportunityOutcome(OpportunityOutcomeStatus.EXPIRED, "response_window_expired", latest, latest, template=template, as_of=as_of)
-    available = tuple(response_evidence) if response_evidence is not None else tuple(sorted(
-        (bar for bar in bars
-         if _value(bar, "timeframe") == template.response_timeframe
-         and _value(bar, "symbol") == _value(interaction, "instrument")
-         and _value(bar, "available_at") >= _value(interaction, "creation_candle").available_at
-         and _value(bar, "available_at") >= _value(bar, "end_time")
-         and _value(bar, "available_at") <= as_of
-          and _value(bar, "available_at") <= parse_nifty_label(f"{_value(bar, 'session_date')}T{template.expiry_at}")),
+    creation = _value(interaction, "creation_candle")
+    source = response_evidence if response_evidence is not None else bars
+    available = tuple(sorted(
+        (
+            bar for bar in source
+            if _value(bar, "timeframe") == template.response_timeframe
+            and _value(bar, "symbol") == _value(interaction, "instrument")
+            and coerce_timestamp(_value(bar, "available_at")) >= coerce_timestamp(_value(creation, "available_at"))
+            and coerce_timestamp(_value(bar, "available_at")) >= coerce_timestamp(_value(bar, "end_time"))
+            and coerce_timestamp(_value(bar, "available_at")) <= as_of
+            and coerce_timestamp(_value(bar, "available_at")) <= parse_nifty_label(
+                f"{_value(bar, 'session_date')}T{template.expiry_at}"
+            )
+        ),
         key=lambda item: (_value(item, "time"), _value(item, "available_at")),
     ))
-    if any(
-        _value(bar, "available_at") > as_of
-        or _value(bar, "available_at") < interaction_available
-         or _value(bar, "available_at") > parse_nifty_label(f"{_value(bar, 'session_date')}T{template.expiry_at}")
-        for bar in available
-    ):
-        raise ValueError("response evidence is outside the evaluation boundary")
     terminal_id = getattr(interaction, "terminal_candle_id", None)
     if terminal_id is not None:
         terminal = next((bar for bar in available if candle_identity(bar) == terminal_id or _value(bar, "time") == terminal_id), None)
@@ -131,25 +140,18 @@ def evaluate_response(template: TradeTemplate, interaction: Any, bars: Sequence[
         else:
             available = tuple(bar for bar in available if candle_identity(bar) <= terminal_id)
     contact_index = next((index for index, bar in enumerate(available)
-                          if (_value(bar, "time") == _value(interaction, "creation_candle").time
-                              or _value(bar, "end_time") == _value(interaction, "creation_candle").time)
+                          if (_value(bar, "time") == _value(creation, "time")
+                              or _value(bar, "end_time") == _value(creation, "time"))
                           and _value(bar, "session_date") == _value(interaction, "session_date")), None)
     if contact_index is None:
-        return OpportunityOutcome(OpportunityOutcomeStatus.PENDING, "contact_not_available", _value(interaction, "interaction_started_at"), interaction_available, template=template, as_of=as_of)
+        return OpportunityOutcome(OpportunityOutcomeStatus.PENDING, "contact_not_available", interaction_observed, interaction_available, template=template, as_of=as_of)
     available = available[contact_index:]
     sessions = tuple(dict.fromkeys(_value(bar, "session_date") for bar in available))
     available = tuple(bar for bar in available if sessions.index(_value(bar, "session_date")) <= template.carry_sessions)
-    if any(
-        _value(bar, "available_at") > as_of
-        or _value(bar, "available_at") < interaction_available
-         or _value(bar, "available_at") > parse_nifty_label(f"{_value(bar, 'session_date')}T{template.expiry_at}")
-        for bar in available
-    ):
-        raise ValueError("response evidence is outside the evaluation boundary")
     available = tuple(sorted(available, key=lambda item: (_value(item, "time"), _value(item, "available_at"))))
     if not available:
-        return OpportunityOutcome(OpportunityOutcomeStatus.PENDING, "missing_completed_evidence", _value(interaction, "created_at"), _value(interaction, "available_at"), policy_version=template.policy_version, template=template, as_of=as_of)
-    spec = build_response_spec(template, band_lower=float(_value(interaction, "band_low")), band_upper=float(_value(interaction, "band_high")))
+        return OpportunityOutcome(OpportunityOutcomeStatus.PENDING, "missing_completed_5m", interaction_observed, interaction_available, template=template, as_of=as_of)
+    spec = build_response_spec(template, band=_value(interaction, "band"))
     evaluation = evaluate_response_window(
         available,
         to_candle=lambda item: ResponseCandle(float(_value(item, "features")["open"] if hasattr(item, "features") else _value(item, "open")), float(_value(item, "features")["high"] if hasattr(item, "features") else _value(item, "high")), float(_value(item, "features")["low"] if hasattr(item, "features") else _value(item, "low")), float(_value(item, "features")["close"] if hasattr(item, "features") else _value(item, "close"))),
@@ -164,14 +166,22 @@ def evaluate_response(template: TradeTemplate, interaction: Any, bars: Sequence[
     if evaluation.status is ResponseOutcomeStatus.INVALIDATED:
         return OpportunityOutcome(OpportunityOutcomeStatus.CONTRADICTED, "reference_crossed_after_contact", observed, available_at, evidence, evidence_lineage=lineage, policy_version=template.policy_version, template=template, as_of=as_of)
     if evaluation.status is not ResponseOutcomeStatus.CONFIRMED:
-        status = OpportunityOutcomeStatus.EXPIRED if spec.expired(session_date=str(_value(interaction, "session_date")), as_of=as_of) else OpportunityOutcomeStatus.PENDING
-        return OpportunityOutcome(status, "response_window_expired" if status is OpportunityOutcomeStatus.EXPIRED else "response_window_open", observed, available_at, evidence, evidence_lineage=lineage, policy_version=template.policy_version, template=template, as_of=as_of)
+        expired = len(sessions) > template.carry_sessions + 1 or spec.expired(session_date=nifty_label(as_of)[:10], as_of=as_of)
+        status = OpportunityOutcomeStatus.EXPIRED if expired else OpportunityOutcomeStatus.PENDING
+        reason = "response_window_expired" if expired else (
+            "inconclusive_contact" if any(
+                _value(bar, "close") == float(_value(interaction, "reference_level"))
+                or _value(bar, "open") == _value(bar, "close") for bar in evidence
+            ) else "response_window_open"
+        )
+        return OpportunityOutcome(status, reason, observed, available_at, evidence, evidence_lineage=lineage, policy_version=template.policy_version, template=template, as_of=as_of)
     candle = evaluation.confirmation_candle
     if candle is None:
         raise RuntimeError("confirmed response is missing its candle")
     fields = candle.features if hasattr(candle, "features") else {"high": _value(candle, "high"), "low": _value(candle, "low"), "close": _value(candle, "close")}
     direction = evaluation.direction or template.direction
-    response = DirectionalResponse(direction, str(_value(interaction, "location")), float(_value(interaction, "reference_level")), float(fields["high"] if direction is Direction.LONG else fields["low"]), float(_value(interaction, "band_low" if direction is Direction.LONG else "band_high")), float(_value(interaction, "band_high" if direction is Direction.LONG else "band_low")) if template.response_type is ResponseType.REJECTION else float(fields["close"]), (str(_value(interaction, "interaction_id")), candle_identity(candle)), _value(candle, "end_time"), _value(candle, "available_at"))
+    band = _value(interaction, "band")
+    response = DirectionalResponse(direction, str(_value(interaction, "location")), float(_value(interaction, "reference_level")), float(fields["high"] if direction is Direction.LONG else fields["low"]), float(band.low if direction is Direction.LONG else band.high), float(band.high if direction is Direction.LONG else band.low) if template.response_type is ResponseType.REJECTION else None, (str(_value(interaction, "interaction_id")), candle_identity(candle)), _value(candle, "end_time"), _value(candle, "available_at"), band=band, evidence=evidence, evidence_lineage=lineage)
     return OpportunityOutcome(OpportunityOutcomeStatus.RESOLVED, f"causal_{template.response_type.value}", response.observed_at, response.available_at, evidence, response, lineage, template.policy_version, template, as_of)
 
 

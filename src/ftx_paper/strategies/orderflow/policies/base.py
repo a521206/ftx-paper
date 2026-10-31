@@ -49,6 +49,25 @@ class StandardLocationPolicy(LocationPolicy):
         latest = max(item.outcome.response.available_at for item in resolved if item.outcome.response)
         winner = min((item for item in resolved if item.outcome.response and item.outcome.response.available_at == latest),
                      key=lambda item: (item.template.response_type.value != "rejection", item.template.template_id))
-        return tuple(HypothesisEvaluation(item.template, item.outcome, item.identity, item is winner,
-                                          "same_time_rejection_precedence" if item is winner else "same_interaction_execution_arbitration")
-                     for item in evaluations)
+        latest_responses = [
+            item for item in resolved
+            if item.outcome.response and item.outcome.response.available_at == latest
+        ]
+        arbitration_reason = (
+            "later_causal_response_superseded_prior"
+            if any(
+                item.outcome.response
+                and item.outcome.response.available_at < latest
+                for item in resolved
+            )
+            else "same_time_rejection_precedence"
+            if any(item.template.response_type.value == "rejection" for item in latest_responses)
+            else "single_latest_causal_response"
+        )
+        return tuple(
+            HypothesisEvaluation(
+                item.template, item.outcome, item.identity, item is winner,
+                arbitration_reason if item is winner else "same_interaction_execution_arbitration",
+            )
+            for item in evaluations
+        )
