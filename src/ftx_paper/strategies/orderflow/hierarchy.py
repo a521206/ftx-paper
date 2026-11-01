@@ -166,6 +166,8 @@ class ResolvedExitRule:
     level: float | None
     source_context: ContextVersionRef | None
     interaction_id: str | None = None
+    response: Any | None = None
+    execution: Any | None = None
     score_direction: str | None = None
     score_margin: float | None = None
     required: bool = False

@@ -162,7 +162,10 @@ class OrderflowCoordinator:
         events: list[dict[str, Any]] = []
         observation = transition.observation
         provenance = observation
-        if observation is not None and transition.interaction.status.value == "ACTIVE":
+        if (
+            observation is not None
+            and transition.interaction.status.value == "ACTIVE"
+        ):
             events.append({
                 "kind": "location_interaction_observed",
                 "identity": f"location_interaction_observed:{interaction_id}:{observation.observation_id}",

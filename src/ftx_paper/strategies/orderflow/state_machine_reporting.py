@@ -38,6 +38,53 @@ def build_replay_payload(
     streams = getattr(context, "parity_streams", {})
     if not isinstance(streams, dict):
         streams = {}
+    execution_states = (
+        tuple(context.execution_engine.snapshot().values())
+        if getattr(context, "execution_engine", None) is not None else ()
+    )
+    execution_fills = [
+        asdict(fill) for state in execution_states for fill in state.fills
+    ]
+    ledger_mutations: list[dict[str, Any]] = []
+    for state in execution_states:
+        parent = state.opportunity_id
+        for reservation in state.reservation_history:
+            ledger_mutations.append({
+                "kind": "reservation", "opportunity_id": parent,
+                **asdict(reservation),
+            })
+            if reservation.released_at:
+                ledger_mutations.append({
+                    "kind": "reservation_release", "opportunity_id": parent,
+                    "reservation_id": reservation.reservation_id,
+                    "occurred_at": reservation.released_at,
+                    "reason": reservation.release_reason,
+                })
+        for admission in state.admission_history:
+            if admission.status.value != "NOT_EVALUATED":
+                ledger_mutations.append({
+                    "kind": "authorization", "opportunity_id": parent,
+                    **asdict(admission),
+                })
+        for fill in state.fills:
+            ledger_mutations.append({
+                "kind": "exit_settlement" if fill.kind in {"exit", "partial_exit"} else "fill",
+                "opportunity_id": parent, **asdict(fill),
+            })
+    execution_transitions = [
+        record for record in records
+        if record.get("kind") in {
+            "entry_pending", "admission_decided", "intent_effective",
+            "intent_cancelled", "entry_cancelled", "exit_signal",
+            "exit_decision", "filled", "position_closed",
+        }
+    ]
+    phase7_input = {
+        "parity_phase_facts": streams,
+        "execution_fills": execution_fills,
+        "execution_transitions": execution_transitions,
+        "ledger_mutations": ledger_mutations,
+    }
     phase_facts = {
         name: _json_safe(list(streams[name]))
         for name in PHASE7_STREAMS
@@ -53,12 +100,18 @@ def build_replay_payload(
         "source_bar_count": len(rows),
         "records": _json_safe(records),
         "replay_records": _json_safe(replay_records),
-        "parity_phase_facts": phase_facts,
+        "parity_phase_facts": {
+            **phase_facts,
+            **build_phase7_projection(phase7_input),
+        },
+        "execution_fills": _json_safe(execution_fills),
+        "execution_transitions": _json_safe(execution_transitions),
+        "ledger_mutations": _json_safe(ledger_mutations),
     }
     # Validate the producer-owned shape without manufacturing missing streams.
-    if phase_facts:
+    if phase_facts or execution_states:
         payload["phase7_projection"] = build_phase7_projection(
-            {"parity_phase_facts": phase_facts}
+            phase7_input
         )
     return payload
 

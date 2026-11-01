@@ -37,6 +37,7 @@ class OrderflowTransitionOwner:
     observation_owner: OrderflowCoordinator = field(init=False)
     execution_owner: ExecutionCoordinator = field(default_factory=ExecutionCoordinator)
     execution_adapter: Any | None = None
+    rows_by_date: Mapping[str, Sequence[Mapping[str, object]]] = field(default_factory=dict, repr=False)
     context: ReplayContext = field(init=False)
     mode: str = "FULL"
     _clock: datetime | None = field(default=None, init=False, repr=False)
@@ -45,6 +46,7 @@ class OrderflowTransitionOwner:
     def __post_init__(self) -> None:
         self.observation_owner = OrderflowCoordinator(self.location_registry)
         self.context = ReplayContext(
+            rows_by_date=self.rows_by_date,
             location_registry=self.location_registry,
             execution_engine=ExecutionEngine(),
         )
@@ -126,6 +128,7 @@ class OrderflowTransitionOwner:
                 bar_opens=bar_opens,
                 decision_scores=decision_scores,
                 constraints=constraints,
+                decision_at=str(item.one_minute.available_at),
             )
         timestamp = str(item.one_minute.time)
         next_time = str(item.one_minute.available_at)
@@ -154,6 +157,7 @@ class OrderflowTransitionOwner:
         self,
         formations: Sequence[LifecycleFormation],
         *,
+        decision_at: str,
         regime: Any = None,
         regime_publications: Sequence[tuple[str, Any]] = (),
         triggers: Mapping[str, TriggerObservation] | None = None,
@@ -175,6 +179,7 @@ class OrderflowTransitionOwner:
             bar_opens=bar_opens,
             decision_scores=decision_scores,
             constraints=constraints,
+            decision_at=decision_at,
         )
         return {
             name: tuple(values)

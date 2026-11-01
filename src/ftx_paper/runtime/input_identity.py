@@ -10,7 +10,7 @@ from typing import Any
 
 from ftx_paper.strategies.orderflow.timestamps import parse_utc
 
-NORMALIZED_BAR_FINGERPRINT_RECIPE = "normalized-bars-v1"
+NORMALIZED_BAR_FINGERPRINT_RECIPE = "ordered-canonical-bars-v1"
 _SESSION_ZONE = ZoneInfo("Asia/Kolkata")
 
 
@@ -41,10 +41,6 @@ def normalized_bar_fingerprint(rows: Sequence[Mapping[str, Any]]) -> str:
             "symbol": "NIFTY", "expiry": "", "contract_type": "CONTINUOUS",
             "session_date": str(row.get("session_date") or session_timestamp.date().isoformat()),
         })
-    normalized.sort(key=lambda row: tuple(row[key] for key in (
-        "session_date", "time", "open", "high", "low", "close", "volume", "oi",
-        "symbol", "expiry", "contract_type",
-    )))
     return sha256(json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 

@@ -69,6 +69,7 @@ class OpportunityCoordinator:
         aggregates: Mapping[str, list[Aggregate]],
         raw_rows: Sequence[Mapping[str, Any]],
         atr: float | None,
+        regime_version: str = "unresolved",
     ) -> LifecycleFormation | None:
         response = outcome.response
         identity = evaluation.identity
@@ -134,7 +135,7 @@ class OpportunityCoordinator:
                 candidate_id=candidate_id,
                 context_candle=context_candle,
                 clock=as_of,
-                regime_version="unresolved",
+                regime_version=regime_version,
                 policy_version=outcome.policy_version or template.policy_version,
                 reference_generation=interaction.reference_generation,
                 causal_identity=identity,
@@ -142,6 +143,7 @@ class OpportunityCoordinator:
             ),
             template,
             formation_available_at=serialize_utc(as_of),
+            decision_context_required=False,
         )
         lifecycle.episode_confirmed = True
         lifecycle.comparison_key = identity
@@ -164,7 +166,6 @@ class OpportunityCoordinator:
             "execution_group_id": lifecycle.execution_group_id,
             "long_score": long_score,
             "short_score": short_score,
-            "decision_context_required": lifecycle.decision_context_required,
             "reference_level": lifecycle.reference_level,
             "entry_boundary": setup.entry_zone_low,
             "failure_boundary": lifecycle.failure_boundary,
@@ -181,7 +182,7 @@ class OpportunityCoordinator:
             lifecycle.lifecycle_id,
             values,
             response.observed_at,
-            response.available_at,
+            lifecycle.formation_available_at,
             lifecycle,
             setup,
         )
@@ -198,6 +199,7 @@ class OpportunityCoordinator:
         aggregates: Mapping[str, list[Aggregate]],
         raw_rows: Sequence[Mapping[str, Any]],
         rows_by_date: Mapping[str, Sequence[Mapping[str, object]]],
+        regime_version: str = "unresolved",
     ) -> tuple[dict[str, Any], LifecycleFormation] | None:
         """Form only Canonical's explicit first-candle OR acceptance seed."""
         candle_key = nifty_label(candle.time)
@@ -279,7 +281,7 @@ class OpportunityCoordinator:
                 candidate_id=candidate_id,
                 context_candle=candle,
                 clock=candle.available_at,
-                regime_version="unresolved",
+                regime_version=regime_version,
                 policy_version=template.policy_version,
                 reference_generation=record.generation,
                 causal_identity=identity,
@@ -320,7 +322,7 @@ class OpportunityCoordinator:
         }
         formation = LifecycleFormation(
             identity, lifecycle.lifecycle_id, values,
-            response.observed_at, response.available_at,
+            response.observed_at, lifecycle.formation_available_at,
             lifecycle,
             setup,
         )

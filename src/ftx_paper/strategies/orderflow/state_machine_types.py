@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping, Sequence
 from datetime import datetime
 
 from .hierarchy import ContextVersionRef, MarketContext
@@ -215,6 +215,7 @@ class MarketContextStore:
 @dataclass
 class ReplayContext:
     rows: list[dict[str, Any]] = field(default_factory=list)
+    rows_by_date: Mapping[str, Sequence[Mapping[str, object]]] = field(default_factory=dict)
     aggregates: dict[str, list[Aggregate]] = field(default_factory=dict)
     market_contexts: MarketContextStore = field(default_factory=MarketContextStore)
     location_registry: LocationRegistry | None = None
@@ -230,7 +231,10 @@ class ReplayContext:
     continuous: Any = None
     session: Any = None
     opening_context: dict[str, Any] = field(default_factory=dict)
+    last_confirmation_context_time: str | None = None
     interactions: dict[str, Any] = field(default_factory=dict)
+    regime_gate: Any = None
+    regime_gate_blocked_lifecycles: set[str] = field(default_factory=set)
     session_extreme_gate_blocked_lifecycles: set[str] = field(default_factory=set)
     events: list[dict[str, Any]] = field(default_factory=list)
     transitions: list[dict[str, Any]] = field(default_factory=list)

@@ -28,7 +28,7 @@ from .hierarchy import (
 from .lifecycle import SetupOpportunity
 from .templates import Direction, StopPolicy
 from .state_machine_types import CanonicalExecutionProposal, ReplayContext
-from .timestamps import coerce_timestamp
+from .timestamps import coerce_timestamp, nifty_label
 from .allocation import entry_block_reason
 from .active_position_gate import ActivePositionGate
 from .response import (
@@ -44,6 +44,19 @@ from .interactions import InteractionSnapshot
 SESSION_EXIT_DEADLINE = "15:10"
 STRUCTURE_TIMEFRAME = "5m"
 EXHAUSTION_RISK = "exhaustion_risk"
+
+
+def _opposite_open_exposure(
+    context: ReplayContext, direction: Direction
+) -> SetupOpportunity | None:
+    return next(
+        (
+            item
+            for item in context.opportunities.values()
+            if item.direction is not direction and context.position_is_open(item)
+        ),
+        None,
+    )
 
 
 class ExecutionHost(Protocol):
@@ -974,8 +987,8 @@ def resolve_setup_exit_plan(
     resolved: list[ResolvedExitRule] = []
     for rule in getattr(template, "exits", ()):
         location = getattr(rule.location, "value", rule.location)
-        location_record = host.location_registry.resolve_as_of(
-            str(location), coerce_timestamp(as_of)
+        target_level = _target_level(
+            host, str(location), as_of, direction=life.direction
         )
         context = host.decision_context_for_location(location, as_of=as_of)
         source = None
@@ -986,8 +999,10 @@ def resolve_setup_exit_plan(
                 rule_id=rule.rule_id,
                 location=str(location),
                 mode=getattr(rule.mode, "value", str(rule.mode)),
-                level=(location_record.price if location_record is not None else None),
+                level=target_level,
                 source_context=source,
+                response=getattr(rule, "response", None),
+                execution=getattr(rule, "execution", None),
                 score_direction=getattr(rule, "score_direction", None),
                 score_margin=getattr(rule, "score_margin", None),
                 required=getattr(rule, "required", False),
@@ -997,6 +1012,23 @@ def resolve_setup_exit_plan(
             )
         )
     return tuple(resolved)
+
+
+def _target_level(
+    host: ExecutionHost,
+    location: str,
+    as_of: str,
+    *,
+    direction: Direction,
+) -> float | None:
+    """Resolve the canonical location-band edge at the decision clock."""
+    registry = host.location_registry
+    if registry is None:
+        return None
+    record = registry.resolve_as_of(location, as_of)
+    if record is None:
+        return None
+    return record.band_low if direction is Direction.LONG else record.band_high
 
 
 def _session_vwap(
@@ -1335,7 +1367,7 @@ class ExecutionCoordinator:
             session.failed_reversal_locked_at[location] = timestamp
 
     def admit_opportunity(
-        self, life: SetupOpportunity, next_time: str, bar_events: list[dict[str, Any]]
+        self, life: SetupOpportunity, decision_at: str, bar_events: list[dict[str, Any]]
     ) -> None:
         setup = self.context.execution_engine.setup_for(life.lifecycle_id)
         reason = None
@@ -1346,7 +1378,7 @@ class ExecutionCoordinator:
                 life,
                 ExecutionAdmission(
                     reason="regime_unresolved",
-                    decided_at=str(life.formation_available_at),
+                    decided_at=decision_at,
                 ),
                 bar_events,
             )
@@ -1357,7 +1389,7 @@ class ExecutionCoordinator:
             self.record_admission(
                 life,
                 ExecutionAdmission(
-                    AdmissionStatus.DENIED, reason, str(life.formation_available_at)
+                    AdmissionStatus.DENIED, reason, decision_at
                 ),
                 bar_events,
             )
@@ -1371,7 +1403,7 @@ class ExecutionCoordinator:
                 setup.regime_version,
                 life.direction.value,
                 IntentStatus.CONFIRMATION_FOUND,
-                life.formation_available_at,
+                 decision_at,
                 setup.entry_zone_high
                 if life.direction is Direction.LONG
                 else setup.entry_zone_low,
@@ -1386,9 +1418,9 @@ class ExecutionCoordinator:
             ),
             regime=regime,
             setup=setup,
-            at=life.formation_available_at,
+            at=decision_at,
             confirmations=setup.required_confirmation,
-            effective_at=life.formation_available_at,
+            effective_at=decision_at,
         )
         self.engine.update_intent(life, intent)
         self.record_admission(
@@ -1396,12 +1428,12 @@ class ExecutionCoordinator:
             ExecutionAdmission(
                 reason="awaiting_entry_policy",
                 intent_id=intent.intent_id,
-                decided_at=str(life.formation_available_at),
+                decided_at=decision_at,
             ),
             bar_events,
         )
         self.emit_intent_armed(
-            str(life.formation_available_at), next_time, bar_events, life
+            decision_at, decision_at, bar_events, life
         )
 
     def record_admission(
@@ -1460,6 +1492,7 @@ class ExecutionCoordinator:
         self,
         formations: tuple[Any, ...],
         *,
+        decision_at: str,
         regime: Any = None,
         regime_publications: Any = (),
         triggers: Any = None,
@@ -1479,18 +1512,19 @@ class ExecutionCoordinator:
                     life, setup, available_at=str(life.formation_available_at)
                 )
             events: list[dict[str, Any]] = []
-            self.admit_opportunity(life, str(formation.available_at), events)
+            self.admit_opportunity(life, decision_at, events)
             state = self.engine.state_for(life.lifecycle_id)
+            decided_at = state.admission.decided_at or str(formation.available_at)
             self.context.record_parity_fact("intent_admission", {
                     "kind": "intent_admission",
-                    "identity": f"intent-admission:{life.lifecycle_id}:{formation.available_at}",
+                    "identity": (
+                        f"intent-admission:{life.lifecycle_id}:"
+                        f"{nifty_label(coerce_timestamp(decided_at))}"
+                    ),
                     "causal_parent_id": life.lifecycle_id,
-                    "occurred_at": state.admission.decided_at
-                    or str(formation.available_at),
-                    "observed_at": state.admission.decided_at
-                    or str(formation.available_at),
-                    "available_at": state.admission.decided_at
-                    or str(formation.available_at),
+                    "occurred_at": decided_at,
+                    "observed_at": decided_at,
+                    "available_at": decided_at,
                     "values": {
                         "lifecycle_id": life.lifecycle_id,
                         "intent_id": state.admission.intent_id,
@@ -2022,6 +2056,11 @@ class ExecutionCoordinator:
                 and coerce_timestamp(state.pending_entry.available_at) <= coerce_timestamp(timestamp)
             ):
                 pending = state.pending_entry
+                if (
+                    pending.session_date not in {None, str(row.get("session_date", life.session_date))}
+                    or coerce_timestamp(pending.intent.expiry) <= coerce_timestamp(timestamp)
+                ):
+                    return
                 decision = entry_fill_decision(
                     direction=life.direction.value,
                     trigger_price=pending.intent.trigger_price,
@@ -2083,7 +2122,11 @@ class ExecutionCoordinator:
             regime=self.context.regime,
             setup=setup,
             setup_available_at=state.setup_available_at or life.formation_available_at,
-            setup_valid=True,
+            setup_valid=(
+                not setup.invalidated_by(close=float(row["close"]))
+                if not getattr(life, "episode_confirmed", True)
+                else self.setup_valid_for_life(life, as_of=timestamp)
+            ),
             context_relation=decision_relation,
             template=setup.template,
             retest_touched=state.retest_touched,
@@ -2147,11 +2190,51 @@ class ExecutionCoordinator:
             if life is None or not life.active:
                 continue
             state = self.engine.state_for(life.lifecycle_id)
+            setup = self.engine.setup_for(life.lifecycle_id)
             if (
-                state.entry_attempted
+                life.candidate_invalidated
+                or setup is None
+                or not setup.active
+                or state.entry_attempted
                 or state.intent is None
+                or state.intent.intent_id != proposal.intent_id
                 or state.intent.status is not IntentStatus.ARMED
+                or life.lifecycle_id
+                in getattr(self.context, "regime_gate_blocked_lifecycles", set())
+                or life.lifecycle_id
+                in getattr(
+                    self.context, "session_extreme_gate_blocked_lifecycles", set()
+                )
+                or self.active_position_gate.is_blocked(life.lifecycle_id)
             ):
+                continue
+            duplicate_owner = self.engine.entry_owner(
+                life,
+                available_at=next_time,
+                entry_price=proposal.observation.price
+                or state.intent.trigger_price,
+            )
+            if duplicate_owner is not None and duplicate_owner != life.lifecycle_id:
+                self.engine.apply_entry_admission(
+                    life,
+                    ExecutionAdmission(
+                        AdmissionStatus.DENIED,
+                        "duplicate_causal_identity",
+                        next_time,
+                        proposal.intent_id,
+                    ),
+                )
+                event = {
+                    "kind": "execution_proposal_suppressed",
+                    "intent_id": proposal.intent_id,
+                    "lifecycle_id": life.lifecycle_id,
+                    "execution_owner_lifecycle_id": duplicate_owner,
+                    "observed_at": timestamp,
+                    "available_at": next_time,
+                    "reason": "duplicate_causal_identity",
+                }
+                self.context.record_event(event)
+                bar_events.append(event)
                 continue
             blocked = None
             if not getattr(life, "episode_confirmed", True):
@@ -2166,6 +2249,19 @@ class ExecutionCoordinator:
                 blocked = "active_position_session_extreme_gate"
             if blocked is None:
                 blocked = self._failed_reversal_block_reason(life, timestamp, bar_events)
+            regime_gate = getattr(self.context, "regime_gate", None)
+            if blocked is None and regime_gate is not None and regime_gate.blocks(
+                getattr(self.context, "rows", ()),
+                timestamp,
+                life.direction.value,
+                str(life.location) if life.location is not None else None,
+            ):
+                blocked = "causal_trend_mean_reversion_gate"
+                blocked_lifecycles = getattr(
+                    self.context, "regime_gate_blocked_lifecycles", None
+                )
+                if blocked_lifecycles is not None:
+                    blocked_lifecycles.add(life.lifecycle_id)
             if blocked is None:
                 blocked = entry_block_reason(
                     setups=self.context.opportunities.values(),
@@ -2176,6 +2272,22 @@ class ExecutionCoordinator:
                     timestamp=timestamp,
                     session_date=str(life.session_date),
                 )
+            reversal_from: SetupOpportunity | None = None
+            if blocked == "portfolio_position_limit":
+                opposite = _opposite_open_exposure(self.context, life.direction)
+                if opposite is not None:
+                    blocked = entry_block_reason(
+                        setups=self.context.opportunities.values(),
+                        executions=self.engine.current(),
+                        events=self.context.events,
+                        constraints=self.context.execution_constraints,
+                        direction=life.direction.value,
+                        timestamp=timestamp,
+                        session_date=str(life.session_date),
+                        exclude_lifecycle_id=opposite.lifecycle_id,
+                    )
+                    if blocked is None:
+                        reversal_from = opposite
             selected = self.engine.admit_entry(
                 life,
                 observation=proposal.observation,
@@ -2183,6 +2295,23 @@ class ExecutionCoordinator:
                 available_at=next_time,
             )
             if selected is not None:
+                if reversal_from is not None:
+                    self.queue_exit(
+                        "position_reversal",
+                        next_time,
+                        reversal_from,
+                        execution_policy="next_available_bar_open",
+                    )
+                    reversal_event = {
+                        "kind": "position_reversal_requested",
+                        "time": timestamp,
+                        "available_at": next_time,
+                        "from_lifecycle_id": reversal_from.lifecycle_id,
+                        "to_lifecycle_id": life.lifecycle_id,
+                        "direction": life.direction.value,
+                    }
+                    self.context.record_event(reversal_event)
+                    bar_events.append(reversal_event)
                 for opposing in self.context.conflicting_unfilled_opportunities(life):
                     if opposing.active:
                         opposing.supersede(at=timestamp, reason="conflicting_entry_selected")
@@ -2259,6 +2388,24 @@ class ExecutionCoordinator:
                     return self.handle_management(
                         index, timestamp, next_time, row, available5, bar_events, life
                     )
+                if coerce_timestamp(timestamp) >= coerce_timestamp(intent.expiry):
+                    cancelled = self.engine.cancel_exit_intent(life, reason="expired")
+                    self.engine.clear_pending_exit(life)
+                    if cancelled is not None:
+                        event = {
+                            "kind": "exit_intent_cancelled",
+                            "intent_id": cancelled.intent_id,
+                            "position_id": cancelled.position_id,
+                            "rule_id": cancelled.rule_id,
+                            "reason": "expired",
+                            "observed_at": timestamp,
+                            "available_at": timestamp,
+                        }
+                        context.record_event(event)
+                        bar_events.append(event)
+                    return self.handle_management(
+                        index, timestamp, next_time, row, available5, bar_events, life
+                    )
                 admission = (
                     evaluate_exit_rule(self.machine, life, rule, timestamp=timestamp)
                     if self.machine is not None
@@ -2305,6 +2452,21 @@ class ExecutionCoordinator:
             context.record_event(event)
             bar_events.append(event)
             after = self.engine.state_for(life.lifecycle_id)
+            if execution.position_after.status is PositionStatus.OPEN:
+                partial = {
+                    "kind": "partial_exit_order",
+                    "position_id": execution.position_before.position_id,
+                    "time": timestamp,
+                    "reason": reason,
+                    "fill_price": execution.price,
+                    "quantity": execution.quantity,
+                    "remaining_quantity": execution.position_after.quantity,
+                    "risk_reward": 3.0,
+                    "execution_assumptions": execution.order.execution_policy,
+                    "lifecycle_id": life.lifecycle_id,
+                }
+                context.record_event(partial)
+                bar_events.append(partial)
             if execution.position_after.status is PositionStatus.CLOSED:
                 closed = {
                     "kind": "position_closed",
@@ -2321,6 +2483,27 @@ class ExecutionCoordinator:
                 }
                 context.record_event(closed)
                 bar_events.append(closed)
+                position_intent = after.position.exit_intent if after.position is not None else None
+                if position_intent is not None:
+                    if position_intent.status is IntentStatus.TRIGGERED:
+                        self.engine.clear_exit_intent(life)
+                    else:
+                        cancelled = self.engine.cancel_exit_intent(
+                            life, reason="position_closed"
+                        )
+                        if cancelled is not None:
+                            intent_event = {
+                                "kind": "exit_intent_cancelled",
+                                "intent_id": cancelled.intent_id,
+                                "position_id": cancelled.position_id,
+                                "rule_id": cancelled.rule_id,
+                                "reason": "position_closed",
+                                "observed_at": timestamp,
+                                "available_at": timestamp,
+                            }
+                            context.record_event(intent_event)
+                            bar_events.append(intent_event)
+                self.engine.clear_pending_exit(life)
             return
         self.evaluate_position_exit_plan(
             life=life,
@@ -2375,7 +2558,9 @@ class ExecutionCoordinator:
             )
             if source_bar is not None:
                 atr = daily_atr(
-                    source_bar.session_date, {str(life.session_date): context.rows}
+                    source_bar.session_date,
+                    context.rows_by_date
+                    or {str(life.session_date): context.rows},
                 )
                 vwap_stop, _ = _or_vwap_stop_price(
                     position.direction, position.fill_price, vwap, atr
@@ -2573,6 +2758,22 @@ class ExecutionCoordinator:
                 if self.machine is not None
                 else None
             )
+            if rule.interaction_id is not None:
+                interaction = next(
+                    (
+                        item
+                        for item in self.context.interactions.values()
+                        if item.interaction_id == rule.interaction_id
+                        and item.available_at <= coerce_timestamp(timestamp)
+                        and any(
+                            coerce_timestamp(state.entry_at or life.formation_available_at)
+                            <= candle.available_at
+                            <= coerce_timestamp(timestamp)
+                            for candle in item.candles
+                        )
+                    ),
+                    None,
+                )
             if interaction is None:
                 continue
             if rule.level is None:
@@ -2592,9 +2793,32 @@ class ExecutionCoordinator:
                     ),
                 )
                 self.engine.update_position(life, position)
+            existing_intent = state.position.exit_intent
+            if (
+                existing_intent is not None
+                and existing_intent.rule_id == rule.rule_id
+                and coerce_timestamp(timestamp) >= coerce_timestamp(existing_intent.expiry)
+            ):
+                cancelled = self.engine.cancel_exit_intent(life, reason="expired")
+                self.engine.clear_pending_exit(life)
+                if cancelled is not None:
+                    event = {
+                        "kind": "exit_intent_cancelled",
+                        "intent_id": cancelled.intent_id,
+                        "position_id": cancelled.position_id,
+                        "rule_id": cancelled.rule_id,
+                        "reason": "expired",
+                        "observed_at": timestamp,
+                        "available_at": next_time,
+                    }
+                    self.context.record_event(event)
+                    bar_events.append(event)
+                continue
             if rule.mode == "fixed_target" and self.exit_rule_triggered(
                 rule, interaction=interaction, direction=life.direction, row=row
             ):
+                if rule.execution is None:
+                    raise ValueError("resolved exit rules require execution timing")
                 self._queue_exit(
                     "fixed_target", next_time, life, requested_price=rule.level
                 )
@@ -2647,6 +2871,8 @@ class ExecutionCoordinator:
                     decision_context=existing.decision_context,
                 )
                 self.engine.set_exit_intent(life, triggered)
+                if rule.execution is None:
+                    raise ValueError("resolved exit rules require execution timing")
                 self._queue_exit(
                     "conditional_exit", next_time, life, requested_price=rule.level
                 )

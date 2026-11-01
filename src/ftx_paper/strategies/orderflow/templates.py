@@ -148,6 +148,18 @@ class TradeTemplate:
 
 
 TRADE_EXITS: Mapping[str, TradeExit] = {
+    "short_to_session_low": TradeExit(
+        rule_id="short-to-session-low-exit", location=LocationTemplate.SESSION_LOW,
+        mode=ExitMode.CONDITIONAL, required=False, execution=ExitExecutionTiming(),
+        trigger="touch_after_confirmation", response=ExitResponseConfig(Direction.LONG, ResponseType.REJECTION),
+        score_direction="long", score_margin=0.0,
+    ),
+    "long_to_session_high": TradeExit(
+        rule_id="long-to-session-high-exit", location=LocationTemplate.SESSION_HIGH,
+        mode=ExitMode.CONDITIONAL, required=False, execution=ExitExecutionTiming(),
+        trigger="touch_after_confirmation", response=ExitResponseConfig(Direction.SHORT, ResponseType.REJECTION),
+        score_direction="short", score_margin=0.0,
+    ),
     "short_to_or_low": TradeExit(
         rule_id="short-to-or-low-exit", location=LocationTemplate.OR_LOW,
         mode=ExitMode.CONDITIONAL, required=False, execution=ExitExecutionTiming(),
@@ -182,7 +194,7 @@ LONG_RECOVERY_LOW = TradeTemplate(
     direction=Direction.LONG, response_type=ResponseType.REJECTION,
     response_timeframe="5m", carry_sessions=1,
     trigger_type=TriggerType.BREAKOUT,
-    exits=(TRADE_EXITS["long_to_or_high"],),
+    exits=(TRADE_EXITS["long_to_session_high"],),
     execution_conflict_group="low-long-recovery",
 )
 
@@ -220,7 +232,7 @@ TRADE_TEMPLATES: Mapping[tuple[str, str], TradeTemplate] = {
         direction=Direction.SHORT, response_type=ResponseType.REJECTION,
         response_timeframe="5m", carry_sessions=1,
         trigger_type=TriggerType.BREAKOUT,
-        exits=(TRADE_EXITS["short_to_or_low"],),
+        exits=(TRADE_EXITS["short_to_session_low"],),
         execution_conflict_group="high-short-recovery",
     ),
     ("5m_recovery_breakout", "SESSION_LOW"): LONG_RECOVERY_LOW,
@@ -264,7 +276,7 @@ TRADE_TEMPLATES: Mapping[tuple[str, str], TradeTemplate] = {
         direction=Direction.LONG, response_type=ResponseType.ACCEPTANCE,
         response_timeframe="5m", carry_sessions=1,
         trigger_type=TriggerType.BREAKOUT,
-        exits=(TRADE_EXITS["short_to_or_low"],),
+        exits=(TRADE_EXITS["long_to_session_high"],),
         stop_policy=StopPolicy.OR_VWAP,
     ),
     ("5m_acceptance_breakout", "SESSION_LOW"): TradeTemplate(
@@ -273,7 +285,7 @@ TRADE_TEMPLATES: Mapping[tuple[str, str], TradeTemplate] = {
         direction=Direction.SHORT, response_type=ResponseType.ACCEPTANCE,
         response_timeframe="5m", carry_sessions=1,
         trigger_type=TriggerType.BREAKOUT,
-        exits=(TRADE_EXITS["long_to_or_high"],),
+        exits=(),
         stop_policy=StopPolicy.OR_VWAP,
     ),
 }

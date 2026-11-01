@@ -26,6 +26,7 @@ def completed_observations(rows: list[dict[str, Any]]) -> tuple[CompletedObserva
                     identities[item.time]
                     for item in one_minute
                     if aggregate.time <= item.time <= aggregate.end_time
+                    and item.available_at <= aggregate.available_at
                 )
             output.append(CompletedObservation(
                 identity=f"aggregate:{timeframe}:{nifty_label(aggregate.time)}",

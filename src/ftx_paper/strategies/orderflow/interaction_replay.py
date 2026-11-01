@@ -12,6 +12,7 @@ from typing import Any
 
 from .context_location_replay import ContextLocationReplay
 from .interaction_detector import InteractionDetector
+from .interactions import candle_identity
 from .location_observation import LocationObservation
 from .orderflow_common import Aggregate, parse_timestamp, serialize_timestamp
 from .timestamps import NIFTY_ZONE, nifty_label, serialize_utc
@@ -154,7 +155,7 @@ def replay_interaction_response(
     """Advance independent 1m/5m detectors in one availability-ordered clock."""
     one = tuple(aggregates.get("1m", ()))
     five = tuple(aggregates.get("5m", ()))
-    all_bars = tuple(sorted((*one, *five), key=lambda item: (item.available_at, item.timeframe, item.time)))
+    all_bars = tuple(sorted(one, key=lambda item: (item.available_at, item.time)))
     observations: dict[str, tuple[LocationObservation, ...]] = {}
     for fact in context.context_location:
         values = fact.get("values", {})
@@ -225,41 +226,28 @@ def replay_interaction_response(
         if prior_value is not None and prior_value.reference is not None else None
     )
     gap_last_1m_available: datetime | None = None
-    transition_owner = OrderflowTransitionOwner(published_registry)
+    transition_owner = OrderflowTransitionOwner(
+        published_registry,
+        rows_by_date=rows_by_date or {},
+    )
     processed_formations = 0
-    clock_available: datetime | None = None
-    clock_available5: list[Aggregate] = []
-    dispatched_available5: datetime | None = None
+    observed5_available: datetime | None = None
+
+    def apply_regime_publications(as_of: datetime) -> None:
+        eligible = [
+            publication
+            for publication in regime_publications
+            if parse_timestamp(publication[0]) <= as_of
+        ]
+        if eligible:
+            transition_owner.context.regime = eligible[-1][1]
+
     for current in all_bars:
-        source = f"aggregate:{current.timeframe}:{nifty_label(current.time)}"
+        source = f"aggregate:1m:{nifty_label(current.time)}"
         current_available = current.available_at
+        next_time = serialize_utc(current.available_at)
         available1 = [item for item in one if item.available_at <= current_available]
         available5 = [item for item in five if item.available_at <= current_available]
-        if clock_available is not None and current_available != clock_available:
-            # Canonical handle_bar has a hard phase boundary: every interaction
-            # transition at the availability clock is published before policy
-            # dispatch for that same clock.
-            latest_available5 = clock_available5[-1].available_at if clock_available5 else None
-            # Defer a boundary dispatch when the next clock is publishing a
-            # new 5m bar; Canonical evaluates that bar after its transitions.
-            if latest_available5 != dispatched_available5 and (
-                not available5 or available5[-1].available_at != current_available
-            ):
-                _dispatch_structure(
-                    detector=detector,
-                    templates=templates,
-                    available5=clock_available5,
-                    available1=[item for item in one if item.available_at <= clock_available],
-                    as_of=clock_available,
-                    facts=facts,
-                    resolved_response_emitted=resolved_response_emitted,
-                    opportunity_coordinator=opportunity_coordinator,
-                    raw_rows=raw_rows,
-                    atr=atr,
-                )
-                dispatched_available5 = latest_available5
-        clock_available = current_available
-        clock_available5 = available5
         if not regime_publications:
             prior_low = published_registry.resolve_as_of("PD_LOW", current.available_at)
             prior_high = published_registry.resolve_as_of("PD_HIGH", current.available_at)
@@ -283,11 +271,14 @@ def replay_interaction_response(
                     context="opening_gap", restrictions=("causal_opening_gap",),
                 ),
             ))
+        apply_regime_publications(current_available)
         session_five = tuple(
             item for item in five if item.session_date == current.session_date
         )
         first_five = min(session_five, key=lambda item: item.time, default=None)
-        if current.timeframe == "5m" and first_five is not None and current.time == first_five.time:
+        latest5 = available5[-1] if available5 else None
+        new5 = latest5 is not None and latest5.available_at != observed5_available
+        if new5 and first_five is not None and latest5 is not None and latest5.time == first_five.time:
             regime_publications.append((
                 serialize_utc(current.available_at),
                 opening_gap_policy.regime_for(
@@ -298,8 +289,9 @@ def replay_interaction_response(
                     restrictions=("causal_opening_gap",),
                 ),
             ))
+            apply_regime_publications(current_available)
             opening_seed = opportunity_coordinator.form_opening_seed(
-                candle=current,
+                candle=latest5,
                 registry=published_registry,
                 templates=templates,
                 aggregates={
@@ -310,6 +302,11 @@ def replay_interaction_response(
                 },
                 raw_rows=raw_rows,
                 rows_by_date=rows_by_date or {},
+                regime_version=(
+                    transition_owner.context.regime.version
+                    if transition_owner.context.regime is not None
+                    else "unresolved"
+                ),
             )
             if opening_seed is not None:
                 outcome_values, formation = opening_seed
@@ -372,7 +369,8 @@ def replay_interaction_response(
                             context="opening_gap", restrictions=("causal_opening_gap",),
                         ),
                     ))
-        if available5:
+                    apply_regime_publications(current_available)
+        if current.timeframe == "1m" and available5:
             for record in deferred_vwap:
                 key = (record.location_id, record.generation)
                 if record.available_at > current_available or key in vwap_registered:
@@ -391,17 +389,34 @@ def replay_interaction_response(
             item for item in observations.get(source, ())
             if item.available_at <= current_available
         )
-        if current.timeframe == "1m":
-            transitions = detector.observe_1m(current=current, available=available1, atr=None, observations=typed)
-        else:
-            one_observations = tuple(item for key, values in observations.items() if key.startswith("aggregate:1m:") for item in values if item.available_at <= current_available)
-            available_ids = {item.observation_id for item in one_observations}
-            typed = tuple(
-                item for item in typed
-                if all(child_id in available_ids for child_id in item.child_observation_ids)
+        transitions = [
+            (transition, current)
+            for transition in detector.observe_1m(
+                current=current, available=available1, atr=None, observations=typed,
             )
-            transitions = detector.observe(current=current, available5=available5, available1=available1, atr=None, observations5=typed, observations1=one_observations)
-        for transition in transitions:
+        ]
+        if new5 and latest5 is not None:
+            source5 = f"aggregate:5m:{nifty_label(latest5.time)}"
+            one_observations = tuple(
+                item for key, values in observations.items()
+                if key.startswith("aggregate:1m:")
+                for item in values if item.available_at <= current_available
+            )
+            available_ids = {item.observation_id for item in one_observations}
+            typed5 = tuple(
+                item for item in observations.get(source5, ())
+                if item.available_at <= current_available
+                and all(child_id in available_ids for child_id in item.child_observation_ids)
+            )
+            transitions.extend(
+                (transition, latest5)
+                for transition in detector.observe(
+                    current=latest5, available5=available5, available1=available1,
+                    atr=None, observations5=typed5, observations1=one_observations,
+                )
+            )
+            observed5_available = latest5.available_at
+        for transition, event_current in transitions:
             snap = transition.interaction.snapshot()
             iid = transition.interaction.interaction_id
             observation = transition.observation
@@ -426,10 +441,14 @@ def replay_interaction_response(
                             "response_status": "CONFIRMED", "response_reason": "causal_vwap_rejection",
                             "source_observation_id": source_observation_id,
                             "evidence_ids": [candle["candle_id"]],
-                            "current_available_at": current.available_at,
+                            "current_available_at": event_current.available_at,
                         }, observed_at=candle["end_time"], available_at=candle["available_at"]))
                         break
-            if replay_mode == "FULL" and observation is not None and transition.interaction.status.value == "ACTIVE":
+            if (
+                replay_mode == "FULL"
+                and observation is not None
+                and transition.interaction.status.value == "ACTIVE"
+            ):
                 interaction_key = f"{observation.location.upper()}:{observation.timeframe}:{observation.reference_generation}"
                 decision_id = hashlib.sha256(
                     f"opportunity|{iid}|{observation.observation_id}".encode()
@@ -442,7 +461,7 @@ def replay_interaction_response(
                     "timeframe": observation.timeframe,
                     "reference_generation": observation.reference_generation,
                     "source_observation_ids": [observation.observation_id],
-                    "source_fingerprint": current.source_fingerprint,
+                    "source_fingerprint": event_current.source_fingerprint,
                     "reason": "location_interaction_observed",
                     "outcome": "observed",
                     "interaction_key": interaction_key,
@@ -459,12 +478,12 @@ def replay_interaction_response(
                     # retaining the interaction ID as its parent.
                     "location_interaction_observed",
                     f"{iid}:{observation.observation_id}",
-                    f"aggregate:{current.timeframe}:{nifty_label(current.time)}", observation_values,
+                    f"aggregate:{event_current.timeframe}:{nifty_label(event_current.time)}", observation_values,
                     observed_at=observation.observed_at,
                     available_at=observation.available_at,
                 ))
             if transition.created:
-                facts.append(_fact("interaction_created", iid, f"aggregate:{current.timeframe}:{nifty_label(current.time)}", {
+                facts.append(_fact("interaction_created", iid, f"aggregate:{event_current.timeframe}:{nifty_label(event_current.time)}", {
                     "interaction_id": iid, "location": str(transition.interaction.location),
                     "timeframe": transition.interaction.timeframe,
                     "reference_generation": transition.interaction.reference_generation,
@@ -472,8 +491,8 @@ def replay_interaction_response(
                     "band_low": transition.interaction.band_low, "band_high": transition.interaction.band_high,
                     "source_aggregate_id": observation.source_aggregate_id if observation is not None else None,
                     "source_observation_id": observation.source_observation_id if observation is not None else None,
-                    "stage": "OBSERVING_LOCATION", "evidence": [current.to_dict()],
-                }, observed_at=current.end_time, available_at=current.available_at))
+                    "stage": "OBSERVING_LOCATION", "evidence": [event_current.to_dict()],
+                }, observed_at=event_current.end_time, available_at=event_current.available_at))
             if transition.interaction.status.value == "ENDED" and transition.departed:
                 facts.append(_fact("interaction_ended", iid, iid, {
                     "interaction_id": iid, "location": str(transition.interaction.location),
@@ -488,6 +507,71 @@ def replay_interaction_response(
                     "terminal_close_side": snap["terminal_close_side"],
                 }, observed_at=snap["candles"][-1]["end_time"],
                     available_at=snap["candles"][-1]["available_at"]))
+        if new5 and latest5 is not None:
+            for life in tuple(transition_owner.context.opportunities.values()):
+                if (
+                    not life.active
+                    or life.candidate_invalidated
+                    or not getattr(life, "episode_confirmed", True)
+                    or not transition_owner.execution_owner.setup_invalidated_by_close(
+                        life, close=latest5.close
+                    )
+                ):
+                    continue
+                invalidation_events: list[dict[str, Any]] = []
+                transition_owner.execution_owner.invalidate_opportunity(
+                    life,
+                    timestamp=serialize_utc(current.end_time),
+                    observed_at=latest5.end_time,
+                    available_at=latest5.available_at,
+                    bar_events=invalidation_events,
+                )
+                facts.append(_fact(
+                    "setup_invalidated",
+                    life.lifecycle_id,
+                    life.lifecycle_id,
+                    {
+                        "lifecycle_id": life.lifecycle_id,
+                        "reason": "setup_invalidated",
+                        "boundary": life.failure_boundary,
+                    },
+                    observed_at=latest5.end_time,
+                    available_at=latest5.available_at,
+                ))
+        if available5:
+            new_confirmation_context = (
+                latest5 is not None
+                and candle_identity(latest5)
+                != transition_owner.context.last_confirmation_context_time
+            )
+            _dispatch_structure(
+                detector=detector,
+                templates=templates,
+                available5=available5,
+                available1=available1,
+                as_of=available5[-1].available_at,
+                new_confirmation_context=new_confirmation_context,
+                facts=facts,
+                resolved_response_emitted=resolved_response_emitted,
+                published_resolved_responses=transition_owner.context.published_resolved_responses,
+                opportunity_coordinator=opportunity_coordinator,
+                raw_rows=raw_rows,
+                atr=atr,
+                regime_version=(
+                    transition_owner.context.regime.version
+                    if transition_owner.context.regime is not None
+                    else "unresolved"
+                ),
+            )
+            if new_confirmation_context and latest5 is not None:
+                transition_owner.context.last_confirmation_context_time = candle_identity(
+                    latest5
+                )
+            transition_owner.context.published_resolved_responses.update(
+                (interaction_id, template_id)
+                for interaction_id, template_id, _evidence_ids
+                in resolved_response_emitted
+            )
         transition_owner.context.interactions = {
             iid: state.evaluation_snapshot()
             for iid, state in detector.interactions.items()
@@ -504,6 +588,7 @@ def replay_interaction_response(
                 new_formations,
                 regime_publications=tuple(regime_publications),
                 decision_scores=scores,
+                decision_at=next_time,
             )
             processed_formations += len(new_formations)
         if current.timeframe == "1m" and opportunity_coordinator.formations:
@@ -511,24 +596,9 @@ def replay_interaction_response(
                 tuple(opportunity_coordinator.formations),
                 index=one.index(current),
                 timestamp=serialize_utc(current.end_time),
-                next_time=serialize_utc(current.available_at),
+                next_time=next_time,
                 row=current.to_dict(),
                 available5=available5,
-            )
-    if clock_available is not None:
-        latest_available5 = clock_available5[-1].available_at if clock_available5 else None
-        if latest_available5 != dispatched_available5:
-            _dispatch_structure(
-                detector=detector,
-                templates=templates,
-            available5=clock_available5,
-            available1=[item for item in one if item.available_at <= clock_available],
-            as_of=clock_available,
-            facts=facts,
-            resolved_response_emitted=resolved_response_emitted,
-                opportunity_coordinator=opportunity_coordinator,
-                raw_rows=raw_rows,
-                atr=atr,
             )
     lifecycle_kinds = {
         "or_directional_seed",
@@ -555,11 +625,14 @@ def _dispatch_structure(
     available5: Sequence[Aggregate],
     available1: Sequence[Aggregate],
     as_of: datetime,
+    new_confirmation_context: bool,
     facts: list[dict[str, Any]],
     resolved_response_emitted: set[tuple[str, str, tuple[str, ...]]],
+    published_resolved_responses: set[tuple[str, str]] | None = None,
     opportunity_coordinator: OpportunityCoordinator,
     raw_rows: Sequence[Mapping[str, Any]],
     atr: float | None,
+    regime_version: str = "unresolved",
 ) -> None:
     """Run the canonical structure phase after all interaction publications."""
     dispatch_start = len(facts)
@@ -581,12 +654,38 @@ def _dispatch_structure(
         fact["_publication_available_at"] = serialize_utc(as_of)
         facts.append(fact)
 
+    latest = available5[-1]
     for state in reversed(tuple(detector.interactions.values())):
         interaction = state.evaluation_snapshot()
-        if interaction.status.value != "ACTIVE" or interaction.location == "VWAP":
+        if interaction.location == "VWAP":
             continue
         iid = interaction.interaction_id
         is_pd = interaction.location in {"PD_LOW", "PD_HIGH"}
+        response_already_published = any(
+            interaction_id == iid
+            for interaction_id, _template_id, _evidence_ids
+            in resolved_response_emitted
+        ) or any(
+            interaction_id == iid
+            for interaction_id, _template_id
+            in (published_resolved_responses or ())
+        )
+        if interaction.creation_candle.available_at > latest.available_at:
+            continue
+        if interaction.status.value != "ACTIVE" and (
+            is_pd
+            or interaction.terminal_candle_id != candle_identity(latest)
+            or not new_confirmation_context
+            or response_already_published
+        ):
+            continue
+        if interaction.status.value not in {"ACTIVE", "ENDED"}:
+            continue
+        # Canonical re-evaluates standard locations only when a new completed
+        # 5m confirmation context becomes available. PD role evaluation is the
+        # intentional exception and may continue on repeated clocks.
+        if not new_confirmation_context and not is_pd:
+            continue
         policy = PDPolicy() if is_pd else StandardLocationPolicy()
         selected = policy.templates_for(tuple(templates.values()), interaction)
         if not selected:
@@ -660,6 +759,7 @@ def _dispatch_structure(
                 aggregates={"1m": list(available1), "5m": list(available5)},
                 raw_rows=raw_rows,
                 atr=atr,
+                regime_version=regime_version,
             )
             if formation is not None:
                 facts.append(_fact(
