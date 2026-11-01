@@ -257,7 +257,9 @@ class OrderflowReplayEngine:
             raise ValueError("replay rows contain a session mismatch")
         artifact, events = _observation_artifact(rows)
         adapter = PaperFeatureAdapter(rows_by_date, prior_values=_prior_values(rows_by_date))
-        evidence_events: list[tuple[datetime, dict[str, Any], dict[str, Any] | None]] = []
+        evidence_events: list[
+            tuple[datetime, dict[str, Any], dict[str, Any] | None, dict[str, Any]]
+        ] = []
         latest_5m: dict[str, Any] | None = None
         prefix_aggregates: dict[str, list[dict[str, Any]]] = {"1m": [], "5m": []}
         for position, event in enumerate(events, start=1):
@@ -277,6 +279,7 @@ class OrderflowReplayEngine:
                     produce_evidence(prefix, session_date=session_date, adapter=adapter),
                 )["evidence"],
                 latest_5m,
+                {**event.value, "timeframe": event.timeframe},
             ))
 
         event_index = 0

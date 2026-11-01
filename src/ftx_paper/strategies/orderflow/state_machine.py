@@ -33,7 +33,9 @@ class ReplayMachine:
         self,
         rows: list[dict[str, Any]],
         *,
-        evidence_events: Iterable[tuple[datetime | str, dict[str, Any], dict[str, Any] | None]],
+        evidence_events: Iterable[
+            tuple[datetime | str, dict[str, Any], dict[str, Any] | None, dict[str, Any]]
+        ],
         evidence_at_clock: EvidenceAtClock,
         session_date: str,
         interaction_response: Sequence[dict[str, Any]] = (),
@@ -77,14 +79,26 @@ class ReplayMachine:
         interaction_response: list[dict[str, Any]] = []
         emitted_interaction_keys: set[tuple[str, str]] = set()
         ordinary_context_ref = self._state.ordinary_context_ref
+        available_1m: list[dict[str, Any]] = []
+        available_5m: list[dict[str, Any]] = []
         for index, row in enumerate(self._rows):
             clock_instant = parse_session_timestamp(self._session_date, row["time"])
             clock = nifty_label(clock_instant)
+            previous_5m = current_5m
             while (
                 event_index < len(self._events)
                 and coerce_timestamp(self._events[event_index][0]) <= clock_instant
             ):
-                _, _, current_5m = self._events[event_index]
+                _, _, latest_5m, aggregate = self._events[event_index]
+                available = {
+                    "time": aggregate.get("time"),
+                    "available_at": aggregate.get("available_at"),
+                }
+                if aggregate.get("timeframe") == "1m":
+                    available_1m.append(available)
+                elif aggregate.get("timeframe") == "5m":
+                    available_5m.append(available)
+                current_5m = latest_5m
                 event_index += 1
             evidence = dict(self._evidence_at_clock(clock))
             supplied = (
@@ -134,7 +148,29 @@ class ReplayMachine:
                         "version": candidate["version"],
                     }
             current_events = tuple(newly_available)
-            records.append(self._record(index, row, evidence, current_5m, ordinary_context_ref, current_events))
+            decision_clock = {
+                "decision_at": clock,
+                "next_decision_at": (
+                    session_minute(self._session_date, self._rows[index + 1]["time"])
+                    if index + 1 < len(self._rows) else clock
+                ),
+                "source_1m_time": str(row["time"])[:5],
+                "available_1m": [dict(item) for item in available_1m],
+                "available_5m": [dict(item) for item in available_5m],
+                "new_5m": current_5m != previous_5m,
+                "previous_5m_available_at": (
+                    previous_5m.get("available_at")
+                    if isinstance(previous_5m, dict) else None
+                ),
+                "updated_5m_available_at": (
+                    current_5m.get("available_at")
+                    if isinstance(current_5m, dict) else None
+                ),
+            }
+            records.append(self._record(
+                index, row, evidence, current_5m, ordinary_context_ref, current_events,
+                decision_clock,
+            ))
             self._state = ReplayState(index, current_5m, evidence, ordinary_context_ref, (), tuple(interaction_response))
         return records, self._state
 
@@ -249,6 +285,7 @@ class ReplayMachine:
         latest_5m: dict[str, Any] | None,
         ordinary_context_ref: dict[str, str] | None,
         interaction_response: Sequence[dict[str, Any]],
+        decision_clock: dict[str, Any],
     ) -> dict[str, Any]:
         timestamp = session_minute(self._session_date, row["time"])
         next_time = (
@@ -277,6 +314,7 @@ class ReplayMachine:
             "setup_opportunities": [],
             "ordinary_context_ref": ordinary_context_ref,
             "capture_scope": "orderflow_state_machine",
+            "decision_clock": decision_clock,
         }
 
 
