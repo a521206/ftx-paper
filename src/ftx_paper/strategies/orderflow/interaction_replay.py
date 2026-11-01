@@ -18,6 +18,7 @@ from .timestamps import nifty_label, serialize_utc
 from .state_machine_types import LocationRegistry
 from .templates import TRADE_TEMPLATES, TradeTemplate
 from .policies import PDPolicy, StandardLocationPolicy
+from .opportunity_coordinator import OpportunityCoordinator, opening_gap_direction
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,7 +134,9 @@ def _publish_replaced_interactions(
 def replay_interaction_response(
     aggregates: Mapping[str, Sequence[Aggregate]], context: ContextLocationReplay,
     registry: LocationRegistry, *, templates: Mapping[tuple[str, str], TradeTemplate] = TRADE_TEMPLATES,
-    replay_mode: str = "FULL",
+    replay_mode: str = "FULL", atr: float | None = None,
+    fill_permission_margin: float | None = 0.05,
+    prior_volume: tuple[float, ...] = (),
 ) -> InteractionResponseReplay:
     """Advance independent 1m/5m detectors in one availability-ordered clock."""
     one = tuple(aggregates.get("1m", ()))
@@ -191,6 +194,9 @@ def replay_interaction_response(
     vwap_emitted: set[str] = set()
     published_records: set[tuple[str, int]] = set()
     resolved_response_emitted: set[tuple[str, str, tuple[str, ...]]] = set()
+    opportunity_coordinator = OpportunityCoordinator(
+        fill_permission_margin=fill_permission_margin,
+    )
     clock_available: datetime | None = None
     clock_available5: list[Aggregate] = []
     dispatched_available5: datetime | None = None
@@ -213,13 +219,49 @@ def replay_interaction_response(
                     detector=detector,
                     templates=templates,
                     available5=clock_available5,
+                    available1=[item for item in one if item.available_at <= clock_available],
                     as_of=clock_available,
                     facts=facts,
                     resolved_response_emitted=resolved_response_emitted,
+                    opportunity_coordinator=opportunity_coordinator,
+                    atr=atr,
                 )
                 dispatched_available5 = latest_available5
         clock_available = current_available
         clock_available5 = available5
+        if current.timeframe == "5m":
+            opening_seed = opportunity_coordinator.form_opening_seed(
+                candle=current,
+                registry=published_registry,
+                templates=templates,
+                aggregates={
+                    timeframe: list(values)
+                    for timeframe, values in (
+                        ("1m", available1), ("5m", available5),
+                    )
+                },
+                atr=atr,
+                opening_gap_direction=opening_gap_direction(current, published_registry),
+                prior_volume=prior_volume,
+            )
+            if opening_seed is not None:
+                outcome_values, formation = opening_seed
+                facts.append(_fact(
+                    "opportunity_outcome",
+                    formation.identity,
+                    str(outcome_values["interaction_id"]),
+                    outcome_values,
+                    observed_at=formation.observed_at,
+                    available_at=formation.available_at,
+                ))
+                facts.append(_fact(
+                    "lifecycle_formed",
+                    formation.identity,
+                    formation.lifecycle_id,
+                    formation.values,
+                    observed_at=formation.observed_at,
+                    available_at=formation.available_at,
+                ))
         if available5:
             for record in deferred_vwap:
                 key = (record.location_id, record.generation)
@@ -342,16 +384,21 @@ def replay_interaction_response(
             _dispatch_structure(
                 detector=detector,
                 templates=templates,
-                available5=clock_available5,
-                as_of=clock_available,
-                facts=facts,
-                resolved_response_emitted=resolved_response_emitted,
+            available5=clock_available5,
+            available1=[item for item in one if item.available_at <= clock_available],
+            as_of=clock_available,
+            facts=facts,
+            resolved_response_emitted=resolved_response_emitted,
+            opportunity_coordinator=opportunity_coordinator,
+            atr=atr,
             )
-    interaction_facts = tuple(
-        item for item in facts if item["kind"] != "opportunity_outcome"
-    )
+    lifecycle_kinds = {
+        "opportunity_outcome", "lifecycle_formed", "setup_invalidated",
+        "setup_expired", "setup_superseded", "opportunity_timeout",
+    }
+    interaction_facts = tuple(item for item in facts if item["kind"] not in lifecycle_kinds)
     opportunity_facts = tuple(
-        item for item in facts if item["kind"] == "opportunity_outcome"
+        item for item in facts if item["kind"] in lifecycle_kinds
     )
     return InteractionResponseReplay(interaction_facts, opportunity_facts)
 
@@ -361,9 +408,12 @@ def _dispatch_structure(
     detector: InteractionDetector,
     templates: Mapping[tuple[str, str], TradeTemplate],
     available5: Sequence[Aggregate],
+    available1: Sequence[Aggregate],
     as_of: datetime,
     facts: list[dict[str, Any]],
     resolved_response_emitted: set[tuple[str, str, tuple[str, ...]]],
+    opportunity_coordinator: OpportunityCoordinator,
+    atr: float | None,
 ) -> None:
     """Run the canonical structure phase after all interaction publications."""
     dispatch_start = len(facts)
@@ -456,6 +506,23 @@ def _dispatch_structure(
                 "evidence_ids": [item.time for item in outcome.evidence],
                 "evidence_lineage": [dataclasses.asdict(item) for item in outcome.evidence_lineage],
             }, observed_at=outcome.observed_at, available_at=outcome.available_at))
+            formation = opportunity_coordinator.form_resolved(
+                interaction=interaction,
+                evaluation=evaluation,
+                outcome=outcome,
+                as_of=as_of,
+                aggregates={"1m": list(available1), "5m": list(available5)},
+                atr=atr,
+            )
+            if formation is not None:
+                facts.append(_fact(
+                    "lifecycle_formed",
+                    formation.identity,
+                    formation.lifecycle_id,
+                    formation.values,
+                    observed_at=formation.observed_at,
+                    available_at=formation.available_at,
+                ))
             if response_to_publish is not None and not is_pd:
                 append_policy_fact("response_confirmed", emission_identity("response_confirmed", identity), iid, {
                     "interaction_id": iid, "location": interaction.location,
@@ -464,6 +531,4 @@ def _dispatch_structure(
                     "direction": response_to_publish.direction.value,
                     "evidence_ids": list(response_to_publish.evidence_ids),
                 }, observed_at=response_to_publish.observed_at, available_at=response_to_publish.available_at)
-
-
 __all__ = ["InteractionResponseReplay", "replay_interaction_response"]

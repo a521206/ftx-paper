@@ -249,6 +249,7 @@ class OrderflowReplayEngine:
         *,
         session_date: str,
         include_interactions: bool = False,
+        fill_permission_margin: float | None = 0.05,
     ) -> dict[str, Any]:
         if not rows:
             raise ValueError("replay session has no rows")
@@ -323,6 +324,16 @@ class OrderflowReplayEngine:
             }
             interaction_replay = replay_interaction_response(
                 aggregates, phase4_replay, _location_registry(final_evidence, session_date),
+                atr=phase4_evidence.atr.value,
+                fill_permission_margin=fill_permission_margin,
+                prior_volume=tuple(
+                    float(row["volume"])
+                    for date in sorted(
+                        value for value in rows_by_date if value < session_date
+                    )[-5:]
+                    for row in rows_by_date[date]
+                    if row.get("volume") is not None
+                ),
             )
             interaction_response = interaction_replay.facts
         machine = ReplayMachine(
@@ -380,8 +391,21 @@ class OrderflowReplayEngine:
             "evidence": final_evidence,
         }
 
-    def replay_session(self, session_date: str, *, runtime_dir: Path, include_interactions: bool = False) -> dict[str, Any]:
+    def replay_session(
+        self,
+        session_date: str,
+        *,
+        runtime_dir: Path,
+        include_interactions: bool = False,
+        fill_permission_margin: float | None = 0.05,
+    ) -> dict[str, Any]:
         if date.fromisoformat(session_date).isoformat() != session_date:
             raise ValueError("date must use ISO YYYY-MM-DD format")
         rows, rows_by_date = _load_session_rows(session_date, runtime_dir)
-        return self.replay(rows, rows_by_date, session_date=session_date, include_interactions=include_interactions)
+        return self.replay(
+            rows,
+            rows_by_date,
+            session_date=session_date,
+            include_interactions=include_interactions,
+            fill_permission_margin=fill_permission_margin,
+        )

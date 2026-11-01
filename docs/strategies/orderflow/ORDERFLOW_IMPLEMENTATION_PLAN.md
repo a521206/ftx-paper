@@ -742,8 +742,9 @@ Phase 4 implementation record:
   supply Phase 4 evidence through the evidence adapter before claiming parity.
 - `phase5_parity_harness.py` compares explicit source/context streams and keeps
   missing streams unavailable; it no longer reconstructs facts from snapshots.
-- `phase6_parity_harness.py` no longer offers snapshot-based Phase 5 fallback
-  generation; Paper lifecycle facts must be supplied explicitly.
+- `compare_canonical_replay.py` now includes the Phase 6 opportunity-lifecycle
+  stream and compares explicit Paper lifecycle facts without reconstructing
+  them from snapshots.
 
 ## Phase 4.5: Add The Causal Interaction Replay Boundary
 
@@ -938,10 +939,21 @@ Current Phase 6 verification record:
   idempotence.
 - Ruff, Pyright, and `git diff --check` pass for the changed Paper scope.
 - The canonical-vs-Paper interaction/response replay now reports Phase 4.5
-  `MATCHED` for both source-matched dates. A dedicated Phase 6 lifecycle replay
-  gate remains separate and must be rerun after any lifecycle changes. No
-  runtime/database parity claim is made; Phase 9 remains the host integration
-  and persistence gate.
+  `MATCHED` for both source-matched dates. The integrated Phase 6 lifecycle
+  replay gate reports accepted `INPUT_VARIANCE` for `2026-09-29` and
+  `2026-10-01`; the remaining differences are bounded ATR-dependent lifecycle
+  geometry, not control-flow or candidate-numbering mismatches.
+- Opening seeds are evaluated exactly once on the first completed 5m candle;
+  later 5m candles cannot become invented opening seeds. Admission margin is
+  coordinator-configured, normal lifecycle scoring uses the latest causally
+  available 5m context, formation uses the structure confirmation clock, and
+  opening score overrides use the configured margin.
+- Canonical lifecycle projection includes explicitly recorded opening seed
+  lifecycles and orders records by candidate number, keeping the canonical and
+  Paper candidate streams aligned. Regression coverage includes this projection
+  and the opening lifecycle behavior; the focused orderflow suite passes.
+- No runtime/database parity claim is made; Phase 9 remains the host
+  integration and persistence gate.
 
 ## Phase 7: Port And Verify Intents, Admission, Allocation, And Execution
 

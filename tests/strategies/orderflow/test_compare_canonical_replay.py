@@ -1,6 +1,8 @@
 import json
 
 from scripts.orderflow.compare_canonical_replay import (
+    _canonical_phase6_records,
+    _compare_phase6,
     _compare_phase45,
     _compare_phase35,
     _bounded_atr_dependent_difference,
@@ -10,6 +12,38 @@ from scripts.orderflow.compare_canonical_replay import (
     _normalize_observation_payload,
 )
 from scripts.orderflow.orderflow_replay import _observation_rows
+
+
+def test_phase6_projection_merges_explicit_opening_lifecycle_from_records() -> None:
+    normal = {
+        "kind": "lifecycle_formed",
+        "observed_at": "2026-10-01T03:50:00Z",
+        "available_at": "2026-10-01T03:51:00Z",
+        "identity": "normal",
+        "causal_parent_id": "interaction-1",
+        "values": {"lifecycle_id": "lifecycle-2", "candidate_id": "candidate-2"},
+        "unavailable": [],
+    }
+    opening = {
+        "kind": "lifecycle_formed",
+        "location": "OR_LOW",
+        "observed_at": "2026-10-01T03:45:00Z",
+        "available_at": "2026-10-01T03:50:00Z",
+        "lifecycle_id": "lifecycle-1",
+        "candidate_id": "candidate-1",
+        "causal_parent_id": None,
+    }
+
+    records = _canonical_phase6_records(
+        {
+            "parity_phase_facts": {"opportunity_lifecycle": [normal]},
+            "records": [opening],
+        },
+        "2026-10-01",
+    )
+
+    assert records is not None
+    assert [item["values"]["candidate_id"] for item in records] == ["candidate-2", "candidate-1"]
 
 
 def test_phase35_comparison_projection_matches_canonical_schema() -> None:
@@ -253,3 +287,97 @@ def test_phase45_comparison_ignores_producer_identity_artifacts(tmp_path) -> Non
 
     assert result["status"] == "MATCHED"
     assert result["ignored_producer_metadata"][0]["canonical_identity"] != result["ignored_producer_metadata"][0]["paper_identity"]
+
+
+def test_phase6_comparison_compares_explicit_lifecycle_facts(tmp_path) -> None:
+    record = {
+        "kind": "lifecycle_formed",
+        "occurred_at": "2026-10-01T03:50:00Z",
+        "observed_at": "2026-10-01T03:50:00Z",
+        "available_at": "2026-10-01T03:51:00Z",
+        "identity": "opportunity-1",
+        "causal_parent_id": "interaction-1",
+        "values": {"status": "FORMED", "reason": "causal_rejection"},
+        "unavailable": [],
+    }
+    artifact = tmp_path / "phase6.json"
+    artifact.write_text(
+        json.dumps({"sessions": {"2026-10-01": {"parity_phase_facts": {"opportunity_lifecycle": [record]}}}}),
+        encoding="utf-8",
+    )
+
+    result = _compare_phase6(
+        artifact,
+        {"parity_phase_facts": {"opportunity_lifecycle": [record]}},
+        "2026-10-01",
+    )
+
+    assert result == {"status": "MATCHED"}
+
+
+def test_phase6_comparison_preserves_formation_before_outcome(tmp_path) -> None:
+    formation = {
+        "kind": "lifecycle_formed",
+        "occurred_at": "2026-10-01T03:50:00Z",
+        "observed_at": "2026-10-01T03:50:00Z",
+        "available_at": "2026-10-01T03:51:00Z",
+        "identity": "opportunity-1",
+        "causal_parent_id": "lifecycle-1",
+        "values": {"lifecycle_id": "lifecycle-1", "stage": "RESPONSE_CONFIRMED"},
+        "unavailable": [],
+    }
+    outcome = {
+        **formation,
+        "kind": "lifecycle_formed",
+        "values": {"status": "FORMED", "reason": "causal_rejection"},
+    }
+    artifact = tmp_path / "phase6-formation.json"
+    artifact.write_text(
+        json.dumps({"sessions": {"2026-10-01": {"parity_phase_facts": {
+            "opportunity_lifecycle": [outcome, formation],
+        }}}}),
+        encoding="utf-8",
+    )
+
+    result = _compare_phase6(
+        artifact,
+        {"parity_phase_facts": {"opportunity_lifecycle": [outcome, formation]}},
+        "2026-10-01",
+    )
+
+    assert result == {"status": "MATCHED"}
+
+
+def test_phase6_comparison_rejects_missing_canonical_records(tmp_path) -> None:
+    artifact = tmp_path / "phase6-missing.json"
+    artifact.write_text(
+        json.dumps({"sessions": {"2026-10-01": {"records": []}}}),
+        encoding="utf-8",
+    )
+
+    result = _compare_phase6(
+        artifact,
+        {"parity_phase_facts": {"opportunity_lifecycle": []}},
+        "2026-10-01",
+    )
+
+    assert result == {
+        "status": "INCOMPLETE",
+        "stream": "opportunity_lifecycle",
+        "reason": "canonical lifecycle records are unavailable",
+    }
+
+    artifact.write_text(
+        json.dumps({"sessions": {"2026-10-01": {}}}),
+        encoding="utf-8",
+    )
+    result = _compare_phase6(
+        artifact,
+        {"parity_phase_facts": {"opportunity_lifecycle": []}},
+        "2026-10-01",
+    )
+    assert result == {
+        "status": "INCOMPLETE",
+        "stream": "opportunity_lifecycle",
+        "reason": "canonical lifecycle records are unavailable",
+    }

@@ -2,11 +2,15 @@ from types import SimpleNamespace
 
 from ftx_paper.strategies.orderflow.location_geometry import LocationBand
 from ftx_paper.strategies.orderflow.opportunity import (
+    DirectionalResponse,
+    OpportunityOutcome,
     OpportunityOutcomeStatus,
     evaluate_response,
 )
+from ftx_paper.strategies.orderflow.opportunity_coordinator import OpportunityCoordinator
+from ftx_paper.strategies.orderflow.policies.base import HypothesisEvaluation
 from ftx_paper.strategies.orderflow.orderflow_common import Aggregate
-from ftx_paper.strategies.orderflow.templates import LONG_RECOVERY_LOW
+from ftx_paper.strategies.orderflow.templates import Direction, LONG_RECOVERY_LOW
 from ftx_paper.strategies.orderflow.timestamps import parse_nifty_label
 
 
@@ -96,3 +100,43 @@ def test_unavailable_confirmation_evidence_is_not_evaluated() -> None:
 
     assert outcome.status is OpportunityOutcomeStatus.PENDING
     assert outcome.reason == "response_window_open"
+
+
+def test_opportunity_coordinator_forms_one_canonical_lifecycle() -> None:
+    contact = bar("09:30", 99.4, 100.0, 99.0, 99.5)
+    confirmation = bar("09:35", 99.8, 100.5, 99.2, 100.0)
+    response = DirectionalResponse(
+        Direction.LONG, "OR_LOW", 100.0, 100.5, 99.0, 100.0,
+        ("interaction-1", confirmation.time), confirmation.end_time,
+        confirmation.available_at, band=LocationBand(99.0, 100.0),
+        evidence=(contact, confirmation),
+    )
+    outcome = OpportunityOutcome(
+        OpportunityOutcomeStatus.RESOLVED, "causal_rejection", response.observed_at,
+        response.available_at, (contact, confirmation), response,
+        policy_version=LONG_RECOVERY_LOW.policy_version,
+        template=LONG_RECOVERY_LOW, as_of=confirmation.available_at,
+    )
+    evaluation = HypothesisEvaluation(
+        LONG_RECOVERY_LOW, outcome, "canonical-identity", selected=True,
+    )
+    interaction_value = interaction(contact)
+    coordinator = OpportunityCoordinator(fill_permission_margin=None)
+
+    first = coordinator.form_resolved(
+        interaction=interaction_value, evaluation=evaluation, outcome=outcome,
+        as_of=confirmation.available_at,
+        aggregates={"1m": [], "5m": [contact, confirmation]}, atr=1.0,
+    )
+    duplicate = coordinator.form_resolved(
+        interaction=interaction_value, evaluation=evaluation, outcome=outcome,
+        as_of=confirmation.available_at,
+        aggregates={"1m": [], "5m": [contact, confirmation]}, atr=1.0,
+    )
+
+    assert first is not None
+    assert first.identity == "canonical-identity"
+    assert first.values["lifecycle_id"] == "lifecycle-2026-10-01-NIFTY-1m_5m-long-candidate-1"
+    assert first.values["strategy"] == "orderflow-1m_5m"
+    assert first.values["context_candle_id"] == contact.time
+    assert duplicate is None

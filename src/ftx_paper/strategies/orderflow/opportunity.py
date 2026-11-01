@@ -94,7 +94,7 @@ def opportunity_identity(*, session_date: str, instrument: str, direction: Direc
         nifty_label(value) if isinstance(value, datetime) else str(value)
         for value in response_evidence_ids
     )
-    fields = (session_date, instrument, direction.value, interaction_id, str(reference_generation), *([template_id] if template_id else []), *evidence_ids, serialize_utc(coerce_timestamp(formation_at)), serialize_utc(coerce_timestamp(formation_available_at)))
+    fields = (session_date, instrument, direction.value, interaction_id, str(reference_generation), *([template_id] if template_id else []), *evidence_ids, nifty_label(coerce_timestamp(formation_at)), nifty_label(coerce_timestamp(formation_available_at)))
     return "|".join(fields)
 
 
@@ -196,13 +196,13 @@ def identify_opportunity(template: TradeTemplate, interaction: Any, bars: Sequen
 def form_opportunity(response: DirectionalResponse, context: OpportunityContext, template: TradeTemplate, *, formation_available_at: str | None = None, decision_context_required: bool = True) -> tuple[SetupOpportunity, StructuralSetup]:
     if template.direction is not response.direction:
         raise ValueError("trade template direction does not match response direction")
-    available = formation_available_at or response.available_at
+    available = coerce_timestamp(formation_available_at or response.available_at)
     if available < response.available_at:
         raise ValueError("formation availability cannot precede response availability")
     failure = context.failure_boundary if context.failure_boundary is not None else response.invalidation_boundary
     entry = response.entry_boundary or response.structure_boundary
     response_episode = context.response_episode_id or f"response-episode:{context.session_date}:{context.instrument}:{template.template_id}:{context.location_interaction_id or context.lifecycle_id}"
-    group = f"execution-group:{context.session_date}:{context.instrument}:{template.execution_conflict_group}:{available}" if template.execution_conflict_group else response_episode
+    group = f"execution-group:{context.session_date}:{context.instrument}:{template.execution_conflict_group}:{serialize_utc(available)}" if template.execution_conflict_group else response_episode
     lineage = tuple(LifecycleEvidenceRef(ref.evidence_id, "5m", ref.observed_at, ref.available_at, "", 0) for ref in response.evidence_lineage)
     opportunity = SetupOpportunity(context.lifecycle_id, response.direction, context.session_date, context.instrument, context.strategy, response.observed_at, available, context.candidate_id, context.parent_context, response.anchor, response.reference_level, context.context_candle, response.structure_boundary, failure, policy_version=context.policy_version, reference_generation=context.reference_generation, causal_identity=context.causal_identity, location_interaction_id=context.location_interaction_id, opening_interaction_kind=context.opening_interaction_kind, opening_policy_version=context.opening_policy_version, template_id=template.template_id, response_episode_id=response_episode, execution_group_id=group, clock=context.clock, decision_context_required=decision_context_required, origin_evidence_id=response.evidence_ids[0] if response.evidence_ids else None, response_evidence_ids=response.evidence_ids, response_evidence_lineage=lineage)
     setup = StructuralSetup(context.candidate_id, f"{context.candidate_id}.template-{template.version}", context.regime_version, response.direction.value, "5m_acceptance_breakout" if template.response_type is ResponseType.ACCEPTANCE else "5m_recovery_breakout", entry, entry, context.context_candle.low if response.direction is Direction.LONG else context.context_candle.high, context.context_candle.low if response.direction is Direction.LONG else context.context_candle.high, failure, parse_nifty_label(f"{context.session_date}T{template.expiry_at}"), required_confirmation=template.required_confirmation, parent_context_id=context.parent_context.context_id if context.parent_context else None, parent_context_version=context.parent_context.version if context.parent_context else None, context_reference_level=response.reference_level, lifecycle_id=context.lifecycle_id, template=template)

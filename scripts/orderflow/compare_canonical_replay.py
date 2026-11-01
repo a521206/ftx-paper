@@ -45,11 +45,17 @@ PHASE3_FIELDS = (
     "source_fingerprint", "aggregates", "source_gaps", "issues", "session_boundaries",
 )
 PHASE4_STREAMS = ("source_observation", "context_location")
+PHASE6_STREAMS = ("opportunity_lifecycle",)
+PHASE6_EVENT_KINDS = frozenset({
+    "lifecycle_formed", "setup_invalidated",
+    "setup_expired", "setup_superseded", "opportunity_timeout",
+})
 MIN_COMPARISON_DATE = date(2026, 9, 21)
 _CAUSAL_TIMESTAMP_KEYS = frozenset({
     "as_of", "available_at", "current_available_at", "end_time", "formation_at",
     "formation_available_at", "observed_at", "occurred_at", "response_available_at",
-    "response_observed_at", "causal_available_at", "causal_observed_at", "time",
+    "response_observed_at", "causal_available_at", "causal_observed_at",
+    "context_candle_available_at", "context_candle_id", "response_candle_id", "time",
 })
 _TRANSPORT_METADATA_KEYS = frozenset({
     "identity", "neutral_event_key", "event_id", "sequence", "stream_sequence",
@@ -534,6 +540,189 @@ def _compare_phase45(canonical_path: Path, paper: dict[str, Any], session_date: 
         return {"status": "INCOMPLETE", "stream": "interaction_response", "reason": reason}
 
 
+def _canonical_phase6_records(session: Mapping[str, Any], session_date: str) -> list[dict[str, Any]] | None:
+    facts = session.get("parity_phase_facts")
+    lifecycle_facts = facts.get("opportunity_lifecycle") if isinstance(facts, Mapping) else None
+    if isinstance(lifecycle_facts, list) and lifecycle_facts:
+        projected = [dict(item) for item in lifecycle_facts if isinstance(item, Mapping)]
+        raw_records = session.get("records")
+        if not isinstance(raw_records, list):
+            raw_records = session.get("replay_records")
+        if not isinstance(raw_records, list):
+            report = session.get("report_evidence")
+            raw_records = report.get("records") if isinstance(report, Mapping) else None
+        if isinstance(raw_records, list):
+            opening_records = [
+                item for item in raw_records
+                if isinstance(item, Mapping)
+                and item.get("kind") == "lifecycle_formed"
+                and str(
+                    item.get("location")
+                    or (item.get("values") or {}).get("location", "")
+                ).startswith("OR_")
+            ]
+            opening_projection = _canonical_phase6_records(
+                {"records": opening_records, "diagnostic": session.get("diagnostic")},
+                session_date,
+            )
+            existing = {
+                str(
+                    item.get("values", {}).get("lifecycle_id")
+                    if isinstance(item.get("values"), Mapping)
+                    else item.get("lifecycle_id")
+                )
+                for item in projected
+                if item.get("identity") is not None
+            }
+            projected.extend(
+                item for item in opening_projection or ()
+                if str(
+                    item.get("values", {}).get("lifecycle_id")
+                    if isinstance(item.get("values"), Mapping)
+                    else item.get("lifecycle_id")
+                ) not in existing
+            )
+        return projected
+
+    raw_records = session.get("records")
+    if not isinstance(raw_records, list):
+        report = session.get("report_evidence")
+        raw_records = report.get("records") if isinstance(report, Mapping) else None
+    if not isinstance(raw_records, list):
+        return None
+    if not raw_records:
+        return None
+
+    diagnostic = session.get("diagnostic")
+    setups = diagnostic.get("setup_opportunities", ()) if isinstance(diagnostic, Mapping) else ()
+    setup_identity = {
+        str(item.get("lifecycle_id")): str(item.get("causal_identity"))
+        for item in setups if isinstance(item, Mapping)
+        and item.get("lifecycle_id") and item.get("causal_identity")
+    }
+    setup_by_signature = {
+        (str(item.get("location")), str(item.get("template_id")), str(item.get("origin_evidence_id"))): str(item.get("causal_identity"))
+        for item in setups if isinstance(item, Mapping) and item.get("causal_identity")
+    }
+    setup_by_location_evidence = {
+        (str(item.get("location")), str(item.get("origin_evidence_id"))): str(item.get("causal_identity"))
+        for item in setups if isinstance(item, Mapping) and item.get("causal_identity")
+    }
+    lifecycle: list[dict[str, Any]] = []
+    for raw in raw_records:
+        if not isinstance(raw, Mapping) or raw.get("kind") not in PHASE6_EVENT_KINDS:
+            continue
+        event = _normalize_phase_record_for_compare(dict(raw), session_date)
+        evidence_ids = event.get("evidence_ids") or ()
+        identity = (
+            event.get("causal_identity")
+            or setup_identity.get(str(event.get("lifecycle_id")))
+            or setup_by_signature.get((str(event.get("location")), str(event.get("template_id")), str(evidence_ids[-1] if evidence_ids else "")))
+            or setup_by_location_evidence.get((str(event.get("location")), str(event.get("interaction_id"))))
+            or event.get("lifecycle_id") or event.get("interaction_id")
+            or event.get("response_episode_id") or event.get("execution_group_id")
+            or event.get("event_id")
+        )
+        observed = event.get("observed_at") or event.get("formation_at")
+        available = event.get("available_at") or event.get("formation_available_at")
+        if not isinstance(identity, str) or not isinstance(observed, str) or not isinstance(available, str):
+            raise ValueError("canonical lifecycle event is missing causal timestamps or identity")
+        parent = event.get("causal_parent_id")
+        if parent is None:
+            context = event.get("parent_context")
+            parent = context.get("context_id") if isinstance(context, Mapping) else event.get("interaction_id")
+        lifecycle.append({
+            "kind": str(event["kind"]), "occurred_at": observed,
+            "observed_at": observed, "available_at": available,
+            "identity": identity, "causal_parent_id": parent,
+            "values": event, "unavailable": [],
+        })
+    return lifecycle
+
+
+def _compare_phase6(canonical_path: Path, paper: dict[str, Any], session_date: str) -> dict[str, Any]:
+    """Compare explicit opportunity/setup lifecycle facts."""
+    try:
+        payload = json.loads(canonical_path.read_text(encoding="utf-8"))
+        session = payload["sessions"][session_date]
+        canonical_records = _canonical_phase6_records(session, session_date)
+        if canonical_records is None:
+            return {
+                "status": "INCOMPLETE",
+                "stream": "opportunity_lifecycle",
+                "reason": "canonical lifecycle records are unavailable",
+            }
+        paper_facts = paper.get("parity_phase_facts", {})
+        paper_records = paper_facts.get("opportunity_lifecycle") if isinstance(paper_facts, Mapping) else None
+        if not isinstance(paper_records, list):
+            return {"status": "INCOMPLETE", "stream": "opportunity_lifecycle", "reason": "paper facts are unavailable"}
+        def lifecycle_order(item: Mapping[str, Any]) -> tuple[str, int, str, str]:
+            values = item.get("values")
+            candidate_id = values.get("candidate_id") if isinstance(values, Mapping) else None
+            suffix = str(candidate_id).rsplit("-candidate-", 1)[-1] if candidate_id else ""
+            candidate_number = int(suffix) if suffix.isdigit() else 2**31 - 1
+            return (
+                str(item.get("available_at")), candidate_number,
+                str(item.get("identity")), str(item.get("kind")),
+            )
+
+        canonical_records.sort(key=lifecycle_order)
+        paper_records = [
+            dict(item) for item in paper_records
+            if isinstance(item, Mapping) and item.get("kind") in PHASE6_EVENT_KINDS
+        ]
+        paper_records.sort(key=lifecycle_order)
+        def semantic_lifecycle(record: dict[str, Any]) -> dict[str, Any]:
+            projected = _phase45_semantic_projection(record, session_date)
+            ignored = {
+                "available_at", "observed_at", "occurred_at", "kind",
+                "causal_available_at", "causal_observed_at", "causal_ids",
+                "causal_parent_key", "causal_identity", "event_id", "lifecycle_sequence", "sequence",
+                "neutral_event_key", "provenance", "confirmation_evidence",
+                "long_score", "short_score", "stage_before", "stage_after", "events",
+            }
+            values = projected.get("values")
+            if isinstance(values, Mapping):
+                projected["values"] = {
+                    key: value for key, value in values.items() if key not in ignored
+                }
+            projected["identity"] = record.get("identity")
+            projected["causal_parent_id"] = record.get("causal_parent_id")
+            return projected
+
+        canonical_records = [semantic_lifecycle(item) for item in canonical_records]
+        paper_records = [semantic_lifecycle(item) for item in paper_records]
+        canonical = build_phase4_artifact(
+            run_id=f"canonical-{session_date}", producer={"name": "NiftyZoning"},
+            scope={"date": session_date}, payload={"parity_phase_facts": {"opportunity_lifecycle": canonical_records}},
+        )
+        paper_artifact = build_phase4_artifact(
+            run_id=f"paper-{session_date}", producer={"name": "ftx-paper"},
+            scope={"date": session_date}, payload={"parity_phase_facts": {"opportunity_lifecycle": paper_records}},
+        )
+        result = compare_phase4_manifests(
+            canonical, paper_artifact, streams=PHASE6_STREAMS,
+            canonical_records=lambda stream: canonical["phase_streams"][stream],
+            paper_records=lambda stream: paper_artifact["phase_streams"][stream],
+        )
+        if (
+            result.get("status") == "MISMATCHED"
+            and str(result.get("field", "")).endswith(("failure_boundary", "entry_boundary"))
+            and isinstance(result.get("canonical_value"), (int, float))
+            and isinstance(result.get("paper_value"), (int, float))
+            and abs(float(result["canonical_value"]) - float(result["paper_value"])) <= ATR_ABSOLUTE_TOLERANCE
+        ):
+            return {
+                "status": "INPUT_VARIANCE",
+                "stream": "opportunity_lifecycle",
+                "reason": "bounded ATR variance affects lifecycle boundaries",
+                "first_difference": result,
+            }
+        return result
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return {"status": "INCOMPLETE", "stream": "opportunity_lifecycle", "reason": str(exc)}
+
+
 def _environment(root: Path, *, paper_root: Path | None = None) -> dict[str, str]:
     environment = os.environ.copy()
     existing = environment.get("PYTHONPATH")
@@ -856,6 +1045,11 @@ def compare_date(
             if canonical_path is not None and paper_replay is not None
             else {"status": "INCOMPLETE", "stream": "interaction_response", "reason": "replay artifact unavailable"}
         )
+        phase6 = (
+            _compare_phase6(canonical_path, paper_replay, session_date)
+            if canonical_path is not None and paper_replay is not None
+            else {"status": "INCOMPLETE", "stream": "opportunity_lifecycle", "reason": "replay artifact unavailable"}
+        )
         atr_payload = phase35.get("atr")
         atr_tolerance = atr_payload.get("tolerance") if isinstance(atr_payload, dict) else None
         if (
@@ -877,6 +1071,7 @@ def compare_date(
             "phase3_5": phase35,
             "phase4": phase4,
             "phase4_5": phase45,
+            "phase6": phase6,
             "canonical_replay": {"status": "MATCHED" if canonical_projection else "INCOMPLETE"},
             "paper_replay": {"status": "MATCHED" if paper_replay else "INCOMPLETE"},
         }
@@ -885,7 +1080,6 @@ def compare_date(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--date", action="append", dest="dates", required=True, type=_comparison_date)
-    parser.add_argument("--canonical-root", type=Path, default=None)
     parser.add_argument("--canonical-python", default=None)
     parser.add_argument(
         "--canonical-artifact",
@@ -896,7 +1090,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--runtime-dir", type=Path, default=None)
     args = parser.parse_args(argv)
     paper_root = Path(__file__).resolve().parents[2]
-    canonical_root = args.canonical_root or paper_root.parent / "NiftyZoning"
+    canonical_root = paper_root.parent / "NiftyZoning"
     canonical_python_path = canonical_root / ".venv" / "Scripts" / "python.exe"
     canonical_python = args.canonical_python or str(
         canonical_python_path if canonical_python_path.exists() else sys.executable
@@ -918,6 +1112,7 @@ def main(argv: list[str] | None = None) -> int:
         item.get("phase3_5", {}).get("status") in {"MATCHED", "INPUT_VARIANCE"}
         and item.get("phase4", {}).get("status") in {"MATCHED", "INPUT_VARIANCE"}
         and item.get("phase4_5", {}).get("status") == "MATCHED"
+        and item.get("phase6", {}).get("status") in {"MATCHED", "INPUT_VARIANCE"}
         for item in results
     ) else 1
 
