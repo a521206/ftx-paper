@@ -230,6 +230,12 @@ def replay_interaction_response(
         published_registry,
         rows_by_date=rows_by_date or {},
     )
+    transition_owner.context.rows = [dict(item) for item in raw_rows]
+    transition_owner.context.prior_session_rows = tuple(
+        tuple(dict(item) for item in values)
+        for date, values in sorted((rows_by_date or {}).items())
+        if one and date < one[0].session_date
+    )
     processed_formations = 0
     observed5_available: datetime | None = None
 

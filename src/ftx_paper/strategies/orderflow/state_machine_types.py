@@ -27,6 +27,18 @@ class SessionLevels:
     prior_day_available_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class DisplacementRules:
+    min_volume_multiple: float = 3.0
+    min_range_multiple: float = 1.0
+    min_body_fraction: float = 0.3
+    baseline_bars: int = 20
+    minimum_prior_sessions: int = 5
+
+
+DISPLACEMENT_RULES = DisplacementRules()
+
+
 class LocationStatus(StrEnum):
     ACTIVE = "active"
     TESTED = "tested"
@@ -216,6 +228,7 @@ class MarketContextStore:
 class ReplayContext:
     rows: list[dict[str, Any]] = field(default_factory=list)
     rows_by_date: Mapping[str, Sequence[Mapping[str, object]]] = field(default_factory=dict)
+    prior_session_rows: tuple[tuple[Mapping[str, Any], ...], ...] = ()
     aggregates: dict[str, list[Aggregate]] = field(default_factory=dict)
     market_contexts: MarketContextStore = field(default_factory=MarketContextStore)
     location_registry: LocationRegistry | None = None

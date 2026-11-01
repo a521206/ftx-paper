@@ -145,7 +145,6 @@ class OpportunityCoordinator:
             formation_available_at=serialize_utc(as_of),
             decision_context_required=False,
         )
-        lifecycle.episode_confirmed = True
         lifecycle.comparison_key = identity
         lifecycle.conflict_key = f"{lifecycle.session_date}:{lifecycle.instrument}:{interaction.location}"
         values = {
@@ -292,7 +291,6 @@ class OpportunityCoordinator:
             formation_available_at=serialize_utc(candle.available_at),
             decision_context_required=False,
         )
-        lifecycle.episode_confirmed = True
         lifecycle.comparison_key = identity
         lifecycle.conflict_key = f"{lifecycle.session_date}:{lifecycle.instrument}:{location}"
         values = {

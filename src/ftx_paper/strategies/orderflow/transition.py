@@ -55,6 +55,41 @@ class OrderflowTransitionOwner:
         self.execution_owner.engine = self.context.execution_engine
         self.execution_owner.machine = self
 
+    def promote_episode(
+        self,
+        life: Any,
+        *,
+        observed_at: str,
+        available_at: str,
+        bar_events: list[dict[str, Any]],
+    ) -> None:
+        """Promote a provisional lifecycle after its final trigger checks."""
+        if life.episode_confirmed:
+            return
+        life.episode_confirmed = True
+        for competing in self.context.conflicting_unfilled_opportunities(life):
+            if competing.active:
+                self.execution_owner.invalidate_opportunity(
+                    competing,
+                    timestamp=observed_at,
+                    observed_at=observed_at,
+                    available_at=available_at,
+                    bar_events=bar_events,
+                    reason="opposing_episode_confirmed",
+                )
+        event = {
+            "kind": "episode_confirmed",
+            "lifecycle_id": life.lifecycle_id,
+            "observed_at": observed_at,
+            "available_at": available_at,
+            "direction": life.direction.value,
+            "conflict_key": life.conflict_key,
+            "owner": "1m",
+            "evidence_timeframe": "1m",
+        }
+        self.context.record_event(event)
+        bar_events.append(event)
+
     @property
     def clock(self) -> datetime | None:
         return self._clock

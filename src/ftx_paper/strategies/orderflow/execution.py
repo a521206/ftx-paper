@@ -26,7 +26,7 @@ from .hierarchy import (
     trigger_exit_intent,
 )
 from .lifecycle import SetupOpportunity
-from .templates import Direction, StopPolicy
+from .templates import Direction, OpeningInteractionKind, StopPolicy
 from .state_machine_types import CanonicalExecutionProposal, ReplayContext
 from .timestamps import coerce_timestamp, nifty_label
 from .allocation import entry_block_reason
@@ -40,6 +40,9 @@ from .response import (
 )
 from .features import daily_atr
 from .interactions import InteractionSnapshot
+from .state_machine_evidence import acceptance_trigger_evidence
+from .state_machine_types import DISPLACEMENT_RULES
+from .orderflow_common import build_aggregate_result
 
 SESSION_EXIT_DEADLINE = "15:10"
 STRUCTURE_TIMEFRAME = "5m"
@@ -100,6 +103,15 @@ class ExecutionHost(Protocol):
         timestamp: str,
         reason: str,
     ) -> Any | None: ...
+
+    def promote_episode(
+        self,
+        life: SetupOpportunity,
+        *,
+        observed_at: str,
+        available_at: str,
+        bar_events: list[dict[str, Any]],
+    ) -> None: ...
 
 
 def _target_interaction(
@@ -2106,6 +2118,15 @@ class ExecutionCoordinator:
         setup = self.engine.setup_for(life.lifecycle_id)
         if setup is None or not self.setup_valid_for_life(life, as_of=timestamp):
             return
+        if (
+            life.opening_policy_version is not None
+            and life.opening_interaction_kind
+            not in {
+                OpeningInteractionKind.OPENING_BREAKOUT.value,
+                OpeningInteractionKind.OPENING_RETEST.value,
+            }
+        ):
+            return
         decision_context = self.machine.decision_context_for_life(life, next_time)
         decision_relation = (
             self.machine.context_relation_for_life(life, decision_context)
@@ -2131,9 +2152,47 @@ class ExecutionCoordinator:
             template=setup.template,
             retest_touched=state.retest_touched,
         )
+        trigger_evidence = [
+            bar.to_dict() for bar in build_aggregate_result([row], 1).aggregates
+        ]
+        if (
+            observation.eligible
+            and setup.template is not None
+            and setup.template.requires_displacement
+            and life.opening_interaction_kind is None
+        ):
+            prior_rows = self.context.rows[
+                max(0, index - DISPLACEMENT_RULES.baseline_bars):index
+            ]
+            displacement = acceptance_trigger_evidence(
+                row,
+                prior_rows,
+                self.context.prior_session_rows,
+                life.direction,
+                include_diagnostics=True,
+            )
+            event = {
+                "kind": "acceptance_trigger_observed",
+                "time": timestamp,
+                "available_at": next_time,
+                "qualified": displacement["qualified"],
+                "evidence": displacement,
+            }
+            self.context.record_event(event)
+            bar_events.append(event)
+            if not displacement["qualified"]:
+                observation = replace(
+                    observation,
+                    eligible=False,
+                    reason="acceptance displacement did not qualify",
+                    ineligible_reason="acceptance_displacement_unqualified",
+                )
         if observation.retest_touched:
             self.engine.mark_retest_touched(
-                life, observed_at=timestamp, available_at=next_time
+                life,
+                observed_at=timestamp,
+                available_at=next_time,
+                evidence=trigger_evidence[0],
             )
             life.mark_retest(
                 at=next_time,
@@ -2145,13 +2204,21 @@ class ExecutionCoordinator:
             )
         event = {
             "kind": "trigger_observation",
+            "evidence": trigger_evidence,
+            "level": "1m",
             "intent_id": state.intent.intent_id,
             "lifecycle_id": life.lifecycle_id,
+            "setup_id": state.intent.setup_id,
             "observed_at": timestamp,
             "available_at": next_time,
             "crossed": observation.crossed,
             "eligible": observation.eligible,
+            "ineligible_reason": observation.ineligible_reason,
             "retest_touched": observation.retest_touched,
+            "retest_confirmed": observation.retest_confirmed,
+            "retest_touch_observed_at": state.retest_touch_observed_at,
+            "retest_touch_available_at": state.retest_touch_available_at,
+            "retest_touch_evidence": state.retest_touch_evidence,
             "reason": observation.reason,
             "owner": "1m",
             "evidence_timeframe": "1m",
@@ -2159,9 +2226,40 @@ class ExecutionCoordinator:
         self.context.record_event(event)
         bar_events.append(event)
         if observation.eligible:
+            if not life.episode_confirmed and self.machine is not None:
+                self.machine.promote_episode(
+                    life,
+                    observed_at=timestamp,
+                    available_at=next_time,
+                    bar_events=bar_events,
+                )
             self.update_decision_context(
                 life, getattr(decision_context, "reference", None)
             )
+            self.context.record_decision_context({
+                "lifecycle_id": life.lifecycle_id,
+                "intent_id": state.intent.intent_id,
+                "observed_at": timestamp,
+                "available_at": next_time,
+                "context": asdict(decision_context) if decision_context is not None else None,
+                "relation": getattr(decision_relation, "value", decision_relation),
+            })
+            proposal_event = {
+                "kind": "execution_proposal_created",
+                "lifecycle_id": life.lifecycle_id,
+                "intent_id": state.intent.intent_id,
+                "observed_at": timestamp,
+                "available_at": next_time,
+                "decision_context": (
+                    asdict(decision_context)
+                    if decision_context is not None else None
+                ),
+                "context_relation": getattr(
+                    decision_relation, "value", decision_relation
+                ),
+            }
+            self.context.record_event(proposal_event)
+            bar_events.append(proposal_event)
             self.context.execution_proposals.append(
                 CanonicalExecutionProposal(
                     life.lifecycle_id,
