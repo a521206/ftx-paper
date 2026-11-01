@@ -131,6 +131,7 @@ class OrderflowTransitionOwner:
         next_time = str(item.one_minute.available_at)
         row = item.one_minute.to_dict()
         available5 = list(self.observation_owner.five_minute_aggregates)
+        self.context.aggregates["5m"] = available5
         self.process_execution_bar(
             tuple(accepted_formations),
             index=0,
@@ -271,10 +272,17 @@ class OrderflowTransitionOwner:
             life = formation.lifecycle
             if life is None:
                 continue
-            self.execution_owner.handle_execution(
-                index, timestamp, next_time, dict(row), [], events, life,
-                evaluate_entries=False,
-            )
+            state = self.execution_owner.engine.state_for(life.lifecycle_id)
+            if (
+                state.pending_entry is not None
+                and state.position is None
+                and state.pending_entry.available_at <= timestamp
+            ):
+                self.execution_owner.fill_triggered(
+                    (formation,),
+                    bar_open={life.lifecycle_id: float(row["open"])},
+                    fill_at=timestamp,
+                )
             self.execution_owner.apply_session_deadline(
                 life,
                 session_date=str(life.session_date),

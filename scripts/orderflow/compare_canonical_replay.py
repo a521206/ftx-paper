@@ -125,10 +125,12 @@ def _gate_result(result: Mapping[str, Any]) -> dict[str, Any]:
         "phase7": _phase_accepted(result.get("phase7", {})),
     }
     failed = [name for name in phases if not accepted[name]]
+    first_failure = next((index for index, name in enumerate(phases) if not accepted[name]), None)
+    blocked = phases[first_failure + 1:] if first_failure is not None else ()
     return {
         "status": "PASSED" if not failed else "FAILED",
         "accepted_phases": [name for name in phases if accepted[name]],
-        "blocked_phases": [],
+        "blocked_phases": list(blocked),
         "failed_phases": failed,
         "reasons": [result.get(name, {}).get("reason") for name in failed if result.get(name, {}).get("reason")],
     }

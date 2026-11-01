@@ -30,6 +30,7 @@ from .templates import Direction, StopPolicy
 from .state_machine_types import CanonicalExecutionProposal, ReplayContext
 from .timestamps import coerce_timestamp
 from .allocation import entry_block_reason
+from .active_position_gate import ActivePositionGate
 from .response import (
     ResponseCandle,
     ResponseEvaluation,
@@ -1195,6 +1196,7 @@ class ExecutionCoordinator:
 
     machine: ExecutionHost | None = None
     engine: ExecutionEngine = field(default_factory=ExecutionEngine)
+    active_position_gate: ActivePositionGate = field(default_factory=ActivePositionGate)
 
     @property
     def parity_streams(self) -> dict[str, list[dict[str, Any]]]:
@@ -1603,7 +1605,28 @@ class ExecutionCoordinator:
                         "unavailable": [],
                     })
                 if required_rejections:
-                    return
+                    self.engine.clear_pending_entry(life, at=fill_at)
+                    current = self.engine.state_for(life.lifecycle_id).intent
+                    if current is not None:
+                        self.engine.update_intent(
+                            life,
+                            replace(
+                                current,
+                                status=IntentStatus.CANCELLED,
+                                cancel_reason="required_exit_rule_rejected",
+                            ),
+                        )
+                    self.context.record_parity_fact("execution_transitions", {
+                        "kind": "entry_cancelled",
+                        "identity": f"{life.lifecycle_id}:required_exit_rule_rejected",
+                        "causal_parent_id": life.lifecycle_id,
+                        "occurred_at": fill_at,
+                        "observed_at": fill_at,
+                        "available_at": fill_at,
+                        "values": {"reason": "required_exit_rule_rejected"},
+                        "unavailable": [],
+                    })
+                    continue
                 self.engine.fill_entry(
                     life,
                     price=decision.fill_price,
@@ -2139,6 +2162,8 @@ class ExecutionCoordinator:
                 entry_price=proposal.observation.price,
             ) not in {None, life.lifecycle_id}:
                 blocked = "entry_already_owned"
+            elif self.active_position_gate.check(self.context, life, timestamp) is not None:
+                blocked = "active_position_session_extreme_gate"
             if blocked is None:
                 blocked = self._failed_reversal_block_reason(life, timestamp, bar_events)
             if blocked is None:
