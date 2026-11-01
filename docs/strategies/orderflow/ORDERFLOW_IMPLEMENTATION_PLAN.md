@@ -960,6 +960,11 @@ Current Phase 6 verification record:
 Validate the complete canonical execution lifecycle only after the opportunity
 and setup-lifecycle gate passes.
 
+Status: In progress. The first deterministic execution slice ports canonical
+intent/admission state, allocation gate ordering, entry reservations, trigger
+transitions, and entry fills. Paper accounting, exits, and runtime wiring remain
+deferred until the corresponding canonical execution transitions are ported.
+
 Canonical scope:
 
 - admission predicates and unavailable outcomes;
@@ -988,6 +993,22 @@ Parity gate:
   mutate only the existing Paper portfolio and ledger owner.
 - Live and replay invoke the same ported proposal and lifecycle implementation;
   only the selected Paper execution/capture adapter may differ.
+
+### Phase 7 Initial Slice Verification Record
+
+- `hierarchy.py` now carries the canonical intent statuses, entry policy, intent
+  transitions, and causal trigger/fill guards from pinned commit
+  `8114f553392ad01dd032aecfed0031a3bc08e2f8`.
+- `execution.py` owns the Paper-side canonical execution state for admission,
+  intent arming, trigger selection, reservations, and entry fills. It does not
+  call Paper accounting or submit broker orders.
+- `allocation.py` preserves canonical first-match portfolio, session, direction,
+  and cooldown gates and keeps unavailable inputs as explicit reasons.
+- Focused tests cover unresolved-regime admission, allowed intent arming,
+  deterministic reservation release, duplicate entry selection idempotence, and
+  rejected duplicate fills. This is not the Phase 7 parity gate; exits,
+  protective stops, partial fills, settlement, and ledger projection remain
+  incomplete.
 
 ## Phase 8: Canonical Reporting And Four-Layer Parity Artifacts
 

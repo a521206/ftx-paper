@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Any
@@ -120,3 +120,67 @@ class StructuralSetup:
 
     def invalidated_by(self, *, close: float) -> bool:
         return close < self.failure_boundary if self.direction == "long" else close > self.failure_boundary
+
+
+class IntentStatus(StrEnum):
+    OBSERVING = "observing"
+    CONFIRMATION_FOUND = "confirmation_found"
+    ARMED = "armed"
+    TRIGGER_OBSERVED = "trigger_observed"
+    TRIGGERED = "triggered"
+    FILLED = "filled"
+    CANCELLED = "cancelled"
+
+
+class EntryPolicy(StrEnum):
+    INTRABAR_CROSS = "intrabar_cross"
+    CLOSE_CONFIRMATION = "close_confirmation"
+
+
+@dataclass(frozen=True, slots=True)
+class TradeIntent:
+    intent_id: str
+    setup_id: str
+    regime_version: str
+    direction: str
+    status: IntentStatus
+    created_at: datetime | str
+    trigger_price: float
+    failure_boundary: float
+    expiry: datetime | str
+    confirmation: tuple[str, ...] = ()
+    cancel_reason: str | None = None
+    triggered_at: datetime | str | None = None
+    setup_version: str | None = None
+    entry_policy: EntryPolicy = EntryPolicy.INTRABAR_CROSS
+    required_confirmation: tuple[str, ...] = ()
+    armed_at: datetime | str | None = None
+    effective_at: datetime | str | None = None
+    filled_at: datetime | str | None = None
+    lifecycle_id: str | None = None
+    formation_context: ContextVersionRef | None = None
+    decision_context: ContextVersionRef | None = None
+
+
+def arm_intent(*, intent: TradeIntent, at: datetime | str) -> TradeIntent:
+    if intent.status not in {IntentStatus.CONFIRMATION_FOUND, IntentStatus.OBSERVING}:
+        return intent
+    return replace(intent, status=IntentStatus.ARMED, armed_at=at, effective_at=at)
+
+
+def record_trigger(*, intent: TradeIntent, at: datetime | str, price: float | None = None) -> TradeIntent:
+    if intent.status not in {IntentStatus.ARMED, IntentStatus.TRIGGER_OBSERVED}:
+        raise ValueError("only an armed intent can trigger")
+    return replace(intent, status=IntentStatus.TRIGGERED, triggered_at=at)
+
+
+def fill_intent(*, intent: TradeIntent, at: datetime | str) -> TradeIntent:
+    if intent.status is not IntentStatus.TRIGGERED:
+        raise ValueError("only a triggered intent can fill")
+    return replace(intent, status=IntentStatus.FILLED, filled_at=at)
+
+
+def cancel_intent(*, intent: TradeIntent, reason: str) -> TradeIntent:
+    if intent.status in {IntentStatus.FILLED, IntentStatus.CANCELLED}:
+        return intent
+    return replace(intent, status=IntentStatus.CANCELLED, cancel_reason=reason)
