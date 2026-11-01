@@ -33,6 +33,7 @@ from ftx_paper.strategies.orderflow.value_publication import (
     ValuePublication,
 )
 from ftx_paper.strategies.orderflow.timestamps import coerce_timestamp, nifty_label, session_minute
+from ftx_paper.strategies.orderflow.phase7_projection import PHASE7_STREAMS
 
 @dataclass(frozen=True, slots=True)
 class _AvailableAggregate:
@@ -387,8 +388,10 @@ class OrderflowReplayEngine:
                 **({"opportunity_lifecycle": interaction_phase_facts["opportunity_lifecycle"]}
                    if interaction_phase_facts else {}),
                  **({"interaction_response": list(interaction_response)} if include_interactions else {}),
-                **({name: list(values) for name, values in interaction_replay.execution_phase_facts.items()}
-                   if interaction_replay is not None else {}),
+                 **({
+                     name: list(interaction_replay.execution_phase_facts.get(name, ()))
+                     for name in PHASE7_STREAMS
+                 } if interaction_replay is not None else {}),
             },
             "evidence": final_evidence,
         }

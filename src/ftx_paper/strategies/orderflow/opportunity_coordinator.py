@@ -78,7 +78,6 @@ class OpportunityCoordinator:
             or response is None
             or identity is None
             or identity in self._formed_identities
-            or nifty_label(interaction.creation_candle.time) in self._opening_seed_candles
         ):
             return None
 
@@ -302,6 +301,8 @@ class OpportunityCoordinator:
             "direction": direction.value,
             "candidate_id": candidate_id,
             "causal_identity": identity,
+            "formation_at": lifecycle.formation_at,
+            "formation_available_at": lifecycle.formation_available_at,
             "opening_policy_version": f"{opening_policy}-1m-v1",
             "opening_interaction_kind": None,
             "long_score": long_score,

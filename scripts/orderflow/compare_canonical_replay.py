@@ -19,7 +19,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 from uuid import uuid4
 
@@ -53,6 +53,12 @@ PHASE6_EVENT_KINDS = frozenset({
     "lifecycle_formed", "setup_invalidated",
     "setup_expired", "setup_superseded", "opportunity_timeout",
 })
+PHASE6_PROVENANCE_FIELDS = (
+    "candidate_id", "lifecycle_id", "location", "direction", "template_id",
+    "response_episode_id", "response_candle_id", "response_evidence_ids",
+    "response_observed_at", "response_available_at", "formation_at",
+    "formation_available_at", "stage",
+)
 MIN_COMPARISON_DATE = date(2026, 9, 21)
 _CAUSAL_TIMESTAMP_KEYS = frozenset({
     "as_of", "available_at", "current_available_at", "end_time", "formation_at",
@@ -691,6 +697,69 @@ def _canonical_phase6_records(session: Mapping[str, Any], session_date: str) -> 
     return lifecycle
 
 
+def _phase6_provenance(record: Mapping[str, Any]) -> dict[str, Any]:
+    values = record.get("values")
+    values = values if isinstance(values, Mapping) else {}
+    return {
+        field: values.get(field)
+        for field in PHASE6_PROVENANCE_FIELDS
+        if values.get(field) is not None
+    }
+
+
+def _phase6_structural_difference(
+    canonical: Sequence[Mapping[str, Any]], paper: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    if len(canonical) != len(paper):
+        return {
+            "reason": "count",
+            "canonical_count": len(canonical),
+            "paper_count": len(paper),
+        }
+    for index, (left, right) in enumerate(zip(canonical, paper)):
+        left_provenance = _phase6_provenance(left)
+        right_provenance = _phase6_provenance(right)
+        difference = _first_difference(left_provenance, right_provenance, "provenance")
+        if difference is not None:
+            return {
+                "index": index,
+                "field": difference["path"],
+                "canonical_value": difference["canonical"],
+                "paper_value": difference["paper"],
+                "canonical_record": left_provenance,
+                "paper_record": right_provenance,
+            }
+    return None
+
+
+def _record_contains(value: Any, needle: str) -> bool:
+    if isinstance(value, Mapping):
+        return any(_record_contains(item, needle) for item in value.values())
+    if isinstance(value, list):
+        return any(_record_contains(item, needle) for item in value)
+    return value == needle
+
+
+def _decision_clock_diagnostics(
+    replay: Mapping[str, Any], lifecycle_id: str,
+) -> list[dict[str, Any]]:
+    records = replay.get("replay_records")
+    if not isinstance(records, list):
+        return []
+    diagnostics: list[dict[str, Any]] = []
+    for record in records:
+        if not isinstance(record, Mapping) or not _record_contains(record, lifecycle_id):
+            continue
+        clock = record.get("decision_clock")
+        if isinstance(clock, Mapping):
+            diagnostics.append({
+                "timestamp": record.get("timestamp"),
+                "available_at": record.get("available_at"),
+                "decision_clock": dict(clock),
+            })
+    return diagnostics
+
+
 def _compare_phase6(canonical_path: Path, paper: dict[str, Any], session_date: str) -> dict[str, Any]:
     """Compare explicit opportunity/setup lifecycle facts."""
     try:
@@ -743,6 +812,14 @@ def _compare_phase6(canonical_path: Path, paper: dict[str, Any], session_date: s
 
         canonical_records = [semantic_lifecycle(item) for item in canonical_records]
         paper_records = [semantic_lifecycle(item) for item in paper_records]
+        structural_difference = _phase6_structural_difference(canonical_records, paper_records)
+        if structural_difference is not None:
+            return {
+                "status": "MISMATCHED",
+                "stream": "opportunity_lifecycle",
+                "reason": "structural_lifecycle_divergence",
+                "first_difference": structural_difference,
+            }
         canonical = build_phase4_artifact(
             run_id=f"canonical-{session_date}", producer={"name": "NiftyZoning"},
             scope={"date": session_date}, payload={"parity_phase_facts": {"opportunity_lifecycle": canonical_records}},
@@ -815,11 +892,30 @@ def _compare_phase7(canonical_path: Path, paper: dict[str, Any], session_date: s
                 name: normalize(paper_streams[name]) for name in paper_explicit_keys
             }},
         )
-        return compare_phase7_manifests(
+        result = compare_phase7_manifests(
             canonical_artifact, paper_artifact,
             canonical_records=lambda stream: canonical_artifact["phase_streams"][stream],
             paper_records=lambda stream: paper_artifact["phase_streams"][stream],
         )
+        if result.get("status") == "MISMATCHED":
+            records = (result.get("canonical_record"), result.get("paper_record"))
+            lifecycle_id = next(
+                (
+                    str(item.get("values", {}).get("lifecycle_id"))
+                    for item in records
+                    if isinstance(item, Mapping)
+                    and isinstance(item.get("values"), Mapping)
+                    and item["values"].get("lifecycle_id") is not None
+                ),
+                None,
+            )
+            if lifecycle_id is not None:
+                result["lifecycle_id"] = lifecycle_id
+                result["decision_clock"] = {
+                    "canonical": _decision_clock_diagnostics(canonical_replay, lifecycle_id),
+                    "paper": _decision_clock_diagnostics(paper, lifecycle_id),
+                }
+        return result
     except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
         return {"status": "INCOMPLETE", "stream": PHASE7_STREAMS[0], "reason": str(exc)}
 
