@@ -835,34 +835,77 @@ def _environment(root: Path, *, paper_root: Path | None = None) -> dict[str, str
 
 def _run_json(
     command: list[str], *, cwd: Path, output: Path | None = None,
-    paper_root: Path | None = None,
+    paper_root: Path | None = None, debug_dir: Path | None = None, label: str = "subprocess",
 ) -> tuple[Any | None, str | None]:
-    result = subprocess.run(
-        command, cwd=cwd, env=_environment(cwd, paper_root=paper_root), capture_output=True, text=True,
-    )
-    if result.returncode:
-        if output is not None and output.is_file():
-            try:
-                return None, output.read_text(encoding="utf-8").strip()
-            except OSError:
-                pass
-        return None, (
-            (result.stderr or result.stdout).strip()
-            or f"subprocess failed (exit code {result.returncode})"
+    try:
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            env=_environment(cwd, paper_root=paper_root),
+            capture_output=True,
+            text=True,
         )
+    except OSError as exc:
+        return None, f"could not start subprocess: {exc} ({_command_label(command)})"
+    log_paths = _write_process_logs(result, debug_dir=debug_dir, label=label)
+    if result.returncode:
+        diagnostic = _process_diagnostic(result, command)
+        if log_paths:
+            diagnostic += f"; logs: {log_paths}"
+        if output is not None and output.is_file():
+            diagnostic += f"; output artifact exists at {output}"
+        return None, diagnostic
     try:
         payload = json.loads(output.read_text(encoding="utf-8")) if output is not None else json.loads(result.stdout)
     except (OSError, json.JSONDecodeError) as exc:
-        return None, f"invalid JSON output: {exc}"
+        diagnostic = f"invalid JSON output: {exc}"
+        return None, f"{diagnostic}; logs: {log_paths}" if log_paths else diagnostic
     return payload if isinstance(payload, (dict, list)) else None, None
 
 
-def _run_command(command: list[str], *, cwd: Path) -> str | None:
-    result = subprocess.run(
-        command, cwd=cwd, env=_environment(cwd), capture_output=True, text=True,
-    )
+def _write_process_logs(
+    result: subprocess.CompletedProcess[str], *, debug_dir: Path | None, label: str,
+) -> str | None:
+    if debug_dir is None:
+        return None
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    stem = "".join(character if character.isalnum() or character in "-_" else "_" for character in label)
+    stdout_path = debug_dir / f"{stem}.stdout.log"
+    stderr_path = debug_dir / f"{stem}.stderr.log"
+    stdout_path.write_text(result.stdout, encoding="utf-8")
+    stderr_path.write_text(result.stderr, encoding="utf-8")
+    return f"{stdout_path}, {stderr_path}"
+
+
+def _command_label(command: list[str]) -> str:
+    return " ".join(command)
+
+
+def _process_diagnostic(result: subprocess.CompletedProcess[str], command: list[str]) -> str:
+    parts = [
+        f"subprocess exited with code {result.returncode}",
+        f"command: {_command_label(command)}",
+    ]
+    if result.stderr.strip():
+        parts.append(f"stderr: {result.stderr.strip()}")
+    if result.stdout.strip():
+        parts.append(f"stdout: {result.stdout.strip()}")
+    return "; ".join(parts)
+
+
+def _run_command(
+    command: list[str], *, cwd: Path, debug_dir: Path | None = None, label: str = "subprocess",
+) -> str | None:
+    try:
+        result = subprocess.run(
+            command, cwd=cwd, env=_environment(cwd), capture_output=True, text=True,
+        )
+    except OSError as exc:
+        return f"could not start subprocess: {exc} ({_command_label(command)})"
+    log_paths = _write_process_logs(result, debug_dir=debug_dir, label=label)
     if result.returncode:
-        return (result.stderr or result.stdout).strip() or "subprocess failed"
+        diagnostic = _process_diagnostic(result, command)
+        return f"{diagnostic}; logs: {log_paths}" if log_paths else diagnostic
     return None
 
 
@@ -1017,6 +1060,7 @@ def compare_date(
     canonical_python: str,
     paper_python: str,
     canonical_artifact: Path | None = None,
+    debug_dir: Path | None = None,
 ) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="orderflow-cross-repo-") as directory_name:
         directory = Path(directory_name)
@@ -1029,7 +1073,7 @@ def compare_date(
         canonical_output_dir = directory / "canonical-replay"
         canonical_source_error = _run_command(
             _canonical_source_command(canonical_python, session_date, canonical_source_path),
-            cwd=canonical_root,
+            cwd=canonical_root, debug_dir=debug_dir, label=f"{session_date}-canonical-source",
         )
         paper_command = [
             paper_python, "scripts/orderflow/orderflow_replay.py", "--date", session_date,
@@ -1039,6 +1083,7 @@ def compare_date(
         with ThreadPoolExecutor(max_workers=2) as executor:
             paper_future = executor.submit(
                 _run_json, paper_command, cwd=paper_root, output=paper_replay_path,
+                debug_dir=debug_dir, label=f"{session_date}-paper-replay",
             )
             if canonical_path is None:
                 canonical_future = executor.submit(
@@ -1050,7 +1095,8 @@ def compare_date(
                         "--replay-mode", "full",
                         "--output", str(canonical_output_dir),
                     ],
-                    cwd=canonical_root,
+                    cwd=canonical_root, debug_dir=debug_dir,
+                    label=f"{session_date}-canonical-replay",
                 )
                 canonical_error = canonical_future.result()
                 replay_files = list(
@@ -1066,6 +1112,7 @@ def compare_date(
                     _run_json,
                     _canonical_projection_command(canonical_python, canonical_path, session_date),
                     cwd=canonical_root,
+                    debug_dir=debug_dir, label=f"{session_date}-canonical-projection",
                 )
                 if canonical_path is not None and canonical_error is None else None
             )
@@ -1075,7 +1122,8 @@ def compare_date(
                     _replay_observation_command(
                         canonical_python, canonical_path, session_date, canonical=True,
                     ),
-                    cwd=canonical_root,
+                    cwd=canonical_root, debug_dir=debug_dir,
+                    label=f"{session_date}-canonical-observation",
                 )
                 if canonical_path is not None and canonical_error is None else None
             )
@@ -1085,7 +1133,8 @@ def compare_date(
                     _replay_observation_command(
                         paper_python, paper_replay_path, session_date, canonical=False,
                     ),
-                    cwd=paper_root,
+                    cwd=paper_root, debug_dir=debug_dir,
+                    label=f"{session_date}-paper-observation",
                 )
                 if paper_replay is not None else None
             )
@@ -1193,7 +1242,14 @@ def compare_date(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog=(
+            "Exit status is 0 only when every requested date passes the parity gate. "
+            "A reported FAILED comparison is an expected diagnostic result, not an "
+            "unhandled script error."
+        ),
+    )
     parser.add_argument("--date", action="append", dest="dates", required=True, type=_comparison_date)
     parser.add_argument("--canonical-python", default=None)
     parser.add_argument(
@@ -1215,6 +1271,9 @@ def main(argv: list[str] | None = None) -> int:
     canonical_python = args.canonical_python or str(
         canonical_python_path if canonical_python_path.exists() else sys.executable
     )
+    output_dir = args.output_dir or paper_root / "data" / "output" / "orderflow"
+    debug_dir = output_dir / "debug"
+    debug_dir.mkdir(parents=True, exist_ok=True)
     results = [compare_date(
         session_date,
         canonical_root=canonical_root,
@@ -1222,12 +1281,27 @@ def main(argv: list[str] | None = None) -> int:
         canonical_python=canonical_python,
         paper_python=sys.executable,
         canonical_artifact=args.canonical_artifact,
+        debug_dir=debug_dir,
     ) for session_date in args.dates]
-    output_dir = args.output_dir or paper_root / "data" / "output" / "orderflow"
     overall = "PASSED" if all(
         _gate_result(item)["status"] == "PASSED" for item in results
     ) else "FAILED"
-    _write_comparison_output(results, output_dir, status=overall)
+    report_path = _write_comparison_output(results, output_dir, status=overall)
+    print(f"Comparison report: {report_path}")
+    for result in results:
+        gate = result["gate"]
+        phase_statuses = ", ".join(
+            f"{phase}={result.get(phase, {}).get('status', 'MISSING')}"
+            for phase in ("phase3", "phase3_5", "phase4", "phase4_5", "phase6", "phase7")
+        )
+        print(f"{result['date']}: gate={gate['status']} ({phase_statuses})")
+        if gate["failed_phases"]:
+            print(f"  failed phases: {', '.join(gate['failed_phases'])}")
+    print(
+        "Comparison completed with parity failures; see the report for first differences."
+        if overall == "FAILED"
+        else "Comparison passed for all requested dates."
+    )
     return 0 if overall == "PASSED" else 1
 
 
