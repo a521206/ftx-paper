@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date
+from datetime import date, datetime, timezone
 import hashlib
 import json
 import math
@@ -21,8 +21,8 @@ import sys
 import tempfile
 from collections.abc import Mapping
 from typing import Any
+from uuid import uuid4
 
-from ftx_paper.config import PaperConfig
 from ftx_paper.strategies.orderflow.parity_artifacts import (
     build_phase4_artifact,
     compare_phase4_manifests,
@@ -83,6 +83,25 @@ def _comparison_date(value: str) -> str:
             f"comparison dates before {MIN_COMPARISON_DATE.isoformat()} are prohibited"
         )
     return parsed.isoformat()
+
+
+def _write_comparison_output(
+    results: list[dict[str, Any]], output_dir: Path,
+) -> Path:
+    generated_at = datetime.now(timezone.utc)
+    run_id = f"{generated_at:%Y%m%dT%H%M%SZ}-{uuid4().hex[:8]}"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"canonical-replay-comparison-{run_id}.json"
+    payload = {
+        "run_id": run_id,
+        "generated_at": generated_at.isoformat(),
+        "results": results,
+    }
+    output_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return output_path
 
 
 def _digest(value: Any) -> str:
@@ -848,7 +867,7 @@ def _canonical_projection_command(
     return [canonical_python, "-c", code, str(replay_path), session_date]
 
 
-def _canonical_source_command(canonical_python: str, canonical_root: Path, session_date: str, output: Path) -> list[str]:
+def _canonical_source_command(canonical_python: str, session_date: str, output: Path) -> list[str]:
     code = """
 import json, sys
 from datetime import datetime, time
@@ -913,7 +932,6 @@ def compare_date(
     *,
     canonical_root: Path,
     paper_root: Path,
-    paper_runtime_dir: Path,
     canonical_python: str,
     paper_python: str,
     canonical_artifact: Path | None = None,
@@ -928,7 +946,7 @@ def compare_date(
         )
         canonical_output_dir = directory / "canonical-replay"
         canonical_source_error = _run_command(
-            _canonical_source_command(canonical_python, canonical_root, session_date, canonical_source_path),
+            _canonical_source_command(canonical_python, session_date, canonical_source_path),
             cwd=canonical_root,
         )
         paper_command = [
@@ -1087,7 +1105,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Existing canonical replay artifact or directory; skips canonical replay execution",
     )
-    parser.add_argument("--runtime-dir", type=Path, default=None)
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Directory for the run-id-named JSON report (default: data/output/orderflow)",
+    )
     args = parser.parse_args(argv)
     paper_root = Path(__file__).resolve().parents[2]
     canonical_root = paper_root.parent / "NiftyZoning"
@@ -1095,17 +1118,16 @@ def main(argv: list[str] | None = None) -> int:
     canonical_python = args.canonical_python or str(
         canonical_python_path if canonical_python_path.exists() else sys.executable
     )
-    paper_runtime_dir = args.runtime_dir or PaperConfig.from_env().runtime_dir
     results = [compare_date(
         session_date,
         canonical_root=canonical_root,
         paper_root=paper_root,
-        paper_runtime_dir=paper_runtime_dir,
         canonical_python=canonical_python,
         paper_python=sys.executable,
         canonical_artifact=args.canonical_artifact,
     ) for session_date in args.dates]
-    print(json.dumps(results, indent=2, sort_keys=True))
+    output_dir = args.output_dir or paper_root / "data" / "output" / "orderflow"
+    _write_comparison_output(results, output_dir)
     return 0 if all(
         item.get("phase3", {}).get("status") == "MATCHED"
         and

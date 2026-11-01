@@ -5,6 +5,7 @@ from scripts.orderflow.compare_canonical_replay import (
     _compare_phase6,
     _compare_phase45,
     _compare_phase35,
+    _write_comparison_output,
     _bounded_atr_dependent_difference,
     _resolve_canonical_artifact,
     _paper_phase35_projection,
@@ -12,6 +13,18 @@ from scripts.orderflow.compare_canonical_replay import (
     _normalize_observation_payload,
 )
 from scripts.orderflow.orderflow_replay import _observation_rows
+
+
+def test_comparison_output_uses_unique_run_id_filename(tmp_path) -> None:
+    output_path = _write_comparison_output(
+        [{"date": "2026-10-01", "phase3": {"status": "MATCHED"}}],
+        tmp_path,
+    )
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert output_path.name == f"canonical-replay-comparison-{payload['run_id']}.json"
+    assert isinstance(payload["generated_at"], str)
+    assert payload["results"] == [{"date": "2026-10-01", "phase3": {"status": "MATCHED"}}]
 
 
 def test_phase6_projection_merges_explicit_opening_lifecycle_from_records() -> None:
