@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
 import hashlib
 import json
 from typing import Any
@@ -15,15 +14,13 @@ from ftx_paper.contracts.replay import (
     ExecutionScope, ReplayEvent, REPLAY_SCHEMA_VERSION, detach_replay_value,
 )
 from ftx_paper.runtime.events import is_parity_decision_event
+from ftx_paper.strategies.orderflow.timestamps import parse_causal_timestamp
 
 __all__ = ["build_summary", "canonical_events", "is_parity_decision_event", "normalize_decision", "normalize_trade"]
 
 
 def _timestamp_string(value: Any) -> str:
-    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return parse_causal_timestamp(str(value), field="replay timestamp").isoformat().replace("+00:00", "Z")
 
 
 def canonical_events(
@@ -93,8 +90,11 @@ def normalize_decision(event: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 def normalize_trade(trade: Mapping[str, Any]) -> TradePayload:
-    entry_at = datetime.fromisoformat(str(trade["entry_timestamp"]))
-    exit_at = datetime.fromisoformat(str(trade["exit_timestamp"])) if trade.get("exit_timestamp") else None
+    entry_at = parse_causal_timestamp(str(trade["entry_timestamp"]), field="trade entry timestamp")
+    exit_at = (
+        parse_causal_timestamp(str(trade["exit_timestamp"]), field="trade exit timestamp")
+        if trade.get("exit_timestamp") else None
+    )
     entry_ist = entry_at.astimezone(IST)
     exit_ist = exit_at.astimezone(IST) if exit_at else None
     stop = float(trade["stop_price"]) if trade.get("stop_price") is not None else None

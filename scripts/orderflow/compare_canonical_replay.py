@@ -25,8 +25,11 @@ from uuid import uuid4
 
 from ftx_paper.strategies.orderflow.parity_artifacts import (
     build_phase4_artifact,
+    build_phase7_artifact,
     compare_phase4_manifests,
+    compare_phase7_manifests,
 )
+from ftx_paper.strategies.orderflow.phase7_projection import PHASE7_STREAMS, build_phase7_projection
 from ftx_paper.strategies.orderflow.timestamps import parse_session_timestamp, parse_utc, serialize_utc
 
 PHASE35_FIELDS = (
@@ -59,6 +62,7 @@ _CAUSAL_TIMESTAMP_KEYS = frozenset({
 })
 _TRANSPORT_METADATA_KEYS = frozenset({
     "identity", "neutral_event_key", "event_id", "sequence", "stream_sequence",
+    "_publication_available_at",
     "causal_parent_key",
 })
 _CAUSAL_METADATA_KEYS = frozenset({
@@ -86,7 +90,7 @@ def _comparison_date(value: str) -> str:
 
 
 def _write_comparison_output(
-    results: list[dict[str, Any]], output_dir: Path,
+    results: list[dict[str, Any]], output_dir: Path, *, status: str | None = None,
 ) -> Path:
     generated_at = datetime.now(timezone.utc)
     run_id = f"{generated_at:%Y%m%dT%H%M%SZ}-{uuid4().hex[:8]}"
@@ -95,6 +99,7 @@ def _write_comparison_output(
     payload = {
         "run_id": run_id,
         "generated_at": generated_at.isoformat(),
+        "status": status or "FAILED",
         "results": results,
     }
     output_path.write_text(
@@ -102,6 +107,31 @@ def _write_comparison_output(
         encoding="utf-8",
     )
     return output_path
+
+
+def _phase_accepted(phase: Mapping[str, Any], *, allow_variance: bool = False) -> bool:
+    accepted = {"MATCHED", "INPUT_VARIANCE"} if allow_variance else {"MATCHED"}
+    return phase.get("status") in accepted
+
+
+def _gate_result(result: Mapping[str, Any]) -> dict[str, Any]:
+    phases = ("phase3", "phase3_5", "phase4", "phase4_5", "phase6", "phase7")
+    accepted = {
+        "phase3": _phase_accepted(result.get("phase3", {})),
+        "phase3_5": _phase_accepted(result.get("phase3_5", {}), allow_variance=True),
+        "phase4": _phase_accepted(result.get("phase4", {}), allow_variance=True),
+        "phase4_5": _phase_accepted(result.get("phase4_5", {})),
+        "phase6": _phase_accepted(result.get("phase6", {}), allow_variance=True),
+        "phase7": _phase_accepted(result.get("phase7", {})),
+    }
+    failed = [name for name in phases if not accepted[name]]
+    return {
+        "status": "PASSED" if not failed else "FAILED",
+        "accepted_phases": [name for name in phases if accepted[name]],
+        "blocked_phases": [],
+        "failed_phases": failed,
+        "reasons": [result.get(name, {}).get("reason") for name in failed if result.get(name, {}).get("reason")],
+    }
 
 
 def _digest(value: Any) -> str:
@@ -742,6 +772,56 @@ def _compare_phase6(canonical_path: Path, paper: dict[str, Any], session_date: s
         return {"status": "INCOMPLETE", "stream": "opportunity_lifecycle", "reason": str(exc)}
 
 
+def _compare_phase7(canonical_path: Path, paper: dict[str, Any], session_date: str) -> dict[str, Any]:
+    """Compare explicit execution facts in causal stream order."""
+    try:
+        payload = json.loads(canonical_path.read_text(encoding="utf-8"))
+        canonical_session = payload["sessions"][session_date]
+        canonical_replay = canonical_session.get("replay")
+        if not isinstance(canonical_replay, Mapping):
+            return {"status": "INCOMPLETE", "stream": PHASE7_STREAMS[0], "reason": "canonical_replay_missing"}
+        canonical_facts = canonical_replay.get("parity_phase_facts")
+        # The replay payload also carries the earlier phase streams.  Only
+        # Phase 7 facts belong in this projection; including those other keys
+        # causes a lookup failure against the Phase 7-only stream mapping.
+        explicit_keys = {
+            key for key in PHASE7_STREAMS
+            if isinstance(canonical_facts, Mapping) and key in canonical_facts
+        }
+        if not explicit_keys:
+            return {"status": "INCOMPLETE", "stream": PHASE7_STREAMS[0], "reason": "canonical_phase7_facts_missing"}
+        canonical_streams = build_phase7_projection(canonical_replay)
+        paper_streams = build_phase7_projection(paper)
+        paper_facts = paper.get("parity_phase_facts")
+        paper_explicit_keys = {
+            key for key in PHASE7_STREAMS
+            if isinstance(paper_facts, Mapping) and key in paper_facts
+        }
+        def normalize(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [_normalize_phase_record_for_compare(item, session_date) for item in values]
+        canonical_artifact = build_phase7_artifact(
+            run_id=f"canonical-{session_date}", producer={"name": "NiftyZoning"},
+            scope={"date": session_date},
+            payload={"parity_phase_facts": {
+                name: normalize(canonical_streams[name]) for name in explicit_keys
+            }},
+        )
+        paper_artifact = build_phase7_artifact(
+            run_id=f"paper-{session_date}", producer={"name": "ftx-paper"},
+            scope={"date": session_date},
+            payload={"parity_phase_facts": {
+                name: normalize(paper_streams[name]) for name in paper_explicit_keys
+            }},
+        )
+        return compare_phase7_manifests(
+            canonical_artifact, paper_artifact,
+            canonical_records=lambda stream: canonical_artifact["phase_streams"][stream],
+            paper_records=lambda stream: paper_artifact["phase_streams"][stream],
+        )
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return {"status": "INCOMPLETE", "stream": PHASE7_STREAMS[0], "reason": str(exc)}
+
+
 def _environment(root: Path, *, paper_root: Path | None = None) -> dict[str, str]:
     environment = os.environ.copy()
     existing = environment.get("PYTHONPATH")
@@ -1068,6 +1148,17 @@ def compare_date(
             if canonical_path is not None and paper_replay is not None
             else {"status": "INCOMPLETE", "stream": "opportunity_lifecycle", "reason": "replay artifact unavailable"}
         )
+        phase7 = (
+            _compare_phase7(canonical_path, paper_replay, session_date)
+            if canonical_path is not None and paper_replay is not None
+            else {"status": "INCOMPLETE", "stream": PHASE7_STREAMS[0], "reason": "replay artifact unavailable"}
+        )
+        if phase6.get("status") not in {"MATCHED", "INPUT_VARIANCE"}:
+            phase7 = {
+                "status": "UNAVAILABLE",
+                "stream": PHASE7_STREAMS[0],
+                "reason": "phase6_gate_not_accepted",
+            }
         atr_payload = phase35.get("atr")
         atr_tolerance = atr_payload.get("tolerance") if isinstance(atr_payload, dict) else None
         if (
@@ -1083,16 +1174,20 @@ def compare_date(
                 "variance": phase35.get("atr"),
                 "first_dependent_difference": phase4,
             }
-        return {
+        result = {
             "date": session_date,
             "phase3": phase3,
             "phase3_5": phase35,
             "phase4": phase4,
             "phase4_5": phase45,
             "phase6": phase6,
+            "phase7": phase7,
+            "phase7_status": phase7.get("status"),
             "canonical_replay": {"status": "MATCHED" if canonical_projection else "INCOMPLETE"},
             "paper_replay": {"status": "MATCHED" if paper_replay else "INCOMPLETE"},
         }
+        result["gate"] = _gate_result(result)
+        return result
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1127,16 +1222,11 @@ def main(argv: list[str] | None = None) -> int:
         canonical_artifact=args.canonical_artifact,
     ) for session_date in args.dates]
     output_dir = args.output_dir or paper_root / "data" / "output" / "orderflow"
-    _write_comparison_output(results, output_dir)
-    return 0 if all(
-        item.get("phase3", {}).get("status") == "MATCHED"
-        and
-        item.get("phase3_5", {}).get("status") in {"MATCHED", "INPUT_VARIANCE"}
-        and item.get("phase4", {}).get("status") in {"MATCHED", "INPUT_VARIANCE"}
-        and item.get("phase4_5", {}).get("status") == "MATCHED"
-        and item.get("phase6", {}).get("status") in {"MATCHED", "INPUT_VARIANCE"}
-        for item in results
-    ) else 1
+    overall = "PASSED" if all(
+        _gate_result(item)["status"] == "PASSED" for item in results
+    ) else "FAILED"
+    _write_comparison_output(results, output_dir, status=overall)
+    return 0 if overall == "PASSED" else 1
 
 
 if __name__ == "__main__":

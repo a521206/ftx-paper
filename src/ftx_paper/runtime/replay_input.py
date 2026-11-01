@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime
 from typing import Any
 
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole, OptionRole
@@ -14,6 +13,7 @@ from ftx_paper.config import (
     IST, SESSION_DATA_END, SESSION_DATA_END_MINUTES, SESSION_OPEN_MINUTES,
 )
 from ftx_paper.strategies.research.config import AFTERNOON_ENTRY_MINUTES, MORNING_ENTRY_MINUTES
+from ftx_paper.strategies.orderflow.timestamps import parse_utc
 
 
 class ReplayInput:
@@ -53,7 +53,7 @@ class ReplayInput:
                     and str(row.get("expiry", ""))[:10] == source.expiry)
             ]
         selected_times = [
-            datetime.fromisoformat(str(row["minute"])) for row in loaded_rows
+            parse_utc(str(row["minute"]), field="replay minute") for row in loaded_rows
             if str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
         ]
         if any(left >= right for left, right in zip(selected_times, selected_times[1:])):
@@ -63,7 +63,7 @@ class ReplayInput:
             kind = str(row.get("instrument_type", "")).upper()
             if kind not in {"FUT", "FUTURES", "INDEX", "EQ", "CE", "PE"}:
                 continue
-            timestamp = datetime.fromisoformat(str(row["minute"]))
+            timestamp = parse_utc(str(row["minute"]), field="replay minute")
             local = timestamp.astimezone(IST)
             minute = local.hour * 60 + local.minute
             if not SESSION_OPEN_MINUTES <= minute < SESSION_DATA_END_MINUTES:

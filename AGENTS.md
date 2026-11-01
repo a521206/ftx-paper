@@ -15,6 +15,7 @@
 - For substantial work, use a concise phased plan; keep each phase focused, verify it against the design, and simplify before proceeding.
 - If strategy behavior cannot be resolved from the design or canonical code, ask rather than inventing a rule.
 - Before completion, review the affected diff for unnecessary complexity, confirm obsolete paths are removed, and run the relevant validation commands below.
+- Wait for explicit user instructions before creating a commit; validation and diff review may be completed without committing.
 
 ## Validation
 

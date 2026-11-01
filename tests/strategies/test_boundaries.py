@@ -25,7 +25,7 @@ def test_strategy_catalog_selects_orderflow_explicitly() -> None:
     )
 
     assert strategy.metadata.name == "ftx-paper-orderflow"
-    assert strategy.metadata.version == "scaffold"
+    assert strategy.metadata.version == "orderflow-v1"
 
 
 def test_strategy_entry_points_are_explicitly_separate() -> None:

@@ -1,4 +1,4 @@
-"""Minimal configuration boundary reserved for the canonical orderflow port."""
+"""Configuration boundary for the canonical orderflow strategy."""
 
 from __future__ import annotations
 
@@ -8,12 +8,12 @@ import json
 
 
 ORDERFLOW_NAME = "ftx-paper-orderflow"
-ORDERFLOW_VERSION = "scaffold"
+ORDERFLOW_VERSION = "orderflow-v1"
 
 
 @dataclass(frozen=True, slots=True)
 class OrderflowConfig:
-    """Configuration placeholder for the canonical orderflow port."""
+    """Runtime configuration for the canonical orderflow owner."""
 
     enabled_vehicles: tuple[str, ...] = ("futures",)
 

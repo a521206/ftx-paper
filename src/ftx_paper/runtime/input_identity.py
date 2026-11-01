@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import datetime
 from hashlib import sha256
 import json
 from zoneinfo import ZoneInfo
 from typing import Any
+
+from ftx_paper.strategies.orderflow.timestamps import parse_utc
 
 NORMALIZED_BAR_FINGERPRINT_RECIPE = "normalized-bars-v1"
 _SESSION_ZONE = ZoneInfo("Asia/Kolkata")
@@ -18,7 +19,7 @@ def normalized_bar_fingerprint(rows: Sequence[Mapping[str, Any]]) -> str:
     for row in rows:
         minute = str(row.get("minute") or row.get("time") or "")
         try:
-            timestamp = datetime.fromisoformat(minute.replace("Z", "+00:00"))
+            timestamp = parse_utc(minute, field="parity bar timestamp")
         except ValueError as exc:
             raise ValueError("parity bar timestamps must be ISO timestamps") from exc
         if timestamp.tzinfo is None or timestamp.utcoffset() is None:

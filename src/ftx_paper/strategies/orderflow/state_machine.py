@@ -276,7 +276,7 @@ class ReplayMachine:
             "location_observations": [],
             "setup_opportunities": [],
             "ordinary_context_ref": ordinary_context_ref,
-            "capture_scope": "phase3_5_evidence_only",
+            "capture_scope": "orderflow_state_machine",
         }
 
 

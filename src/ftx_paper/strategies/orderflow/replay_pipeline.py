@@ -1,4 +1,4 @@
-"""Causal orderflow replay preparation shared by runtime and compatibility CLI."""
+"""Causal orderflow replay preparation shared by runtime and replay tooling."""
 
 from __future__ import annotations
 
@@ -64,8 +64,8 @@ def _location_registry(evidence: dict[str, Any], session_date: str) -> LocationR
         if source_aggregate_id is not None:
             source_aggregate_id = session_minute(session_date, str(source_aggregate_id))
         registry.register(LocationRecord(
-            str(item["location_id"]), str(item["alias"]), float(item["price"]),
-             str(item.get("source_session") or "current"), coerce_timestamp(str(item["created_at"])),
+             str(item["location_id"]), str(item["alias"]), float(item["price"]),
+             str(item["source_session"]), coerce_timestamp(str(item["created_at"])),
              coerce_timestamp(str(item["available_at"])), stream_id,
             LocationBand(float(band["low"]), float(band["high"])),
             generation=int(item.get("generation", 1)), frozen_atr=item.get("frozen_atr"),
@@ -144,8 +144,8 @@ def _aggregate_events(observation: Any) -> tuple[_AvailableAggregate, ...]:
     return tuple(sorted(events, key=lambda item: (item.available_at, item.timeframe, item.index)))
 
 
-def _observation_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Normalize legacy source labels at the observation ingress boundary."""
+def _observation_input_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Project replay input timestamps into the canonical source shape."""
     return [
         {
             **row,
@@ -158,7 +158,7 @@ def _observation_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _observation_artifact(
     rows: list[dict[str, Any]],
 ) -> tuple[dict[str, Any], tuple[_AvailableAggregate, ...]]:
-    observation = observe_market(_observation_rows(rows))
+    observation = observe_market(_observation_input_rows(rows))
     return (
         {
             "schema_version": 1,
@@ -326,14 +326,9 @@ class OrderflowReplayEngine:
                 aggregates, phase4_replay, _location_registry(final_evidence, session_date),
                 atr=phase4_evidence.atr.value,
                 fill_permission_margin=fill_permission_margin,
-                prior_volume=tuple(
-                    float(row["volume"])
-                    for date in sorted(
-                        value for value in rows_by_date if value < session_date
-                    )[-5:]
-                    for row in rows_by_date[date]
-                    if row.get("volume") is not None
-                ),
+                prior_value=phase4_evidence.prior_value,
+                raw_rows=rows,
+                rows_by_date=rows_by_date,
             )
             interaction_response = interaction_replay.facts
         machine = ReplayMachine(
@@ -341,8 +336,10 @@ class OrderflowReplayEngine:
             evidence_events=evidence_events,
             evidence_at_clock=evidence_at_clock,
             session_date=session_date,
-            interaction_response=interaction_response,
         )
+        # ReplayMachine is retained only as the bounded evidence projection.
+        # Interaction and execution chronology are owned by the transition
+        # owner inside replay_interaction_response above.
         replay_records, final_state = machine.run()
 
         final_evidence = _as_of_evidence(final_state.evidence, final_clock)
@@ -382,11 +379,13 @@ class OrderflowReplayEngine:
             "parity_phase_facts": {
                 "context_publication": list(final_state.context_publications),
                 **phase4_replay.parity_phase_facts(),
-                # ReplayMachine owns the normalized interaction stream. The
-                # producer replay contributes only its distinct opportunity stream.
+                 # The transition owner contributes interaction and execution
+                 # streams; ReplayMachine contributes evidence chronology only.
                 **({"opportunity_lifecycle": interaction_phase_facts["opportunity_lifecycle"]}
                    if interaction_phase_facts else {}),
-                **({"interaction_response": list(final_state.interaction_response)} if include_interactions else {}),
+                 **({"interaction_response": list(interaction_response)} if include_interactions else {}),
+                **({name: list(values) for name, values in interaction_replay.execution_phase_facts.items()}
+                   if interaction_replay is not None else {}),
             },
             "evidence": final_evidence,
         }

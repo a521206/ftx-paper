@@ -14,6 +14,7 @@ import json
 from typing import Any
 
 from .timestamps import parse_causal_timestamp, parse_utc, serialize_utc
+from .phase7_projection import PHASE7_STREAMS
 
 PHASE_STREAMS = ("source_observation", "context_location", "interaction_response", "opportunity_lifecycle", "intent_admission", "trigger_exit")
 
@@ -153,6 +154,49 @@ def compare_phase4_manifests(canonical: Mapping[str, Any], paper: Mapping[str, A
     return {"status": "MATCHED"}
 
 
+def build_phase7_artifact(*, run_id: str, producer: Mapping[str, Any], scope: Mapping[str, Any], payload: Mapping[str, Any]) -> dict[str, Any]:
+    from .phase7_projection import build_phase7_projection
+    facts = payload.get("parity_phase_facts")
+    facts = facts if isinstance(facts, Mapping) else {}
+    streams = build_phase7_projection({"parity_phase_facts": facts})
+    manifest: dict[str, dict[str, Any]] = {}
+    for name, records in streams.items():
+        # Only parity_phase_facts is producer-owned. Top-level projection
+        # fields are projections and must not turn an empty stream into an
+        # observed execution fact.
+        present = name in facts
+        status = "MATCHED" if present else "UNAVAILABLE"
+        entry = _manifest(records, status=status, observed=present)
+        entry["coverage"] = "observed_empty" if present and not records else ("observed" if present else "unavailable")
+        if not present:
+            entry["reason"] = f"missing_{name}_facts"
+        manifest[name] = entry
+    return {
+        "artifact_type": "orderflow_phase7_parity", "schema_version": 1,
+        "contract": {"id": "orderflow_phase7_streams", "version": 1, "streams": list(PHASE7_STREAMS)},
+        "producer": _copy(producer), "run_id": run_id, "scope": _copy(scope),
+        "phase_streams": streams,
+        "manifest": {"version": 1, "hash_algorithm": "sha256", "run_id": run_id, "streams": manifest},
+    }
+
+
+def compare_phase7_manifests(canonical: Mapping[str, Any], paper: Mapping[str, Any], *, canonical_records: Any = None, paper_records: Any = None) -> dict[str, Any]:
+    left = canonical.get("manifest", {}).get("streams", {})
+    right = paper.get("manifest", {}).get("streams", {})
+    for stream in PHASE7_STREAMS:
+        lm, rm = left.get(stream), right.get(stream)
+        if not isinstance(lm, Mapping) or not isinstance(rm, Mapping):
+            return {"status": "INCOMPLETE", "stream": stream, "reason": "manifest_missing"}
+        if (lm.get("status"), rm.get("status")) != ("MATCHED", "MATCHED"):
+            return {"status": "INCOMPLETE", "stream": stream, "canonical": dict(lm), "paper": dict(rm)}
+        if (lm.get("count"), lm.get("sha256")) == (rm.get("count"), rm.get("sha256")):
+            continue
+        if canonical_records is None or paper_records is None:
+            return {"status": "MISMATCHED", "stream": stream, "reason": "manifest", "canonical": dict(lm), "paper": dict(rm)}
+        return {"status": "MISMATCHED", "stream": stream, **compare_chronological_streams(canonical_records(stream), paper_records(stream))}
+    return {"status": "MATCHED"}
+
+
 def compare_chronological_streams(
     canonical: Sequence[Mapping[str, Any]], paper: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
@@ -189,4 +233,4 @@ def _first_mismatch(left: Any, right: Any, path: str = "") -> tuple[str, Any, An
     return path, left, right
 
 
-__all__ = ["PHASE_STREAMS", "build_phase4_artifact", "canonical_hash", "compare_chronological_streams", "compare_phase4_manifests", "normalize_phase_record", "phase_facts_from_payload"]
+__all__ = ["PHASE_STREAMS", "PHASE7_STREAMS", "build_phase4_artifact", "build_phase7_artifact", "canonical_hash", "compare_chronological_streams", "compare_phase4_manifests", "compare_phase7_manifests", "normalize_phase_record", "phase_facts_from_payload"]

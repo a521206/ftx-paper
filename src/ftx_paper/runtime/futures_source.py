@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import date as date_type, datetime
+from datetime import date as date_type
 import hashlib
 import json
 from typing import Any
@@ -13,6 +13,7 @@ from ftx_paper.contracts import (
     FuturesContract, Instrument, MarketBar, SELECTION_POLICY_VERSION, parse_expiry,
     select_front_futures_contract,
 )
+from ftx_paper.strategies.orderflow.timestamps import parse_utc
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,7 +205,7 @@ class FuturesSessionSourceResolver:
     @staticmethod
     def _in_session(row: dict[str, Any]) -> bool:
         try:
-            timestamp = datetime.fromisoformat(str(row["minute"])).astimezone(IST)
+            timestamp = parse_utc(str(row["minute"]), field="futures source minute").astimezone(IST)
             minute = timestamp.hour * 60 + timestamp.minute
         except (KeyError, ValueError):
             return False

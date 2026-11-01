@@ -3,7 +3,7 @@
 from __future__ import annotations
 # pyright: reportArgumentType=false
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 from ..evidence_publication import AtrPublication
@@ -55,13 +55,17 @@ def _value_publication(value: Any) -> ValuePublication:
         )
     if not isinstance(reference_value, dict):
         raise ValueError("serialized prior value reference must be an object")
+    observed_at = _datetime(reference_value.get("observed_at"))
+    available_at = _datetime(reference_value.get("available_at"))
+    if observed_at is None or available_at is None:
+        raise ValueError("serialized prior value reference timestamps are required")
     reference = PriorSessionValueReference(
         session_date=str(reference_value["session_date"]),
         value_area_low=float(reference_value["value_area_low"]),
         point_of_control=float(reference_value["point_of_control"]),
         value_area_high=float(reference_value["value_area_high"]),
-         observed_at=_datetime(reference_value["observed_at"]) or datetime(1, 1, 1, tzinfo=timezone.utc),
-         available_at=_datetime(reference_value["available_at"]) or datetime(1, 1, 1, tzinfo=timezone.utc),
+         observed_at=observed_at,
+         available_at=available_at,
         lineage=tuple(reference_value["lineage"]),
     )
     return ValuePublication(

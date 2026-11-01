@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 import math
 from typing import Any, Mapping
 
 from .orderflow_common import Aggregate
+from .timestamps import nifty_label, parse_session_timestamp
 
 
 def contextual_support(
@@ -67,23 +69,64 @@ def build_context_scores(
 ) -> tuple[float, float] | None:
     if atr is None:
         return None
-    prior = [item for item in aggregates[aggregate.timeframe] if item.session_date == aggregate.session_date and item.end_time < aggregate.time]
-    own = contextual_support(aggregate, prior[-1] if prior else None, atr=atr, volume_average=sum(item.volume for item in prior[-20:]) / min(len(prior), 20) if prior else None)
-    child = aggregates.get("1m", [])
-    if aggregate.timeframe == "5m":
-        children = [item for item in child if aggregate.time <= item.time <= aggregate.end_time and item.available_at <= aggregate.available_at]
-        child_scores = [
-            contextual_support(
-                item,
-                child[child.index(item) - 1] if child.index(item) else None,
-                atr=atr,
-                volume_average=(sum(previous.volume for previous in child[max(0, child.index(item) - 20):child.index(item)]) / min(child.index(item), 20) if child.index(item) else None),
-            )
-            for item in children
-        ]
-    else:
-        child_scores = []
+    prior = [
+        item for item in aggregates[aggregate.timeframe]
+        if item.session_date == aggregate.session_date
+        and item.end_time < aggregate.time
+    ]
+    own = contextual_support(
+        aggregate,
+        prior[-1] if prior else None,
+        atr=atr,
+        volume_average=(
+            sum(item.volume for item in prior[-20:]) / min(len(prior), 20)
+            if prior else None
+        ),
+    )
+    if aggregate.timeframe != "5m":
+        return hierarchical_score(aggregate, (), own_support=own)
+
+    aggregate_clock = _clock_time(aggregate.time, aggregate.session_date)
+    aggregate_end_clock = _clock_time(aggregate.end_time, aggregate.session_date)
+    aggregate_available_clock = _clock_time(aggregate.available_at, aggregate.session_date)
+    children = [
+        row for row in raw_rows
+        if aggregate_clock <= _clock_time(row["time"], str(row.get("session_date", aggregate.session_date))) <= aggregate_end_clock
+        and _minute_after(_clock_time(row["time"], str(row.get("session_date", aggregate.session_date)))) <= aggregate_available_clock
+    ]
+    child_scores = [
+        contextual_support(
+            row,
+            raw_rows[index - 1] if index else None,
+            atr=atr,
+            volume_average=(
+                sum(float(previous["volume"]) for previous in raw_rows[max(0, index - 20):index])
+                / min(index, 20)
+                if index else None
+            ),
+        )
+        for index, row in enumerate(raw_rows)
+        if row in children
+    ]
     return hierarchical_score(aggregate, child_scores, own_support=own)
+
+
+def _clock_time(value: Any, session_date: str | None = None) -> str:
+    if isinstance(value, datetime):
+        return nifty_label(value).split("T")[-1][:5]
+    text = str(value).strip()
+    if session_date is not None:
+        return nifty_label(parse_session_timestamp(session_date, text)).split("T")[-1][:5]
+    return text.split("T")[-1][:5]
+
+
+def _minute_after(value: str) -> str:
+    hour, minute = (int(part) for part in value[:5].split(":"))
+    minute += 1
+    if minute == 60:
+        hour += 1
+        minute = 0
+    return f"{hour:02d}:{minute:02d}"
 
 
 def _directional_support(aggregate: Aggregate) -> tuple[float, float]:

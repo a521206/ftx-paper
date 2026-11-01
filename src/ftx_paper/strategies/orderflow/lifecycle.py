@@ -91,7 +91,10 @@ class SetupOpportunity:
     template_id: str | None = None
     status: OpportunityStatus = OpportunityStatus.FORMED
     response_episode_id: str | None = None
+    episode_confirmed: bool = False
     execution_group_id: str | None = None
+    comparison_key: str | None = None
+    conflict_key: str | None = None
     clock: datetime | None = None
     decision_context_required: bool = True
     timeout_limit: int = 6
@@ -162,7 +165,9 @@ class SetupOpportunity:
         available = canonical_timestamp(str(payload.get("available_at", observed)))
         if available < observed or available < self.formation_available_at:
             raise ValueError("lifecycle event is not causally available")
-        if not self.active and payload.get("kind") not in {"setup_invalidated", "setup_expired"}:
+        if not self.active and payload.get("kind") not in {
+            "setup_invalidated", "setup_expired", "setup_superseded",
+        }:
             raise ValueError("cannot append evidence to an inactive opportunity")
         sequence = len(self._events)
         payload.update(lifecycle_id=self.lifecycle_id, direction=self.direction.value, observed_at=observed, available_at=available)
@@ -176,7 +181,6 @@ class SetupOpportunity:
         if not self.active or at < self.formation_available_at:
             raise ValueError("invalidation requires an available active lifecycle")
         self.status = OpportunityStatus.EXPIRED if expired else OpportunityStatus.INVALIDATED
-        self.record({"kind": "setup_expired" if expired else "setup_invalidated", "reason": reason, "observed_at": at, "available_at": at})
 
     def supersede(self, *, at: datetime | str, reason: str = "superseded") -> None:
         if not self.active:
@@ -184,11 +188,12 @@ class SetupOpportunity:
         at = canonical_timestamp(at)
         if at < self.formation_available_at:
             raise ValueError("supersession cannot precede formation")
-        self.record({"kind": "setup_superseded", "reason": reason, "observed_at": at, "available_at": at, "stage_after": LifecycleStage.SUPERSEDED.value})
         self.status = OpportunityStatus.SUPERSEDED
 
     def to_dict(self) -> dict[str, Any]:
         return {"lifecycle_id": self.lifecycle_id, "candidate_id": self.candidate_id, "direction": self.direction.value, "status": self.status.value, "stage": self.stage.value, "causal_identity": self.causal_identity, "response_evidence_ids": list(self.response_evidence_ids), "response_evidence_lineage": [asdict(item) for item in self.response_evidence_lineage], "parent_context": asdict(self.parent_context) if self.parent_context else None, "events": [asdict(item) for item in self._events]}
 
-
-__all__ = ["EvidenceRef", "LifecycleEvent", "LifecycleStage", "OpportunityStatus", "SetupOpportunity"]
+__all__ = [
+    "Direction", "EvidenceRef", "LifecycleEvent", "LifecycleStage",
+    "OpportunityStatus", "SetupOpportunity",
+]

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from collections.abc import Mapping
 from typing import Any
-from datetime import datetime
 
 from .interactions import InteractionSnapshot
 from .contextual import build_context_scores
+from .features import daily_atr
 from .location_geometry import LocationBand
 from .opportunity import (
     DirectionalResponse,
@@ -34,6 +34,8 @@ class LifecycleFormation:
     values: dict[str, Any]
     observed_at: Any
     available_at: Any
+    lifecycle: Any = None
+    setup: Any = None
 
 
 @dataclass(slots=True)
@@ -43,11 +45,19 @@ class OpportunityCoordinator:
     setup_number: int = 0
     fill_permission_margin: float | None = 0.05
     _formed_identities: set[str] = field(default_factory=set, init=False, repr=False)
-    _opening_seed_sessions: set[str] = field(default_factory=set, init=False, repr=False)
     _opening_seed_candles: set[str] = field(default_factory=set, init=False, repr=False)
+    formations: list[LifecycleFormation] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._formed_identities.clear()
+
+    def _register_candidate(self, formation: LifecycleFormation) -> bool:
+        """Register a formed lifecycle once before downstream publication."""
+        if formation.identity in self._formed_identities:
+            return False
+        self._formed_identities.add(formation.identity)
+        self.formations.append(formation)
+        return True
 
     def form_resolved(
         self,
@@ -57,6 +67,7 @@ class OpportunityCoordinator:
         outcome: OpportunityOutcome,
         as_of: Any,
         aggregates: Mapping[str, list[Aggregate]],
+        raw_rows: Sequence[Mapping[str, Any]],
         atr: float | None,
     ) -> LifecycleFormation | None:
         response = outcome.response
@@ -66,11 +77,7 @@ class OpportunityCoordinator:
             or response is None
             or identity is None
             or identity in self._formed_identities
-            or str(interaction.creation_candle.time) in self._opening_seed_candles
-            or (
-                isinstance(interaction.creation_candle.time, datetime)
-                and nifty_label(interaction.creation_candle.time) in self._opening_seed_candles
-            )
+            or nifty_label(interaction.creation_candle.time) in self._opening_seed_candles
         ):
             return None
 
@@ -81,7 +88,7 @@ class OpportunityCoordinator:
         )
         scores = build_context_scores(
             score_candle,
-            raw_rows=(),
+            raw_rows=raw_rows,
             aggregates=dict(aggregates),
             atr=atr,
         )
@@ -136,6 +143,9 @@ class OpportunityCoordinator:
             template,
             formation_available_at=serialize_utc(as_of),
         )
+        lifecycle.episode_confirmed = True
+        lifecycle.comparison_key = identity
+        lifecycle.conflict_key = f"{lifecycle.session_date}:{lifecycle.instrument}:{interaction.location}"
         values = {
             **lifecycle.to_dict(),
             "kind": "lifecycle_formed",
@@ -154,7 +164,6 @@ class OpportunityCoordinator:
             "execution_group_id": lifecycle.execution_group_id,
             "long_score": long_score,
             "short_score": short_score,
-            "opening_score_override": False,
             "decision_context_required": lifecycle.decision_context_required,
             "reference_level": lifecycle.reference_level,
             "entry_boundary": setup.entry_zone_low,
@@ -167,14 +176,18 @@ class OpportunityCoordinator:
             "response_evidence_ids": list(response.evidence_ids),
             "location_interaction_id": interaction.interaction_id,
         }
-        self._formed_identities.add(identity)
-        return LifecycleFormation(
+        formation = LifecycleFormation(
             identity,
             lifecycle.lifecycle_id,
             values,
             response.observed_at,
             response.available_at,
+            lifecycle,
+            setup,
         )
+        if not self._register_candidate(formation):
+            return None
+        return formation
 
     def form_opening_seed(
         self,
@@ -183,67 +196,35 @@ class OpportunityCoordinator:
         registry: LocationRegistry,
         templates: Mapping[tuple[str, str], TradeTemplate],
         aggregates: Mapping[str, list[Aggregate]],
-        atr: float | None,
-        opening_gap_direction: str | None,
-        prior_volume: tuple[float, ...],
+        raw_rows: Sequence[Mapping[str, Any]],
+        rows_by_date: Mapping[str, Sequence[Mapping[str, object]]],
     ) -> tuple[dict[str, Any], LifecycleFormation] | None:
         """Form only Canonical's explicit first-candle OR acceptance seed."""
-        if candle.session_date in self._opening_seed_sessions:
+        candle_key = nifty_label(candle.time)
+        if candle_key in self._opening_seed_candles:
             return None
-        # Canonical evaluates the first completed 5m candle exactly once.
-        self._opening_seed_sessions.add(candle.session_date)
         if candle.open == candle.close:
             return None
         direction = Direction.LONG if candle.close > candle.open else Direction.SHORT
-        expected_gap = "down" if direction is Direction.LONG else "up"
-        candle_range = candle.high - candle.low
-        opening_signature = False
-        if candle_range > 0 and prior_volume:
-            body = abs(candle.close - candle.open)
-            rejection_wick = (
-                candle.open - candle.low
-                if direction is Direction.LONG
-                else candle.high - candle.open
-            )
-            five_minute_average = sum(prior_volume) / len(prior_volume) * 5
-            opening_signature = (
-                opening_gap_direction == expected_gap
-                and body / candle_range >= 0.35
-                and rejection_wick / candle_range >= 0.25
-                and candle.volume >= five_minute_average * 2.0
-            )
         scores = build_context_scores(
             candle,
-            raw_rows=(),
+            raw_rows=raw_rows,
             aggregates=dict(aggregates),
-            atr=atr,
+            atr=daily_atr(candle.session_date, rows_by_date),
         )
         if scores is None:
             return None
         long_score, short_score = scores
         own_score = long_score if direction is Direction.LONG else short_score
         opposing_score = short_score if direction is Direction.LONG else long_score
-        opening_score_override = False
-        if own_score <= opposing_score:
-            if not opening_signature or self.fill_permission_margin is None:
-                return None
-            if direction is Direction.LONG:
-                long_score = max(long_score, short_score + self.fill_permission_margin)
-                own_score = long_score
-            else:
-                short_score = max(short_score, long_score + self.fill_permission_margin)
-                own_score = short_score
-            opening_score_override = True
-        if own_score <= opposing_score:
+        if own_score is None or opposing_score is None or own_score <= opposing_score:
             return None
         location = "OR_HIGH" if direction is Direction.LONG else "OR_LOW"
         record = registry.resolve_as_of(location, candle.available_at)
         template = templates.get(("5m_acceptance_breakout", location))
         if record is None or template is None:
             return None
-        self._opening_seed_sessions.add(candle.session_date)
-        self._opening_seed_candles.add(str(candle.time))
-        self._opening_seed_candles.add(nifty_label(candle.time))
+        self._opening_seed_candles.add(candle_key)
         seed_id = (
             f"OR_SEED:{candle.session_date}:{candle.symbol}:{record.generation}:"
             f"{direction.value}:{nifty_label(candle.time)}"
@@ -309,6 +290,9 @@ class OpportunityCoordinator:
             formation_available_at=serialize_utc(candle.available_at),
             decision_context_required=False,
         )
+        lifecycle.episode_confirmed = True
+        lifecycle.comparison_key = identity
+        lifecycle.conflict_key = f"{lifecycle.session_date}:{lifecycle.instrument}:{location}"
         values = {
             **lifecycle.to_dict(),
             "kind": "lifecycle_formed",
@@ -322,7 +306,6 @@ class OpportunityCoordinator:
             "opening_interaction_kind": None,
             "long_score": long_score,
             "short_score": short_score,
-            "opening_score_override": opening_score_override,
             "reference_level": record.price,
             "entry_boundary": setup.entry_zone_low,
             "failure_boundary": response.invalidation_boundary,
@@ -338,7 +321,11 @@ class OpportunityCoordinator:
         formation = LifecycleFormation(
             identity, lifecycle.lifecycle_id, values,
             response.observed_at, response.available_at,
+            lifecycle,
+            setup,
         )
+        if not self._register_candidate(formation):
+            return None
         outcome = {
             "interaction_id": seed_id,
             "location": location,
@@ -349,19 +336,6 @@ class OpportunityCoordinator:
             "reason": "opening_candle_directional_seed",
             "evidence_ids": list(response.evidence_ids),
         }
-        self._formed_identities.add(identity)
         return outcome, formation
 
-
-def opening_gap_direction(candle: Aggregate, registry: LocationRegistry) -> str:
-    """Classify the opening candle against causally available prior extremes."""
-    prior_low = registry.resolve_as_of("PD_LOW", candle.available_at)
-    prior_high = registry.resolve_as_of("PD_HIGH", candle.available_at)
-    if prior_low is not None and candle.open < prior_low.price:
-        return "down"
-    if prior_high is not None and candle.open > prior_high.price:
-        return "up"
-    return "internal"
-
-
-__all__ = ["LifecycleFormation", "OpportunityCoordinator", "opening_gap_direction"]
+__all__ = ["LifecycleFormation", "OpportunityCoordinator"]

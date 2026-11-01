@@ -1,4 +1,4 @@
-"""Compatibility CLI for the production orderflow replay pipeline."""
+"""CLI for the bounded orderflow replay pipeline."""
 
 from __future__ import annotations
 
@@ -8,10 +8,10 @@ import json
 from pathlib import Path
 
 from ftx_paper.config import PaperConfig
-from ftx_paper.strategies.orderflow.replay_pipeline import OrderflowReplayEngine, _observation_rows
+from ftx_paper.strategies.orderflow.replay_pipeline import OrderflowReplayEngine
 from ftx_paper.strategies.orderflow.timestamps import session_minute
 
-__all__ = ["OrderflowReplayEngine", "_observation_rows", "main"]
+__all__ = ["OrderflowReplayEngine", "main"]
 
 
 def main(argv: list[str] | None = None) -> int:

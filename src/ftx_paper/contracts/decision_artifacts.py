@@ -17,6 +17,14 @@ def _decision_at(value: Any) -> datetime:
     return value
 
 
+def _parse_datetime(value: str, field: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{field} must be an ISO timestamp") from exc
+    return _decision_at(parsed)
+
+
 def _to_dict(values: Mapping[str, Any], *, datetime_fields: tuple[str, ...] = ()) -> dict[str, Any]:
     result = dict(values)
     for name in datetime_fields:
@@ -41,7 +49,7 @@ def _from_dict(
     }
     for name in datetime_fields:
         if isinstance(values[name], str):
-            values[name] = datetime.fromisoformat(values[name])
+            values[name] = _parse_datetime(values[name], name)
     return values
 
 

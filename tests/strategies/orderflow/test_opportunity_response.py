@@ -8,9 +8,11 @@ from ftx_paper.strategies.orderflow.opportunity import (
     evaluate_response,
 )
 from ftx_paper.strategies.orderflow.opportunity_coordinator import OpportunityCoordinator
+import ftx_paper.strategies.orderflow.opportunity_coordinator as coordinator_module
 from ftx_paper.strategies.orderflow.policies.base import HypothesisEvaluation
 from ftx_paper.strategies.orderflow.orderflow_common import Aggregate
-from ftx_paper.strategies.orderflow.templates import Direction, LONG_RECOVERY_LOW
+from ftx_paper.strategies.orderflow.state_machine_types import LocationRegistry
+from ftx_paper.strategies.orderflow.templates import Direction, LONG_RECOVERY_LOW, TRADE_TEMPLATES
 from ftx_paper.strategies.orderflow.timestamps import parse_nifty_label
 
 
@@ -125,13 +127,15 @@ def test_opportunity_coordinator_forms_one_canonical_lifecycle() -> None:
 
     first = coordinator.form_resolved(
         interaction=interaction_value, evaluation=evaluation, outcome=outcome,
-        as_of=confirmation.available_at,
-        aggregates={"1m": [], "5m": [contact, confirmation]}, atr=1.0,
+            as_of=confirmation.available_at,
+            aggregates={"1m": [], "5m": [contact, confirmation]},
+            raw_rows=[], atr=1.0,
     )
     duplicate = coordinator.form_resolved(
-        interaction=interaction_value, evaluation=evaluation, outcome=outcome,
-        as_of=confirmation.available_at,
-        aggregates={"1m": [], "5m": [contact, confirmation]}, atr=1.0,
+            interaction=interaction_value, evaluation=evaluation, outcome=outcome,
+            as_of=confirmation.available_at,
+            aggregates={"1m": [], "5m": [contact, confirmation]},
+            raw_rows=[], atr=1.0,
     )
 
     assert first is not None
@@ -140,3 +144,42 @@ def test_opportunity_coordinator_forms_one_canonical_lifecycle() -> None:
     assert first.values["strategy"] == "orderflow-1m_5m"
     assert first.values["context_candle_id"] == contact.time
     assert duplicate is None
+
+
+def test_opening_seed_uses_canonical_inputs_and_retries_until_formed(monkeypatch) -> None:
+    candle = bar("09:15", 100.0, 102.0, 99.0, 101.0)
+    registry = LocationRegistry("stream")
+    raw_rows = [{"time": "09:15", "volume": 10}]
+    seen: dict[str, object] = {}
+
+    def scores(aggregate, *, raw_rows, aggregates, atr):
+        seen["raw_rows"] = raw_rows
+        seen["atr"] = atr
+        return 0.8, 0.2
+
+    monkeypatch.setattr(coordinator_module, "build_context_scores", scores)
+    monkeypatch.setattr(coordinator_module, "daily_atr", lambda session, rows: 7.5)
+    coordinator = OpportunityCoordinator()
+
+    assert coordinator.form_opening_seed(
+        candle=candle, registry=registry, templates=TRADE_TEMPLATES,
+        aggregates={"1m": [], "5m": [candle]}, raw_rows=raw_rows,
+        rows_by_date={"2026-10-01": tuple(raw_rows)},
+    ) is None
+
+    registry.register_opening_range(99.0, 101.0, candle.available_at, atr=1.0)
+    result = coordinator.form_opening_seed(
+        candle=candle, registry=registry, templates=TRADE_TEMPLATES,
+        aggregates={"1m": [], "5m": [candle]}, raw_rows=raw_rows,
+        rows_by_date={"2026-10-01": tuple(raw_rows)},
+    )
+
+    assert result is not None
+    outcome, formation = result
+    assert outcome["interaction_id"].startswith("OR_SEED:")
+    assert seen == {"raw_rows": raw_rows, "atr": 7.5}
+    assert coordinator.form_opening_seed(
+        candle=candle, registry=registry, templates=TRADE_TEMPLATES,
+        aggregates={"1m": [], "5m": [candle]}, raw_rows=raw_rows,
+        rows_by_date={"2026-10-01": tuple(raw_rows)},
+    ) is None

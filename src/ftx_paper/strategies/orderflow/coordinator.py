@@ -62,6 +62,11 @@ class OrderflowCoordinator:
     def __post_init__(self) -> None:
         self.detector = InteractionDetector(self.location_registry)
 
+    @property
+    def five_minute_aggregates(self) -> tuple[Aggregate, ...]:
+        """Completed 5m evidence available to the execution boundary."""
+        return tuple(self._five_minute)
+
     def advance(self, item: OrderflowClockInput) -> OrderflowAdvance:
         """Advance state at one completed bar's availability boundary.
 

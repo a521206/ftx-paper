@@ -960,10 +960,110 @@ Current Phase 6 verification record:
 Validate the complete canonical execution lifecycle only after the opportunity
 and setup-lifecycle gate passes.
 
-Status: In progress. The first deterministic execution slice ports canonical
-intent/admission state, allocation gate ordering, entry reservations, trigger
-transitions, and entry fills. Paper accounting, exits, and runtime wiring remain
-deferred until the corresponding canonical execution transitions are ported.
+Status: **Blocked before implementation.** The deterministic entry slice and
+the replay/export contract exist, but Paper does not yet contain the canonical
+execution dependency closure or an execution-owning replay boundary. Phase 7
+must not be marked in progress merely because its projection and comparison
+utilities exist.
+
+### Phase 7 Ownership And Non-Goals
+
+NiftyZoning remains the sole owner of orderflow intent, admission, allocation,
+execution, lifecycle settlement, and orderflow-ledger semantics. Paper may own
+only input/clock adaptation, diagnostic capture, Paper execution-account
+mapping, and persistence of canonical facts. The Paper capital/equity ledger is
+a separate host owner.
+
+Do not resolve this phase by publishing explicit empty streams when execution
+was not evaluated, deriving facts from trades or terminal snapshots, adding a
+Paper-specific coordinator/risk rule/template selector/settlement rule, or
+mapping a lifecycle directly to an order without canonical admission,
+allocation, reservation, trigger, and fill transitions.
+
+### Phase 7A - Port The Canonical Execution Dependency Closure
+
+Port the pinned canonical implementation and direct dependencies, preserving
+symbols, transitions, causal timestamps, unavailable outcomes, and ownership:
+
+- `src/orderflow/hierarchy.py`: `TradeIntent`, `ExitIntent`,
+  `PositionManagement`, intent statuses, entry/exit transitions, and setup
+  execution state;
+- `src/orderflow/intent_policy.py`: entry/exit admission and decision-context
+  rules;
+- `src/orderflow/active_position_gate.py`: active-position and execution-group
+  gates;
+- `src/orderflow/allocation.py`: portfolio, session, direction, cooldown, and
+  sizing gates;
+- `src/orderflow/execution.py`: `ExecutionCoordinator`, entry/exit timing,
+  trigger evaluation, reservations, partial fills, protective stops, settlement,
+  and realized points;
+- execution portions of `state_machine_types.py`: `ReplayContext`,
+  `ExecutionConstraints`, `ExecutionProposal`, execution state, and
+  `record_parity_fact`.
+
+The current Paper `execution.py` is only an entry-state scaffold. It must not
+be extended into a second strategy implementation; replace or retire it as
+required by the canonical port and port the corresponding canonical tests.
+
+### Phase 7B - Add The Shared Execution Transition Boundary
+
+Extend the ported state-machine orchestration so one completed available
+observation advances the same execution owner in live and replay, in canonical
+order: lifecycle/setup registration; execution-group eligibility; admission and
+unavailable/denied outcomes; decision-context and allocation/risk gates; intent
+arming/effective time/cancellation; trigger/reservation/next-bar fill; position
+management, protective stops, exits, partial fills, settlement, and idempotent
+retry handling.
+
+Replay may bound input and capture facts. Live may adapt feed callbacks and
+Paper execution notifications. Neither path may own a separate strategy state
+machine or alter canonical policy calculations.
+
+### Phase 7C - Publish Canonical Execution Facts
+
+Add the smallest Paper equivalent of canonical
+`state_machine_reporting.build_replay_payload()` as a projection over the
+ported execution owner. It must publish producer-owned facts under
+`parity_phase_facts`, never reconstruct them from presentation output.
+
+The streams are compared in this order:
+
+1. `intent_admission`
+2. `trigger_exit`
+3. `execution_fills`
+4. `execution_transitions`
+5. `ledger_mutations`
+
+Each record preserves `kind`, `identity`, `causal_parent_id`,
+`occurred_at`, `observed_at`, `available_at`, `values`, and `unavailable`.
+Ledger mutations derive from canonical reservation/admission history,
+authorizations, fills, cancellations, exits, and settlement. Missing streams
+remain `UNAVAILABLE`/`INCOMPLETE`; they are never treated as successful empty
+parity.
+
+### Phase 7D - Paper Host Adapter
+
+Only after canonical proposal/fill facts exist, map successful canonical fills
+to the existing Paper `OrderIntent`/`ExecutionService` boundary. Diagnostic mode
+must not mutate Paper account state. Explicit Paper execution may mutate only
+the existing Paper portfolio/accounting owner and must never submit broker
+orders.
+
+### Phase 7 Exit Gates
+
+- Canonical intent, admission, allocation, execution, and reporting tests pass
+  against the pinned commit, with only package-root import adaptations.
+- Live and replay invoke the same ported execution transition boundary.
+- Admission, intent, reservation, trigger, fill, partial-fill, stop, exit,
+  cancellation, settlement, and realized-point records match in causal order.
+- All five Phase 7 streams are explicit producer facts and manifests match
+  before records are compared.
+- Duplicate/retry replay does not duplicate reservations, fills, exits, or
+  ledger mutations.
+- Diagnostic replay makes no Paper account mutation; explicit Paper execution
+  uses only the existing accounting adapter.
+- Cross-repository parity passes on a no-trade date and a date with canonical
+  entries, exits, and settlement. Any missing stream blocks the phase.
 
 Canonical scope:
 
@@ -996,6 +1096,11 @@ Parity gate:
 
 ### Phase 7 Initial Slice Verification Record
 
+- `transition.py` now owns the shared chronological boundary for live and
+  bounded replay, including one observation coordinator, one execution owner,
+  a monotonic completed-bar clock, and the producer parity stream collection.
+  Replay lifecycle execution is advanced through this owner; the live strategy
+  constructs the same owner instead of discarding execution state.
 - `hierarchy.py` now carries the canonical intent statuses, entry policy, intent
   transitions, and causal trigger/fill guards from pinned commit
   `8114f553392ad01dd032aecfed0031a3bc08e2f8`.
@@ -1009,6 +1114,62 @@ Parity gate:
   rejected duplicate fills. This is not the Phase 7 parity gate; exits,
   protective stops, partial fills, settlement, and ledger projection remain
   incomplete.
+
+### Phase 7 Stream Contract And Current Evidence
+
+The canonical owners are `src/orderflow/hierarchy.py` (`TradeIntent`,
+`ExitIntent`, `PositionManagement`, and lifecycle transitions),
+`src/orderflow/execution.py` (`ExecutionCoordinator` and execution calculations),
+`src/orderflow/state_machine_types.py` (`ReplayContext.record_parity_fact`), and
+`src/orderflow/state_machine_reporting.py` (`build_replay_payload`). The shared
+projection is `phase7_projection.py` in each repository.
+
+The explicit streams are ordered as follows:
+
+1. `intent_admission`
+2. `trigger_exit`
+3. `execution_fills`
+4. `execution_transitions`
+5. `ledger_mutations`
+
+Each record preserves `kind`, `identity`, `causal_parent_id`,
+`occurred_at`, `observed_at`, `available_at`, `values`, and `unavailable`.
+Manifests are compared before records; records are then compared in stream and
+sequence order, reporting the first stream, record, or field mismatch.
+Canonical replay payloads publish fills, execution transitions, reservations,
+authorizations, and settlement mutations through `parity_phase_facts` without
+reconstructing them from trades or terminal snapshots. Paper now invokes the
+tested execution owner from the chronological interaction clock for newly
+formed lifecycle/setup objects and emits explicit admission facts. Trigger,
+reservation, fill, exit, settlement, and ledger transitions remain incomplete
+until their causal observations and next-bar execution boundary are wired. The
+projection cannot create facts that the execution owner did not emit.
+
+Verification evidence for the requested source-matched dates (`2026-10-01`,
+`2026-10-05`) is:
+
+- Phase 3: `MATCHED`.
+- Phase 3.5: `INPUT_VARIANCE`, with bounded ATR/prior-value variance.
+- Phase 4: accepted bounded ATR-dependent `INPUT_VARIANCE`.
+- Phase 4.5: `MATCHED`.
+- Phase 6: accepted bounded ATR-dependent `INPUT_VARIANCE`.
+- Phase 7: `INCOMPLETE`; Paper now emits chronological `intent_admission`,
+  trigger, and entry execution facts from the shared replay owner, but canonical
+  exit-policy evaluation, live shared-owner wiring, and complete settlement
+  coverage are still absent. The comparison command correctly remains non-zero.
+
+`execution_adapter.py` now defines the Paper host boundary: it maps an already
+triggered canonical `TradeIntent` to the existing `OrderIntent` contract and
+delegates explicit execution to `ExecutionService`. Diagnostic mode returns the
+proposal without calling the service or mutating account state; the strategy
+boundary accepts execution notifications without owning a second coordinator.
+
+The bounded ATR tolerance remains 1% relative / 2.5 absolute, and prior-value
+variance remains accepted only through the existing Phase 3.5 input-variance
+rule. The Phase 7 gaps are now explicitly divided into the canonical execution
+dependency closure (7A), shared transition boundary (7B), fact publication
+(7C), and Paper host adapter (7D). No Phase 7 parity claim is made until all
+five streams match on both no-trade and execution-bearing sessions.
 
 ## Phase 8: Canonical Reporting And Four-Layer Parity Artifacts
 

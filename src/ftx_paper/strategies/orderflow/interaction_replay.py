@@ -4,7 +4,7 @@ from __future__ import annotations
 # pyright: reportArgumentType=false
 
 import dataclasses
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 import hashlib
 from collections.abc import Mapping, Sequence
@@ -14,17 +14,23 @@ from .context_location_replay import ContextLocationReplay
 from .interaction_detector import InteractionDetector
 from .location_observation import LocationObservation
 from .orderflow_common import Aggregate, parse_timestamp, serialize_timestamp
-from .timestamps import nifty_label, serialize_utc
+from .timestamps import NIFTY_ZONE, nifty_label, serialize_utc
 from .state_machine_types import LocationRegistry
 from .templates import TRADE_TEMPLATES, TradeTemplate
+from .value_publication import ValuePublication
 from .policies import PDPolicy, StandardLocationPolicy
-from .opportunity_coordinator import OpportunityCoordinator, opening_gap_direction
+from .opportunity_coordinator import OpportunityCoordinator
+from .opening_gap_policy import OpeningGapPolicy
+from .transition import OrderflowTransitionOwner
 
 
 @dataclass(frozen=True, slots=True)
 class InteractionResponseReplay:
     facts: tuple[dict[str, Any], ...]
     opportunity_facts: tuple[dict[str, Any], ...] = ()
+    formations: tuple[Any, ...] = ()
+    regime_publications: tuple[tuple[str, Any], ...] = ()
+    execution_phase_facts: dict[str, tuple[dict[str, Any], ...]] = field(default_factory=dict)
 
     def parity_phase_facts(self) -> dict[str, list[dict[str, Any]]]:
         return {
@@ -45,9 +51,14 @@ def _fact(kind: str, identity: str, parent: str | None, snapshot: Mapping[str, A
         raise ValueError("interaction parity fact timestamps are required")
     observed_timestamp = serialize_timestamp(parse_timestamp(observed))
     available_timestamp = serialize_timestamp(parse_timestamp(available))
+    session_date = parse_timestamp(observed).astimezone(NIFTY_ZONE).date().isoformat()
     return {"kind": kind, "occurred_at": observed_timestamp,
              "observed_at": observed_timestamp, "available_at": available_timestamp,
-             "identity": identity, "causal_parent_id": parent, "values": _jsonable(snapshot),
+             "causal_observed_at": observed_timestamp,
+             "causal_available_at": available_timestamp,
+             "policy_version": "orderflow-v1", "provenance": "causal_replay",
+             "identity": identity, "causal_parent_id": parent,
+             "session_date": session_date, "values": _jsonable(snapshot),
              "unavailable": list(unavailable)}
 
 
@@ -136,7 +147,9 @@ def replay_interaction_response(
     registry: LocationRegistry, *, templates: Mapping[tuple[str, str], TradeTemplate] = TRADE_TEMPLATES,
     replay_mode: str = "FULL", atr: float | None = None,
     fill_permission_margin: float | None = 0.05,
-    prior_volume: tuple[float, ...] = (),
+    raw_rows: Sequence[Mapping[str, Any]] = (),
+    rows_by_date: Mapping[str, Sequence[Mapping[str, object]]] | None = None,
+    prior_value: ValuePublication | None = None,
 ) -> InteractionResponseReplay:
     """Advance independent 1m/5m detectors in one availability-ordered clock."""
     one = tuple(aggregates.get("1m", ()))
@@ -197,6 +210,23 @@ def replay_interaction_response(
     opportunity_coordinator = OpportunityCoordinator(
         fill_permission_margin=fill_permission_margin,
     )
+    opening_gap_policy = OpeningGapPolicy()
+    regime_publications: list[tuple[str, Any]] = []
+    gap_direction: str | None = None
+    opening_gap_state: str | None = None
+    opening_gap_reference: float | None = None
+    opening_gap_bars = 0
+    prior_value_low = (
+        prior_value.reference.value_area_low
+        if prior_value is not None and prior_value.reference is not None else None
+    )
+    prior_value_high = (
+        prior_value.reference.value_area_high
+        if prior_value is not None and prior_value.reference is not None else None
+    )
+    gap_last_1m_available: datetime | None = None
+    transition_owner = OrderflowTransitionOwner(published_registry)
+    processed_formations = 0
     clock_available: datetime | None = None
     clock_available5: list[Aggregate] = []
     dispatched_available5: datetime | None = None
@@ -224,12 +254,50 @@ def replay_interaction_response(
                     facts=facts,
                     resolved_response_emitted=resolved_response_emitted,
                     opportunity_coordinator=opportunity_coordinator,
+                    raw_rows=raw_rows,
                     atr=atr,
                 )
                 dispatched_available5 = latest_available5
         clock_available = current_available
         clock_available5 = available5
-        if current.timeframe == "5m":
+        if not regime_publications:
+            prior_low = published_registry.resolve_as_of("PD_LOW", current.available_at)
+            prior_high = published_registry.resolve_as_of("PD_HIGH", current.available_at)
+            opening = opening_gap_policy.classify(
+                opening=current.to_dict(),
+                prior_low=prior_low.price if prior_low is not None else None,
+                prior_high=prior_high.price if prior_high is not None else None,
+                prior_value_low=prior_value_low,
+                prior_value_high=prior_value_high,
+                available_at=current.available_at,
+            )
+            gap_direction = str(opening.get("direction"))
+            opening_gap_state = str(opening.get("state")) if gap_direction in {"up", "down"} else None
+            opening_gap_reference = float(opening["reference_level"]) if gap_direction in {"up", "down"} else None
+            regime_publications.append((
+                serialize_utc(current.available_at),
+                opening_gap_policy.regime_for(
+                    state=opening_gap_state,
+                    direction=gap_direction if gap_direction in {"up", "down"} else None,
+                    version=f"opening-gap-permission-{serialize_utc(current.available_at)}",
+                    context="opening_gap", restrictions=("causal_opening_gap",),
+                ),
+            ))
+        session_five = tuple(
+            item for item in five if item.session_date == current.session_date
+        )
+        first_five = min(session_five, key=lambda item: item.time, default=None)
+        if current.timeframe == "5m" and first_five is not None and current.time == first_five.time:
+            regime_publications.append((
+                serialize_utc(current.available_at),
+                opening_gap_policy.regime_for(
+                    state=opening_gap_state,
+                    direction=gap_direction if gap_direction in {"up", "down"} else None,
+                    version=f"opening-gap-permission-{serialize_utc(current.available_at)}",
+                    context="opening_gap",
+                    restrictions=("causal_opening_gap",),
+                ),
+            ))
             opening_seed = opportunity_coordinator.form_opening_seed(
                 candle=current,
                 registry=published_registry,
@@ -240,12 +308,32 @@ def replay_interaction_response(
                         ("1m", available1), ("5m", available5),
                     )
                 },
-                atr=atr,
-                opening_gap_direction=opening_gap_direction(current, published_registry),
-                prior_volume=prior_volume,
+                raw_rows=raw_rows,
+                rows_by_date=rows_by_date or {},
             )
             if opening_seed is not None:
                 outcome_values, formation = opening_seed
+                transition_owner.attach_setup(formation)
+                facts.append(_fact(
+                    "or_directional_seed",
+                    formation.identity,
+                    formation.lifecycle_id,
+                    {
+                        "lifecycle_id": formation.lifecycle_id,
+                        "causal_identity": formation.identity,
+                        "location": outcome_values["location"],
+                        "direction": outcome_values["direction"],
+                        "interaction_id": None,
+                        "opening_interaction_kind": None,
+                        "opening_policy_version": formation.values["opening_policy_version"],
+                        "candidate_provenance": "opening_hypothesis",
+                        "reference_generation": formation.lifecycle.reference_generation,
+                        "long_score": formation.values["long_score"],
+                        "short_score": formation.values["short_score"],
+                    },
+                    observed_at=formation.observed_at,
+                    available_at=formation.available_at,
+                ))
                 facts.append(_fact(
                     "opportunity_outcome",
                     formation.identity,
@@ -262,6 +350,28 @@ def replay_interaction_response(
                     observed_at=formation.observed_at,
                     available_at=formation.available_at,
                 ))
+        if current.timeframe == "1m" and gap_direction in {"up", "down"} and opening_gap_reference is not None:
+            if gap_last_1m_available is None or current.available_at > gap_last_1m_available:
+                gap_last_1m_available = current.available_at
+                opening_gap_bars += 1
+                transitioned = opening_gap_policy.transition(
+                    direction=gap_direction,
+                    completed_bars=opening_gap_bars,
+                    close=current.close,
+                    reference_level=opening_gap_reference,
+                    prior_value_low=prior_value_low,
+                    prior_value_high=prior_value_high,
+                )
+                if transitioned is not None and transitioned != opening_gap_state:
+                    opening_gap_state = transitioned
+                    regime_publications.append((
+                        serialize_utc(current.available_at),
+                        opening_gap_policy.regime_for(
+                            state=opening_gap_state, direction=gap_direction,
+                            version=f"opening-gap-permission-{serialize_utc(current.available_at)}",
+                            context="opening_gap", restrictions=("causal_opening_gap",),
+                        ),
+                    ))
         if available5:
             for record in deferred_vwap:
                 key = (record.location_id, record.generation)
@@ -377,7 +487,34 @@ def replay_interaction_response(
                     "terminal_candle_id": snap["terminal_candle_id"],
                     "terminal_close_side": snap["terminal_close_side"],
                 }, observed_at=snap["candles"][-1]["end_time"],
-                   available_at=snap["candles"][-1]["available_at"]))
+                    available_at=snap["candles"][-1]["available_at"]))
+        transition_owner.context.interactions = {
+            iid: state.evaluation_snapshot()
+            for iid, state in detector.interactions.items()
+        }
+        new_formations = tuple(opportunity_coordinator.formations[processed_formations:])
+        if new_formations:
+            scores = {
+                item.lifecycle.lifecycle_id: (
+                    item.values.get("long_score"), item.values.get("short_score"),
+                )
+                for item in new_formations if item.lifecycle is not None
+            }
+            transition_owner.advance_execution(
+                new_formations,
+                regime_publications=tuple(regime_publications),
+                decision_scores=scores,
+            )
+            processed_formations += len(new_formations)
+        if current.timeframe == "1m" and opportunity_coordinator.formations:
+            transition_owner.advance_replay_bar(
+                tuple(opportunity_coordinator.formations),
+                index=one.index(current),
+                timestamp=serialize_utc(current.end_time),
+                next_time=serialize_utc(current.available_at),
+                row=current.to_dict(),
+                available5=available5,
+            )
     if clock_available is not None:
         latest_available5 = clock_available5[-1].available_at if clock_available5 else None
         if latest_available5 != dispatched_available5:
@@ -389,10 +526,12 @@ def replay_interaction_response(
             as_of=clock_available,
             facts=facts,
             resolved_response_emitted=resolved_response_emitted,
-            opportunity_coordinator=opportunity_coordinator,
-            atr=atr,
+                opportunity_coordinator=opportunity_coordinator,
+                raw_rows=raw_rows,
+                atr=atr,
             )
     lifecycle_kinds = {
+        "or_directional_seed",
         "opportunity_outcome", "lifecycle_formed", "setup_invalidated",
         "setup_expired", "setup_superseded", "opportunity_timeout",
     }
@@ -400,7 +539,13 @@ def replay_interaction_response(
     opportunity_facts = tuple(
         item for item in facts if item["kind"] in lifecycle_kinds
     )
-    return InteractionResponseReplay(interaction_facts, opportunity_facts)
+    return InteractionResponseReplay(
+        interaction_facts,
+        opportunity_facts,
+        tuple(opportunity_coordinator.formations),
+        tuple(regime_publications),
+        {name: tuple(values) for name, values in transition_owner.context.parity_snapshot().items()},
+    )
 
 
 def _dispatch_structure(
@@ -413,6 +558,7 @@ def _dispatch_structure(
     facts: list[dict[str, Any]],
     resolved_response_emitted: set[tuple[str, str, tuple[str, ...]]],
     opportunity_coordinator: OpportunityCoordinator,
+    raw_rows: Sequence[Mapping[str, Any]],
     atr: float | None,
 ) -> None:
     """Run the canonical structure phase after all interaction publications."""
@@ -512,6 +658,7 @@ def _dispatch_structure(
                 outcome=outcome,
                 as_of=as_of,
                 aggregates={"1m": list(available1), "5m": list(available5)},
+                raw_rows=raw_rows,
                 atr=atr,
             )
             if formation is not None:

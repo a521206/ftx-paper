@@ -13,6 +13,8 @@ from .orderflow_common import Aggregate
 from .timestamps import coerce_timestamp, nifty_label
 from .lifecycle import EvidenceRef, LifecycleEvent, LifecycleStage, OpportunityStatus, SetupOpportunity  # noqa: F401
 from .opportunity import DirectionalResponse, OpportunityOutcome, OpportunityOutcomeStatus  # noqa: F401
+from .templates import Direction
+from .hierarchy import TriggerObservation
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,8 +97,16 @@ class LocationRegistry:
             for alias, price, prior in (("SESSION_HIGH", next_high, running_high), ("SESSION_LOW", next_low, running_low)):
                 if prior is not None and price == prior:
                     continue
+                source_id = nifty_label(aggregate.time)
+                if any(
+                    item.alias == alias
+                    and item.source_aggregate_id == source_id
+                    and item.price == price
+                    for item in self.records.values()
+                ):
+                    continue
                 previous = self.resolve_as_of(alias, aggregate.available_at)
-                published.append((self._register_level(alias, price, aggregate.available_at, session_date, frozen_atr=atr, source_aggregate_id=nifty_label(aggregate.time)), previous))
+                published.append((self._register_level(alias, price, aggregate.available_at, session_date, frozen_atr=atr, source_aggregate_id=source_id), previous))
             running_high = aggregate.high if running_high is None else max(running_high, aggregate.high)
             running_low = aggregate.low if running_low is None else min(running_low, aggregate.low)
         return tuple(published)
@@ -204,15 +214,143 @@ class MarketContextStore:
 
 @dataclass
 class ReplayContext:
+    rows: list[dict[str, Any]] = field(default_factory=list)
+    aggregates: dict[str, list[Aggregate]] = field(default_factory=dict)
     market_contexts: MarketContextStore = field(default_factory=MarketContextStore)
     location_registry: LocationRegistry | None = None
     regime: Any = None
+    execution_constraints: "ExecutionConstraints" = field(default_factory=lambda: ExecutionConstraints())
+    execution_engine: Any = None
+    opportunities: dict[str, SetupOpportunity] = field(default_factory=dict)
+    execution_proposals: list["CanonicalExecutionProposal"] = field(default_factory=list)
+    parity_streams: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    parity_observed: set[str] = field(default_factory=set, repr=False)
+    # Chronological state retained by the canonical state-machine boundary.
+    current_session_date: str | None = None
+    continuous: Any = None
+    session: Any = None
+    opening_context: dict[str, Any] = field(default_factory=dict)
+    interactions: dict[str, Any] = field(default_factory=dict)
+    session_extreme_gate_blocked_lifecycles: set[str] = field(default_factory=set)
+    events: list[dict[str, Any]] = field(default_factory=list)
+    transitions: list[dict[str, Any]] = field(default_factory=list)
+    decision_context_evidence: list[dict[str, Any]] = field(default_factory=list)
+    opportunity_identities: dict[str, str] = field(default_factory=dict)
+    published_resolved_responses: set[tuple[str, str]] = field(default_factory=set)
+
+    def __post_init__(self) -> None:
+        if self.execution_engine is None:
+            raise ValueError("ReplayContext requires an injected execution engine")
+
+    def register_opportunity(self, opportunity: SetupOpportunity) -> bool:
+        if opportunity.causal_identity is not None:
+            existing = self.opportunity_identities.get(opportunity.causal_identity)
+            if existing is not None:
+                return False
+        if self.execution_engine.execution_group_claim(opportunity.execution_group_id) is not None:
+            return False
+        if opportunity.lifecycle_id in self.opportunities:
+            return False
+        self.execution_engine.register(opportunity.lifecycle_id)
+        self.opportunities[opportunity.lifecycle_id] = opportunity
+        if opportunity.causal_identity is not None:
+            self.opportunity_identities.setdefault(
+                opportunity.causal_identity, opportunity.lifecycle_id,
+            )
+        return True
+
+    def first_lifecycle_for_identity(self, causal_identity: str) -> str | None:
+        return self.opportunity_identities.get(causal_identity)
+
+    def unfilled_execution_group_siblings(
+        self, selected: SetupOpportunity,
+    ) -> tuple[SetupOpportunity, ...]:
+        return tuple(
+            item for item in self.opportunities.values()
+            if item.lifecycle_id != selected.lifecycle_id
+            and item.active
+            and not self.position_is_open(item)
+            and selected.execution_group_id is not None
+            and item.execution_group_id == selected.execution_group_id
+        )
+
+    def conflicting_unfilled_opportunities(
+        self, selected: SetupOpportunity,
+    ) -> tuple[SetupOpportunity, ...]:
+        return tuple(
+            item for item in self.opportunities.values()
+            if item.lifecycle_id != selected.lifecycle_id
+            and item.active
+            and not self.position_is_open(item)
+            and getattr(item, "conflict_key", None)
+            == getattr(selected, "conflict_key", None)
+            and item.direction is not selected.direction
+        )
+
+    def record_decision_context(self, evidence: dict[str, Any]) -> None:
+        self.decision_context_evidence.append(dict(evidence))
+
+    def record_event(self, event: dict[str, Any]) -> None:
+        payload = dict(event)
+        self.events.append(payload)
+        lifecycle_id = payload.get("lifecycle_id")
+        if lifecycle_id is None:
+            return
+        lifecycle = self.opportunities.get(str(lifecycle_id))
+        if lifecycle is not None:
+            lifecycle.record(payload)
+
+    def record_transition(self, transition: dict[str, Any]) -> None:
+        self.transitions.append(dict(transition))
+
+    def position_is_open(self, opportunity: SetupOpportunity | None = None) -> bool:
+        if opportunity is None:
+            return bool(self.execution_engine.open_positions())
+        state = self.execution_engine.state_for(opportunity.lifecycle_id)
+        return state.position is not None and state.position.status.value == "open"
+
+    def record_parity_fact(self, stream: str, fact: dict[str, Any]) -> None:
+        if stream not in {
+            "intent_admission", "trigger_exit", "execution_fills",
+            "execution_transitions", "ledger_mutations",
+        }:
+            raise ValueError(f"unknown parity stream: {stream}")
+        self.parity_observed.add(stream)
+        self.parity_streams.setdefault(stream, []).append(dict(fact))
+
+    def parity_snapshot(self) -> dict[str, list[dict[str, Any]]]:
+        return {
+            stream: [dict(fact) for fact in facts]
+            for stream, facts in self.parity_streams.items()
+            if stream in self.parity_observed
+        }
 
     def publish_context(self, context: MarketContext) -> ContextVersionRef:
         return self.market_contexts.publish(context)
 
     def context(self, reference: ContextVersionRef) -> MarketContext | None:
         return self.market_contexts.resolve(reference)
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionConstraints:
+    max_open_positions: int = 1
+    max_session_entries: int | None = None
+    max_direction_entries: int | None = None
+    post_trade_cooldown_minutes: int = 0
+    fill_permission_margin: float | None = 0.05
+    stop_atr_buffer: float = 0.25
+    failed_reversal_lockout: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class CanonicalExecutionProposal:
+    lifecycle_id: str
+    intent_id: str
+    observation: TriggerObservation
+    setup_available_at: datetime | str
+    direction: Direction
+    structural_rank: int
 
 
 # Opportunity-layer contracts are re-exported here for the canonical state
