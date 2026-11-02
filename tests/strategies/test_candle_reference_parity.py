@@ -2,6 +2,7 @@ from datetime import datetime
 from types import SimpleNamespace
 
 from scripts.orderflow.compare_canonical_replay import (
+    _first_execution_trace_difference,
     _normalize_phase_record_for_compare,
     _phase6_structural_difference,
 )
@@ -58,3 +59,15 @@ def test_candle_ids_are_not_generic_causal_timestamps() -> None:
     }}
     normalized = _normalize_phase_record_for_compare(record, "2026-09-29")
     assert normalized["values"]["context_candle_id"] == "2026-09-29T09:15"
+
+
+def test_execution_trace_difference_aligns_by_causal_clock() -> None:
+    canonical = [{"observed_at": "2026-09-29T03:50:00Z", "available_at": "2026-09-29T03:51:00Z"}]
+    paper = [
+        {"observed_at": "2026-09-29T03:49:00Z", "available_at": "2026-09-29T03:50:00Z"},
+        {"observed_at": "2026-09-29T03:50:00Z", "available_at": "2026-09-29T03:51:00Z"},
+    ]
+    difference = _first_execution_trace_difference(canonical, paper)
+    assert difference is not None
+    assert difference["clock"]["observed_at"] == "2026-09-29T03:49:00Z"
+    assert difference["canonical"] is None

@@ -21,6 +21,38 @@ from .state_machine_types import ExecutionConstraints, LocationRegistry, ReplayC
 from .timestamps import coerce_timestamp
 
 
+def _execution_trace_state(state: Any) -> dict[str, Any]:
+    position = state.position
+    pending = state.pending_exit
+    intent = state.intent
+
+    def value(item: Any) -> Any:
+        return getattr(item, "value", item)
+
+    return {
+        "intent": {
+            "status": value(intent.status),
+            "triggered_at": getattr(intent, "triggered_at", None),
+        } if intent is not None else None,
+        "pending_exit": {
+            "reason": pending.reason,
+            "available_at": pending.available_at,
+            "requested_price": pending.requested_price,
+            "execution_policy": pending.execution_policy,
+            "quantity": pending.quantity,
+        } if pending is not None else None,
+        "position": {
+            "status": value(position.status),
+            "quantity": position.quantity,
+            "fill_price": position.fill_price,
+            "failure_boundary": position.failure_boundary,
+            "protective_stop": position.protective_stop,
+            "post_3r_activated": position.post_3r_activated,
+            "partial_exit_taken": position.partial_exit_taken,
+        } if position is not None else None,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class TransitionAdvance:
     """Facts emitted by one idempotent shared transition."""
@@ -334,6 +366,8 @@ class OrderflowTransitionOwner:
             life = formation.lifecycle
             if life is None:
                 continue
+            if coerce_timestamp(timestamp) < coerce_timestamp(life.formation_available_at):
+                continue
             state = self.execution_owner.engine.state_for(life.lifecycle_id)
             if (
                 state.pending_entry is not None
@@ -363,6 +397,9 @@ class OrderflowTransitionOwner:
                 )
             ):
                 self.execution_owner.admit_opportunity(life, next_time, events)
+            trace_before = _execution_trace_state(
+                self.execution_owner.engine.state_for(life.lifecycle_id)
+            )
             self.execution_owner.handle_management(
                 index, timestamp, next_time, dict(row), list(available5), events, life,
                 defer_discretionary_execution=True,
@@ -381,6 +418,25 @@ class OrderflowTransitionOwner:
                     index, timestamp, next_time, dict(row), [], events, life,
                     evaluate_entries=True,
                 )
+            self.context.execution_diagnostics.append({
+                "kind": "execution_lifecycle_tick",
+                "lifecycle_id": life.lifecycle_id,
+                "observed_at": timestamp,
+                "available_at": next_time,
+                "bar": {
+                    "time": row.get("time"), "open": row.get("open"),
+                    "high": row.get("high"), "low": row.get("low"),
+                    "close": row.get("close"),
+                },
+                "available_5m": [
+                    {"time": item.time, "available_at": item.available_at}
+                    for item in available5[-2:]
+                ],
+                "before": trace_before,
+                "after": _execution_trace_state(
+                    self.execution_owner.engine.state_for(life.lifecycle_id)
+                ),
+            })
         self.execution_owner.select_execution_proposals(timestamp, next_time, events)
         if self.execution_adapter is not None and instrument is not None:
             self._publish_execution_proposals(

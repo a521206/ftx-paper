@@ -40,6 +40,13 @@ This is a contract and dependency map, not an implementation of later policy.
 - Live calls one completed observation at a time. Replay processes a bounded,
   timestamp-ordered iterable. Neither adapter invokes the other or evaluates
   policy.
+- Comparable candle identity is an explicit reference with `session_date`,
+  `timeframe`, `start_at`, and `end_at`. The timestamp members are UTC
+  ISO-8601 values ending in `Z`; producer-local candle IDs remain diagnostic
+  metadata and are never normalized as generic timestamps.
+- Diagnostic replay artifacts include symmetric `execution_lifecycle_tick`
+  records keyed by lifecycle and causal clock. These records explain the first
+  execution divergence but are not parity contract values.
 - `build_runtime_boundary_artifact` emits the versioned
   `orderflow_runtime_boundary` envelope with `input_prefix`, `replay`,
   `incremental`, `recovery`, and `coverage`. Each execution reports state and

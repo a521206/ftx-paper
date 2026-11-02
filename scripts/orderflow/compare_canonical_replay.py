@@ -837,6 +837,62 @@ def _execution_diagnostics(
     return [*result[:6], {"omitted": len(result) - 12}, *result[-6:]]
 
 
+def _execution_trace_diagnostics(
+    payload: Mapping[str, Any], lifecycle_id: str, *, canonical: bool,
+    session_date: str,
+) -> list[dict[str, Any]]:
+    diagnostic = payload.get("diagnostic")
+    source: Any = (
+        diagnostic.get("execution_diagnostics", [])
+        if canonical and isinstance(diagnostic, Mapping)
+        else payload.get("execution_diagnostics", [])
+    )
+    if not isinstance(source, list):
+        return []
+
+    def normalize(value: Any, key: str | None = None) -> Any:
+        if isinstance(value, Mapping):
+            return {str(k): normalize(v, str(k)) for k, v in value.items()}
+        if isinstance(value, list):
+            return [normalize(item, key) for item in value]
+        if key in {"observed_at", "available_at", "time", "triggered_at"}:
+            try:
+                return _canonical_timestamp(value, session_date)
+            except (TypeError, ValueError):
+                return value
+        return value
+
+    return [
+        normalize(item)
+        for item in source
+        if isinstance(item, Mapping)
+        and item.get("kind") == "execution_lifecycle_tick"
+        and item.get("lifecycle_id") == lifecycle_id
+    ]
+
+
+def _first_execution_trace_difference(
+    canonical: list[dict[str, Any]], paper: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    def key(item: Mapping[str, Any]) -> tuple[Any, Any]:
+        return item.get("observed_at"), item.get("available_at")
+
+    canonical_by_clock = {key(item): item for item in canonical}
+    paper_by_clock = {key(item): item for item in paper}
+    clocks = sorted(set(canonical_by_clock) | set(paper_by_clock), key=str)
+    for index, clock in enumerate(clocks):
+        left = canonical_by_clock.get(clock)
+        right = paper_by_clock.get(clock)
+        if left != right:
+            return {
+                "index": index,
+                "clock": {"observed_at": clock[0], "available_at": clock[1]},
+                "canonical": left,
+                "paper": right,
+            }
+    return None
+
+
 def _bounded_diagnostic_values(value: Any, limit: int = 12) -> list[Any]:
     if not isinstance(value, list):
         return []
@@ -1088,11 +1144,17 @@ def _compare_phase7(canonical_path: Path, paper: dict[str, Any], session_date: s
             records = (result.get("canonical_record"), result.get("paper_record"))
             lifecycle_id = next(
                 (
-                    str(item.get("values", {}).get("lifecycle_id"))
+                    str(
+                        item.get("values", {}).get("lifecycle_id")
+                        or item.get("values", {}).get("opportunity_id")
+                    )
                     for item in records
                     if isinstance(item, Mapping)
                     and isinstance(item.get("values"), Mapping)
-                    and item["values"].get("lifecycle_id") is not None
+                    and (
+                        item["values"].get("lifecycle_id") is not None
+                        or item["values"].get("opportunity_id") is not None
+                    )
                 ),
                 None,
             )
@@ -1108,6 +1170,21 @@ def _compare_phase7(canonical_path: Path, paper: dict[str, Any], session_date: s
                     ),
                     "paper": _execution_diagnostics(
                         paper, lifecycle_id, canonical=False,
+                    ),
+                }
+                canonical_trace = _execution_trace_diagnostics(
+                    canonical_session, lifecycle_id, canonical=True,
+                    session_date=session_date,
+                )
+                paper_trace = _execution_trace_diagnostics(
+                    paper, lifecycle_id, canonical=False,
+                    session_date=session_date,
+                )
+                result["execution_trace"] = {
+                    "canonical": canonical_trace,
+                    "paper": paper_trace,
+                    "first_difference": _first_execution_trace_difference(
+                        canonical_trace, paper_trace,
                     ),
                 }
         return result
