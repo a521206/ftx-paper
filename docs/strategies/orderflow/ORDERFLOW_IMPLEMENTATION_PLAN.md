@@ -1461,6 +1461,9 @@ Phase 9A verification record:
 
 #### 9B - Define The Host Adapter Contracts
 
+Status: **Implemented for the versioned contract boundary.** Runtime composition
+and persistence wiring remain in later Phase 9 subphases.
+
 - Define one versioned input adapter from completed broker/stored-bar evidence to
   the canonical observation contract. Live emits one available observation at a
   time; replay emits the same shape from bounded ordered input.
@@ -1471,6 +1474,21 @@ Phase 9A verification record:
 
 Exit gate: live-style and bounded-replay fixtures produce identical canonical
 input envelopes and no adapter performs policy or gap repair.
+
+Phase 9B verification record:
+
+- `strategies/orderflow/host_adapter.py` defines the versioned
+  `orderflow_paper_host_adapter` input/output contract.
+- `MarketEvidence` requires explicit source identity, UTC observed/available
+  timestamps, lineage, values, and unavailable reasons; it does not infer gaps,
+  completion, or policy facts.
+- `LiveHostInputAdapter` and `ReplayHostInputAdapter` share
+  `CanonicalInputAdapter` and the existing canonical transition boundary.
+- `CanonicalOutputAdapter` projects supplied events, proposals, snapshots, and
+  artifacts without reconstructing decisions.
+- Focused Phase 9B tests pass: live and bounded replay produce identical
+  canonical state, unavailable evidence is preserved, invalid timestamps/order
+  are rejected, and the output envelope is versioned.
 
 #### 9C - Compose One Canonical Runtime Owner
 
