@@ -575,6 +575,14 @@ class SqliteRuntimeStore:
             ).fetchall()
         return [str(row[0]) for row in rows]
 
+    def read_market_dates(self) -> list[str]:
+        """Return persisted market-bar session dates.
+
+        Keep the explicit market-data name as a compatibility API for
+        integrations that distinguish these dates from other runtime dates.
+        """
+        return self.read_dates()
+
     def read_market_coverage(self, session_date: str) -> dict[str, Any]:
         """Return per-symbol, exchange, and source coverage for one session."""
         with self._connect() as connection:
@@ -925,6 +933,23 @@ class SqliteRuntimeStore:
             f"replay_activity:{status}:{run_id}:{updated_at}",
             timestamp=updated_at,
         )
+
+    def write_replay_artifact(self, run_id: str, artifact: dict[str, Any]) -> None:
+        """Persist a completed artifact without exposing SQLite to replay code."""
+        run = self.read_replay_run(run_id)
+        if run is None:
+            raise KeyError(f"unknown replay run: {run_id}")
+        self.update_replay_run(
+            run_id,
+            status=str(run.get("status") or "running"),
+            result=artifact,
+        )
+
+    def read_replay_artifact(self, run_id: str) -> dict[str, Any] | None:
+        """Read the persisted production replay artifact."""
+        run = self.read_replay_run(run_id)
+        result = run.get("result") if run is not None else None
+        return result if isinstance(result, dict) else None
 
     def transition_replay_run(self, run_id: str, *, expected_status: str, status: str,
                               result: dict[str, Any] | None = None, error: str | None = None) -> bool:

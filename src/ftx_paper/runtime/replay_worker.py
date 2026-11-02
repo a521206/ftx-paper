@@ -191,7 +191,12 @@ class ReplayWorker:
                 result = self._execute({**request, "run_id": run_id}, cancel)
                 run = self.store.read_replay_run(run_id)
                 if run is not None and run.get("status") != "cancelled":
-                    self.store.update_replay_run(run_id, status="completed", result=result)
+                    persist = getattr(self.store, "write_replay_artifact", None)
+                    if callable(persist):
+                        persist(run_id, result)
+                    else:
+                        self.store.update_replay_run(run_id, status="running", result=result)
+                    self.store.update_replay_run(run_id, status="completed")
             except Exception:
                 run = self.store.read_replay_run(run_id)
                 if run is not None and run.get("status") != "cancelled":
@@ -986,14 +991,16 @@ class ReplayWorker:
         futures_source = self.inputs.resolve_source(session_date)
         bars = self.inputs.bars(session_date, rows=rows, futures_source=futures_source)
         aggregator = ReplayInput.aggregator(bars)
-        strategy = self.strategy_selector.create(
+        runtime = self.strategy_selector.create(
             "ftx-paper-orderflow",
             StrategyContext(enabled_vehicles=vehicles),
         )
-        bind_replay_bars = getattr(strategy, "bind_replay_bars", None)
+        bind_replay_bars = getattr(runtime, "bind_replay_bars", None)
         if callable(bind_replay_bars):
             bind_replay_bars(bars)
-        engine = PaperEngine(strategy)
+        # The selector composes the same PaperOrderflowRuntime used by live
+        # hosting.  Replay owns only the bounded clock and capture loop.
+        engine = PaperEngine(runtime)
         run_id = str(request.get("run_id") or uuid4().hex)
         events: _ScopedEvents = _ScopedEvents(
             run_id=run_id,
@@ -1014,7 +1021,7 @@ class ReplayWorker:
                 for event in result.events
             )
 
-        snapshot = getattr(strategy, "snapshot", lambda: {})()
+        snapshot = getattr(runtime, "snapshot", lambda: {})()
         input_manifest = self.input_manifest(
             session_date, rows=rows, bars=bars, futures_source=futures_source,
         )
@@ -1022,8 +1029,8 @@ class ReplayWorker:
         summary["bars_seen"] = bundles_seen
         metadata = {
             "api_version": "1.1",
-            "strategy_version": strategy.metadata.version,
-            "configuration_hash": strategy.metadata.config_hash,
+            "strategy_version": runtime.metadata.version,
+            "configuration_hash": runtime.metadata.config_hash,
             "normalized_fingerprint": input_manifest["normalized_fingerprint"],
             "input_provenance": input_manifest["provenance"],
             "input_availability": input_manifest["availability"],
@@ -1044,7 +1051,7 @@ class ReplayWorker:
         }
         parity_artifact = None
         if include_parity_layers:
-            parity_payload = getattr(strategy, "parity_payload", None)
+            parity_payload = getattr(runtime, "parity_payload", None)
             if not callable(parity_payload):
                 raise RuntimeError("orderflow runtime does not expose canonical parity facts")
             from ftx_paper.strategies.orderflow.parity_artifacts import build_parity_artifact_from_payload
@@ -1052,7 +1059,7 @@ class ReplayWorker:
             parity_artifact = build_parity_artifact_from_payload(
                 cast(dict[str, Any], parity_payload(rows)),
                 run_id=run_id,
-                producer={"name": strategy.metadata.name, "version": strategy.metadata.version},
+                producer={"name": runtime.metadata.name, "version": runtime.metadata.version},
             )
         canonical = ReplayResult(
             run_id=run_id,

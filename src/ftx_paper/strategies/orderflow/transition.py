@@ -8,6 +8,7 @@ mutable clock, one interaction owner, and one execution owner.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from copy import deepcopy
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
@@ -21,7 +22,7 @@ from .hierarchy import ContextVersionRef, TriggerObservation
 from .opportunity_coordinator import LifecycleFormation
 from .opportunity_timeout import advance_opportunity_timeout
 from .state_machine_types import ExecutionConstraints, LocationRegistry, ReplayContext
-from .timestamps import coerce_timestamp, nifty_label
+from .timestamps import coerce_timestamp, nifty_label, serialize_utc
 
 
 def _execution_trace_state(state: Any) -> dict[str, Any]:
@@ -155,6 +156,41 @@ class OrderflowTransitionOwner:
     @property
     def parity_streams(self) -> dict[str, list[dict[str, Any]]]:
         return self.context.parity_snapshot()
+
+    def snapshot(self) -> dict[str, Any]:
+        """Return the canonical producer prefix needed for recovery."""
+        return {
+            "schema_version": 1,
+            "clock": serialize_utc(self._clock) if self._clock is not None else None,
+            "events": deepcopy(self.context.events),
+            "transitions": deepcopy(self.context.transitions),
+            "parity_streams": deepcopy(self.context.parity_streams),
+            "parity_observed": sorted(self.context.parity_observed),
+            "parity_layers": deepcopy(self.context.parity_layers),
+            "execution_diagnostics": deepcopy(self.context.execution_diagnostics),
+        }
+
+    def restore_snapshot(self, snapshot: Mapping[str, Any]) -> None:
+        """Restore producer-owned facts and the transition clock idempotently."""
+        if snapshot.get("schema_version") != 1:
+            raise ValueError("unsupported orderflow snapshot schema")
+        raw_clock = snapshot.get("clock")
+        if raw_clock is not None and not isinstance(raw_clock, str):
+            raise ValueError("orderflow snapshot clock must be a string or null")
+        for name in ("events", "transitions", "parity_streams", "parity_layers", "execution_diagnostics"):
+            value = snapshot.get(name, [] if name in {"events", "transitions", "execution_diagnostics"} else {})
+            if not isinstance(value, (list, dict)):
+                raise ValueError(f"orderflow snapshot {name} is invalid")
+        observed = snapshot.get("parity_observed", [])
+        if not isinstance(observed, list) or any(not isinstance(item, str) for item in observed):
+            raise ValueError("orderflow snapshot parity_observed is invalid")
+        self._clock = coerce_timestamp(raw_clock) if raw_clock else None
+        self.context.events = deepcopy(snapshot.get("events", []))
+        self.context.transitions = deepcopy(snapshot.get("transitions", []))
+        self.context.parity_streams = deepcopy(snapshot.get("parity_streams", {}))
+        self.context.parity_observed = set(observed)
+        self.context.parity_layers = deepcopy(snapshot.get("parity_layers", {}))
+        self.context.execution_diagnostics = deepcopy(snapshot.get("execution_diagnostics", []))
 
     @property
     def engine(self) -> Any:

@@ -43,6 +43,7 @@ def test_runtime_store_round_trips_market_bars(tmp_path):
         "source": "historical_backfill", "ingested_at": rows[0]["ingested_at"],
     }]
     assert store.read_dates() == ["2026-01-05"]
+    assert store.read_market_dates() == ["2026-01-05"]
 
 
 def test_runtime_store_round_trips_versioned_strategy_snapshots(tmp_path):

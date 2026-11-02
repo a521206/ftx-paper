@@ -129,6 +129,19 @@ class PaperOrderflowRuntime:
         snapshot["runtime_schema_version"] = 1
         return snapshot
 
+    @classmethod
+    def from_snapshot(cls, snapshot: Mapping[str, Any]) -> "PaperOrderflowRuntime":
+        """Construct an isolated runtime restored from a canonical snapshot."""
+        if snapshot.get("runtime_schema_version") != 1:
+            raise ValueError("unsupported orderflow runtime snapshot")
+        strategy_snapshot = dict(snapshot)
+        strategy_snapshot.pop("runtime_schema_version", None)
+        strategy = OrderflowStrategy.from_snapshot(strategy_snapshot)
+        return cls(
+            transition_owner=strategy._transition_owner,
+            execution_adapter=strategy._execution_adapter,
+        )
+
     def parity_payload(self, rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
         """Project only producer-owned facts emitted by the canonical owner."""
         return build_replay_payload(self.transition_owner, [], [], [dict(row) for row in rows], capture_mode="replay")

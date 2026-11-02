@@ -95,10 +95,23 @@ class OrderflowStrategy:
                 serialize_utc(self._transition_owner.clock)
                 if self._transition_owner.clock is not None else None
             ),
+            "canonical": self._transition_owner.snapshot(),
             "execution_notifications": len(self._execution_adapter.notifications) if self._execution_adapter else 0,
             "parity_streams": self._transition_owner.parity_streams,
             "parity_layers": self._transition_owner.context.parity_layers,
         }
+
+    @classmethod
+    def from_snapshot(cls, snapshot: Mapping[str, object], **_: object) -> "OrderflowStrategy":
+        """Restore the producer prefix without creating a second policy owner."""
+        if snapshot.get("schema_version") != 1 or snapshot.get("strategy") != ORDERFLOW_NAME:
+            raise ValueError("unsupported orderflow strategy snapshot")
+        strategy = cls()
+        canonical = snapshot.get("canonical")
+        if not isinstance(canonical, Mapping):
+            raise ValueError("orderflow strategy snapshot canonical state is missing")
+        strategy._transition_owner.restore_snapshot(canonical)
+        return strategy
 
 
 __all__ = ["OrderflowConfig", "OrderflowStrategy"]
