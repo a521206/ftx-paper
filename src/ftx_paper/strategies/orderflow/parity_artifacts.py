@@ -11,12 +11,16 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 import hashlib
 import json
+import re
 from typing import Any
 
-from .timestamps import parse_causal_timestamp, parse_utc, serialize_utc
+from .timestamps import parse_causal_timestamp, parse_session_timestamp, parse_utc, serialize_utc
 from .phase7_projection import PHASE7_STREAMS
 
 PHASE_STREAMS = ("source_observation", "context_location", "interaction_response", "opportunity_lifecycle", "intent_admission", "trigger_exit")
+_EXECUTION_GROUP_ID = re.compile(
+    r"^(execution-group:(?P<session_date>\d{4}-\d{2}-\d{2}:[^:]+:[^:]+:)(?P<timestamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?))$"
+)
 
 
 def _json(value: object) -> bytes:
@@ -48,12 +52,35 @@ def _copy(value: Any) -> Any:
     return value
 
 
+def _normalize_embedded_ids(value: Any, *, key: str | None = None) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(item_key): _normalize_embedded_ids(item, key=str(item_key))
+            for item_key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_normalize_embedded_ids(item, key=key) for item in value]
+    if key != "execution_group_id" or not isinstance(value, str):
+        return value
+    match = _EXECUTION_GROUP_ID.fullmatch(value)
+    if match is None:
+        return value
+    session_date = match.group("session_date").split(":", 1)[0]
+    timestamp = match.group("timestamp")
+    try:
+        parsed = parse_session_timestamp(session_date, timestamp)
+    except (TypeError, ValueError):
+        return value
+    prefix = value[: match.start("timestamp")]
+    return f"{prefix}{serialize_utc(parsed)}"
+
+
 def normalize_phase_record(record: Mapping[str, Any], *, sequence: int) -> dict[str, Any]:
     required = {"kind", "occurred_at", "observed_at", "available_at", "identity", "causal_parent_id", "values", "unavailable"}
     missing = required - set(record)
     if missing:
         raise ValueError(f"phase record missing {sorted(missing)}")
-    result = _copy(record)
+    result = _normalize_embedded_ids(_copy(record))
     result["occurred_at"] = _timestamp(result["occurred_at"])
     result["observed_at"] = _timestamp(result["observed_at"])
     result["available_at"] = _timestamp(result["available_at"])

@@ -7,6 +7,7 @@ facts into ``parity_streams`` before they can appear in a replay payload.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import asdict, is_dataclass
 from typing import Any, cast
 
@@ -23,6 +24,24 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, set):
         return sorted((_json_safe(item) for item in value), key=str)
     return value
+
+
+def _execution_diagnostic_summary(records: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> dict[str, Any]:
+    """Publish compact causal coverage alongside the raw diagnostic trace."""
+    by_kind = Counter(str(record.get("kind", "")) for record in records)
+    by_lifecycle = Counter(
+        str(record.get("lifecycle_id"))
+        for record in records
+        if record.get("lifecycle_id") is not None
+    )
+    return {
+        "record_count": len(records),
+        "by_kind": dict(sorted(by_kind.items())),
+        "lifecycle_count": len(by_lifecycle),
+        "records_by_lifecycle": dict(sorted(by_lifecycle.items())),
+        "first_sequence": records[0].get("sequence") if records else None,
+        "last_sequence": records[-1].get("sequence") if records else None,
+    }
 
 
 def build_replay_payload(
@@ -92,6 +111,7 @@ def build_replay_payload(
         for name in PHASE7_STREAMS
         if name in streams
     }
+    execution_diagnostics = tuple(getattr(context, "execution_diagnostics", ()))
     payload: dict[str, Any] = {
         "artifact_type": "orderflow_state_machine_trace",
         "schema_version": 7,
@@ -109,9 +129,8 @@ def build_replay_payload(
         "execution_fills": _json_safe(execution_fills),
         "execution_transitions": _json_safe(execution_transitions),
         "ledger_mutations": _json_safe(ledger_mutations),
-        "execution_diagnostics": _json_safe(
-            getattr(context, "execution_diagnostics", ())
-        ),
+        "execution_diagnostics": _json_safe(execution_diagnostics),
+        "execution_diagnostic_summary": _execution_diagnostic_summary(execution_diagnostics),
     }
     # Validate the producer-owned shape without manufacturing missing streams.
     if phase_facts or execution_states:

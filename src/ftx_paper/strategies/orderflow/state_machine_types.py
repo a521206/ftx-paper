@@ -25,6 +25,7 @@ _EXECUTION_DIAGNOSTIC_KINDS = frozenset({
     "intent_armed", "trigger_observation", "execution_proposal_created",
     "execution_proposal_selected", "execution_proposal_suppressed",
     "admission_decided", "entry_pending", "filled", "position_closed",
+    "position_ownership_transferred",
     "intent_cancelled", "entry_cancelled", "entry_blocked_risk",
     "entry_blocked_rr", "entry_blocked_exit_plan", "trigger_denied_portfolio",
     "exit_signal", "exit_order", "exit_trigger_observed", "exit_decision",
@@ -48,6 +49,7 @@ _EXECUTION_TRANSITION_KINDS = frozenset({
     "entry_pending", "admission_decided", "intent_effective",
     "intent_cancelled", "entry_cancelled", "exit_signal",
     "exit_decision", "filled", "position_closed",
+    "position_ownership_transferred",
 })
 
 

@@ -318,6 +318,8 @@ class ExecutionEngine:
     _execution_group_claims: dict[str, tuple[str, str]] = field(
         default_factory=dict, repr=False
     )
+    _position_owners: dict[str, str] = field(default_factory=dict, repr=False)
+    _position_transfer_claimed: set[str] = field(default_factory=set, repr=False)
 
     def register(self, lifecycle_id: str) -> None:
         self._states.setdefault(lifecycle_id, ExecutionState(lifecycle_id))
@@ -395,6 +397,58 @@ class ExecutionEngine:
             if state.position is not None
             and state.position.status is PositionStatus.OPEN
         )
+
+    def position_owner(self, position_id: str) -> str | None:
+        return self._position_owners.get(position_id)
+
+    def transfer_position_owner(
+        self,
+        source: SetupOpportunity,
+        successor: SetupOpportunity,
+        *,
+        available_at: str | datetime,
+    ) -> PositionManagement | None:
+        """Transfer one live same-direction position to the first successor candidate."""
+        source_state = self._state(source.lifecycle_id)
+        successor_state = self._state(successor.lifecycle_id)
+        position = source_state.position
+        if (
+            position is None
+            or position.status is not PositionStatus.OPEN
+            or source.direction is not successor.direction
+            or successor_state.position is not None
+            or successor_state.pending_entry is not None
+            or position.position_id in self._position_transfer_claimed
+        ):
+            return None
+        if source_state.entry_at is not None and coerce_timestamp(available_at) < coerce_timestamp(source_state.entry_at):
+            return None
+        owner = self._position_owners.get(position.position_id, source.lifecycle_id)
+        if owner != source.lifecycle_id:
+            return None
+        successor_setup = successor_state.setup
+        successor_state.position = replace(
+            position,
+            exit_plan=(
+                successor_setup.exit_plan
+                if successor_setup is not None else position.exit_plan
+            ),
+            exit_intent=None,
+        )
+        successor_state.entry_at = source_state.entry_at
+        successor_state.fills = list(source_state.fills)
+        successor_state.trail_tracker = (
+            copy(source_state.trail_tracker)
+            if source_state.trail_tracker is not None else None
+        )
+        successor_state.pending_exit = None
+        successor_state.entry_attempted = True
+        source_state.position = None
+        source_state.pending_exit = None
+        source_state.trail_tracker = None
+        self._position_owners[position.position_id] = successor.lifecycle_id
+        self._position_transfer_claimed.add(position.position_id)
+        return successor_state.position
 
     def snapshot(self) -> dict[str, ExecutionState]:
         return self.current()
@@ -483,10 +537,15 @@ class ExecutionEngine:
         self, life: SetupOpportunity, position: PositionManagement
     ) -> None:
         state = self._state(life.lifecycle_id)
+        transferred_owner = self.position_owner(position.position_id) == life.lifecycle_id
         if (
             state.intent is None
-            or position.lifecycle_id != life.lifecycle_id
-            or position.intent_id != state.intent.intent_id
+            or position.direction != life.direction.value
+            or (
+                position.lifecycle_id != life.lifecycle_id
+                and not transferred_owner
+            )
+            or (position.intent_id != state.intent.intent_id and not transferred_owner)
         ):
             raise ValueError("position does not belong to the lifecycle opportunity")
         state.position = position
@@ -735,6 +794,10 @@ class ExecutionEngine:
 
     def queue_exit(self, life: SetupOpportunity, order: ExitOrder) -> bool:
         state = self._state(life.lifecycle_id)
+        if state.position is None or self.position_owner(state.position.position_id) != life.lifecycle_id:
+            return False
+        if order.position_id is not None and order.position_id != state.position.position_id:
+            return False
         if state.pending_exit is not None and self._exit_priority(
             order.reason
         ) >= self._exit_priority(state.pending_exit.reason):
@@ -786,6 +849,10 @@ class ExecutionEngine:
             or position.status is not PositionStatus.OPEN
         ):
             raise ValueError("no open pending exit to execute")
+        if order.position_id is not None and order.position_id != position.position_id:
+            raise ValueError("pending exit does not belong to the current position")
+        if self.position_owner(position.position_id) != life.lifecycle_id:
+            raise ValueError("lifecycle does not own the current position")
         quantity = order.quantity if order.quantity is not None else position.quantity
         if quantity <= 0 or quantity > position.quantity:
             raise ValueError("pending exit quantity is outside the open position")
@@ -894,6 +961,7 @@ class ExecutionEngine:
                 life.lifecycle_id,
                 str(coerce_timestamp(filled_at)),
             )
+        self._position_owners[position.position_id] = life.lifecycle_id
 
     def record_exit_fill(
         self,
@@ -1541,10 +1609,40 @@ class ExecutionCoordinator:
             ),
             bar_events,
         )
+
         self._record_intent_admission(life, life.formation_available_at)
         self.emit_intent_armed(
             decision_at, next_time, bar_events, life
         )
+        source_life = next(
+            (
+                candidate
+                for candidate in self.context.opportunities.values()
+                if candidate.lifecycle_id != life.lifecycle_id
+                and candidate.direction is life.direction
+                and self.context.position_is_open(candidate)
+            ),
+            None,
+        )
+        if source_life is not None:
+            transferred_position = self.engine.transfer_position_owner(
+                source_life,
+                life,
+                available_at=life.formation_available_at,
+            )
+            if transferred_position is not None:
+                self.context.record_event({
+                    "kind": "position_ownership_transferred",
+                    "position_id": transferred_position.position_id,
+                    "from_lifecycle_id": source_life.lifecycle_id,
+                    "to_lifecycle_id": life.lifecycle_id,
+                    "origin_lifecycle_id": transferred_position.lifecycle_id,
+                    "direction": life.direction.value,
+                    "observed_at": life.formation_at,
+                    "available_at": life.formation_available_at,
+                    "transfer_reason": "same_direction_candidate_available",
+                }, record_lifecycle=False)
+                bar_events.append(self.context.events[-1])
 
     def record_admission(
         self,
@@ -2529,6 +2627,7 @@ class ExecutionCoordinator:
                 or setup is None
                 or not setup.active
                 or state.entry_attempted
+                or state.position is not None
                 or state.intent is None
                 or state.intent.intent_id != proposal.intent_id
                 or state.intent.status is not IntentStatus.ARMED
@@ -2917,7 +3016,7 @@ class ExecutionCoordinator:
         )
         if is_or_vwap:
             previous_trail, trailing_stop, trail_was_active = None, None, False
-        else:
+        elif self.engine.state_for(life.lifecycle_id).trail_tracker is not None:
             previous_trail, trailing_stop, trail_was_active = (
                 self.engine.update_trail_candidate(
                     life,
@@ -2927,6 +3026,8 @@ class ExecutionCoordinator:
                     bar_close=float(row["close"]),
                 )
             )
+        else:
+            previous_trail, trailing_stop, trail_was_active = None, None, False
         vwap_stop = None
         source_bar = None
         vwap = None

@@ -785,10 +785,15 @@ def _phase6_structural_difference(
     canonical: Sequence[Mapping[str, Any]], paper: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any] | None:
     if len(canonical) != len(paper):
+        index = min(len(canonical), len(paper))
         return {
             "reason": "count",
+            "index": index,
+            "field": "count",
             "canonical_count": len(canonical),
             "paper_count": len(paper),
+            "canonical_record": canonical[index] if index < len(canonical) else None,
+            "paper_record": paper[index] if index < len(paper) else None,
         }
     for index, (left, right) in enumerate(zip(canonical, paper)):
         left_provenance = _phase6_provenance(left)
@@ -804,6 +809,52 @@ def _phase6_structural_difference(
                 "paper_record": right_provenance,
             }
     return None
+
+
+def _phase6_lifecycle_id(record: Mapping[str, Any] | None) -> str | None:
+    if not isinstance(record, Mapping):
+        return None
+    values = record.get("values")
+    if isinstance(values, Mapping):
+        value = values.get("lifecycle_id") or values.get("opportunity_id")
+        if value is not None:
+            return str(value)
+    for key in ("lifecycle_id", "opportunity_id", "causal_parent_id"):
+        value = record.get(key)
+        if value is not None and str(value).startswith("lifecycle-"):
+            return str(value)
+    return None
+
+
+def _phase6_causal_diagnostics(
+    payload: Mapping[str, Any], lifecycle_ids: Sequence[str], *, canonical: bool,
+) -> dict[str, Any]:
+    """Summarize candidate-specific diagnostics without copying full traces."""
+    diagnostic = payload.get("diagnostic")
+    source: Any = (
+        diagnostic.get("execution_diagnostics", [])
+        if canonical and isinstance(diagnostic, Mapping)
+        else payload.get("execution_diagnostics", [])
+    )
+    if not isinstance(source, list):
+        replay = payload.get("replay")
+        source = replay.get("execution_diagnostics", []) if isinstance(replay, Mapping) else []
+    wanted = set(lifecycle_ids)
+    records = [
+        dict(item) for item in source
+        if isinstance(item, Mapping) and str(item.get("lifecycle_id")) in wanted
+    ]
+    by_kind: dict[str, int] = {}
+    for item in records:
+        kind = str(item.get("kind", ""))
+        by_kind[kind] = by_kind.get(kind, 0) + 1
+    return {
+        "lifecycle_ids": sorted(wanted),
+        "record_count": len(records),
+        "by_kind": dict(sorted(by_kind.items())),
+        "first_records": records[:10],
+        "last_records": records[-10:] if len(records) > 10 else [],
+    }
 
 
 def _record_contains(value: Any, needle: str) -> bool:
@@ -1212,11 +1263,30 @@ def _compare_phase6(canonical_path: Path, paper: dict[str, Any], session_date: s
         paper_records = [semantic_lifecycle(item) for item in paper_records]
         structural_difference = _phase6_structural_difference(canonical_records, paper_records)
         if structural_difference is not None:
+            boundary_records = (
+                structural_difference.get("canonical_record"),
+                structural_difference.get("paper_record"),
+            )
+            lifecycle_ids = [
+                lifecycle_id
+                for lifecycle_id in (
+                    _phase6_lifecycle_id(record) for record in boundary_records
+                )
+                if lifecycle_id is not None
+            ]
             return {
                 "status": "MISMATCHED",
                 "stream": "opportunity_lifecycle",
                 "reason": "structural_lifecycle_divergence",
                 "first_difference": structural_difference,
+                "causal_diagnostics": {
+                    "canonical": _phase6_causal_diagnostics(
+                        session, lifecycle_ids, canonical=True,
+                    ),
+                    "paper": _phase6_causal_diagnostics(
+                        paper, lifecycle_ids, canonical=False,
+                    ),
+                },
             }
         canonical = build_phase4_artifact(
             run_id=f"canonical-{session_date}", producer={"name": "NiftyZoning"},

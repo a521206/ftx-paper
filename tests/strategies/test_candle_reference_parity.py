@@ -50,6 +50,23 @@ def test_different_candles_do_not_compare_equal() -> None:
     ) is not None
 
 
+def test_phase6_count_difference_reports_boundary_records() -> None:
+    difference = _phase6_structural_difference(
+        [{"identity": "canonical-0"}],
+        [{"identity": "paper-0"}, {"identity": "paper-1"}],
+    )
+
+    assert difference == {
+        "reason": "count",
+        "index": 1,
+        "field": "count",
+        "canonical_count": 1,
+        "paper_count": 2,
+        "canonical_record": None,
+        "paper_record": {"identity": "paper-1"},
+    }
+
+
 def test_candle_ids_are_not_generic_causal_timestamps() -> None:
     record = {"values": {
         "context_candle_id": "2026-09-29T09:15",

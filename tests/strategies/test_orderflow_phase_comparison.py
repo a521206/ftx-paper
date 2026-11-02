@@ -23,6 +23,7 @@ from ftx_paper.strategies.orderflow.interactions import ProjectionSnapshot
 from ftx_paper.strategies.orderflow.lifecycle import SetupOpportunity
 from ftx_paper.strategies.orderflow.orderflow_common import Aggregate
 from ftx_paper.strategies.orderflow.opportunity_coordinator import OpportunityCoordinator
+from ftx_paper.strategies.orderflow.parity_artifacts import normalize_phase_record
 from ftx_paper.strategies.orderflow.phase7_projection import build_phase7_projection
 from ftx_paper.strategies.orderflow.state_machine_reporting import build_replay_payload
 from ftx_paper.strategies.orderflow.state_machine_types import LocationRegistry, ReplayContext
@@ -37,6 +38,36 @@ def test_resolve_canonical_artifact_reuses_retained_canonical_file(tmp_path) -> 
     artifact.write_text('{"sessions":{"2026-10-05":{}}}', encoding="utf-8")
 
     assert _resolve_canonical_artifact(tmp_path, session_date) == artifact
+
+
+def test_parity_artifact_normalizes_embedded_execution_group_timestamp() -> None:
+    base = {
+        "kind": "lifecycle_formed",
+        "occurred_at": "2026-10-05T03:50:00Z",
+        "observed_at": "2026-10-05T03:50:00Z",
+        "available_at": "2026-10-05T03:50:00Z",
+        "identity": "life-1",
+        "causal_parent_id": None,
+        "unavailable": [],
+    }
+    canonical = normalize_phase_record({
+        **base,
+        "values": {
+            "execution_group_id": (
+                "execution-group:2026-10-05:NIFTY:high-short-recovery:2026-10-05T09:35"
+            ),
+        },
+    }, sequence=0)
+    paper = normalize_phase_record({
+        **base,
+        "values": {
+            "execution_group_id": (
+                "execution-group:2026-10-05:NIFTY:high-short-recovery:2026-10-05T04:05:00.000000Z"
+            ),
+        },
+    }, sequence=0)
+
+    assert canonical["values"] == paper["values"]
 
 
 def _payload(*, expiry: bool) -> dict[str, object]:
@@ -211,6 +242,14 @@ def test_phase7_reporting_preserves_producer_owned_transition_and_ledger_facts()
 
     assert payload["execution_transitions"] == [transition]
     assert payload["ledger_mutations"] == [ledger]
+    assert payload["execution_diagnostic_summary"] == {
+        "record_count": 0,
+        "by_kind": {},
+        "lifecycle_count": 0,
+        "records_by_lifecycle": {},
+        "first_sequence": None,
+        "last_sequence": None,
+    }
 
 
 def test_phase7_exit_diagnostics_normalize_utc_and_preserve_missing_exit_event() -> None:
