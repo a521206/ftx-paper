@@ -367,6 +367,8 @@ class OrderflowTransitionOwner:
         self.context.pending_bar_events.clear()
         self.context.execution_proposals.clear()
         if self.mode == "FULL":
+            self.execution_owner.prepare_requalifications(timestamp, next_time, events)
+        if self.mode == "FULL":
             row_dict = dict(row)
             for life in tuple(self.context.opportunities.values()):
                 if life.active or self.context.position_is_open(life):
@@ -422,7 +424,6 @@ class OrderflowTransitionOwner:
                 )
             ):
                 self.execution_owner.admit_opportunity(life, next_time, events)
-                self.execution_owner._record_intent_admission(life, life.formation_available_at)
             trace_before = _execution_trace_state(
                 self.execution_owner.engine.state_for(life.lifecycle_id)
             )

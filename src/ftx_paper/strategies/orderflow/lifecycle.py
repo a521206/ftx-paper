@@ -46,6 +46,9 @@ class LifecycleStage(StrEnum):
     SUPERSEDED = "SUPERSEDED"
 
 
+ContinuationKey = tuple[str, ...]
+
+
 @dataclass(frozen=True, slots=True)
 class EvidenceRef:
     evidence_id: str
@@ -107,6 +110,9 @@ class SetupOpportunity:
     execution_group_id: str | None = None
     comparison_key: str | None = None
     conflict_key: str | None = None
+    continuation_key: ContinuationKey | None = None
+    superseded_by_lifecycle_id: str | None = None
+    supersession_reason: str | None = None
     clock: datetime | None = None
     decision_context_required: bool = True
     timeout_limit: int = 6
@@ -194,18 +200,26 @@ class SetupOpportunity:
             raise ValueError("invalidation requires an available active lifecycle")
         self.status = OpportunityStatus.EXPIRED if expired else OpportunityStatus.INVALIDATED
 
-    def supersede(self, *, at: datetime | str, reason: str = "superseded") -> None:
+    def supersede(
+        self,
+        *,
+        at: datetime | str,
+        reason: str = "superseded",
+        superseded_by_lifecycle_id: str | None = None,
+    ) -> None:
         if not self.active:
             return
         at = canonical_timestamp(at)
         if at < self.formation_available_at:
             raise ValueError("supersession cannot precede formation")
         self.status = OpportunityStatus.SUPERSEDED
+        self.superseded_by_lifecycle_id = superseded_by_lifecycle_id
+        self.supersession_reason = reason
 
     def to_dict(self) -> dict[str, Any]:
-        return {"lifecycle_id": self.lifecycle_id, "candidate_id": self.candidate_id, "direction": self.direction.value, "status": self.status.value, "stage": self.stage.value, "causal_identity": self.causal_identity, "response_evidence_ids": list(self.response_evidence_ids), "response_evidence_lineage": [asdict(item) for item in self.response_evidence_lineage], "parent_context": asdict(self.parent_context) if self.parent_context else None, "events": [asdict(item) for item in self._events]}
+        return {"lifecycle_id": self.lifecycle_id, "candidate_id": self.candidate_id, "direction": self.direction.value, "status": self.status.value, "stage": self.stage.value, "causal_identity": self.causal_identity, "continuation_key": self.continuation_key, "superseded_by_lifecycle_id": self.superseded_by_lifecycle_id, "supersession_reason": self.supersession_reason, "response_evidence_ids": list(self.response_evidence_ids), "response_evidence_lineage": [asdict(item) for item in self.response_evidence_lineage], "parent_context": asdict(self.parent_context) if self.parent_context else None, "events": [asdict(item) for item in self._events]}
 
 __all__ = [
     "Direction", "EvidenceRef", "LifecycleEvent", "LifecycleStage",
-    "OpportunityStatus", "SetupOpportunity",
+    "ContinuationKey", "OpportunityStatus", "SetupOpportunity",
 ]

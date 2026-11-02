@@ -208,6 +208,17 @@ class AdmissionStatus(StrEnum):
     DENIED = "DENIED"
 
 
+class RequalificationStatus(StrEnum):
+    PENDING = "PENDING"
+    REQUALIFICATION_READY = "REQUALIFICATION_READY"
+    REATTEMPTED = "REATTEMPTED"
+    FILLED = "FILLED"
+    INVALIDATED = "INVALIDATED"
+    EXPIRED = "EXPIRED"
+    SUPERSEDED = "SUPERSEDED"
+    TERMINAL_DENIED = "TERMINAL_DENIED"
+
+
 class ReservationStatus(StrEnum):
     ACTIVE = "ACTIVE"
     RELEASED = "RELEASED"
@@ -219,6 +230,28 @@ class ExecutionAdmission:
     reason: str | None = None
     decided_at: str | None = None
     intent_id: str | None = None
+    terminal: bool = False
+    requalifiable: bool = False
+    requalification_id: str | None = None
+
+
+@dataclass
+class RequalificationState:
+    requalification_id: str
+    lifecycle_id: str
+    setup_id: str
+    latest_intent_id: str | None
+    continuation_key: tuple[str, ...] | None
+    denial_reason: str
+    trigger_price: float | None
+    denied_at: str
+    denied_available_at: str
+    next_eligible_context_at: str | None = None
+    attempt_number: int = 1
+    status: RequalificationStatus = RequalificationStatus.PENDING
+    blocking_position_id: str | None = None
+    owner_lifecycle_id: str | None = None
+    observation: TriggerObservation | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,6 +340,8 @@ class ExecutionState:
     retest_touch_available_at: str | None = None
     retest_touch_evidence: dict[str, Any] | None = None
     trail_tracker: Any | None = field(default=None, repr=False)
+    requalification: RequalificationState | None = None
+    attempt_number: int = 0
 
 
 @dataclass
@@ -506,6 +541,75 @@ class ExecutionEngine:
         state.admission = admission
         if not state.admission_history or state.admission_history[-1] != admission:
             state.admission_history += (admission,)
+
+    def queue_requalification(
+        self,
+        life: SetupOpportunity,
+        *,
+        intent_id: str | None,
+        observation: TriggerObservation,
+        reason: str,
+        denied_at: str,
+        denied_available_at: str,
+        blocking_position_id: str | None = None,
+    ) -> RequalificationState:
+        state = self._state(life.lifecycle_id)
+        current = state.requalification
+        if current is not None and current.status in {
+            RequalificationStatus.PENDING,
+            RequalificationStatus.REQUALIFICATION_READY,
+            RequalificationStatus.REATTEMPTED,
+        }:
+            current.denial_reason = reason
+            current.latest_intent_id = intent_id
+            current.denied_at = denied_at
+            current.denied_available_at = denied_available_at
+            current.blocking_position_id = blocking_position_id
+            current.observation = observation
+            current.status = RequalificationStatus.PENDING
+            return current
+        state.requalification = RequalificationState(
+            requalification_id=f"requalification:{life.lifecycle_id}:{state.attempt_number + 1}",
+            lifecycle_id=life.lifecycle_id,
+            setup_id=str(getattr(state.setup, "setup_id", life.candidate_id)),
+            latest_intent_id=intent_id,
+            continuation_key=life.continuation_key,
+            denial_reason=reason,
+            trigger_price=observation.price,
+            denied_at=denied_at,
+            denied_available_at=denied_available_at,
+            attempt_number=state.attempt_number + 1,
+            blocking_position_id=blocking_position_id,
+            owner_lifecycle_id=life.lifecycle_id,
+            observation=observation,
+        )
+        return state.requalification
+
+    def prepare_requalification(
+        self, life: SetupOpportunity, *, context_available_at: str,
+    ) -> RequalificationState | None:
+        state = self._state(life.lifecycle_id)
+        queue = state.requalification
+        if queue is None or queue.status is not RequalificationStatus.PENDING:
+            return None
+        if coerce_timestamp(context_available_at) <= coerce_timestamp(queue.denied_available_at):
+            return None
+        queue.attempt_number += 1
+        queue.status = RequalificationStatus.REQUALIFICATION_READY
+        queue.next_eligible_context_at = context_available_at
+        state.intent = None
+        state.entry_attempted = False
+        state.attempt_number = queue.attempt_number
+        return queue
+
+    def mark_requalification_attempted(self, life: SetupOpportunity, intent_id: str) -> None:
+        queue = self._state(life.lifecycle_id).requalification
+        if queue is not None:
+            queue.status = RequalificationStatus.REATTEMPTED
+            queue.latest_intent_id = intent_id
+
+    def requalification_for(self, lifecycle_id: str) -> RequalificationState | None:
+        return self._state(lifecycle_id).requalification
 
     def release_reservation(
         self, life: SetupOpportunity, *, at: str, reason: str
@@ -731,6 +835,8 @@ class ExecutionEngine:
             quantity=quantity,
             filled_at=filled_at,
         )
+        if state.requalification is not None:
+            state.requalification.status = RequalificationStatus.FILLED
         return position
 
     def queue_exit(self, life: SetupOpportunity, order: ExitOrder) -> bool:
@@ -1489,6 +1595,7 @@ class ExecutionCoordinator:
                 ),
                 bar_events,
             )
+            self._record_intent_admission(life, life.formation_available_at)
             return
         elif not self.context.regime.permits(life.direction.value):
             reason = "regime_permission_denied"
@@ -1500,12 +1607,15 @@ class ExecutionCoordinator:
                 ),
                 bar_events,
             )
+            self._record_intent_admission(life, life.formation_available_at)
             return
         assert setup is not None
         regime = self.context.regime
+        attempt = self.engine.state_for(life.lifecycle_id).attempt_number
+        intent_id = f"intent-{life.lifecycle_id}" if attempt == 0 else f"intent-{life.lifecycle_id}:attempt-{attempt}"
         intent = arm_intent(
             intent=TradeIntent(
-                f"intent-{life.lifecycle_id}",
+                intent_id,
                 setup.setup_id,
                 setup.regime_version,
                 life.direction.value,
@@ -1539,9 +1649,13 @@ class ExecutionCoordinator:
             ),
             bar_events,
         )
+        self._record_intent_admission(life, life.formation_available_at)
         self.emit_intent_armed(
             decision_at, next_time, bar_events, life
         )
+        queue = self.engine.requalification_for(life.lifecycle_id)
+        if queue is not None and queue.status is RequalificationStatus.REQUALIFICATION_READY:
+            self.engine.mark_requalification_attempted(life, intent.intent_id)
 
     def record_admission(
         self,
@@ -1625,7 +1739,6 @@ class ExecutionCoordinator:
                 )
             events: list[dict[str, Any]] = []
             self.admit_opportunity(life, decision_at, events)
-            self._record_intent_admission(life, formation.available_at)
         return self.context.parity_snapshot()
 
     def _record_intent_admission(self, life: SetupOpportunity, fallback_at: Any) -> None:
@@ -1971,6 +2084,9 @@ class ExecutionCoordinator:
             )
         self.engine.clear_pending_entry(life)
         life.invalidate(at=timestamp, expired=True)
+        queue = self.engine.requalification_for(life.lifecycle_id)
+        if queue is not None:
+            queue.status = RequalificationStatus.EXPIRED
         event = {
             "kind": "setup_expired",
             "time": timestamp,
@@ -2123,6 +2239,9 @@ class ExecutionCoordinator:
                 execution_policy="failure_boundary",
             )
         life.invalidate(at=timestamp)
+        queue = self.engine.requalification_for(life.lifecycle_id)
+        if queue is not None:
+            queue.status = RequalificationStatus.INVALIDATED
         event = {
             "kind": "setup_invalidated",
             "observed_at": observed_at,
@@ -2531,11 +2650,6 @@ class ExecutionCoordinator:
                 or state.intent.status is not IntentStatus.ARMED
                 or life.lifecycle_id
                 in getattr(self.context, "regime_gate_blocked_lifecycles", set())
-                or life.lifecycle_id
-                in getattr(
-                    self.context, "session_extreme_gate_blocked_lifecycles", set()
-                )
-                or self.active_position_gate.is_blocked(life.lifecycle_id)
             ):
                 continue
             duplicate_owner = self.engine.entry_owner(
@@ -2686,6 +2800,9 @@ class ExecutionCoordinator:
                 for opposing in self.context.conflicting_unfilled_opportunities(life):
                     if opposing.active:
                         opposing.supersede(at=timestamp, reason="conflicting_entry_selected")
+                        queue = self.engine.requalification_for(opposing.lifecycle_id)
+                        if queue is not None:
+                            queue.status = RequalificationStatus.SUPERSEDED
                         self.context.record_event({
                             "kind": "setup_superseded",
                             "lifecycle_id": opposing.lifecycle_id,
@@ -2704,6 +2821,55 @@ class ExecutionCoordinator:
                 self.context.record_event(event)
                 bar_events.append(event)
             else:
+                requalifiable = blocked in {
+                    "active_position_session_extreme_gate",
+                    "decision_context_unavailable",
+                    "decision_context_scores_unavailable",
+                    "fill_permission_mismatch",
+                    "opening_gap_permission_changed",
+                }
+                admission = self.engine.state_for(life.lifecycle_id).admission
+                queue = None
+                if requalifiable:
+                    blocking_position_id = (
+                        gate_evidence.get("active_position_id")
+                        if gate_evidence is not None else None
+                    )
+                    queue = self.engine.queue_requalification(
+                        life,
+                        intent_id=proposal.intent_id,
+                        observation=proposal.observation,
+                        reason=str(blocked),
+                        denied_at=timestamp,
+                        denied_available_at=next_time,
+                        blocking_position_id=blocking_position_id,
+                    )
+                    self.context.record_event({
+                        "kind": "trigger_requalification_queued",
+                        "lifecycle_id": life.lifecycle_id,
+                        "setup_id": queue.setup_id,
+                        "intent_id": proposal.intent_id,
+                        "requalification_id": queue.requalification_id,
+                        "continuation_key": life.continuation_key,
+                        "reason": blocked,
+                        "attempt_number": queue.attempt_number,
+                        "blocking_position_id": blocking_position_id,
+                        "observed_at": timestamp,
+                        "available_at": next_time,
+                    })
+                else:
+                    existing_queue = self.engine.requalification_for(life.lifecycle_id)
+                    if existing_queue is not None:
+                        existing_queue.status = RequalificationStatus.TERMINAL_DENIED
+                self.engine.decide_admission(
+                    life,
+                    replace(
+                        admission,
+                        terminal=not requalifiable,
+                        requalifiable=requalifiable,
+                        requalification_id=(queue.requalification_id if queue else None),
+                    ),
+                )
                 event = {
                     "kind": "admission_decided",
                     "time": timestamp,
@@ -2714,7 +2880,72 @@ class ExecutionCoordinator:
                 }
                 self.context.record_event(event)
                 bar_events.append(event)
+                denial_event = {
+                    "kind": "trigger_denied_portfolio",
+                    "proposal_id": f"proposal-{proposal.intent_id}-{timestamp}",
+                    "intent_id": proposal.intent_id,
+                    "setup_id": setup.setup_id,
+                    "lifecycle_id": life.lifecycle_id,
+                    "observed_at": timestamp,
+                    "available_at": next_time,
+                    "reason": blocked,
+                    "trigger_price": proposal.observation.price,
+                    "terminal": not requalifiable,
+                    "requalifiable": requalifiable,
+                    "requalification_id": queue.requalification_id if queue else None,
+                }
+                self.context.record_event(denial_event)
+                bar_events.append(denial_event)
         self.context.execution_proposals.clear()
+
+    def prepare_requalifications(
+        self, timestamp: str, next_time: str, bar_events: list[dict[str, Any]]
+    ) -> None:
+        available_context = max(
+            (str(item.available_at) for item in self.context.aggregates.get("5m", ())
+             if coerce_timestamp(item.available_at) <= coerce_timestamp(timestamp)),
+            default=None,
+        )
+        if available_context is None:
+            return
+        for life in tuple(self.context.opportunities.values()):
+            if not life.active or self.context.continuation_owner(life.continuation_key) != life.lifecycle_id:
+                continue
+            queue = self.engine.prepare_requalification(
+                life, context_available_at=available_context
+            )
+            if queue is None or queue.observation is None:
+                continue
+            self.context.record_event({
+                "kind": "trigger_requalification_ready",
+                "lifecycle_id": life.lifecycle_id,
+                "setup_id": queue.setup_id,
+                "intent_id": queue.latest_intent_id,
+                "requalification_id": queue.requalification_id,
+                "continuation_key": life.continuation_key,
+                "attempt_number": queue.attempt_number,
+                "next_eligible_context_at": available_context,
+                "observed_at": timestamp,
+                "available_at": next_time,
+            })
+            self.admit_opportunity(life, next_time, bar_events)
+            state = self.engine.state_for(life.lifecycle_id)
+            if state.intent is not None:
+                observation = replace(
+                    queue.observation,
+                    intent_id=state.intent.intent_id,
+                )
+                queue.observation = observation
+                self.context.execution_proposals.append(
+                    CanonicalExecutionProposal(
+                        life.lifecycle_id,
+                        state.intent.intent_id,
+                        observation,
+                        state.setup_available_at or life.formation_available_at,
+                        life.direction,
+                        0,
+                    )
+                )
 
     def handle_management(
         self,

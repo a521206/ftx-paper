@@ -46,6 +46,14 @@ def build_replay_payload(
         asdict(fill) for state in execution_states for fill in state.fills
     ]
     execution_transitions = list(streams.get("execution_transitions", ()))
+    denied_trigger_queue = [
+        asdict(item.requalification)
+        for item in execution_states
+        if item.requalification is not None
+        and item.requalification.status.value in {
+            "PENDING", "REQUALIFICATION_READY", "REATTEMPTED",
+        }
+    ]
     ledger_mutations = list(streams.get("ledger_mutations", ()))
     if not ledger_mutations:
         for state in execution_states:
@@ -108,6 +116,7 @@ def build_replay_payload(
         },
         "execution_fills": _json_safe(execution_fills),
         "execution_transitions": _json_safe(execution_transitions),
+        "denied_trigger_queue": _json_safe(denied_trigger_queue),
         "ledger_mutations": _json_safe(ledger_mutations),
         "execution_diagnostics": _json_safe(
             getattr(context, "execution_diagnostics", ())

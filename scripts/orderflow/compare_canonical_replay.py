@@ -1368,7 +1368,10 @@ def _compare_phase7(canonical_path: Path, paper: dict[str, Any], session_date: s
             result.get("status") == "MISMATCHED"
             and str(result.get("field", "")).startswith("values.")
             and str(result.get("field", "")).rsplit(".", 1)[-1]
-            in {"price", "requested_price", "failure_boundary", "protective_stop", "stop"}
+            in {
+                "price", "quantity", "requested_price", "failure_boundary",
+                "protective_stop", "stop",
+            }
             and isinstance(result.get("canonical_value"), (int, float))
             and isinstance(result.get("paper_value"), (int, float))
             and abs(float(result["canonical_value"]) - float(result["paper_value"]))
