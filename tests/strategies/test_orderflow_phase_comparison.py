@@ -1,8 +1,13 @@
 from datetime import datetime
 from typing import Any
 
-from scripts.orderflow.compare_canonical_replay import _timeout_before_canonical_trigger
+from scripts.orderflow.compare_canonical_replay import (
+    _exit_diagnostics,
+    _first_exit_diagnostic_difference,
+    _timeout_before_canonical_trigger,
+)
 from ftx_paper.strategies.orderflow.interaction_replay import _handle_opening_interaction
+from ftx_paper.strategies.orderflow.interaction_replay import InteractionResponseReplay
 from ftx_paper.strategies.orderflow.phase7_projection import build_phase7_projection
 from ftx_paper.strategies.orderflow.state_machine_reporting import build_replay_payload
 from ftx_paper.strategies.orderflow.templates import OpeningInteractionKind
@@ -181,6 +186,76 @@ def test_phase7_reporting_preserves_producer_owned_transition_and_ledger_facts()
 
     assert payload["execution_transitions"] == [transition]
     assert payload["ledger_mutations"] == [ledger]
+
+
+def test_phase7_exit_diagnostics_normalize_utc_and_preserve_missing_exit_event() -> None:
+    canonical = {
+        "diagnostic": {
+            "execution_diagnostics": [
+                {
+                    "kind": "execution_lifecycle_tick",
+                    "lifecycle_id": "life-1",
+                    "observed_at": "09:30",
+                    "available_at": "09:31",
+                    "bar": {"time": "09:30", "close": 100.0},
+                    "before": {"position": {"status": "open"}},
+                    "after": {"position": {"status": "open"}},
+                },
+                {
+                    "kind": "exit_signal",
+                    "lifecycle_id": "life-1",
+                    "observed_at": "09:40",
+                    "available_at": "09:41",
+                    "reason": "vwap_stop",
+                },
+            ],
+        },
+    }
+    paper = {
+        "execution_diagnostics": [
+            {
+                "kind": "execution_lifecycle_tick",
+                "lifecycle_id": "life-1",
+                "observed_at": "09:30",
+                "available_at": "09:31",
+                "bar": {"time": "09:30", "close": 100.0},
+                "before": {"position": {"status": "open"}},
+                "after": {"position": {"status": "open"}},
+            },
+        ],
+    }
+
+    canonical_exit = _exit_diagnostics(canonical, "life-1", canonical=True, session_date="2026-10-01")
+    paper_exit = _exit_diagnostics(paper, "life-1", canonical=False, session_date="2026-10-01")
+
+    assert canonical_exit[0]["observed_at"] == "2026-10-01T04:00:00.000000Z"
+    assert canonical_exit[0]["bar"]["time"] == "2026-10-01T04:00:00.000000Z"
+    difference = _first_exit_diagnostic_difference(canonical_exit, paper_exit)
+    assert difference is not None
+    assert difference["index"] == 1
+    assert difference["canonical"]["kind"] == "exit_signal"
+    assert difference["paper"] is None
+
+
+def test_phase6_projection_preserves_only_canonical_lifecycle_kinds() -> None:
+    replay = InteractionResponseReplay(
+        facts=(),
+        opportunity_facts=(
+            {"kind": "or_directional_seed"},
+            {"kind": "lifecycle_formed"},
+            {"kind": "setup_invalidated"},
+            {"kind": "setup_expired"},
+            {"kind": "setup_superseded"},
+            {"kind": "opportunity_timeout"},
+            {"kind": "opportunity_outcome"},
+        ),
+    )
+
+    assert [
+        item["kind"] for item in replay.parity_phase_facts()["opportunity_lifecycle"]
+    ] == [
+        "lifecycle_formed",
+    ]
 
 
 def test_opening_interaction_is_published_as_a_lifecycle_event_only() -> None:

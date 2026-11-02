@@ -37,7 +37,11 @@ class InteractionResponseReplay:
     def parity_phase_facts(self) -> dict[str, list[dict[str, Any]]]:
         return {
             "interaction_response": [dict(item) for item in self.facts],
-            "opportunity_lifecycle": [dict(item) for item in self.opportunity_facts],
+            "opportunity_lifecycle": [
+                dict(item)
+                for item in self.opportunity_facts
+                if item.get("kind") == "lifecycle_formed"
+            ],
         }
 
 
@@ -852,16 +856,53 @@ def _dispatch_structure(
                 "evidence_ids": [item.time for item in outcome.evidence],
                 "evidence_lineage": [dataclasses.asdict(item) for item in outcome.evidence_lineage],
             }, observed_at=outcome.observed_at, available_at=outcome.available_at))
-            formation = opportunity_coordinator.form_resolved(
-                interaction=interaction,
-                evaluation=evaluation,
-                outcome=outcome,
-                as_of=as_of,
-                aggregates={"1m": list(available1), "5m": list(available5)},
-                raw_rows=raw_rows,
-                atr=atr,
-                regime_version=regime_version,
-            )
+            formation = None
+            if response_to_publish is not None:
+                confirmation_available_at = serialize_utc(as_of)
+                setup_expires_at = (
+                    f"{interaction.session_date}T{evaluation.template.expiry_at}"
+                )
+                if confirmation_available_at >= setup_expires_at:
+                    append_policy_fact(
+                        "opportunity_suppressed_expired",
+                        emission_identity(
+                            "opportunity_suppressed_expired", identity
+                        ),
+                        iid,
+                        {
+                            "interaction_id": iid,
+                            "template_id": evaluation.template.template_id,
+                            "location_id": str(interaction.location),
+                            "response_available_at": response_to_publish.available_at,
+                            "confirmation_available_at": confirmation_available_at,
+                            "setup_expires_at": setup_expires_at,
+                            "reason": "response_available_at_or_after_setup_expiry",
+                        },
+                        observed_at=serialize_utc(latest.end_time),
+                        available_at=serialize_utc(latest.available_at),
+                    )
+                else:
+                    formation = opportunity_coordinator.form_resolved(
+                        interaction=interaction,
+                        evaluation=evaluation,
+                        outcome=outcome,
+                        as_of=as_of,
+                        aggregates={"1m": list(available1), "5m": list(available5)},
+                        raw_rows=raw_rows,
+                        atr=atr,
+                        regime_version=regime_version,
+                    )
+            else:
+                formation = opportunity_coordinator.form_resolved(
+                    interaction=interaction,
+                    evaluation=evaluation,
+                    outcome=outcome,
+                    as_of=as_of,
+                    aggregates={"1m": list(available1), "5m": list(available5)},
+                    raw_rows=raw_rows,
+                    atr=atr,
+                    regime_version=regime_version,
+                )
             if formation is not None:
                 facts.append(_fact(
                     "lifecycle_formed",

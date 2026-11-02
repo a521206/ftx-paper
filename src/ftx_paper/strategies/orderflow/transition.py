@@ -369,6 +369,8 @@ class OrderflowTransitionOwner:
             if coerce_timestamp(timestamp) < coerce_timestamp(life.formation_available_at):
                 continue
             state = self.execution_owner.engine.state_for(life.lifecycle_id)
+            if not life.active and state.position is None:
+                continue
             if (
                 state.pending_entry is not None
                 and state.position is None

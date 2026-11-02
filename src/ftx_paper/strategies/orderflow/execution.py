@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, replace
 from copy import copy
 from enum import StrEnum
+from collections.abc import Mapping
 from typing import Any, Protocol
 
 from .hierarchy import (
@@ -25,7 +26,7 @@ from .hierarchy import (
     observe_trigger,
     trigger_exit_intent,
 )
-from .lifecycle import SetupOpportunity
+from .lifecycle import OpportunityStatus, SetupOpportunity
 from .templates import Direction, OpeningInteractionKind, StopPolicy
 from .state_machine_types import CanonicalExecutionProposal, ReplayContext
 from .timestamps import coerce_timestamp, nifty_label, parse_session_timestamp
@@ -1448,8 +1449,9 @@ class ExecutionCoordinator:
             session.failed_reversal_locked_at[location] = timestamp
 
     def admit_opportunity(
-        self, life: SetupOpportunity, decision_at: str, bar_events: list[dict[str, Any]]
+        self, life: SetupOpportunity, next_time: str, bar_events: list[dict[str, Any]]
     ) -> None:
+        decision_at = nifty_label(life.formation_available_at)
         setup = self.context.execution_engine.setup_for(life.lifecycle_id)
         reason = None
         if setup is None:
@@ -1514,7 +1516,7 @@ class ExecutionCoordinator:
             bar_events,
         )
         self.emit_intent_armed(
-            decision_at, decision_at, bar_events, life
+            decision_at, next_time, bar_events, life
         )
 
     def record_admission(
@@ -1587,6 +1589,11 @@ class ExecutionCoordinator:
                 raise ValueError(
                     "lifecycle formation is missing canonical execution objects"
                 )
+            if not life.active:
+                continue
+            formation_at = coerce_timestamp(life.formation_available_at)
+            if formation_at >= coerce_timestamp(setup.expires_at):
+                continue
             self.engine.register(life.lifecycle_id)
             if self.engine.setup_for(life.lifecycle_id) is None:
                 self.engine.attach_setup(
@@ -1678,6 +1685,206 @@ class ExecutionCoordinator:
                 available_at=str(observation.available_at),
             )
 
+    def _complete_pending_entry_fill(
+        self,
+        life: SetupOpportunity,
+        *,
+        timestamp: str,
+        causal_now: str,
+        row: Mapping[str, Any],
+        bar_events: list[dict[str, Any]],
+        pending: EntryOrder,
+    ) -> None:
+        """Apply canonical pending-entry validation, RR gate, and fill."""
+        triggered = pending.intent
+        execution = self.engine.state_for(life.lifecycle_id)
+        setup = self.engine.setup_for(life.lifecycle_id)
+        fill_decision = entry_fill_decision(
+            direction=life.direction.value,
+            trigger_price=triggered.trigger_price,
+            requested_fill_price=pending.fill_price,
+            bar_open=float(row["open"]),
+            failure_boundary=triggered.failure_boundary,
+        )
+        fill_price = fill_decision.fill_price
+        hard_stop = fill_decision.hard_stop
+        quantity = fill_decision.quantity
+        risk_metrics = fill_decision.risk_metrics
+        if hard_stop is None:
+            self.engine.update_intent(
+                life,
+                cancel_intent(
+                    intent=triggered, reason="failure_boundary_not_protective"
+                ),
+            )
+            self.engine.clear_pending_entry(life, at=causal_now)
+            event = {
+                "kind": "entry_blocked_risk",
+                "time": timestamp,
+                "intent_id": triggered.intent_id,
+                "lifecycle_id": life.lifecycle_id,
+                "reason": "failure_boundary_not_protective",
+            }
+            self.context.record_event(event)
+            bar_events.append(event)
+            return
+        if quantity <= 0.0:
+            self.engine.update_intent(
+                life,
+                cancel_intent(intent=triggered, reason="zero_initial_risk"),
+            )
+            self.engine.clear_pending_entry(life, at=causal_now)
+            event = {
+                "kind": "entry_blocked_risk",
+                "time": timestamp,
+                "intent_id": triggered.intent_id,
+                "lifecycle_id": life.lifecycle_id,
+                "reason": "zero_initial_risk",
+                "actual_risk_bp": risk_metrics.get("actual_risk_bp", 0.0),
+            }
+            self.context.record_event(event)
+            bar_events.append(event)
+            return
+        if setup is not None and not execution.exit_plan_frozen:
+            if self.machine is None:
+                raise RuntimeError(
+                    "execution coordinator is not attached to a transition owner"
+                )
+            self.engine.freeze_exit_plan(
+                life,
+                resolve_setup_exit_plan(self.machine, life, as_of=timestamp),
+                available_at=timestamp,
+            )
+            setup = self.engine.setup_for(life.lifecycle_id)
+        configured_exit_plan = setup.exit_plan if setup is not None else ()
+        accepted, rejected, required_rejections = validate_exit_plan(
+            configured_exit_plan,
+            direction=life.direction.value,
+            fill_price=fill_price,
+        )
+        for rule in rejected:
+            event = {
+                "kind": "exit_plan_rule_rejected",
+                "rule_id": rule.rule_id,
+                "location": rule.location,
+                "reason": rule.validation_reason(
+                    direction=life.direction.value, fill_price=fill_price
+                ),
+                "observed_at": timestamp,
+                "available_at": timestamp,
+                "lifecycle_id": life.lifecycle_id,
+            }
+            self.context.record_event(event)
+            bar_events.append(event)
+        if required_rejections:
+            current = self.engine.state_for(life.lifecycle_id).intent
+            if current is not None:
+                self.engine.update_intent(
+                    life,
+                    replace(
+                        current,
+                        status=IntentStatus.CANCELLED,
+                        cancel_reason="required_exit_plan_invalid",
+                    ),
+                )
+            self.engine.clear_pending_entry(life, at=causal_now)
+            event = {
+                "kind": "entry_blocked_exit_plan",
+                "intent_id": triggered.intent_id,
+                "lifecycle_id": life.lifecycle_id,
+                "reason": "required_exit_plan_invalid",
+                "rejected_rule_ids": tuple(
+                    rule.rule_id for rule in required_rejections
+                ),
+                "observed_at": timestamp,
+                "available_at": timestamp,
+            }
+            self.context.record_event(event)
+            bar_events.append(event)
+            return
+        exit_plan = accepted
+        for rule in exit_plan:
+            if rule.mode != "conditional" or hard_stop is None:
+                continue
+            target_level = rule.level
+            if target_level is None:
+                continue
+            reward_points = (
+                target_level - fill_price
+                if life.direction is Direction.LONG
+                else fill_price - target_level
+            )
+            risk_points = abs(fill_price - hard_stop)
+            risk_reward = (
+                reward_points / risk_points if risk_points > 0.0 else None
+            )
+            if risk_reward is None or risk_reward >= 1.0:
+                continue
+            current = self.engine.state_for(life.lifecycle_id).intent or triggered
+            self.engine.update_intent(
+                life,
+                replace(
+                    current,
+                    status=IntentStatus.CANCELLED,
+                    cancel_reason="conditional_exit_rr_below_one",
+                ),
+            )
+            self.engine.clear_pending_entry(life, at=causal_now)
+            event = {
+                "kind": "entry_blocked_rr",
+                "owner": "1m",
+                "evidence_timeframe": "1m",
+                "intent_id": triggered.intent_id,
+                "lifecycle_id": life.lifecycle_id,
+                "rule_id": rule.rule_id,
+                "location": rule.location,
+                "reason": "conditional_exit_rr_below_one",
+                "reward_points": reward_points,
+                "risk_points": risk_points,
+                "risk_reward": risk_reward,
+                "observed_at": timestamp,
+                "available_at": timestamp,
+            }
+            self.context.record_event(event)
+            bar_events.append(event)
+            return
+        self.engine.fill_entry(
+            life,
+            price=fill_price,
+            quantity=quantity,
+            protective_stop=hard_stop,
+            filled_at=causal_now,
+            exit_plan=exit_plan,
+        )
+        self._initialize_trail_tracker(life)
+        self._record_fill(self.engine.state_for(life.lifecycle_id).fills[-1])
+        self.context.record_parity_fact("ledger_mutations", {
+            "kind": "position_opened",
+            "identity": f"position:{life.lifecycle_id}:{causal_now}",
+            "causal_parent_id": life.lifecycle_id,
+            "occurred_at": causal_now,
+            "observed_at": causal_now,
+            "available_at": causal_now,
+            "values": {
+                "lifecycle_id": life.lifecycle_id,
+                "quantity": quantity,
+            },
+            "unavailable": [],
+        })
+        for sibling in self.context.unfilled_execution_group_siblings(life):
+            if sibling.active:
+                sibling.supersede(
+                    at=causal_now,
+                    reason="execution_group_claimed",
+                )
+                self.context.record_event({
+                    "kind": "setup_superseded",
+                    "lifecycle_id": sibling.lifecycle_id,
+                    "observed_at": causal_now,
+                    "available_at": causal_now,
+                    "reason": "execution_group_claimed",
+                })
+
     def fill_triggered(
         self, formations: tuple[Any, ...], *, bar_open: Any, fill_at: str
     ) -> None:
@@ -1686,95 +1893,25 @@ class ExecutionCoordinator:
             if life is None or life.lifecycle_id not in bar_open:
                 continue
             state = self.engine.state_for(life.lifecycle_id)
+            pending = state.pending_entry
             if (
-                state.intent is None
-                or state.intent.status is not IntentStatus.TRIGGERED
+                pending is None
+                or state.position is not None
+                or coerce_timestamp(pending.available_at) > coerce_timestamp(fill_at)
+                or pending.intent.status is not IntentStatus.TRIGGERED
             ):
                 continue
-            decision = entry_fill_decision(
-                direction=life.direction.value,
-                trigger_price=state.intent.trigger_price,
-                requested_fill_price=state.intent.trigger_price,
-                bar_open=bar_open[life.lifecycle_id],
-                failure_boundary=state.intent.failure_boundary,
+            self._complete_pending_entry_fill(
+                life,
+                timestamp=fill_at,
+                causal_now=fill_at,
+                row={
+                    "open": bar_open[life.lifecycle_id],
+                    "session_date": str(life.session_date),
+                },
+                bar_events=[],
+                pending=pending,
             )
-            if decision.hard_stop is not None and decision.quantity > 0:
-                exit_plan = tuple(
-                    getattr(self.engine.setup_for(life.lifecycle_id), "exit_plan", ())
-                    or ()
-                )
-                accepted, rejected, required_rejections = validate_exit_plan(
-                    exit_plan,
-                    direction=life.direction.value,
-                    fill_price=decision.fill_price,
-                )
-                for rule in rejected:
-                    self.context.record_parity_fact("execution_transitions", {
-                        "kind": "exit_rule_rejected",
-                        "identity": f"{life.lifecycle_id}:{rule.rule_id}",
-                        "causal_parent_id": life.lifecycle_id,
-                        "occurred_at": fill_at,
-                        "observed_at": fill_at,
-                        "available_at": fill_at,
-                        "values": {"rule_id": rule.rule_id, "reason": rule.validation_reason(direction=life.direction.value, fill_price=decision.fill_price)},
-                        "unavailable": [],
-                    })
-                if required_rejections:
-                    self.engine.clear_pending_entry(life, at=fill_at)
-                    current = self.engine.state_for(life.lifecycle_id).intent
-                    if current is not None:
-                        self.engine.update_intent(
-                            life,
-                            replace(
-                                current,
-                                status=IntentStatus.CANCELLED,
-                                cancel_reason="required_exit_rule_rejected",
-                            ),
-                        )
-                    self.context.record_parity_fact("execution_transitions", {
-                        "kind": "entry_cancelled",
-                        "identity": f"{life.lifecycle_id}:required_exit_rule_rejected",
-                        "causal_parent_id": life.lifecycle_id,
-                        "occurred_at": fill_at,
-                        "observed_at": fill_at,
-                        "available_at": fill_at,
-                        "values": {"reason": "required_exit_rule_rejected"},
-                        "unavailable": [],
-                    })
-                    continue
-                self.engine.fill_entry(
-                    life,
-                    price=decision.fill_price,
-                    quantity=decision.quantity,
-                    filled_at=fill_at,
-                    protective_stop=decision.hard_stop,
-                    exit_plan=accepted,
-                )
-                self._initialize_trail_tracker(life)
-                self._record_fill(self.engine.state_for(life.lifecycle_id).fills[-1])
-                self.context.record_parity_fact("ledger_mutations", {
-                    "kind": "position_opened",
-                    "identity": f"position:{life.lifecycle_id}:{fill_at}",
-                    "causal_parent_id": life.lifecycle_id,
-                    "occurred_at": fill_at,
-                    "observed_at": fill_at,
-                    "available_at": fill_at,
-                    "values": {"lifecycle_id": life.lifecycle_id, "quantity": decision.quantity},
-                    "unavailable": [],
-                })
-                for sibling in self.context.unfilled_execution_group_siblings(life):
-                    if sibling.active:
-                        sibling.supersede(
-                            at=fill_at,
-                            reason="execution_group_claimed",
-                        )
-                        self.context.record_event({
-                            "kind": "setup_superseded",
-                            "lifecycle_id": sibling.lifecycle_id,
-                            "observed_at": fill_at,
-                            "available_at": fill_at,
-                            "reason": "execution_group_claimed",
-                        })
 
     def fill_exit(self, formation: Any, *, filled_at: str, open_price: float) -> None:
         life = formation.lifecycle
@@ -1871,6 +2008,8 @@ class ExecutionCoordinator:
         for life in tuple(self.context.opportunities.values()):
             state = self.engine.state_for(life.lifecycle_id)
             if (
+                not life.active
+                or
                 state.intent is None
                 or state.intent.status is not IntentStatus.ARMED
                 or regime.permits(life.direction.value)
@@ -2143,30 +2282,14 @@ class ExecutionCoordinator:
                     or coerce_timestamp(pending.intent.expiry) <= coerce_timestamp(timestamp)
                 ):
                     return
-                decision = entry_fill_decision(
-                    direction=life.direction.value,
-                    trigger_price=pending.intent.trigger_price,
-                    requested_fill_price=pending.fill_price,
-                    bar_open=float(row["open"]),
-                    failure_boundary=pending.intent.failure_boundary,
+                self._complete_pending_entry_fill(
+                    life,
+                    timestamp=timestamp,
+                    causal_now=timestamp,
+                    row=row,
+                    bar_events=bar_events,
+                    pending=pending,
                 )
-                if decision.hard_stop is not None and decision.quantity > 0:
-                    self.engine.fill_entry(
-                        life,
-                        price=decision.fill_price,
-                        quantity=decision.quantity,
-                        filled_at=timestamp,
-                        protective_stop=decision.hard_stop,
-                        exit_plan=tuple(
-                            getattr(
-                                self.engine.setup_for(life.lifecycle_id),
-                                "exit_plan",
-                                (),
-                            )
-                            or ()
-                        ),
-                    )
-                    self._initialize_trail_tracker(life)
             return
         if (
             state.intent is None
@@ -2342,7 +2465,7 @@ class ExecutionCoordinator:
                     observation,
                     state.setup_available_at or life.formation_available_at,
                     life.direction,
-                    0,
+                    0 if life.status is OpportunityStatus.FORMED else 1,
                 )
             )
 
@@ -2569,8 +2692,10 @@ class ExecutionCoordinator:
         life: SetupOpportunity,
         defer_discretionary_execution: bool = False,
     ) -> None:
-        context = self.context
         state = self.engine.state_for(life.lifecycle_id)
+        if not life.active and state.position is None:
+            return
+        context = self.context
         pending = state.pending_exit
         if (
             pending is not None
@@ -2811,6 +2936,93 @@ class ExecutionCoordinator:
             }
             context.record_event(event, record_lifecycle=False)
             bar_events.append(event)
+        stop_update = update_position_stop(
+            position, setup, row, trailing_stop, vwap_stop
+        )
+        if stop_update.changed:
+            self.engine.update_position(
+                life, replace(position, protective_stop=stop_update.candidate)
+            )
+            state = self.engine.state_for(life.lifecycle_id)
+            assert state.position is not None
+            position = state.position
+        if stop_update.changed or (
+            previous_trail != trailing_stop and trailing_stop is not None
+        ):
+            event = {
+                "kind": "stop_updated",
+                "observed_at": timestamp,
+                "available_at": source_bar.available_at
+                if source_bar is not None
+                else next_time,
+                "lifecycle_id": life.lifecycle_id,
+                "position_id": position.position_id,
+                "previous_stop": prior_stop,
+                "trailing_stop": trailing_stop,
+                "vwap": vwap,
+                "atr": atr,
+                "vwap_stop_reference": vwap_stop,
+                "active_stop": position.protective_stop,
+                "stop_source": stop_update.source,
+            }
+            context.record_event(event, record_lifecycle=False)
+            bar_events.append(event)
+        protective_stop = position.protective_stop
+        can_trigger = (
+            is_or_vwap or trail_was_active or activated or position.post_3r_activated
+        )
+        has_candidate = is_or_vwap or trailing_stop is not None or activated
+        if (
+            can_trigger
+            and has_candidate
+            and protective_stop is not None
+            and (
+                (float(row["high"]) >= protective_stop)
+                if position.direction == "short"
+                else (float(row["low"]) <= protective_stop)
+            )
+        ):
+            trigger_stop, reason = (
+                protective_stop,
+                ("vwap_stop" if is_or_vwap else "trail_stop"),
+            )
+        elif prior_stop is not None and (
+            (float(row["high"]) >= prior_stop)
+            if position.direction == "short"
+            else (float(row["low"]) <= prior_stop)
+        ):
+            trigger_stop, reason = prior_stop, "hard_stop"
+        else:
+            trigger_stop, reason = None, ""
+        if trigger_stop is not None:
+            fill_price = (
+                max(float(row["open"]), trigger_stop)
+                if position.direction == "long"
+                else min(float(row["open"]), trigger_stop)
+            )
+            self._queue_exit(
+                reason,
+                next_time,
+                life,
+                requested_price=fill_price,
+                execution_policy="protective_stop_decision",
+            )
+            event = {
+                "kind": "exit_signal",
+                "level": "1m",
+                "reason": reason,
+                "lifecycle_id": life.lifecycle_id,
+                "observed_at": timestamp,
+                "available_at": next_time,
+                "fill_price": fill_price,
+                "stop": trigger_stop,
+                "stop_trigger": "wick_or_touch",
+                "owner": "1m",
+                "evidence_timeframe": "1m",
+            }
+            context.record_event(event, record_lifecycle=False)
+            bar_events.append(event)
+
         synthetic_snapshots = None
         if state.intent is not None:
             available_interactions = [
@@ -2905,92 +3117,6 @@ class ExecutionCoordinator:
                 }
                 context.record_event(event)
                 bar_events.append(event)
-        stop_update = update_position_stop(
-            position, setup, row, trailing_stop, vwap_stop
-        )
-        if stop_update.changed:
-            self.engine.update_position(
-                life, replace(position, protective_stop=stop_update.candidate)
-            )
-            state = self.engine.state_for(life.lifecycle_id)
-            assert state.position is not None
-            position = state.position
-        if stop_update.changed or (
-            previous_trail != trailing_stop and trailing_stop is not None
-        ):
-            event = {
-                "kind": "stop_updated",
-                "observed_at": timestamp,
-                "available_at": source_bar.available_at
-                if source_bar is not None
-                else next_time,
-                "lifecycle_id": life.lifecycle_id,
-                "position_id": position.position_id,
-                "previous_stop": prior_stop,
-                "trailing_stop": trailing_stop,
-                "vwap": vwap,
-                "atr": atr,
-                "vwap_stop_reference": vwap_stop,
-                "active_stop": position.protective_stop,
-                "stop_source": stop_update.source,
-            }
-            context.record_event(event, record_lifecycle=False)
-            bar_events.append(event)
-        protective_stop = position.protective_stop
-        can_trigger = (
-            is_or_vwap or trail_was_active or activated or position.post_3r_activated
-        )
-        has_candidate = is_or_vwap or trailing_stop is not None or activated
-        if (
-            can_trigger
-            and has_candidate
-            and protective_stop is not None
-            and (
-                (float(row["high"]) >= protective_stop)
-                if position.direction == "short"
-                else (float(row["low"]) <= protective_stop)
-            )
-        ):
-            trigger_stop, reason = (
-                protective_stop,
-                ("vwap_stop" if is_or_vwap else "trail_stop"),
-            )
-        elif prior_stop is not None and (
-            (float(row["high"]) >= prior_stop)
-            if position.direction == "short"
-            else (float(row["low"]) <= prior_stop)
-        ):
-            trigger_stop, reason = prior_stop, "hard_stop"
-        else:
-            trigger_stop, reason = None, ""
-        if trigger_stop is not None:
-            fill_price = (
-                max(float(row["open"]), trigger_stop)
-                if position.direction == "long"
-                else min(float(row["open"]), trigger_stop)
-            )
-            self._queue_exit(
-                reason,
-                next_time,
-                life,
-                requested_price=fill_price,
-                execution_policy="protective_stop_decision",
-            )
-            event = {
-                "kind": "exit_signal",
-                "level": "1m",
-                "reason": reason,
-                "lifecycle_id": life.lifecycle_id,
-                "observed_at": timestamp,
-                "available_at": next_time,
-                "fill_price": fill_price,
-                "stop": trigger_stop,
-                "stop_trigger": "wick_or_touch",
-                "owner": "1m",
-                "evidence_timeframe": "1m",
-            }
-            context.record_event(event, record_lifecycle=False)
-            bar_events.append(event)
 
     def evaluate_position_exit_plan(
         self,
@@ -3002,6 +3128,8 @@ class ExecutionCoordinator:
         bar_events: list[dict[str, Any]],
     ) -> None:
         state = self.engine.state_for(life.lifecycle_id)
+        if not life.active and state.position is None:
+            return
         if (
             state.position is None
             or state.position.status is not PositionStatus.OPEN

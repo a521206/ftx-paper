@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from ftx_paper.strategies.orderflow.state_machine import ReplayMachine
-from ftx_paper.strategies.orderflow.execution import ExecutionEngine
+from ftx_paper.strategies.orderflow.execution import ExecutionCoordinator, ExecutionEngine
 from ftx_paper.strategies.orderflow.state_machine_types import ReplayContext
 
 
@@ -113,3 +115,20 @@ def test_replay_event_identity_includes_causal_parent() -> None:
     second.record_event({**event, "causal_parent_id": "parent-2"})
 
     assert first.events[0]["neutral_event_key"] != second.events[0]["neutral_event_key"]
+
+
+def test_inactive_lifecycle_without_position_skips_management() -> None:
+    engine = ExecutionEngine()
+    engine.register("life-1")
+    owner = ExecutionCoordinator(machine=SimpleNamespace(context=None), engine=engine)
+    life = SimpleNamespace(active=False, lifecycle_id="life-1")
+
+    owner.handle_management(
+        0,
+        "2026-09-29T09:21:00Z",
+        "2026-09-29T09:22:00Z",
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0},
+        [],
+        [],
+        life,
+    )
