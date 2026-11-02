@@ -428,7 +428,10 @@ def _compare_phase35_independent(
             return {"status": "MISMATCHED", "layer": "phase3_5_independent", "field": f"prior_value.{field}"}
         if abs(left_value - right_value) > tolerance:
             return {"status": "MISMATCHED", "layer": "phase3_5_independent", "field": f"prior_value.{field}", "canonical_value": left_value, "paper_value": right_value, "tolerance": tolerance}
-    ignored = {"fingerprint", "poc", "vah", "val"}
+    # Snapshot identity and fingerprint belong to the producer's profile
+    # store.  Phase 3.5 parity compares the published value geometry and
+    # causal availability, not repository-specific source provenance.
+    ignored = {"fingerprint", "reference_id", "poc", "vah", "val"}
     remaining_left = {key: value for key, value in left.items() if key not in ignored}
     remaining_right = {key: value for key, value in right.items() if key not in ignored}
     if remaining_left != remaining_right:

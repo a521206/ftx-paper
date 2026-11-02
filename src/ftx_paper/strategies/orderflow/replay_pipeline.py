@@ -28,6 +28,8 @@ from ftx_paper.strategies.orderflow.canonical.orderflow.value_publication import
     prior_profile_is_complete,
     publish_value_references,
 )
+from ftx_paper.strategies.orderflow.canonical.ict.value_profile.records import DailyProfileRecord
+from ftx_paper.strategies.orderflow.canonical.ict.value_profile.store import DailyProfileStore
 from ftx_paper.strategies.orderflow.value_publication import (
     PriorSessionValueReference,
     ValuePublication,
@@ -190,8 +192,28 @@ def _observation_artifact(
 def _prior_values(
     rows_by_date: dict[str, tuple[dict[str, Any], ...]],
 ) -> dict[str, ValuePublication]:
+    class _ReplayDailyProfileStore:
+        def __init__(self) -> None:
+            self._records: dict[tuple[str, int, str, str], DailyProfileRecord] = {}
+
+        def load(
+            self,
+            *,
+            instrument: str,
+            timeframe_minutes: int,
+            config_fingerprint: str,
+            session_date: str,
+        ) -> DailyProfileRecord | None:
+            return self._records.get((instrument, timeframe_minutes, config_fingerprint, session_date))
+
+        def save(self, record: DailyProfileRecord) -> None:
+            self._records[
+                (record.instrument, record.timeframe_minutes, record.config_fingerprint, record.session_date)
+            ] = record
+
     publications: dict[str, ValuePublication] = {}
     dates = sorted(rows_by_date)
+    store: DailyProfileStore = _ReplayDailyProfileStore()
     for session_date in dates:
         prior_dates = [value for value in dates if value < session_date]
         if not prior_dates:
@@ -204,6 +226,8 @@ def _prior_values(
             rows,
             session_date,
             prior_profile_complete=prior_profile_is_complete(prior_rows),
+            daily_profile_store=store,
+            trading_session_dates=tuple(dates),
         )
         reference = next(
             (item for item in references if item.scope == "prior_session"),

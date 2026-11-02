@@ -19,6 +19,7 @@ from ftx_paper.strategies.orderflow.canonical.ict.value_profile import (
     ValueProfileConfig,
     build_daily_profile_record,
 )
+from ftx_paper.strategies.orderflow.canonical.ict.value_profile.store import DailyProfileStore
 from ftx_paper.strategies.orderflow.canonical.replay.value_references import ValueAreaReference
 from ftx_paper.strategies.orderflow.timestamps import parse_nifty_label, parse_session_timestamp, parse_utc, serialize_utc
 
@@ -60,6 +61,8 @@ def publish_value_references(
     session_date: str,
     *,
     prior_profile_complete: bool,
+    daily_profile_store: DailyProfileStore | None = None,
+    trading_session_dates: tuple[str, ...] = (),
 ) -> tuple[ValueAreaReference, ...]:
     """Calculate profile facts, then publish eligible references at session open."""
     source_bars = _profile_source_bars(prior_rows, rows)
@@ -69,16 +72,23 @@ def publish_value_references(
         profile_config=ValueProfileConfig(),
         measurement_config=MeasurementConfig(),
         active_session_date=session_date,
+        daily_profile_store=daily_profile_store,
+        trading_session_dates=trading_session_dates,
     )
     profile = profiles.get(1)
     if profile is None:
         return ()
+    prior_available = (
+        prior_profile_complete
+        if daily_profile_store is None
+        else prior_profile_complete is not False
+    )
     refs = value_references_from_snapshots(
         tuple(
             snapshot for snapshot in profile.snapshots
             if (
                 snapshot.scope is ProfileScope.PRIOR_SESSION
-                and prior_profile_complete
+                and prior_available
             )
         ),
         tuple(
