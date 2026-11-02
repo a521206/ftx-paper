@@ -27,6 +27,8 @@ from uuid import uuid4
 from ftx_paper.strategies.orderflow.parity_artifacts import (
     build_phase4_artifact,
     build_phase7_artifact,
+    build_parity_artifact_from_payload,
+    compare_parity_artifacts,
     compare_phase4_manifests,
     compare_phase7_manifests,
 )
@@ -161,7 +163,7 @@ def _phase_accepted(phase: Mapping[str, Any], *, allow_variance: bool = False) -
 
 
 def _gate_result(result: Mapping[str, Any]) -> dict[str, Any]:
-    phases = ("phase3", "phase3_5", "phase4", "phase4_5", "phase6", "phase7")
+    phases = ("phase3", "phase3_5", "phase4", "phase4_5", "phase6", "phase7", "parity")
     accepted = {
         "phase3": _phase_accepted(result.get("phase3", {})),
         "phase3_5": _phase_accepted(result.get("phase3_5", {}), allow_variance=True),
@@ -169,6 +171,7 @@ def _gate_result(result: Mapping[str, Any]) -> dict[str, Any]:
         "phase4_5": _phase_accepted(result.get("phase4_5", {})),
         "phase6": _phase_accepted(result.get("phase6", {}), allow_variance=True),
         "phase7": _phase_accepted(result.get("phase7", {}), allow_variance=True),
+        "parity": _phase_accepted(result.get("parity", {})),
     }
     failed = [name for name in phases if not accepted[name]]
     first_failure = next((index for index, name in enumerate(phases) if not accepted[name]), None)
@@ -1694,6 +1697,29 @@ with open(output, 'w', encoding='utf-8') as handle:
     return [canonical_python, "-c", code, session_date, str(output)]
 
 
+def _compare_unified_artifact(
+    canonical_path: Path | None, paper: Mapping[str, Any] | None, session_date: str,
+) -> dict[str, Any]:
+    """Run the Phase 8 acceptance comparison; split phases remain diagnostics."""
+    if canonical_path is None or paper is None:
+        return {"status": "INCOMPLETE", "reason": "replay artifact unavailable"}
+    try:
+        canonical_payload = json.loads(canonical_path.read_text(encoding="utf-8"))
+        canonical_session = canonical_payload["sessions"][session_date]
+        if not isinstance(canonical_session, Mapping):
+            raise ValueError("canonical session payload is unavailable")
+        canonical_artifact = build_parity_artifact_from_payload(
+            canonical_session, run_id=f"canonical-{session_date}",
+            producer={"name": "NiftyZoning"},
+        )
+        paper_artifact = build_parity_artifact_from_payload(
+            paper, run_id=f"paper-{session_date}", producer={"name": "ftx-paper"},
+        )
+        return compare_parity_artifacts(canonical_artifact, paper_artifact)
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return {"status": "INCOMPLETE", "reason": str(exc)}
+
+
 def compare_date(
     session_date: str,
     *,
@@ -1848,6 +1874,7 @@ def compare_date(
             if canonical_path is not None and paper_replay is not None
             else {"status": "INCOMPLETE", "stream": PHASE7_STREAMS[0], "reason": "replay artifact unavailable"}
         )
+        parity = _compare_unified_artifact(canonical_path, paper_replay, session_date)
         if phase6.get("status") not in {"MATCHED", "INPUT_VARIANCE"}:
             phase7 = {
                 "status": "UNAVAILABLE",
@@ -1882,6 +1909,7 @@ def compare_date(
             "phase6": phase6,
             "phase7": phase7,
             "phase7_status": phase7.get("status"),
+            "parity": parity,
             "canonical_replay": {
                 "status": "MATCHED" if canonical_projection else "INCOMPLETE",
                 **retained_artifacts["canonical"],
@@ -1947,7 +1975,7 @@ def main(argv: list[str] | None = None) -> int:
         gate = result["gate"]
         phase_statuses = ", ".join(
             f"{phase}={result.get(phase, {}).get('status', 'MISSING')}"
-            for phase in ("phase3", "phase3_5", "phase4", "phase4_5", "phase6", "phase7")
+            for phase in ("phase3", "phase3_5", "phase4", "phase4_5", "phase6", "phase7", "parity")
         )
         print(f"{result['date']}: gate={gate['status']} ({phase_statuses})")
         if gate["failed_phases"]:

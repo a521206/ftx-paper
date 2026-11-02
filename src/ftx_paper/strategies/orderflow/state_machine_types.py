@@ -432,6 +432,29 @@ class ReplayContext:
             "filled": (("execution_settlement", "fill"), ("portfolio_ledger", "fill")),
             "position_closed": (("execution_settlement", "settlement"), ("portfolio_ledger", "exit_settlement")),
         }
+        decision_stage = {
+            "interaction_created": "interaction",
+            "response_confirmed": "interaction",
+            "lifecycle_formed": "candidate",
+            "admission_decided": "admission",
+            "trigger_observation": "trigger",
+            "exit_signal": "exit",
+            "exit_decision": "exit",
+        }.get(str(event_data.get("kind")))
+        if decision_stage is not None and isinstance(observed_at, str) and isinstance(available_at, str):
+            self.record_parity_layer_fact("decision", {
+                "kind": "decision",
+                "stage": decision_stage,
+                "outcome": str(event_data.get("outcome") or event_data.get("status") or "observed"),
+                "occurred_at": observed_at,
+                "observed_at": observed_at,
+                "available_at": available_at,
+                "sequence": len(self.parity_layers.get("decision", [])),
+                "identity": str(event_data.get("neutral_event_key", event_data["event_id"])),
+                "causal_parent_id": event_data.get("causal_parent_id"),
+                "values": dict(event_data),
+                "unavailable": [],
+            })
         if str(event_data.get("kind")) in layer_kinds and isinstance(observed_at, str) and isinstance(available_at, str):
             for layer, kind in layer_kinds[str(event_data["kind"])]:
                 self.record_parity_layer_fact(layer, {

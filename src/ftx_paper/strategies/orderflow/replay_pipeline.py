@@ -34,10 +34,12 @@ from ftx_paper.strategies.orderflow.value_publication import (
     PriorSessionValueReference,
     ValuePublication,
 )
-from ftx_paper.strategies.orderflow.timestamps import coerce_timestamp, nifty_label, session_minute
+from ftx_paper.strategies.orderflow.timestamps import coerce_timestamp, nifty_label, parse_session_timestamp, serialize_utc, session_minute
 from ftx_paper.strategies.orderflow.vwap_location import causal_vwap_prefix
 from ftx_paper.strategies.orderflow.features import daily_atr_cache
 from ftx_paper.strategies.orderflow.phase7_projection import PHASE7_STREAMS
+from ftx_paper.strategies.orderflow.parity_artifacts import LAYERS, PHASE_STREAMS
+from ftx_paper.strategies.orderflow.state_machine_reporting import _transport_parity_facts
 
 
 def _json_safe(value: Any) -> Any:
@@ -419,6 +421,81 @@ class OrderflowReplayEngine:
             "contract_type": rows[0]["contract_type"],
             "source_fingerprint": artifact["source_fingerprint"],
         }
+        phase_facts = {
+            name: [] for name in PHASE_STREAMS
+        }
+        phase_facts.update({
+            "context_publication": list(final_state.context_publications),
+            **phase4_replay.parity_phase_facts(),
+            **({"opportunity_lifecycle": interaction_phase_facts["opportunity_lifecycle"]}
+               if interaction_phase_facts else {}),
+            **({"interaction_response": _json_safe(list(interaction_response))}
+               if include_interactions else {}),
+            **({name: list(interaction_replay.execution_phase_facts.get(name, ()))
+                for name in PHASE7_STREAMS} if interaction_replay is not None else {}),
+        })
+        normalized_phase_facts: dict[str, list[dict[str, Any]]] = {}
+        for name in PHASE_STREAMS:
+            identities: set[str] = set()
+            normalized: list[dict[str, Any]] = []
+            for index, raw_record in enumerate(_transport_parity_facts(phase_facts.get(name, ()) )):
+                record = {**raw_record, "sequence": index}
+                identity = str(record.get("identity") or f"{name}:{index}")
+                if identity in identities:
+                    identity = f"{identity}:occurrence-{index}"
+                identities.add(identity)
+                record["identity"] = identity
+                normalized.append(record)
+            normalized_phase_facts[name] = normalized
+        phase_facts = normalized_phase_facts
+        # Final-layer facts must be published by their owning execution/ledger
+        # producers.  Run scope is owned by this replay producer; execution and
+        # ledger layers come from the shared transition owner.
+        scope_time = serialize_utc(parse_session_timestamp(session_date, rows[0]["time"]))
+        parity_layers = {
+            name: [
+                {**record, "sequence": index}
+                for index, record in enumerate(_transport_parity_facts(
+                    interaction_replay.parity_layers.get(name, ())
+                    if interaction_replay is not None else (),
+                ))
+            ]
+            for name in LAYERS
+        }
+        parity_layers["run_scope"] = _transport_parity_facts([{
+            "kind": "run_scope",
+            "occurred_at": scope_time,
+            "observed_at": scope_time,
+            "available_at": scope_time,
+            "sequence": 0,
+            "identity": f"run_scope:{session_date}:{artifact['source_fingerprint']}",
+            "causal_parent_id": None,
+            "values": {
+                "selected_source_rows": len(rows),
+                "filtered_source_rows": len(rows),
+                "completed_source_rows": len(rows),
+                "gap_rows": 0,
+                "processed_decision_bars": len(rows),
+            },
+            "unavailable": [],
+        }])
+        parity_coverage = {
+            "phase_streams": {
+                name: {
+                    "status": "MATCHED",
+                    "observed": True,
+                    "coverage": "observed_empty" if not phase_facts[name] else "observed",
+                }
+                for name in PHASE_STREAMS
+            },
+            "layers": {
+                name: {
+                    "status": "MATCHED", "observed": True,
+                    "coverage": "observed" if parity_layers[name] else "observed_empty",
+                }
+                for name in LAYERS
+            },
+        }
 
         return {
             "artifact_type": "canonical_phase4_5_replay" if include_interactions else "canonical_phase3_5_replay",
@@ -428,6 +505,7 @@ class OrderflowReplayEngine:
             "replay_mode": "evidence",
             "date": session_date,
             "session_date": session_date,
+            "scope": {"date": session_date, "timezone": "Asia/Kolkata"},
             "source_identity": source_identity,
             "observation_metadata": {
                 "aggregate_counts": {
@@ -441,20 +519,9 @@ class OrderflowReplayEngine:
             "registered_locations": locations,
             "prior_value": final_evidence["prior_value"],
             "context_stream_id": final_evidence["context_stream_id"],
-            "parity_phase_facts": {
-                "context_publication": list(final_state.context_publications),
-                **phase4_replay.parity_phase_facts(),
-                 # The transition owner contributes interaction and execution
-                 # streams; ReplayMachine contributes evidence chronology only.
-                **({"opportunity_lifecycle": interaction_phase_facts["opportunity_lifecycle"]}
-                   if interaction_phase_facts else {}),
-                  **({"interaction_response": _json_safe(list(interaction_response))}
-                     if include_interactions else {}),
-             **({
-                     name: list(interaction_replay.execution_phase_facts.get(name, ()))
-                     for name in PHASE7_STREAMS
-                  } if interaction_replay is not None else {}),
-              },
+            "parity_phase_facts": phase_facts,
+            "parity_layers": parity_layers,
+            "parity_coverage": parity_coverage,
              "execution_diagnostics": (
                  _json_safe(list(interaction_replay.execution_diagnostics))
                  if interaction_replay is not None else []

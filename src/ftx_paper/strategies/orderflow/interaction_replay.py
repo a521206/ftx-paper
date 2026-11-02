@@ -29,6 +29,7 @@ class InteractionResponseReplay:
     formations: tuple[Any, ...] = ()
     regime_publications: tuple[tuple[str, Any], ...] = ()
     execution_phase_facts: dict[str, tuple[dict[str, Any], ...]] = field(default_factory=dict)
+    parity_layers: dict[str, tuple[dict[str, Any], ...]] = field(default_factory=dict)
     execution_diagnostics: tuple[dict[str, Any], ...] = ()
 
     def parity_phase_facts(self) -> dict[str, list[dict[str, Any]]]:
@@ -564,6 +565,7 @@ def replay_interaction_response(
         (),
         tuple(regime_publications),
         {name: tuple(values) for name, values in transition_owner.context.parity_snapshot().items()},
+        {name: tuple(values) for name, values in transition_owner.context.parity_layers.items()},
         tuple(transition_owner.context.execution_diagnostics),
     )
 

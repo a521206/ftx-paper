@@ -1159,7 +1159,7 @@ work is the reporting/artifact contract and host integration described in Phase
 
 ## Phase 8: Canonical Reporting And Four-Layer Parity Artifacts
 
-Status: **Next.**
+Status: **In progress (8D-8F implementation complete; cross-repo replay evidence pending).**
 
 Port the canonical producer-reporting contract before exposing orderflow through
 Paper API or runtime events. This is an artifact and validation phase, not a
@@ -1301,6 +1301,8 @@ timestamps, coverage mismatches, and non-contiguous sequences are rejected.
 
 #### 8D - Replace Comparison With Manifest-First Parity
 
+Status: **Complete.**
+
 - Add canonical-order comparison for all six phase streams followed by all four
   layers.
 - Compare status, coverage, count, and hash before loading records.
@@ -1314,6 +1316,8 @@ stops at the first deterministic mismatch.
 
 #### 8E - Persist And Read Canonical Artifacts
 
+Status: **Complete.**
+
 - Persist the validated envelope, six decision-stream JSONL files, four layer
   JSONL files, and the canonical manifest filenames.
 - Add bounded `offset`/`limit` pagination that reads persisted records only and
@@ -1324,6 +1328,8 @@ Exit gate: JSON and JSONL round-trip tests pass, pagination is bounded, and
 tampering is detected before persistence.
 
 #### 8F - Run The Phase 8 Parity Gate
+
+Status: **Complete for the artifact contract gate; cross-repo replay gate remains unavailable.**
 
 - Port and adapt the canonical parity-artifact tests with package-root imports
   only; do not copy presentation/reporting tests that are outside the contract.
@@ -1347,8 +1353,9 @@ the temporary Phase 8 harness.
   mismatches, and tampered record hashes.
 - Manifest comparison checks status, count, and hash before loading records, then
   reports the first causal mismatch in deterministic stream/sequence/field
-  order. It passes on a no-trade session and an execution-bearing session with
-  entry, exit, and settlement facts.
+  order. Contract fixtures cover no-trade and execution-bearing record shapes;
+  a cross-repo session comparison is not claimed without a complete canonical
+  artifact.
 - Persisted JSONL pages round-trip through the reader with stable ordering and
   bounded `offset`/`limit`; pagination does not mutate or recompute facts.
 - The artifact contains no Paper transport, broker, database, or runtime
@@ -1356,6 +1363,19 @@ the temporary Phase 8 harness.
   parity source.
 - Phase 9 remains blocked until this gate passes; no API/runtime event or DB
   parity claim is made from the Phase 8 harness alone.
+
+### Phase 8 Verification Record
+
+- `tests/strategies/test_orderflow_phase8_contract.py`: 10 passed, including
+  manifest-first comparison, deterministic first `stream`/`sequence`/`field`
+  reporting, JSON/JSONL round-trip, and bounded pagination.
+- `tests/strategies/test_orderflow_phase_comparison.py`: 17 passed; retained
+  Phase 4/7 helpers remain diagnostic-only.
+- Ruff, Pyright, and `git diff --check`: passed for changed implementation,
+  harness, and tests.
+- Remaining `UNAVAILABLE` inputs in contract fixtures: none. The local
+  cross-repo replay gate remains unavailable because no complete canonical
+  artifact containing all six streams and four final layers was available.
 
 ## Phase 9: Add The Paper Host Adapter
 

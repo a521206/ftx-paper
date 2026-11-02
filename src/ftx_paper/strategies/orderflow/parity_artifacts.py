@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 import hashlib
 import json
+from pathlib import Path
 import re
 from typing import Any
 
@@ -482,6 +483,120 @@ def compare_chronological_streams(
     return {"status": "MATCHED", "count": len(left)}
 
 
+def _status_precedence(statuses: Sequence[str]) -> str:
+    for status in ("MISMATCHED", "INCOMPLETE", "UNAVAILABLE"):
+        if status in statuses:
+            return status
+    return "MATCHED"
+
+
+def compare_parity_artifacts(
+    canonical: Mapping[str, Any], paper: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Compare the unified artifact in canonical stream/layer order."""
+    validate_parity_artifact(canonical)
+    validate_parity_artifact(paper)
+    groups = (
+        ("phase_streams", "decision_substreams", PHASE_STREAMS),
+        ("layers", "layers", LAYERS),
+    )
+    for manifest_group, record_group, names in groups:
+        left_group = canonical["manifest"][manifest_group]
+        right_group = paper["manifest"][manifest_group]
+        left_records = canonical[record_group]
+        right_records = paper[record_group]
+        for name in names:
+            left = left_group[name]
+            right = right_group[name]
+            statuses = (str(left["status"]), str(right["status"]))
+            if statuses != ("MATCHED", "MATCHED"):
+                return {"status": _status_precedence(statuses), "stream": name,
+                        "group": manifest_group, "canonical": dict(left),
+                        "paper": dict(right)}
+            differing = next(
+                (field for field in ("coverage", "count", "sha256")
+                 if left[field] != right[field]), None,
+            )
+            if differing is None:
+                continue
+            canonical_values = left_records[name]
+            paper_values = right_records[name]
+            for sequence, (canonical_value, paper_value) in enumerate(
+                zip(canonical_values, paper_values)
+            ):
+                if canonical_value != paper_value:
+                    field, left_value, right_value = _first_mismatch(
+                        canonical_value, paper_value,
+                    )
+                    return {"status": "MISMATCHED", "stream": name,
+                            "group": manifest_group, "sequence": sequence,
+                            "field": field, "canonical_value": left_value,
+                            "paper_value": right_value}
+            sequence = min(len(canonical_values), len(paper_values))
+            return {"status": "MISMATCHED", "stream": name,
+                    "group": manifest_group, "sequence": sequence,
+                    "field": "sequence", "reason": differing,
+                    "canonical_count": len(canonical_values),
+                    "paper_count": len(paper_values)}
+    return {"status": "MATCHED"}
+
+
+def write_parity_artifact(run_dir: str | Path, payload: Mapping[str, Any]) -> Path:
+    """Persist the validated envelope, manifest, and ordered JSONL streams."""
+    validate_parity_artifact(payload)
+    root = Path(run_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    envelope = root / FILENAME
+    envelope.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    for collection_name, names in (("decision_substreams", PHASE_STREAMS), ("layers", LAYERS)):
+        collection = payload[collection_name]
+        assert isinstance(collection, Mapping)
+        for name in names:
+            records = collection[name]
+            (root / f"{name}.jsonl").write_text(
+                "".join(json.dumps(record, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n" for record in records),
+                encoding="utf-8",
+            )
+    (root / "parity_manifest.json").write_text(json.dumps(payload["manifest"], ensure_ascii=True, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return envelope
+
+
+def read_parity_artifact(run_dir: str | Path) -> dict[str, Any]:
+    """Read and validate a persisted unified artifact envelope."""
+    payload = json.loads((Path(run_dir) / FILENAME).read_text(encoding="utf-8"))
+    if not isinstance(payload, Mapping):
+        raise ValueError("persisted parity artifact must be an object")
+    validate_parity_artifact(payload)
+    return dict(payload)
+
+
+def read_parity_page(
+    run_dir: str | Path, stream: str, *, offset: int = 0, limit: int = 1_000,
+) -> dict[str, Any]:
+    """Read a bounded JSONL page without evaluating strategy state."""
+    if stream not in PHASE_STREAMS and stream not in LAYERS:
+        raise ValueError(f"unknown parity stream: {stream}")
+    if offset < 0 or limit <= 0:
+        raise ValueError("offset must be nonnegative and limit must be positive")
+    path = Path(run_dir) / f"{stream}.jsonl"
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    records: list[dict[str, Any]] = []
+    total_count = 0
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            if offset <= total_count < offset + limit:
+                value = json.loads(line)
+                if not isinstance(value, dict):
+                    raise ValueError("JSONL parity records must be objects")
+                records.append(value)
+            total_count += 1
+    return {"stream": stream, "offset": offset, "limit": limit,
+            "total_count": total_count, "records": records}
+
+
 def _first_mismatch(left: Any, right: Any, path: str = "") -> tuple[str, Any, Any]:
     """Return the deterministic first differing field in two normalized facts."""
     if isinstance(left, Mapping) and isinstance(right, Mapping):
@@ -506,7 +621,8 @@ __all__ = [
     "PHASE_STREAMS", "PHASE7_STREAMS", "SCHEMA_VERSION",
     "build_parity_artifact", "build_parity_artifact_from_payload",
     "build_phase4_artifact", "build_phase7_artifact", "canonical_hash",
-    "compare_chronological_streams", "compare_phase4_manifests",
+    "compare_chronological_streams", "compare_parity_artifacts", "compare_phase4_manifests",
     "compare_phase7_manifests", "normalize_phase_record", "phase_facts_from_payload",
-    "validate_contract_declarations", "validate_parity_artifact",
+    "read_parity_artifact", "read_parity_page", "validate_contract_declarations",
+    "validate_parity_artifact", "write_parity_artifact",
 ]

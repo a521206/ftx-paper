@@ -1763,20 +1763,6 @@ class ExecutionCoordinator:
             return False
         queued = self.engine.queue_exit(life, order)
         if queued:
-            self.context.record_parity_fact("trigger_exit", {
-                    "kind": "exit_queued",
-                    "identity": f"exit:{life.lifecycle_id}:{order.available_at}:{order.reason}",
-                    "causal_parent_id": life.lifecycle_id,
-                    "occurred_at": observed_at,
-                    "observed_at": observed_at,
-                    "available_at": order.available_at,
-                    "values": {
-                        "reason": order.reason,
-                        "requested_price": order.requested_price,
-                        "quantity": order.quantity,
-                    },
-                    "unavailable": [],
-                })
             if order.reason in {
                 "hard_stop",
                 "vwap_stop",
@@ -2296,7 +2282,7 @@ class ExecutionCoordinator:
         quantity: float | None = None,
     ) -> None:
         position = self.engine.state_for(life.lifecycle_id).position
-        self.engine.queue_exit(
+        queued = self.engine.queue_exit(
             life,
             ExitOrder(
                 reason,
@@ -2308,6 +2294,21 @@ class ExecutionCoordinator:
                 position.position_id if position else None,
             ),
         )
+        if queued:
+            self.context.record_parity_fact("trigger_exit", {
+                "kind": "exit_queued",
+                "identity": f"exit:{life.lifecycle_id}:{available_at}:{reason}",
+                "causal_parent_id": life.lifecycle_id,
+                "occurred_at": available_at,
+                "observed_at": available_at,
+                "available_at": available_at,
+                "values": {
+                    "reason": reason,
+                    "requested_price": requested_price,
+                    "quantity": quantity,
+                },
+                "unavailable": [],
+            })
         if reason in {
             "hard_stop",
             "vwap_stop",
