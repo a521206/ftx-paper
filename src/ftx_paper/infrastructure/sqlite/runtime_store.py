@@ -278,14 +278,21 @@ class SqliteRuntimeStore:
                     selected_at TEXT NOT NULL,
                     PRIMARY KEY (provider, exchange, underlying, role, tradingsymbol)
                 );
-                CREATE TABLE IF NOT EXISTS runtime_orders (
+                 CREATE TABLE IF NOT EXISTS runtime_orders (
                     client_order_id TEXT PRIMARY KEY,
                     state TEXT NOT NULL,
                     payload TEXT NOT NULL,
                     account_revision INTEGER,
                     broker_order_id TEXT,
-                    updated_at TEXT NOT NULL
-                );
+                     updated_at TEXT NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS strategy_snapshots (
+                     strategy_id TEXT PRIMARY KEY,
+                     schema_version INTEGER NOT NULL,
+                     payload TEXT NOT NULL,
+                     revision INTEGER NOT NULL DEFAULT 0,
+                     updated_at TEXT NOT NULL
+                 );
                 CREATE TABLE IF NOT EXISTS replay_result_chunks (
                     run_id TEXT NOT NULL,
                     chunk_index INTEGER NOT NULL,
@@ -615,6 +622,66 @@ class SqliteRuntimeStore:
             current = self.read_status()
             current.update(updates)
             self.write_status(current)
+
+    def write_strategy_snapshot(
+        self, strategy_id: str, snapshot: dict[str, Any], *, revision: int = 0,
+    ) -> None:
+        """Persist one versioned strategy snapshot independently of status."""
+        if not strategy_id.strip():
+            raise ValueError("strategy_id must not be empty")
+        schema_version = snapshot.get("schema_version", 1)
+        if type(schema_version) is not int or schema_version < 1:
+            raise ValueError("strategy snapshot schema_version must be a positive integer")
+        if revision < 0:
+            raise ValueError("strategy snapshot revision must be non-negative")
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO strategy_snapshots(strategy_id, schema_version, payload, revision, updated_at) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(strategy_id) DO UPDATE SET "
+                "schema_version=excluded.schema_version, payload=excluded.payload, "
+                "revision=excluded.revision, updated_at=excluded.updated_at",
+                (
+                    strategy_id, schema_version,
+                    json.dumps(_json_safe(snapshot, path="strategy snapshot"), separators=(",", ":")),
+                    revision, self._now(),
+                ),
+            )
+
+    def read_strategy_snapshot(self, strategy_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT schema_version, payload, revision, updated_at FROM strategy_snapshots "
+                "WHERE strategy_id = ?", (strategy_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = json.loads(row[1])
+        if not isinstance(payload, dict):
+            raise ValueError("stored strategy snapshot must be an object")
+        return {
+            "strategy_id": strategy_id,
+            "schema_version": int(row[0]),
+            "payload": payload,
+            "revision": int(row[2]),
+            "updated_at": str(row[3]),
+        }
+
+    def read_strategy_snapshots(self) -> dict[str, dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT strategy_id, schema_version, payload, revision, updated_at "
+                "FROM strategy_snapshots ORDER BY strategy_id",
+            ).fetchall()
+        result: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            payload = json.loads(row[2])
+            if not isinstance(payload, dict):
+                raise ValueError("stored strategy snapshot must be an object")
+            result[str(row[0])] = {
+                "strategy_id": str(row[0]), "schema_version": int(row[1]),
+                "payload": payload, "revision": int(row[3]), "updated_at": str(row[4]),
+            }
+        return result
 
     def append_event(self, event_type: str, payload: dict[str, Any], idempotency_key: str | None = None,
                      *, timestamp: str | None = None) -> bool:
@@ -1054,6 +1121,15 @@ class SqliteRuntimeStore:
                 json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
             )
         return sorted(events, key=ordering_key, reverse=True)
+
+    def read_orderflow_facts(
+        self, *, limit: int = 1000, stream: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Read persisted canonical orderflow facts without recomputation."""
+        facts = [item for item in self.read_events(limit) if item["event_type"] == "ORDERFLOW_FACT"]
+        if stream is None:
+            return facts
+        return [item for item in facts if item["payload"].get("stream") == stream]
 
     def read_market_bar_stats(self) -> dict[str, Any]:
         """Read market-bar coverage for diagnostics without mutating state."""

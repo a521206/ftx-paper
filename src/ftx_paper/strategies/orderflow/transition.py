@@ -12,6 +12,8 @@ from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
 
+from ftx_paper.execution.events import ExecutionNotification
+
 from .coordinator import OrderflowAdvance, OrderflowClockInput, OrderflowCoordinator
 from .execution import AdmissionStatus, ExecutionCoordinator, ExecutionEngine, IntentStatus
 from .features import daily_atr_cache
@@ -76,6 +78,7 @@ class OrderflowTransitionOwner:
     mode: str = "FULL"
     _clock: datetime | None = field(default=None, init=False, repr=False)
     _published_intents: set[str] = field(default_factory=set, init=False, repr=False)
+    _execution_notifications: set[str] = field(default_factory=set, init=False, repr=False)
 
     @staticmethod
     def _intent_allows_requalification(state: Any) -> bool:
@@ -160,6 +163,47 @@ class OrderflowTransitionOwner:
 
     def attach_setup(self, formation: LifecycleFormation) -> None:
         self.execution_owner.attach_setup(formation)
+
+    def on_execution_event(self, event: ExecutionNotification) -> None:
+        """Record an account-owner notification without re-running policy."""
+        identity = event.event_id or (
+            f"{event.event_type}:{event.client_order_id}:"
+            f"{event.occurred_at or event.available_at or ''}"
+        )
+        if identity in self._execution_notifications:
+            return
+        self._execution_notifications.add(identity)
+        occurred_at = event.occurred_at or event.available_at or self._clock
+        available_at = event.available_at or occurred_at
+        if occurred_at is None or available_at is None:
+            return
+        kind = {
+            "FILLED": "filled",
+            "CANCELLED": "entry_cancelled",
+            "REJECTED": "entry_cancelled",
+        }.get(event.event_type.upper())
+        if kind is None:
+            return
+        if any(
+            fact.get("kind") == kind
+            and fact.get("values", {}).get("client_order_id") == event.client_order_id
+            for fact in self.context.parity_streams.get("execution_transitions", ())
+        ):
+            return
+        self.context.record_event({
+            "kind": kind,
+            "identity": f"execution_notification:{identity}",
+            "client_order_id": event.client_order_id,
+            "status": event.status,
+            "quantity": event.quantity,
+            "filled_quantity": event.filled_quantity,
+            "price": event.price,
+            "reason": event.reason,
+            "observed_at": occurred_at,
+            "available_at": available_at,
+            "causal_parent_id": event.client_order_id,
+            "parity_stream": "execution_transitions",
+        })
 
     def _accept_formations(
         self, formations: Sequence[LifecycleFormation],
@@ -499,13 +543,14 @@ class OrderflowTransitionOwner:
                 continue
             adapter = self.execution_adapter
             assert adapter is not None
-            adapter.proposal(
+            proposal = adapter.proposal(
                 intent,
                 instrument=instrument,
                 quantity=decision.quantity,
                 observed_at=timestamp,
                 available_at=next_time,
             )
+            adapter.authorize(proposal, timestamp=next_time)
             self._published_intents.add(intent.intent_id)
 
     def observe_triggers(

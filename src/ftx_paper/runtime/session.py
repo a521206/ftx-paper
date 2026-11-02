@@ -104,6 +104,7 @@ class RuntimeSession:
         self.store, self.auth, self.specifications = store, auth, specifications
         self.capital_profile = capital_profile
         self.engine = engine or PaperEngine()
+        self._strategy_snapshot_revision = 0
         self._restore_strategy_state()
         self.portfolio = portfolio or PortfolioState(self.capital_profile.initial_capital)
         self.capital_context = capital_context or CapitalRuntimeContext(
@@ -137,6 +138,9 @@ class RuntimeSession:
             self.account, self.coordinator, self.store,
             notify=self.strategy_runner.on_execution_event,
         )
+        bind_execution = getattr(self.engine, "bind_execution_service", None)
+        if callable(bind_execution):
+            bind_execution(self.execution, diagnostic=False)
         self.order_manager = OrderManager(self.execution)
         self.feed_manager = FeedManager()
         self.event_bus = event_bus or EventBus()
@@ -164,6 +168,16 @@ class RuntimeSession:
         restore_many = getattr(self.engine, "restore_snapshots", None)
         restore = getattr(type(strategy), "from_snapshot", None) if strategy is not None else None
         raw_snapshot = self.store.read_status().get("strategy_snapshot")
+        read_snapshots = getattr(self.store, "read_strategy_snapshots", None)
+        stored_snapshots = read_snapshots() if callable(read_snapshots) else {}
+        if isinstance(stored_snapshots, Mapping) and stored_snapshots:
+            instances = {
+                str(strategy_id): {"strategy": record.get("payload", {})}
+                for strategy_id, record in stored_snapshots.items()
+                if isinstance(record, Mapping) and isinstance(record.get("payload"), Mapping)
+            }
+            if instances:
+                raw_snapshot = {"schema_version": 1, "instances": instances}
         if callable(restore_many) and isinstance(raw_snapshot, Mapping) and self.capital_profile is not None:
             restore_many(raw_snapshot, capital_profile=self.capital_profile)
             return
@@ -179,7 +193,29 @@ class RuntimeSession:
             strategy = getattr(self.engine, "strategy", None)
             snapshot = getattr(strategy, "snapshot", None)
         if callable(snapshot):
-            self.store.patch_status({"strategy_snapshot": snapshot()})
+            value = snapshot()
+            self.store.patch_status({"strategy_snapshot": value})
+            self._strategy_snapshot_revision += 1
+            write_snapshot = getattr(self.store, "write_strategy_snapshot", None)
+            if callable(write_snapshot) and isinstance(value, Mapping):
+                instances = value.get("instances")
+                if isinstance(instances, Mapping):
+                    for strategy_id, entry in instances.items():
+                        if not isinstance(strategy_id, str) or not isinstance(entry, Mapping):
+                            continue
+                        payload = entry.get("strategy")
+                        if isinstance(payload, Mapping):
+                            write_snapshot(
+                                strategy_id, dict(payload),
+                                revision=self._strategy_snapshot_revision,
+                            )
+                else:
+                    metadata = getattr(self.engine, "strategy_metadata", None)
+                    strategy_id = getattr(metadata, "name", None) or "runtime"
+                    write_snapshot(
+                        str(strategy_id), dict(value),
+                        revision=self._strategy_snapshot_revision,
+                    )
 
     def strategy_status(self) -> tuple[dict[str, object], ...]:
         status = getattr(self.engine, "strategy_status", None)
@@ -608,6 +644,45 @@ class RuntimeSession:
             self.store.patch_status({"state": "ERROR", "health_state": "FAILED", "error": str(exc)})
             raise
 
+    def _persist_orderflow_facts(
+        self, engine: PaperEngine | MultiStrategyEngine, *, source: str,
+        session_date: str, bundle_id: str, timestamp: str,
+    ) -> None:
+        """Persist producer-owned orderflow facts as an idempotent read model."""
+        snapshot = getattr(engine, "snapshot", lambda: {})()
+        instances = snapshot.get("instances") if isinstance(snapshot, Mapping) else None
+        candidates = instances.items() if isinstance(instances, Mapping) else (("ftx-paper-orderflow", {"strategy": snapshot}),)
+        for strategy_id, entry in candidates:
+            if not isinstance(entry, Mapping):
+                continue
+            strategy = entry.get("strategy")
+            if not isinstance(strategy, Mapping) or strategy.get("strategy") != "ftx-paper-orderflow":
+                continue
+            for category in ("parity_streams", "parity_layers"):
+                values = strategy.get(category)
+                if not isinstance(values, Mapping):
+                    continue
+                for stream, facts in values.items():
+                    if not isinstance(facts, (list, tuple)):
+                        continue
+                    for fact in facts:
+                        if not isinstance(fact, Mapping):
+                            continue
+                        identity = str(fact.get("identity") or "")
+                        if not identity:
+                            continue
+                        payload = {
+                            "strategy_id": str(strategy_id), "source": source,
+                            "session_date": session_date, "bundle_id": bundle_id,
+                            "category": category, "stream": str(stream),
+                            "fact": deepcopy(dict(fact)),
+                        }
+                        self.store.append_event(
+                            "ORDERFLOW_FACT", payload,
+                            f"orderflow_fact:{source}:{category}:{stream}:{identity}",
+                            timestamp=timestamp,
+                        )
+
     def _process_bundle(self, bundle, *, source: str,
                         engine: PaperEngine | MultiStrategyEngine | None = None,
                         existing_handler=None, event_handler=None) -> None:
@@ -745,6 +820,10 @@ class RuntimeSession:
             if not result_holder:
                 return {"recorded": 0}
             result = result_holder[0]
+            self._persist_orderflow_facts(
+                active_engine, source=source, session_date=bundle.trading_date,
+                bundle_id=bundle.bundle_id, timestamp=timestamp,
+            )
             for event in result.events:
                 try:
                     self._persist_engine_event(

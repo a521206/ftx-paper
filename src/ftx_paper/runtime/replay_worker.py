@@ -291,6 +291,14 @@ class ReplayWorker:
                 raise ValueError("strategy_id is required")
             if self.strategy_selector is None:
                 raise RuntimeError("replay strategy selector was not configured")
+            if strategy_id == "ftx-paper-orderflow":
+                return self._execute_orderflow(
+                    request,
+                    cancel,
+                    session_date=session_date,
+                    vehicles=vehicles,
+                    include_parity_layers=include_parity_layers,
+                )
             strategy = self.strategy_selector.create(
                 strategy_id,
                 StrategyContext(
@@ -953,6 +961,101 @@ class ReplayWorker:
             shadow_ledger=tuple(ReplayLedgerEntry(item) for item in ledger_records),
             parity_artifact=parity_artifact,
             report=report,
+        )
+        return canonical.to_dict()
+
+    def _execute_orderflow(
+        self,
+        request: dict[str, Any],
+        cancel: Event,
+        *,
+        session_date: str,
+        vehicles: tuple[str, ...],
+        include_parity_layers: bool,
+    ) -> dict[str, Any]:
+        """Replay orderflow through its canonical transition owner.
+
+        Orderflow deliberately does not use the generic replay execution loop:
+        that loop owns Paper strategy fills and settlement, which would create a
+        second orderflow state machine.  The strategy boundary remains the sole
+        owner here; this method only loads bounded input and projects its facts.
+        """
+        if self.strategy_selector is None:
+            raise RuntimeError("replay strategy selector was not configured")
+        rows = self.store.read_market_bars(session_date)
+        futures_source = self.inputs.resolve_source(session_date)
+        bars = self.inputs.bars(session_date, rows=rows, futures_source=futures_source)
+        aggregator = ReplayInput.aggregator(bars)
+        strategy = self.strategy_selector.create(
+            "ftx-paper-orderflow",
+            StrategyContext(enabled_vehicles=vehicles),
+        )
+        engine = PaperEngine(strategy)
+        run_id = str(request.get("run_id") or uuid4().hex)
+        events: _ScopedEvents = _ScopedEvents(
+            run_id=run_id,
+            execution_scope="replay",
+            ledger_scope="replay",
+        )
+        bundles_seen = 0
+        for bar in bars:
+            if cancel.is_set():
+                break
+            bundle = aggregator.ingest(bar)
+            if bundle is None:
+                continue
+            bundles_seen += 1
+            result = engine.on_bundle(bundle)
+            events.extend(
+                {"event_type": event.get("event_type", "ORDERFLOW_FACT"), **event}
+                for event in result.events
+            )
+
+        snapshot = getattr(strategy, "snapshot", lambda: {})()
+        input_manifest = self.input_manifest(
+            session_date, rows=rows, bars=bars, futures_source=futures_source,
+        )
+        summary = dict(build_summary(list(events), []))
+        summary["bars_seen"] = bundles_seen
+        metadata = {
+            "api_version": "1.1",
+            "strategy_version": strategy.metadata.version,
+            "configuration_hash": strategy.metadata.config_hash,
+            "normalized_fingerprint": input_manifest["normalized_fingerprint"],
+            "input_provenance": input_manifest["provenance"],
+            "input_availability": input_manifest["availability"],
+            "selected_source_rows": int(input_manifest["selected_source_rows"]),
+            "filtered_source_rows": int(input_manifest["filtered_source_rows"]),
+            "completed_source_rows": int(input_manifest["completed_source_rows"]),
+            "gap_rows": int(input_manifest["gap_rows"]),
+            "processed_decision_bars": bundles_seen,
+            "mode": "replay",
+            "include_parity_layers": include_parity_layers,
+        }
+        report = {
+            "schema_version": 1,
+            "report_type": "paper_replay",
+            "session_date": session_date,
+            "summary": summary,
+            "metrics": summary,
+        }
+        parity_artifact = None
+        if include_parity_layers:
+            parity_artifact = {
+                "status": "UNAVAILABLE",
+                "reason": "orderflow canonical artifact requires complete evidence publications",
+            }
+        canonical = ReplayResult(
+            run_id=run_id,
+            schema_version=REPLAY_SCHEMA_VERSION,
+            execution_scope="replay",
+            ledger_scope="replay",
+            summary=ReplaySummary(summary),
+            events=tuple(canonical_events(list(events), run_id=run_id, execution_scope="replay")),
+            shadow_trades=(),
+            shadow_ledger=(),
+            parity_artifact=parity_artifact,
+            report={**report, "metadata": metadata, "strategy_snapshot": snapshot},
         )
         return canonical.to_dict()
 

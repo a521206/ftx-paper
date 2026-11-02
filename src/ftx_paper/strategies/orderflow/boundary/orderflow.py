@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 
 from ftx_paper.execution.events import ExecutionNotification
+from ftx_paper.execution.service import ExecutionService
 from ftx_paper.strategies.shared.protocol import StrategyDecision, StrategyMetadata
 from ftx_paper.contracts import MarketBar, MarketRole
 from ftx_paper.strategies.orderflow.coordinator import OrderflowClockInput, OrderflowCoordinator
@@ -14,7 +15,7 @@ from ftx_paper.strategies.orderflow.execution import ExecutionCoordinator
 from ftx_paper.strategies.orderflow.state_machine_types import LocationRegistry
 from ftx_paper.strategies.orderflow.transition import OrderflowTransitionOwner
 from ftx_paper.strategies.orderflow.opportunity_coordinator import LifecycleFormation
-from ftx_paper.strategies.orderflow.timestamps import require_utc, nifty_label
+from ftx_paper.strategies.orderflow.timestamps import require_utc, nifty_label, serialize_utc
 
 from .orderflow_config import ORDERFLOW_NAME, ORDERFLOW_VERSION, OrderflowConfig
 
@@ -22,7 +23,7 @@ from .orderflow_config import ORDERFLOW_NAME, ORDERFLOW_VERSION, OrderflowConfig
 class OrderflowStrategy:
     """Shared live boundary for observation and execution state."""
 
-    def __init__(self, *, config: OrderflowConfig | None = None, coordinator: OrderflowCoordinator | None = None, execution_adapter: OrderflowExecutionAdapter | None = None, execution_owner: ExecutionCoordinator | None = None, transition_owner: OrderflowTransitionOwner | None = None, clock_input_provider: Callable[[MarketBar], OrderflowClockInput] | None = None, formation_provider: Callable[[OrderflowClockInput], Sequence[LifecycleFormation]] | None = None) -> None:
+    def __init__(self, *, config: OrderflowConfig | None = None, coordinator: OrderflowCoordinator | None = None, execution_adapter: OrderflowExecutionAdapter | None = None, execution_owner: ExecutionCoordinator | None = None, transition_owner: OrderflowTransitionOwner | None = None, clock_input_provider: Callable[[object], OrderflowClockInput] | None = None, formation_provider: Callable[[OrderflowClockInput], Sequence[LifecycleFormation]] | None = None) -> None:
         self.config = config or OrderflowConfig()
         self._transition_owner = transition_owner or OrderflowTransitionOwner(
             coordinator.location_registry if coordinator is not None else LocationRegistry("orderflow:live"),
@@ -54,11 +55,11 @@ class OrderflowStrategy:
         bar = bars.get(MarketRole.FUTURES) if isinstance(bars, Mapping) else None
         if not isinstance(bar, MarketBar) or self._coordinator is None:
             return ()
-        clock_input = (
-            self._clock_input_provider(bar)
-            if self._clock_input_provider is not None
-            else OrderflowClockInput(self._aggregate(bar))
-        )
+        clock_input = self._clock_input_provider(bundle) if self._clock_input_provider is not None else None
+        if clock_input is None:
+            supporting = getattr(bundle, "supporting_inputs", None)
+            supplied = supporting.get("orderflow_clock_input") if isinstance(supporting, Mapping) else None
+            clock_input = supplied if isinstance(supplied, OrderflowClockInput) else OrderflowClockInput(self._aggregate(bar))
         advance = self._transition_owner.advance(
             clock_input,
             formations=(self._formation_provider(clock_input) if self._formation_provider else ()),
@@ -82,8 +83,17 @@ class OrderflowStrategy:
         )
 
     def on_execution_event(self, event: ExecutionNotification) -> None:
+        self._transition_owner.on_execution_event(event)
         if self._execution_adapter is not None:
             self._execution_adapter.on_execution_event(event)
+
+    def bind_execution_service(self, service: ExecutionService, *, diagnostic: bool = False) -> None:
+        """Attach the existing Paper execution owner without adding policy."""
+        if self._execution_adapter is None:
+            self._execution_adapter = OrderflowExecutionAdapter()
+            self._transition_owner.execution_adapter = self._execution_adapter
+        self._execution_adapter.service = service
+        self._execution_adapter.diagnostic = diagnostic
 
     def snapshot(self) -> Mapping[str, object]:
         return {
@@ -91,8 +101,13 @@ class OrderflowStrategy:
             "strategy": ORDERFLOW_NAME,
             "state": "observation_boundary",
             "execution_owner": self._execution_owner is not None,
-            "transition_clock": self._transition_owner.clock,
+            "transition_clock": (
+                serialize_utc(self._transition_owner.clock)
+                if self._transition_owner.clock is not None else None
+            ),
             "execution_notifications": len(self._execution_adapter.notifications) if self._execution_adapter else 0,
+            "parity_streams": self._transition_owner.parity_streams,
+            "parity_layers": self._transition_owner.context.parity_layers,
         }
 
 

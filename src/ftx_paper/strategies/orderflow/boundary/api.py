@@ -27,3 +27,22 @@ def register_decision_api(app: Flask, store: Any, json_safe: Callable[[Any], Any
             return jsonify(payload), status
         assert result is not None
         return jsonify(json_safe({**result, "strategy_id": STRATEGY_ID, "api": "orderflow"}))
+
+    @app.get(f"/api/v1/strategies/{STRATEGY_ID}/facts")
+    def orderflow_facts():
+        stream = request.args.get("stream")
+        selected_date = request.args.get("date")
+        try:
+            limit = max(1, min(int(request.args.get("limit", "100")), 1000))
+        except ValueError:
+            return jsonify({"error": "limit must be an integer"}), 400
+        facts = store.read_orderflow_facts(limit=limit, stream=stream)
+        if selected_date:
+            facts = [
+                item for item in facts
+                if item.get("payload", {}).get("session_date") == selected_date
+            ]
+        return jsonify(json_safe({
+            "strategy_id": STRATEGY_ID, "stream": stream, "date": selected_date,
+            "facts": facts,
+        }))

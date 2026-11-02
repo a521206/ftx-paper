@@ -45,6 +45,24 @@ def test_runtime_store_round_trips_market_bars(tmp_path):
     assert store.read_dates() == ["2026-01-05"]
 
 
+def test_runtime_store_round_trips_versioned_strategy_snapshots(tmp_path):
+    store = RuntimeStore(tmp_path)
+    snapshot = {"schema_version": 1, "state": {"clock": "2026-10-01T04:00:00Z"}}
+
+    store.write_strategy_snapshot("ftx-paper-orderflow", snapshot, revision=3)
+
+    restored = store.read_strategy_snapshot("ftx-paper-orderflow")
+    assert restored is not None
+    assert restored == {
+        "strategy_id": "ftx-paper-orderflow",
+        "schema_version": 1,
+        "payload": snapshot,
+        "revision": 3,
+        "updated_at": restored["updated_at"],
+    }
+    assert store.read_strategy_snapshots()["ftx-paper-orderflow"]["payload"] == snapshot
+
+
 def test_runtime_store_canonicalizes_index_exchange_and_rejects_bad_vix(tmp_path):
     store = RuntimeStore(tmp_path)
     timestamp = datetime(2026, 10, 6, 4, 0, tzinfo=ZoneInfo("UTC"))

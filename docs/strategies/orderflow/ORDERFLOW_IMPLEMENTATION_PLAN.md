@@ -1394,8 +1394,9 @@ the temporary Phase 8 harness.
 Only after the ported canonical layers and artifact checks pass, integrate them
 with Paper.
 
-Status: **Planning only; blocked by the Phase 8 cross-repository timestamp
-normalization and replay rerun.** The live strategy boundary,
+Status: **In progress; host persistence and execution seams are implemented, but
+the Phase 8 cross-repository parity gate and full replay-owner migration remain
+open.** The live strategy boundary,
 shared transition owner, generic `RuntimeSession` dispatch, and generic
 `ReplayWorker` provide host seams, but the complete canonical orderflow state and
 execution path is not yet wired through Paper live/replay. The temporary
@@ -1492,6 +1493,9 @@ Phase 9B verification record:
 
 #### 9C - Compose One Canonical Runtime Owner
 
+Status: **Implemented for retained runtime composition; recovery of the full
+canonical transition graph remains open.**
+
 - Extend `RuntimeSession` to own the orderflow transition state directly, or add
   a narrowly scoped `PaperOrderflowRuntime` only if direct composition is not
   possible.
@@ -1505,6 +1509,12 @@ prefix through live and bounded replay.
 
 #### 9D - Replace The Temporary Replay Path
 
+Status: **Partially implemented.** Bounded cancellation-aware replay and fresh
+`PaperOrderflowRuntime` composition are available through the shared strategy
+boundary. The existing `ReplayWorker` still contains generic Paper execution
+orchestration, and the temporary harness is intentionally retained until the
+production replay path owns all canonical capture responsibilities.
+
 - Make `ReplayWorker` own only bounded loading, scope, cancellation, clock,
   capture, and fresh runtime composition.
 - Route every replay observation through the live transition owner; do not call
@@ -1514,6 +1524,11 @@ prefix through live and bounded replay.
 Exit gate: replay retry is idempotent and isolated from live/account state.
 
 #### 9E - Connect Paper Execution Without Policy Duplication
+
+Status: **Host execution binding implemented; canonical execution parity remains
+open.** `RuntimeSession` binds the existing Paper `ExecutionService` to the
+orderflow adapter without adding a second execution owner. Full execution-bearing
+replay parity is not yet claimed.
 
 - Map only admitted/triggered canonical proposals through
   `OrderflowExecutionAdapter` to the existing Paper execution owner.
@@ -1526,6 +1541,11 @@ execution-bearing replay matches canonical lifecycle ordering.
 
 #### 9F - Persist, Recover, And Serve Facts
 
+Status: **Partially implemented.** Versioned strategy snapshots are persisted in
+SQLite, canonical orderflow facts are stored idempotently through runtime events,
+and a read-only facts API is available. Full canonical snapshot restoration is
+not claimed while the transition graph lacks a complete restore contract.
+
 - Persist versioned canonical events, snapshots, notifications, and artifacts
   through existing runtime/store boundaries.
 - Restore the canonical snapshot on recoverable restart; otherwise mark the
@@ -1537,6 +1557,11 @@ Exit gate: recovery preserves the canonical prefix and live/replay projections
 are equivalent for the same facts.
 
 #### 9G - Wire Context/Location Persistence And Run The Matrix
+
+Status: **Persistence seam implemented; DB-backed matrix gate remains open.**
+Producer-owned parity streams and layers are persisted as read-only orderflow
+facts. The required source-matched matrix still depends on resolving the
+documented lifecycle and execution mismatches.
 
 - Persist `context_location` from the canonical context owner with source
   observation IDs, causal parents, availability, and missing-evidence reasons.

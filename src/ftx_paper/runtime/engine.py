@@ -82,6 +82,11 @@ class PaperEngine:
         if callable(handler):
             handler(event)
 
+    def bind_execution_service(self, service: Any, *, diagnostic: bool = False) -> None:
+        handler = getattr(self.strategy, "bind_execution_service", None)
+        if callable(handler):
+            handler(service, diagnostic=diagnostic)
+
     def record_exit(self, **kwargs: object) -> None:
         """Forward a settled exit to strategies that maintain risk-gate state."""
         record_exit = getattr(self.strategy, "record_exit", None)
@@ -189,6 +194,12 @@ class MultiStrategyEngine:
                         raise RuntimeError(
                             f"strategy {item.strategy_id!r} rejected shared {name} context"
                         )
+
+    def bind_execution_service(self, service: Any, *, diagnostic: bool = False) -> None:
+        for item in self.instances:
+            handler = getattr(item.strategy, "bind_execution_service", None)
+            if callable(handler):
+                handler(service, diagnostic=diagnostic)
 
     def reset(self) -> None:
         for engine in self._engines.values():
