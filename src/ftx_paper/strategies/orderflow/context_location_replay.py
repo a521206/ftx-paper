@@ -243,6 +243,14 @@ def _replay_market(
     )
     facts: list[dict[str, Any]] = []
     for aggregate in aggregates:
+        available5 = tuple(
+            item for item in market.aggregates["5m"]
+            if item.session_date == session_date
+            and coerce_timestamp(item.available_at) <= coerce_timestamp(aggregate.available_at)
+        )
+        # Match StateMachine.handle_interactions: VWAP publication is deferred
+        # until at least one completed 5m aggregate is available.
+        vwap_published = bool(available5)
         unavailable: list[str] = []
         unavailable.extend(
             reason for reason in evidence.unavailable
@@ -272,6 +280,8 @@ def _replay_market(
                 and (
                 record.alias != "VWAP"
                 or (
+                    vwap_published
+                    and
                     (publication_at := _location_publication_at(record, market.aggregates))
                     is not None
                     and coerce_timestamp(publication_at) <= coerce_timestamp(aggregate.available_at)
