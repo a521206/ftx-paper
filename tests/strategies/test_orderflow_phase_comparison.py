@@ -8,6 +8,7 @@ from scripts.orderflow.compare_canonical_replay import (
     _exit_diagnostics,
     _first_exit_diagnostic_difference,
     _first_execution_trace_difference,
+    _resolve_canonical_artifact,
     _timeout_before_canonical_trigger,
     _execution_trace_diagnostics,
 )
@@ -27,6 +28,15 @@ from ftx_paper.strategies.orderflow.state_machine_reporting import build_replay_
 from ftx_paper.strategies.orderflow.state_machine_types import LocationRegistry, ReplayContext
 from ftx_paper.strategies.orderflow.templates import DEFAULT_TEMPLATES, Direction, OpeningInteractionKind
 from ftx_paper.strategies.orderflow.timestamps import parse_session_timestamp, serialize_utc
+
+
+def test_resolve_canonical_artifact_reuses_retained_canonical_file(tmp_path) -> None:
+    session_date = "2026-10-05"
+    artifact = tmp_path / session_date / "run" / f"{session_date}-canonical.json"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text('{"sessions":{"2026-10-05":{}}}', encoding="utf-8")
+
+    assert _resolve_canonical_artifact(tmp_path, session_date) == artifact
 
 
 def _payload(*, expiry: bool) -> dict[str, object]:
@@ -274,7 +284,7 @@ def test_execution_trace_diagnostics_fails_closed_when_stream_is_unavailable() -
         )
 
 
-def test_phase6_projection_preserves_only_canonical_lifecycle_kinds() -> None:
+def test_phase6_projection_preserves_only_formed_lifecycle_facts() -> None:
     replay = InteractionResponseReplay(
         facts=(),
         opportunity_facts=(
@@ -424,7 +434,7 @@ def test_opening_interaction_dispatches_without_a_completed_5m_aggregate(
         {"1m": (one_minute,), "5m": ()},
         ContextLocationReplay((), ()),
         LocationRegistry("test"),
-        atr=1.0,
+        atr_by_session={"2026-10-01": 1.0},
     )
 
     assert calls == ["opening"]
@@ -486,7 +496,7 @@ def test_timeout_expires_before_structure_admission(monkeypatch) -> None:
         {"1m": (one_minute,), "5m": (five_minute,)},
         ContextLocationReplay((), ()),
         LocationRegistry("test"),
-        atr=1.0,
+        atr_by_session={"2026-10-01": 1.0},
     )
 
     assert structure_saw_active == [False]
@@ -561,8 +571,11 @@ def test_pd_role_context_uses_post_contact_evidence_and_has_context_identity() -
     assert role_event["role"] == "SUPPORT"
     assert role_event["context_id"] == f"interaction:{interaction.interaction_id}"
     assert role_event["context_version"] == "v1"
-    role_facts = context.parity_snapshot()["interaction_response"]
-    assert any(item["kind"] == "role_context_available" for item in role_facts)
+    assert any(
+        item["kind"] == "role_context_available"
+        for item in context.events
+    )
+    assert "interaction_response" not in context.parity_snapshot()
 
 
 def test_session_timestamp_normalizes_local_seconds_and_offsets() -> None:

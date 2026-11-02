@@ -1477,6 +1477,7 @@ def _artifact_contains_session(path: Path, session_date: str) -> bool:
 
 
 def _resolve_canonical_artifact(path: Path, session_date: str) -> Path | None:
+    path = path.resolve()
     if path.is_file():
         if path.name == "manifest.json":
             try:
@@ -1495,7 +1496,14 @@ def _resolve_canonical_artifact(path: Path, session_date: str) -> Path | None:
                 )
         return path if _artifact_contains_session(path, session_date) else None
     if path.is_dir():
-        matches = sorted(path.rglob("orderflow-state-machine-multi-session-replay.json"))
+        matches = sorted(
+            (
+                *path.rglob("orderflow-state-machine-multi-session-replay.json"),
+                *path.rglob(f"{session_date}-canonical.json"),
+            ),
+            key=lambda candidate: candidate.stat().st_mtime,
+            reverse=True,
+        )
         return next(
             (candidate for candidate in matches if _artifact_contains_session(candidate, session_date)),
             None,

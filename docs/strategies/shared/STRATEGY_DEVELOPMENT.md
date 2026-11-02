@@ -7,6 +7,10 @@ Shared ownership and isolation rules are defined in
 [Strategy boundaries](STRATEGY_BOUNDARIES.md). This guide covers the current
 extension contract; it is not a roadmap for a future refactor.
 
+Strategies that need static daily or pre-market inputs should use the generic
+[daily setup materialization design](DAILY_SETUP_MATERIALIZATION.md) rather
+than calculating those inputs in replay or owning a worker themselves.
+
 ## Design Contract
 
 A strategy must:

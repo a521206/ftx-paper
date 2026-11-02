@@ -115,6 +115,29 @@ translate market bars into canonical input and canonical execution proposals int
 existing Paper paper-trading records, but it may not reimplement policy or
 maintain parallel orderflow state.
 
+### Current Integration Status
+
+Paper has partial host wiring, but orderflow is not yet integrated as a complete
+production live/replay machine:
+
+- `runtime_boundary.py` defines the host-neutral one-observation contract and
+  snapshot shape.
+- `transition.py` provides the shared chronological owner used by the current
+  live strategy boundary and bounded transition tests.
+- `strategies/orderflow/boundary/orderflow.py` can advance that owner from a
+  completed live-style bundle, and the generic `RuntimeSession`/`PaperEngine`
+  dispatch path can host the strategy.
+- `runtime/replay_worker.py` provides the generic bounded replay lifecycle, but
+  `scripts/orderflow/orderflow_replay.py` still owns the orderflow parity-harness
+  loading and evidence replay path.
+
+This wiring is scaffolding and a partial transition boundary, not a claim that
+Paper live and replay already share the complete canonical orderflow state,
+execution, recovery, persistence, and reporting path. Phase 7 remains incomplete
+until canonical exits, fills, settlement, and all execution streams are covered.
+The production integration point is Phase 9, after the Phase 7 and Phase 8 exit
+gates pass.
+
 ## Live And Replay Porting Contract
 
 The port must support both Paper operating modes. Replay is not the production
@@ -672,9 +695,13 @@ Phase 3.5 evidence artifacts during the staged port. Its raw-row loading,
 prefix iteration, and artifact projection are harness orchestration, not a
 second orderflow implementation. Production Paper live and replay must invoke
 the same canonical transition boundary with separate input/clock adapters.
-Once that path can produce the required evidence and replay facts, remove this
-script and any harness-only artifact assumptions; do not promote it into the
-live callback path or retain it as a parallel replay engine.
+Retire this script only during Phase 9, after the production Paper replay adapter
+and live input adapter both invoke the shared canonical transition boundary and
+can produce the required evidence, replay facts, execution facts, and recovery
+snapshot without this harness. Do not promote it into the live callback path or
+retain it as a parallel replay engine. Until that gate passes, it remains a
+temporary parity tool and must not be treated as the production replay entry
+point.
 
 Phase 4 input contract:
 
@@ -1168,11 +1195,22 @@ Parity gate:
 Only after the ported canonical layers and artifact checks pass, integrate them
 with Paper.
 
+Status: **Not complete; partial scaffolding exists.** The live strategy boundary,
+shared transition owner, generic `RuntimeSession` dispatch, and generic
+`ReplayWorker` provide host seams, but the complete canonical orderflow state and
+execution path is not yet wired through Paper live/replay. The temporary
+`scripts/orderflow/orderflow_replay.py` harness remains the parity entry point
+until this phase's retirement gate passes.
+
 Required work:
 
 - Connect the existing broker/feed and stored-bar inputs to one canonical input
   adapter contract. The live adapter publishes completed evidence incrementally;
   the replay adapter publishes the same contract from bounded stored input.
+- Replace the orderflow-specific replay-harness path with the existing
+  `ReplayWorker`/replay adapter path. The worker may own bounded file/database
+  loading, iteration, cancellation, and capture, but it must not become a second
+  orderflow state machine.
 - Add a live `PaperOrderflowRuntime` composition boundary only if the existing
   `RuntimeSession` cannot host the canonical state directly. It may own feed
   subscriptions, session lifecycle, snapshots, and notifications, but not policy
@@ -1205,6 +1243,9 @@ Exit gate:
 - Capture mode and persistence do not change canonical decisions.
 - Paper remains loopback by default and paper-only; no broker order submission is
   introduced.
+- `scripts/orderflow/orderflow_replay.py` is retired, together with any
+  harness-only artifact assumptions. Its responsibilities are covered by the
+  production Paper replay adapter and shared canonical transition boundary.
 
 ## Validation Commands
 

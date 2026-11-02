@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from datetime import datetime
+from enum import Enum
 from typing import Any
 
 from .context_location_replay import ContextLocationReplay
@@ -21,7 +22,6 @@ from .opportunity_replay_host import bar_events_to_facts, build_opportunity_coor
 from .opening_gap_policy import OpeningGapPolicy
 from .transition import OrderflowTransitionOwner
 
-
 @dataclass(frozen=True, slots=True)
 class InteractionResponseReplay:
     facts: tuple[dict[str, Any], ...]
@@ -33,10 +33,9 @@ class InteractionResponseReplay:
 
     def parity_phase_facts(self) -> dict[str, list[dict[str, Any]]]:
         return {
-            "interaction_response": [dict(item) for item in self.facts],
+            "interaction_response": [_jsonable(dict(item)) for item in self.facts],
             "opportunity_lifecycle": [
-                dict(item)
-                for item in self.opportunity_facts
+                _jsonable(dict(item)) for item in self.opportunity_facts
                 if item.get("kind") == "lifecycle_formed"
             ],
         }
@@ -68,10 +67,16 @@ def _fact(kind: str, identity: str, parent: str | None, snapshot: Mapping[str, A
 def _jsonable(value: Any) -> Any:
     if isinstance(value, datetime):
         return serialize_utc(value)
+    if isinstance(value, Enum):
+        return value.value
+    if is_dataclass(value):
+        return _jsonable(asdict(value))
     if isinstance(value, Mapping):
         return {str(key): _jsonable(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_jsonable(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return sorted((_jsonable(item) for item in value), key=str)
     return value
 
 
@@ -148,10 +153,11 @@ def _publish_replaced_interactions(
 def replay_interaction_response(
     aggregates: Mapping[str, Sequence[Aggregate]], context: ContextLocationReplay,
     registry: LocationRegistry, *, templates: Mapping[tuple[str, str], TradeTemplate] = TRADE_TEMPLATES,
-    replay_mode: str = "FULL", atr: float | None = None,
+    replay_mode: str = "FULL",
     fill_permission_margin: float | None = 0.05,
     raw_rows: Sequence[Mapping[str, Any]] = (),
     rows_by_date: Mapping[str, Sequence[Mapping[str, object]]] | None = None,
+    atr_by_session: Mapping[str, float | None] | None = None,
     prior_value: ValuePublication | None = None,
 ) -> InteractionResponseReplay:
     """Advance independent 1m/5m detectors in one availability-ordered clock."""
@@ -208,6 +214,7 @@ def replay_interaction_response(
     detector = InteractionDetector(published_registry)
     facts: list[dict[str, Any]] = []
     published_records: set[tuple[str, int]] = set()
+    vwap_response_published: set[str] = set()
     opening_gap_policy = OpeningGapPolicy()
     regime_publications: list[tuple[str, Any]] = []
     gap_direction: str | None = None
@@ -226,6 +233,7 @@ def replay_interaction_response(
     transition_owner = OrderflowTransitionOwner(
         published_registry,
         rows_by_date=rows_by_date or {},
+        atr_by_session=atr_by_session,
     )
     transition_owner.context.rows = [dict(item) for item in raw_rows]
     transition_owner.context.prior_session_rows = tuple(
@@ -264,6 +272,11 @@ def replay_interaction_response(
         )
         available1 = [item for item in one if item.available_at <= current_available]
         available5 = [item for item in five if item.available_at <= current_available]
+        atr_source = available1[-1] if available1 else (available5[-1] if available5 else None)
+        atr = (
+            transition_owner.context.atr_by_session.get(atr_source.session_date)
+            if atr_source is not None else None
+        )
         transition_owner.context.aggregates["1m"] = list(available1)
         transition_owner.context.aggregates["5m"] = list(available5)
         bar_events: list[dict[str, Any]] = []
@@ -354,10 +367,18 @@ def replay_interaction_response(
             item for item in observations.get(source, ())
             if item.available_at <= current_available
         )
+        if atr is None and new5 and latest5 is not None:
+            bar_events.append({
+                "kind": "atr_unavailable",
+                "available_at": latest5.available_at,
+                "observed_at": latest5.end_time,
+                "decision": "interaction_creation",
+                "reason": "insufficient_daily_history",
+            })
         transitions = [
             (transition, current)
             for transition in detector.observe_1m(
-                current=current, available=available1, atr=None, observations=typed,
+                current=current, available=available1, atr=atr, observations=typed,
             )
         ]
         if new5 and latest5 is not None:
@@ -377,7 +398,7 @@ def replay_interaction_response(
                 (transition, latest5)
                 for transition in detector.observe(
                     current=latest5, available5=available5, available1=available1,
-                    atr=None, observations5=typed5, observations1=one_observations,
+                    atr=atr, observations5=typed5, observations1=one_observations,
                 )
             )
             observed5_available = latest5.available_at
@@ -387,6 +408,43 @@ def replay_interaction_response(
             transition_owner.context.interactions[iid] = (
                 detector.interactions[iid].evaluation_snapshot()
             )
+            if (
+                str(transition.interaction.location) == "VWAP"
+                and iid not in vwap_response_published
+                and transition.interaction.pre_contact_side is not None
+            ):
+                for item in transition.interaction.candles[1:]:
+                    close = item.candle.close
+                    confirmed = (
+                        transition.interaction.pre_contact_side.value == "BELOW"
+                        and close >= transition.interaction.band_low
+                    ) or (
+                        transition.interaction.pre_contact_side.value == "ABOVE"
+                        and close <= transition.interaction.band_high
+                    )
+                    if not confirmed:
+                        continue
+                    source = detector.interactions.get(iid)
+                    source_id = (
+                        source.reference_provenance.get("source_observation_id")
+                        if source is not None else None
+                    )
+                    transition_owner.context.emit({
+                        "kind": "response_confirmed",
+                        "interaction_id": iid,
+                        "location": "VWAP",
+                        "timeframe": transition.interaction.timeframe,
+                        "reference_generation": transition.interaction.reference_generation,
+                        "response_status": "CONFIRMED",
+                        "response_reason": "causal_vwap_rejection",
+                        "source_observation_id": source_id,
+                        "evidence_ids": [nifty_label(item.candle.time)],
+                        "observed_at": item.candle.end_time,
+                        "available_at": item.candle.available_at,
+                        "current_available_at": event_current.available_at,
+                    }, bar_events)
+                    vwap_response_published.add(iid)
+                    break
             opportunity.publish_interaction_context(
                 transition.interaction, bar_events,
             )
@@ -497,18 +555,9 @@ def replay_interaction_response(
                 row=current.to_dict(),
                 available5=available5,
             )
-    lifecycle_kinds = {
-        "or_directional_seed",
-        "lifecycle_formed", "setup_invalidated",
-        "setup_expired", "setup_superseded", "opportunity_timeout",
-        "opportunity_suppressed_expired",
-        "opportunity_suppressed_duplicate",
-        "opportunity_suppressed_pd_role_direction",
-    }
-    interaction_facts = tuple(item for item in facts if item["kind"] not in lifecycle_kinds)
-    opportunity_facts = tuple(
-        item for item in facts if item["kind"] in lifecycle_kinds
-    )
+    parity_streams = transition_owner.context.parity_snapshot()
+    interaction_facts = tuple(facts)
+    opportunity_facts = tuple(parity_streams.get("opportunity_lifecycle", ()))
     return InteractionResponseReplay(
         interaction_facts,
         opportunity_facts,

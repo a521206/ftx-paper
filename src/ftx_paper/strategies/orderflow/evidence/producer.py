@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from typing import Protocol
 
 from ..evidence_publication import AtrPublication, publish_phase4a_evidence
@@ -103,9 +104,23 @@ def _artifact_aggregates(artifact: dict[str, object], session_date: str) -> dict
 
 def produce_evidence(
     artifact: dict[str, object], *, session_date: str, adapter: EvidenceAdapter,
+    parsed_aggregates: Mapping[str, Sequence[Aggregate]] | None = None,
+    precomputed_vwap_measurements: Mapping[str, Sequence[VwapMeasurement]] | None = None,
 ) -> dict[str, object]:
     source_fingerprint = _validate_artifact(artifact)
-    aggregates = _artifact_aggregates(artifact, session_date)
+    aggregates = (
+        {timeframe: tuple(values) for timeframe, values in parsed_aggregates.items()}
+        if parsed_aggregates is not None
+        else _artifact_aggregates(artifact, session_date)
+    )
+    if set(aggregates) != {"1m", "5m"}:
+        raise ValueError("Phase 3 aggregates must contain exactly 1m and 5m")
+    if any(
+        aggregate.session_date != session_date
+        for values in aggregates.values()
+        for aggregate in values
+    ):
+        raise ValueError("Phase 3 aggregate session mismatch")
     first = next((item for item in aggregates["1m"] + aggregates["5m"]), None)
     if first is None:
         raise ValueError("aggregate artifact has no aggregates")
@@ -132,9 +147,19 @@ def produce_evidence(
             aggregates["5m"], session_date=session_date, atr=atr.value,
         )
         for timeframe in ("1m", "5m"):
-            measurements.extend(causal_vwap_prefix(
-                aggregates[timeframe], session_date=session_date,
-            ))
+            if precomputed_vwap_measurements is None:
+                measurements.extend(causal_vwap_prefix(
+                    aggregates[timeframe], session_date=session_date,
+                ))
+                continue
+            available_at = max(
+                (aggregate.available_at for aggregate in aggregates[timeframe]),
+                default=None,
+            )
+            measurements.extend(
+                item for item in precomputed_vwap_measurements[timeframe]
+                if available_at is not None and item.available_at <= available_at
+            )
         for measurement in measurements:
             registry.publish_vwap(
                 value=measurement.value, available_at=measurement.available_at,

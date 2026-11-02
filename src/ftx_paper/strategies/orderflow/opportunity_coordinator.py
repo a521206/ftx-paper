@@ -7,7 +7,6 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from .contextual import build_context_scores
-from .features import daily_atr
 from .execution import (
     AdmissionStatus,
     ExecutionAdmission,
@@ -67,35 +66,6 @@ class LifecycleFormation:
     available_at: Any
     lifecycle: Any = None
     setup: Any = None
-
-
-def _record_lifecycle_parity_fact(ctx: ReplayContext, life: SetupOpportunity, event: dict[str, Any]) -> None:
-    """Publish the lifecycle contract independently of report projections."""
-    location = getattr(life.location, "value", life.location)
-    values = {
-        **event,
-        "candidate_id": event.get("candidate_id") or life.lifecycle_id,
-        "lifecycle_id": life.lifecycle_id,
-        "direction": life.direction.value,
-        "location": location,
-        "status": life.status.value,
-        "stage": life.stage.value,
-        "formation_at": life.formation_at,
-        "formation_available_at": life.formation_available_at,
-        "policy_version": life.policy_version,
-        "response_episode_id": life.response_episode_id,
-        "execution_group_id": life.execution_group_id,
-    }
-    ctx.record_parity_fact("opportunity_lifecycle", {
-        "kind": "lifecycle_formed",
-        "identity": life.causal_identity or life.lifecycle_id,
-        "causal_parent_id": life.lifecycle_id,
-        "occurred_at": event["observed_at"],
-        "observed_at": event["observed_at"],
-        "available_at": event["available_at"],
-        "values": values,
-        "unavailable": [],
-    })
 
 
 def policy_for(location: LocationTemplate) -> LocationPolicy:
@@ -160,7 +130,7 @@ class OpportunityCoordinator:
             score_candle,
             raw_rows=self.host.context.rows,
             aggregates=self.host.context.aggregates,
-            atr=daily_atr(score_candle.session_date, self.host.context.rows_by_date),
+            atr=self.host.context.atr_by_session.get(score_candle.session_date),
         )
         observed_at = snapshot.last_source_end
         available_at = snapshot.available_at
@@ -291,7 +261,7 @@ class OpportunityCoordinator:
             return
         scores = build_context_scores(
             candle, raw_rows=ctx.rows, aggregates=ctx.aggregates,
-            atr=daily_atr(candle.session_date, ctx.rows_by_date),
+            atr=ctx.atr_by_session.get(candle.session_date),
         )
         if scores is None:
             return
@@ -313,7 +283,7 @@ class OpportunityCoordinator:
         ctx.or_seed_candles.add(candle.time)
         seed_id = (
             f"OR_SEED:{candle.session_date}:{candle.symbol}:"
-            f"{record.generation}:{direction.value}:{candle.time}"
+            f"{record.generation}:{direction.value}:{nifty_label(candle.time)}"
         )
         response = DirectionalResponse(
             direction=direction,
@@ -436,7 +406,7 @@ class OpportunityCoordinator:
             "short_score": short_score,
             "reference_level": life.reference_level,
             "failure_boundary": life.failure_boundary,
-            "context_candle_id": candle.time,
+            "context_candle_id": nifty_label(candle.time),
             "context_candle_reference": candle_reference(candle),
             "context_candle_available_at": candle.available_at,
             "response_candle_id": response.evidence_ids[-1],
@@ -451,7 +421,6 @@ class OpportunityCoordinator:
             "confirmation_evidence": confirmation_evidence,
         }
         ctx.emit(lifecycle_event, bar_events, life)
-        _record_lifecycle_parity_fact(ctx, life, lifecycle_event)
         ctx.emit_market_event(
             {
                 "kind": "setup_candidate",
@@ -993,7 +962,7 @@ class OpportunityCoordinator:
             return None
         local_scores = build_context_scores(
             latest, raw_rows=ctx.rows, aggregates=ctx.aggregates,
-            atr=daily_atr(latest.session_date, ctx.rows_by_date),
+            atr=ctx.atr_by_session.get(latest.session_date),
         )
         local_long_score, local_short_score = local_scores if local_scores is not None else (None, None)
         score_margin = ctx.execution_constraints.fill_permission_margin
@@ -1164,7 +1133,6 @@ class OpportunityCoordinator:
             "confirmation_evidence": confirmation_evidence,
         }
         ctx.emit(lifecycle_event, bar_events, life)
-        _record_lifecycle_parity_fact(ctx, life, lifecycle_event)
         ctx.emit_market_event(
             {
                 "kind": "setup_candidate", "level": STRUCTURE_TIMEFRAME,

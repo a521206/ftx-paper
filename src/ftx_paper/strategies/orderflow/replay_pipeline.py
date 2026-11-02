@@ -33,6 +33,8 @@ from ftx_paper.strategies.orderflow.value_publication import (
     ValuePublication,
 )
 from ftx_paper.strategies.orderflow.timestamps import coerce_timestamp, nifty_label, session_minute
+from ftx_paper.strategies.orderflow.vwap_location import causal_vwap_prefix
+from ftx_paper.strategies.orderflow.features import daily_atr_cache
 from ftx_paper.strategies.orderflow.phase7_projection import PHASE7_STREAMS
 
 
@@ -267,17 +269,33 @@ class OrderflowReplayEngine:
             raise ValueError("replay session has no rows")
         if any(str(row.get("session_date")) != session_date for row in rows):
             raise ValueError("replay rows contain a session mismatch")
+        atr_by_session = daily_atr_cache(rows_by_date)
         artifact, events = _observation_artifact(rows)
         adapter = PaperFeatureAdapter(rows_by_date, prior_values=_prior_values(rows_by_date))
+        parsed_aggregates = {
+            timeframe: tuple(
+                _aggregate(item, timeframe)
+                for item in artifact["aggregates"][timeframe]
+            )
+            for timeframe in ("1m", "5m")
+        }
+        precomputed_vwap_measurements = {
+            timeframe: causal_vwap_prefix(values, session_date=session_date)
+            for timeframe, values in parsed_aggregates.items()
+        }
         evidence_events: list[
             tuple[datetime, dict[str, Any], dict[str, Any] | None, dict[str, Any]]
         ] = []
         latest_5m: dict[str, Any] | None = None
         prefix_aggregates: dict[str, list[dict[str, Any]]] = {"1m": [], "5m": []}
+        parsed_prefix_aggregates: dict[str, list[Aggregate]] = {"1m": [], "5m": []}
         for position, event in enumerate(events, start=1):
             if event.timeframe == "5m":
                 latest_5m = event.value
             prefix_aggregates[event.timeframe].append(event.value)
+            parsed_prefix_aggregates[event.timeframe].append(
+                _aggregate(event.value, event.timeframe),
+            )
             prefix = {
                 **artifact,
                 "aggregates": {
@@ -288,7 +306,13 @@ class OrderflowReplayEngine:
             evidence_events.append((
                 event.available_at,
                 evidence_payload(
-                    produce_evidence(prefix, session_date=session_date, adapter=adapter),
+                    produce_evidence(
+                        prefix,
+                        session_date=session_date,
+                        adapter=adapter,
+                        parsed_aggregates=parsed_prefix_aggregates,
+                        precomputed_vwap_measurements=precomputed_vwap_measurements,
+                    ),
                 )["evidence"],
                 latest_5m,
                 {**event.value, "timeframe": event.timeframe},
@@ -323,6 +347,8 @@ class OrderflowReplayEngine:
             phase3_artifact,
             session_date=session_date,
             adapter=SerializedEvidenceAdapter({"evidence": final_evidence}),
+            parsed_aggregates=parsed_aggregates,
+            precomputed_vwap_measurements=precomputed_vwap_measurements,
         )["publication"])
         phase4_replay = replay_context_location_artifact(
             phase3_artifact,
@@ -339,11 +365,11 @@ class OrderflowReplayEngine:
             }
             interaction_replay = replay_interaction_response(
                 aggregates, phase4_replay, _location_registry(final_evidence, session_date),
-                atr=phase4_evidence.atr.value,
                 fill_permission_margin=fill_permission_margin,
                 prior_value=phase4_evidence.prior_value,
                 raw_rows=rows,
                 rows_by_date=rows_by_date,
+                atr_by_session=atr_by_session,
             )
             interaction_response = interaction_replay.facts
         machine = ReplayMachine(
@@ -398,7 +424,8 @@ class OrderflowReplayEngine:
                  # streams; ReplayMachine contributes evidence chronology only.
                 **({"opportunity_lifecycle": interaction_phase_facts["opportunity_lifecycle"]}
                    if interaction_phase_facts else {}),
-                 **({"interaction_response": list(interaction_response)} if include_interactions else {}),
+                  **({"interaction_response": _json_safe(list(interaction_response))}
+                     if include_interactions else {}),
              **({
                      name: list(interaction_replay.execution_phase_facts.get(name, ()))
                      for name in PHASE7_STREAMS

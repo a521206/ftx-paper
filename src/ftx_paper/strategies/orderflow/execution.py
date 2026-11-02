@@ -40,7 +40,6 @@ from .response import (
     ResponseSpec,
     evaluate_response_window,
 )
-from .features import daily_atr
 from .interactions import InteractionSnapshot
 from .state_machine_evidence import acceptance_trigger_evidence
 from .state_machine_types import (
@@ -1626,29 +1625,32 @@ class ExecutionCoordinator:
                 )
             events: list[dict[str, Any]] = []
             self.admit_opportunity(life, decision_at, events)
-            state = self.engine.state_for(life.lifecycle_id)
-            decided_at = state.admission.decided_at or str(formation.available_at)
-            self.context.record_parity_fact("intent_admission", {
-                    "kind": "intent_admission",
-                    "identity": (
-                        f"intent-admission:{life.lifecycle_id}:"
-                        f"{nifty_label(coerce_timestamp(decided_at))}"
-                    ),
-                    "causal_parent_id": life.lifecycle_id,
-                    "occurred_at": decided_at,
-                    "observed_at": decided_at,
-                    "available_at": decided_at,
-                    "values": {
-                        "lifecycle_id": life.lifecycle_id,
-                        "intent_id": state.admission.intent_id,
-                        "status": state.admission.status.value,
-                        "reason": state.admission.reason,
-                    },
-                    "unavailable": []
-                    if state.admission.reason is None
-                    else [state.admission.reason],
-                })
+            self._record_intent_admission(life, formation.available_at)
         return self.context.parity_snapshot()
+
+    def _record_intent_admission(self, life: SetupOpportunity, fallback_at: Any) -> None:
+        state = self.engine.state_for(life.lifecycle_id)
+        decided_at = state.admission.decided_at or str(fallback_at)
+        self.context.record_parity_fact("intent_admission", {
+            "kind": "intent_admission",
+            "identity": (
+                f"intent-admission:{life.lifecycle_id}:"
+                f"{nifty_label(coerce_timestamp(decided_at))}"
+            ),
+            "causal_parent_id": life.lifecycle_id,
+            "occurred_at": decided_at,
+            "observed_at": decided_at,
+            "available_at": decided_at,
+            "values": {
+                "lifecycle_id": life.lifecycle_id,
+                "intent_id": state.admission.intent_id,
+                "status": state.admission.status.value,
+                "reason": state.admission.reason,
+            },
+            "unavailable": []
+            if state.admission.reason is None
+            else [state.admission.reason],
+        })
 
     def queue_exit_order(
         self, formation: Any, order: ExitOrder, *, observed_at: str
@@ -2931,11 +2933,7 @@ class ExecutionCoordinator:
                 context.aggregates.get("5m", []), str(life.session_date), timestamp
             )
             if source_bar is not None:
-                atr = daily_atr(
-                    source_bar.session_date,
-                    context.rows_by_date
-                    or {str(life.session_date): context.rows},
-                )
+                atr = context.atr_by_session.get(source_bar.session_date)
                 vwap_stop, _ = _or_vwap_stop_price(
                     position.direction, position.fill_price, vwap, atr
                 )

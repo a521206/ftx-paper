@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
 from enum import StrEnum
+from enum import Enum
 import hashlib
 import json
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence, cast
 from datetime import datetime
 
 from .hierarchy import ContextVersionRef, MarketContext, ContextObservation
@@ -35,8 +36,12 @@ _INTERACTION_RESPONSE_KINDS = frozenset({
     "interaction_created", "location_interaction_observed",
     "interaction_departure", "interaction_ended", "interaction_closed",
     "response_confirmed", "response_invalidated", "response_expired",
-    "role_context_available", "role_transition", "hypothesis_arbitrated",
-    "opportunity_outcome",
+    "role_transition", "hypothesis_arbitrated",
+})
+
+OPPORTUNITY_LIFECYCLE_KINDS = frozenset({
+    "lifecycle_formed", "setup_invalidated", "setup_expired",
+    "setup_superseded", "opportunity_timeout",
 })
 
 _EXECUTION_TRANSITION_KINDS = frozenset({
@@ -49,11 +54,40 @@ _EXECUTION_TRANSITION_KINDS = frozenset({
 def _parity_safe(value: Any) -> Any:
     if isinstance(value, datetime):
         return serialize_utc(value)
+    if isinstance(value, Enum):
+        return value.value
+    if is_dataclass(value):
+        return _parity_safe(asdict(cast(Any, value)))
     if isinstance(value, Mapping):
         return {str(key): _parity_safe(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_parity_safe(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return sorted((_parity_safe(item) for item in value), key=str)
     return value
+
+
+def _lifecycle_parity_values(
+    event: Mapping[str, Any], lifecycle: SetupOpportunity | None,
+) -> tuple[str, Any]:
+    if lifecycle is None:
+        return str(event.get("neutral_event_key", event.get("event_id", ""))), _parity_safe(dict(event))
+    location = getattr(lifecycle.location, "value", lifecycle.location)
+    values = {
+        **dict(event),
+        "candidate_id": event.get("candidate_id") or lifecycle.candidate_id,
+        "lifecycle_id": lifecycle.lifecycle_id,
+        "direction": lifecycle.direction.value,
+        "location": location,
+        "status": lifecycle.status.value,
+        "stage": lifecycle.stage.value,
+        "formation_at": lifecycle.formation_at,
+        "formation_available_at": lifecycle.formation_available_at,
+        "policy_version": lifecycle.policy_version,
+        "response_episode_id": lifecycle.response_episode_id,
+        "execution_group_id": lifecycle.execution_group_id,
+    }
+    return lifecycle.causal_identity or lifecycle.lifecycle_id, _parity_safe(values)
 
 
 ORDERFLOW_TRAIL_ACTIVATE_BP = 20.0
@@ -272,6 +306,7 @@ class MarketContextStore:
 class ReplayContext:
     rows: list[dict[str, Any]] = field(default_factory=list)
     rows_by_date: Mapping[str, Sequence[Mapping[str, object]]] = field(default_factory=dict)
+    atr_by_session: Mapping[str, float | None] = field(default_factory=dict)
     prior_session_rows: tuple[tuple[Mapping[str, Any], ...], ...] = ()
     aggregates: dict[str, list[Aggregate]] = field(default_factory=dict)
     market_contexts: MarketContextStore = field(default_factory=MarketContextStore)
@@ -366,11 +401,18 @@ class ReplayContext:
         self.events.append(dict(event_data))
         bar_events.append(dict(event_data))
         stream = event_data.get("parity_stream")
+        if stream is None and event_data.get("kind") == "lifecycle_formed":
+            stream = "opportunity_lifecycle"
         if stream is not None:
             parent = (
                 event_data.get("causal_parent_id")
                 or event_data.get("interaction_id")
                 or (lifecycle.lifecycle_id if lifecycle is not None else None)
+            )
+            identity, values = (
+                _lifecycle_parity_values(event_data, lifecycle)
+                if stream == "opportunity_lifecycle" else
+                (str(event_data.get("neutral_event_key", event_data.get("event_id", ""))), _parity_safe(event_data))
             )
             self.record_parity_fact(str(stream), {
                 "kind": str(event_data.get("kind", "")),
@@ -378,9 +420,9 @@ class ReplayContext:
                 "observed_at": _parity_safe(observed_at),
                 "available_at": _parity_safe(available_at),
                 "sequence": len(self.parity_streams.get(str(stream), [])),
-                "identity": str(event_data.get("neutral_event_key", event_data.get("event_id", ""))),
+                "identity": identity,
                 "causal_parent_id": parent,
-                "values": _parity_safe(event_data),
+                "values": values,
                 "unavailable": [],
             })
 
@@ -519,16 +561,23 @@ class ReplayContext:
         parity_stream = payload.get("parity_stream")
         if parity_stream is None and payload.get("kind") in _EXECUTION_TRANSITION_KINDS:
             parity_stream = "execution_transitions"
+        if parity_stream is None and payload.get("kind") in OPPORTUNITY_LIFECYCLE_KINDS:
+            parity_stream = "opportunity_lifecycle"
         if parity_stream is not None:
+            identity, values = (
+                _lifecycle_parity_values(payload, lifecycle)
+                if parity_stream == "opportunity_lifecycle" else
+                (str(payload.get("neutral_event_key", payload.get("event_id", ""))), _parity_safe(payload))
+            )
             self.record_parity_fact(str(parity_stream), {
                 "kind": str(payload.get("kind", "")),
                 "occurred_at": _parity_safe(observed_at),
                 "observed_at": _parity_safe(observed_at),
                 "available_at": _parity_safe(available_at),
                 "sequence": len(self.parity_streams.get(str(parity_stream), [])),
-                "identity": str(payload.get("neutral_event_key", payload.get("event_id", ""))),
+                "identity": identity,
                 "causal_parent_id": lifecycle_id,
-                "values": _parity_safe(payload),
+                "values": values,
                 "unavailable": [],
             })
         self.events.append(payload)
@@ -554,7 +603,7 @@ class ReplayContext:
         if stream not in allowed:
             raise ValueError(f"unknown parity stream: {stream}")
         self.parity_observed.add(stream)
-        self.parity_streams.setdefault(stream, []).append(dict(fact))
+        self.parity_streams.setdefault(stream, []).append(_parity_safe(dict(fact)))
 
     def parity_snapshot(self) -> dict[str, list[dict[str, Any]]]:
         return {

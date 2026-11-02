@@ -66,5 +66,31 @@ def daily_atr(
     return atr
 
 
+def daily_atr_cache(
+    rows_by_date: Mapping[str, Sequence[Mapping[str, object]]],
+) -> dict[str, float | None]:
+    """Build ATR values once for every session represented by the input rows."""
+    period = 14
+    days = _daily_features(rows_by_date)
+    cache: dict[str, float | None] = {}
+    true_ranges: list[float] = []
+    atr: float | None = None
+    previous: _DailyFeature | None = None
+    for day in days:
+        cache[day.session_date] = atr if len(true_ranges) >= period else None
+        true_ranges.append(
+            day.high - day.low
+            if previous is None
+            else _true_range(day, previous.close)
+        )
+        if len(true_ranges) == period:
+            atr = sum(true_ranges) / period
+        elif len(true_ranges) > period:
+            assert atr is not None
+            atr = ((atr * (period - 1)) + true_ranges[-1]) / period
+        previous = day
+    return cache
+
+
 def _true_range(day: _DailyFeature, previous_close: float) -> float:
     return max(day.high - day.low, abs(day.high - previous_close), abs(day.low - previous_close))

@@ -53,7 +53,8 @@ class OrderflowOpportunityHost:
     def structure_interactions(self) -> tuple[InteractionSnapshot, ...]:
         return tuple(
             state.evaluation_snapshot()
-            for state in reversed(tuple(self._detector.interactions.values()))
+            for state in self._detector.interactions.values()
+            if state.timeframe == "5m"
         )
 
     def selected_interaction_context(
@@ -94,6 +95,8 @@ def bar_events_to_facts(
     for event in events:
         if not isinstance(event, Mapping):
             continue
+        if event.get("parity_stream") != "interaction_response":
+            continue
         observed = event.get("observed_at", event.get("time"))
         available = event.get("available_at", observed)
         if observed is None or available is None:
@@ -112,6 +115,7 @@ def bar_events_to_facts(
                 "causal_available_at", "event_id", "sequence", "neutral_event_key",
             }
         }
+        values["session_date"] = values.get("session_date") or session_date
         facts.append({
             "kind": str(event.get("kind", "")),
             "occurred_at": serialize_utc(observed) if not isinstance(observed, str) else observed,
@@ -121,7 +125,7 @@ def bar_events_to_facts(
             "causal_available_at": event.get("causal_available_at", available),
             "policy_version": event.get("policy_version", "orderflow-v1"),
             "provenance": event.get("provenance", "causal_replay"),
-            "session_date": event.get("session_date", session_date),
+            "session_date": event.get("session_date") or session_date,
             "identity": identity,
             "causal_parent_id": parent,
             "values": values,

@@ -14,6 +14,7 @@ from typing import Any, Mapping, Sequence
 
 from .coordinator import OrderflowAdvance, OrderflowClockInput, OrderflowCoordinator
 from .execution import AdmissionStatus, ExecutionCoordinator, ExecutionEngine, IntentStatus
+from .features import daily_atr_cache
 from .hierarchy import ContextVersionRef, TriggerObservation
 from .opportunity_coordinator import LifecycleFormation
 from .opportunity_timeout import advance_opportunity_timeout
@@ -70,6 +71,7 @@ class OrderflowTransitionOwner:
     execution_owner: ExecutionCoordinator = field(default_factory=ExecutionCoordinator)
     execution_adapter: Any | None = None
     rows_by_date: Mapping[str, Sequence[Mapping[str, object]]] = field(default_factory=dict, repr=False)
+    atr_by_session: Mapping[str, float | None] | None = field(default=None, repr=False)
     context: ReplayContext = field(init=False)
     mode: str = "FULL"
     _clock: datetime | None = field(default=None, init=False, repr=False)
@@ -95,6 +97,11 @@ class OrderflowTransitionOwner:
         self.observation_owner = OrderflowCoordinator(self.location_registry)
         self.context = ReplayContext(
             rows_by_date=self.rows_by_date,
+            atr_by_session=(
+                self.atr_by_session
+                if self.atr_by_session is not None
+                else daily_atr_cache(self.rows_by_date)
+            ),
             location_registry=self.location_registry,
             execution_engine=ExecutionEngine(),
         )
@@ -415,6 +422,7 @@ class OrderflowTransitionOwner:
                 )
             ):
                 self.execution_owner.admit_opportunity(life, next_time, events)
+                self.execution_owner._record_intent_admission(life, life.formation_available_at)
             trace_before = _execution_trace_state(
                 self.execution_owner.engine.state_for(life.lifecycle_id)
             )
