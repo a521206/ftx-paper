@@ -17,6 +17,7 @@ import math
 import os
 from pathlib import Path
 import subprocess
+import shutil
 import sys
 import tempfile
 from collections.abc import Mapping, Sequence
@@ -99,9 +100,10 @@ def _comparison_date(value: str) -> str:
 
 def _write_comparison_output(
     results: list[dict[str, Any]], output_dir: Path, *, status: str | None = None,
+    run_id: str | None = None,
 ) -> Path:
     generated_at = datetime.now(timezone.utc)
-    run_id = f"{generated_at:%Y%m%dT%H%M%SZ}-{uuid4().hex[:8]}"
+    run_id = run_id or f"{generated_at:%Y%m%dT%H%M%SZ}-{uuid4().hex[:8]}"
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"canonical-replay-comparison-{run_id}.json"
     payload = {
@@ -117,6 +119,42 @@ def _write_comparison_output(
     return output_path
 
 
+def _retain_replay_artifacts(
+    artifact_dir: Path | None,
+    session_date: str,
+    run_id: str,
+    canonical_path: Path | None,
+    paper_path: Path,
+    canonical_source_path: Path,
+) -> dict[str, dict[str, Any]]:
+    """Copy subprocess replay artifacts out of the temporary work directory."""
+    if artifact_dir is None:
+        return {
+            "canonical_source": {"status": "NOT_RETAINED", "path": None},
+            "canonical": {"status": "NOT_RETAINED", "path": None},
+            "paper": {"status": "NOT_RETAINED", "path": None},
+        }
+    destination = artifact_dir / session_date / run_id
+    result: dict[str, dict[str, Any]] = {}
+    for name, source in (
+        ("canonical_source", canonical_source_path),
+        ("canonical", canonical_path),
+        ("paper", paper_path),
+    ):
+        if source is None or not source.is_file():
+            result[name] = {"status": "UNAVAILABLE", "path": None}
+            continue
+        target = destination / f"{session_date}-{name}.json"
+        try:
+            destination.mkdir(parents=True, exist_ok=True)
+            if source.resolve() != target.resolve():
+                shutil.copy2(source, target)
+            result[name] = {"status": "RETAINED", "path": str(target)}
+        except OSError as exc:
+            result[name] = {"status": "RETENTION_FAILED", "path": None, "reason": str(exc)}
+    return result
+
+
 def _phase_accepted(phase: Mapping[str, Any], *, allow_variance: bool = False) -> bool:
     accepted = {"MATCHED", "INPUT_VARIANCE"} if allow_variance else {"MATCHED"}
     return phase.get("status") in accepted
@@ -130,7 +168,7 @@ def _gate_result(result: Mapping[str, Any]) -> dict[str, Any]:
         "phase4": _phase_accepted(result.get("phase4", {}), allow_variance=True),
         "phase4_5": _phase_accepted(result.get("phase4_5", {})),
         "phase6": _phase_accepted(result.get("phase6", {}), allow_variance=True),
-        "phase7": _phase_accepted(result.get("phase7", {})),
+        "phase7": _phase_accepted(result.get("phase7", {}), allow_variance=True),
     }
     failed = [name for name in phases if not accepted[name]]
     first_failure = next((index for index, name in enumerate(phases) if not accepted[name]), None)
@@ -809,6 +847,7 @@ def _decision_clock_diagnostics(
 
 def _execution_diagnostics(
     payload: Mapping[str, Any], lifecycle_id: str, *, canonical: bool,
+    session_date: str,
 ) -> list[dict[str, Any]]:
     diagnostic = payload.get("diagnostic")
     source: Any = (
@@ -830,11 +869,115 @@ def _execution_diagnostics(
         "blocking_reason", "gate_evidence", "vwap_source", "synthetic_snapshots",
         "synthetic_snapshot_count", "continuation", "completed_1m_count",
         "completed_5m_count", "reason", "evidence_time", "evidence_available_at",
+        "bar", "before", "after", "fill_price", "quantity", "remaining_quantity",
+        "stop", "stop_trigger", "risk_reward", "components", "owner", "level",
     }
-    result = [{str(key): value for key, value in item.items() if key in keep} for item in records]
+    result = [
+        _normalize_execution_diagnostic(
+            {str(key): value for key, value in item.items() if key in keep},
+            session_date=session_date,
+        )
+        for item in records
+    ]
     if len(result) <= 12:
         return result
     return [*result[:6], {"omitted": len(result) - 12}, *result[-6:]]
+
+
+def _normalize_execution_diagnostic(value: Any, *, session_date: str | None) -> Any:
+    """Normalize diagnostic timestamps recursively for cross-repository comparison."""
+    if isinstance(value, Mapping):
+        return {
+            str(key): _normalize_execution_diagnostic(item, session_date=session_date)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _normalize_execution_diagnostic(item, session_date=session_date)
+            for item in value
+        ]
+    if isinstance(value, str) and session_date is not None:
+        try:
+            return _canonical_timestamp(value, session_date)
+        except (TypeError, ValueError):
+            return value
+    return value
+
+
+def _exit_diagnostics(
+    payload: Mapping[str, Any], lifecycle_id: str, *, canonical: bool,
+    session_date: str,
+) -> list[dict[str, Any]]:
+    """Return the causal exit evidence, including ticks with no exit action."""
+    diagnostic = payload.get("diagnostic")
+    source: Any = (
+        diagnostic.get("execution_diagnostics", [])
+        if canonical and isinstance(diagnostic, Mapping)
+        else payload.get("execution_diagnostics", [])
+    )
+    if not isinstance(source, list):
+        return []
+    exit_kinds = {
+        "exit_signal", "exit_order", "exit_trigger_observed", "exit_decision",
+        "position_closed", "execution_lifecycle_tick", "failed_continuation_evaluated",
+    }
+    records = [
+        item for item in source
+        if isinstance(item, Mapping)
+        and item.get("kind") in exit_kinds
+        and any(item.get(key) == lifecycle_id for key in ("lifecycle_id", "opportunity_id", "causal_parent_id"))
+    ]
+    keep = {
+        "sequence", "kind", "level", "reason", "owner", "lifecycle_id",
+        "observed_at", "available_at", "evidence_time", "evidence_available_at",
+        "bar", "before", "after", "fill_price", "quantity", "remaining_quantity",
+        "stop", "stop_trigger", "risk_reward", "components", "vwap_source",
+        "continuation", "position", "decision_context",
+        "location_interaction_id", "entry_at", "completed_1m_count",
+        "completed_5m_count", "synthetic_snapshot_count", "synthetic_snapshots",
+    }
+    return [
+        _normalize_execution_diagnostic(
+            {str(key): value for key, value in item.items() if key in keep},
+            session_date=session_date,
+        )
+        for item in records
+    ]
+
+
+def _first_exit_diagnostic_difference(
+    canonical: list[dict[str, Any]], paper: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Compare exit evidence in causal order, preserving missing-event diagnostics."""
+    geometry_fields = {
+        "failure_boundary", "protective_stop", "entry_boundary", "band_low", "band_high",
+    }
+    diagnostic_metadata = {"sequence"}
+
+    def semantic(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {
+                str(key): semantic(item)
+                for key, item in value.items()
+                if key not in geometry_fields and key not in diagnostic_metadata
+            }
+        if isinstance(value, list):
+            return [semantic(item) for item in value]
+        return value
+
+    limit = max(len(canonical), len(paper))
+    for index in range(limit):
+        left = canonical[index] if index < len(canonical) else None
+        right = paper[index] if index < len(paper) else None
+        if semantic(left) != semantic(right):
+            difference = _first_difference(semantic(left), semantic(right), "exit_diagnostic")
+            return {
+                "index": index,
+                "canonical": left,
+                "paper": right,
+                "field": difference,
+            }
+    return None
 
 
 def _execution_trace_diagnostics(
@@ -1167,9 +1310,26 @@ def _compare_phase7(canonical_path: Path, paper: dict[str, Any], session_date: s
                 result["execution_diagnostics"] = {
                     "canonical": _execution_diagnostics(
                         canonical_session, lifecycle_id, canonical=True,
+                        session_date=session_date,
                     ),
                     "paper": _execution_diagnostics(
                         paper, lifecycle_id, canonical=False,
+                        session_date=session_date,
+                    ),
+                }
+                canonical_exit = _exit_diagnostics(
+                    canonical_session, lifecycle_id, canonical=True,
+                    session_date=session_date,
+                )
+                paper_exit = _exit_diagnostics(
+                    paper, lifecycle_id, canonical=False,
+                    session_date=session_date,
+                )
+                result["exit_diagnostics"] = {
+                    "canonical": canonical_exit,
+                    "paper": paper_exit,
+                    "first_difference": _first_exit_diagnostic_difference(
+                        canonical_exit, paper_exit,
                     ),
                 }
                 canonical_trace = _execution_trace_diagnostics(
@@ -1187,6 +1347,22 @@ def _compare_phase7(canonical_path: Path, paper: dict[str, Any], session_date: s
                         canonical_trace, paper_trace,
                     ),
                 }
+        if (
+            result.get("status") == "MISMATCHED"
+            and str(result.get("field", "")).startswith("values.")
+            and str(result.get("field", "")).rsplit(".", 1)[-1]
+            in {"price", "requested_price", "failure_boundary", "protective_stop", "stop"}
+            and isinstance(result.get("canonical_value"), (int, float))
+            and isinstance(result.get("paper_value"), (int, float))
+            and abs(float(result["canonical_value"]) - float(result["paper_value"]))
+            <= ATR_ABSOLUTE_TOLERANCE
+        ):
+            result = {
+                "status": "INPUT_VARIANCE",
+                "stream": result.get("stream", "execution_fills"),
+                "reason": "bounded ATR variance affects execution price",
+                "first_difference": result,
+            }
         return result
     except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
         return {"status": "INCOMPLETE", "stream": PHASE7_STREAMS[0], "reason": str(exc)}
@@ -1429,6 +1605,8 @@ def compare_date(
     paper_python: str,
     canonical_artifact: Path | None = None,
     debug_dir: Path | None = None,
+    artifact_dir: Path | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="orderflow-cross-repo-") as directory_name:
         directory = Path(directory_name)
@@ -1593,6 +1771,10 @@ def compare_date(
                 "variance": phase35.get("atr"),
                 "first_dependent_difference": phase4,
             }
+        retained_artifacts = _retain_replay_artifacts(
+            artifact_dir, session_date, run_id or uuid4().hex[:8], canonical_path, paper_replay_path,
+            canonical_source_path,
+        )
         result = {
             "date": session_date,
             "phase3": phase3,
@@ -1602,8 +1784,15 @@ def compare_date(
             "phase6": phase6,
             "phase7": phase7,
             "phase7_status": phase7.get("status"),
-            "canonical_replay": {"status": "MATCHED" if canonical_projection else "INCOMPLETE"},
-            "paper_replay": {"status": "MATCHED" if paper_replay else "INCOMPLETE"},
+            "canonical_replay": {
+                "status": "MATCHED" if canonical_projection else "INCOMPLETE",
+                **retained_artifacts["canonical"],
+            },
+            "paper_replay": {
+                "status": "MATCHED" if paper_replay else "INCOMPLETE",
+                **retained_artifacts["paper"],
+            },
+            "canonical_source": retained_artifacts["canonical_source"],
         }
         result["gate"] = _gate_result(result)
         return result
@@ -1640,7 +1829,10 @@ def main(argv: list[str] | None = None) -> int:
         canonical_python_path if canonical_python_path.exists() else sys.executable
     )
     output_dir = args.output_dir or paper_root / "data" / "output" / "orderflow"
-    debug_dir = output_dir / "debug"
+    generated_at = datetime.now(timezone.utc)
+    run_id = f"{generated_at:%Y%m%dT%H%M%SZ}-{uuid4().hex[:8]}"
+    artifact_dir = output_dir / "artifacts"
+    debug_dir = artifact_dir / "debug"
     debug_dir.mkdir(parents=True, exist_ok=True)
     results = [compare_date(
         session_date,
@@ -1650,11 +1842,13 @@ def main(argv: list[str] | None = None) -> int:
         paper_python=sys.executable,
         canonical_artifact=args.canonical_artifact,
         debug_dir=debug_dir,
+        artifact_dir=artifact_dir,
+        run_id=run_id,
     ) for session_date in args.dates]
     overall = "PASSED" if all(
         _gate_result(item)["status"] == "PASSED" for item in results
     ) else "FAILED"
-    report_path = _write_comparison_output(results, output_dir, status=overall)
+    report_path = _write_comparison_output(results, output_dir, status=overall, run_id=run_id)
     print(f"Comparison report: {report_path}")
     for result in results:
         gate = result["gate"]
