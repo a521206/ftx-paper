@@ -990,6 +990,9 @@ class ReplayWorker:
             "ftx-paper-orderflow",
             StrategyContext(enabled_vehicles=vehicles),
         )
+        bind_replay_bars = getattr(strategy, "bind_replay_bars", None)
+        if callable(bind_replay_bars):
+            bind_replay_bars(bars)
         engine = PaperEngine(strategy)
         run_id = str(request.get("run_id") or uuid4().hex)
         events: _ScopedEvents = _ScopedEvents(
@@ -1041,10 +1044,16 @@ class ReplayWorker:
         }
         parity_artifact = None
         if include_parity_layers:
-            parity_artifact = {
-                "status": "UNAVAILABLE",
-                "reason": "orderflow canonical artifact requires complete evidence publications",
-            }
+            parity_payload = getattr(strategy, "parity_payload", None)
+            if not callable(parity_payload):
+                raise RuntimeError("orderflow runtime does not expose canonical parity facts")
+            from ftx_paper.strategies.orderflow.parity_artifacts import build_parity_artifact_from_payload
+
+            parity_artifact = build_parity_artifact_from_payload(
+                cast(dict[str, Any], parity_payload(rows)),
+                run_id=run_id,
+                producer={"name": strategy.metadata.name, "version": strategy.metadata.version},
+            )
         canonical = ReplayResult(
             run_id=run_id,
             schema_version=REPLAY_SCHEMA_VERSION,

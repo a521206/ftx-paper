@@ -1511,9 +1511,11 @@ prefix through live and bounded replay.
 
 Status: **Partially implemented.** Bounded cancellation-aware replay and fresh
 `PaperOrderflowRuntime` composition are available through the shared strategy
-boundary. The existing `ReplayWorker` still contains generic Paper execution
-orchestration, and the temporary harness is intentionally retained until the
-production replay path owns all canonical capture responsibilities.
+boundary. The reusable canonical input/formation providers now publish bounded
+causal evidence through that boundary for live-style and replay construction.
+The existing `ReplayWorker` still contains generic Paper execution orchestration,
+and the temporary harness is intentionally retained until the production replay
+path owns all canonical capture responsibilities.
 
 - Make `ReplayWorker` own only bounded loading, scope, cancellation, clock,
   capture, and fresh runtime composition.
@@ -1522,6 +1524,20 @@ production replay path owns all canonical capture responsibilities.
 - Move artifact persistence behind the production runtime/store boundary.
 
 Exit gate: replay retry is idempotent and isolated from live/account state.
+
+Phase 9 provider verification record:
+
+- `CanonicalInputProvider` converts bounded source rows into the shared
+  `OrderflowClockInput`, preserving aggregate, ATR, session-level, prior-value,
+  VWAP, location-observation, lineage, and unavailable publications at each
+  causal availability boundary.
+- `CanonicalFormationProvider` consumes owner-published lifecycle formations,
+  preserves identity and availability ordering, and suppresses duplicate retries.
+- `PaperOrderflowRuntime.from_rows` constructs a fresh bounded owner with the
+  same strategy transition boundary used by live hosting.
+- `scripts/orderflow/orderflow_replay.py` remains in place. The remaining
+  retirement gate is production replay capture of all producer-owned evidence,
+  interaction, execution, artifact, and recovery streams without the harness.
 
 #### 9E - Connect Paper Execution Without Policy Duplication
 

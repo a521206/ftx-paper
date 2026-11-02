@@ -9,13 +9,13 @@ from ftx_paper.execution.service import ExecutionService
 from ftx_paper.strategies.shared.protocol import StrategyDecision, StrategyMetadata
 from ftx_paper.contracts import MarketBar, MarketRole
 from ftx_paper.strategies.orderflow.coordinator import OrderflowClockInput, OrderflowCoordinator
-from ftx_paper.strategies.orderflow.orderflow_common import Aggregate
 from ftx_paper.strategies.orderflow.execution_adapter import OrderflowExecutionAdapter
 from ftx_paper.strategies.orderflow.execution import ExecutionCoordinator
 from ftx_paper.strategies.orderflow.state_machine_types import LocationRegistry
 from ftx_paper.strategies.orderflow.transition import OrderflowTransitionOwner
 from ftx_paper.strategies.orderflow.opportunity_coordinator import LifecycleFormation
-from ftx_paper.strategies.orderflow.timestamps import require_utc, nifty_label, serialize_utc
+from ftx_paper.strategies.orderflow.timestamps import serialize_utc
+from ftx_paper.strategies.orderflow.providers import CanonicalInputProvider
 
 from .orderflow_config import ORDERFLOW_NAME, ORDERFLOW_VERSION, OrderflowConfig
 
@@ -37,7 +37,7 @@ class OrderflowStrategy:
         self._coordinator = self._transition_owner.observation_owner
         self._execution_adapter = execution_adapter
         self._execution_owner = self._transition_owner.execution_owner
-        self._clock_input_provider = clock_input_provider
+        self._clock_input_provider = clock_input_provider or CanonicalInputProvider()
         self._formation_provider = formation_provider
 
     @property
@@ -55,11 +55,7 @@ class OrderflowStrategy:
         bar = bars.get(MarketRole.FUTURES) if isinstance(bars, Mapping) else None
         if not isinstance(bar, MarketBar) or self._coordinator is None:
             return ()
-        clock_input = self._clock_input_provider(bundle) if self._clock_input_provider is not None else None
-        if clock_input is None:
-            supporting = getattr(bundle, "supporting_inputs", None)
-            supplied = supporting.get("orderflow_clock_input") if isinstance(supporting, Mapping) else None
-            clock_input = supplied if isinstance(supplied, OrderflowClockInput) else OrderflowClockInput(self._aggregate(bar))
+        clock_input = self._clock_input_provider(bundle)
         advance = self._transition_owner.advance(
             clock_input,
             formations=(self._formation_provider(clock_input) if self._formation_provider else ()),
@@ -70,17 +66,6 @@ class OrderflowStrategy:
             decisions.append(StrategyDecision("SOURCE_OBSERVATION", advance.observation.source_event))
         decisions.extend(StrategyDecision(str(item["kind"]).upper(), item) for item in advance.observation.events)
         return tuple(decisions)
-
-    @staticmethod
-    def _aggregate(bar: MarketBar) -> Aggregate:
-        timestamp = require_utc(bar.timestamp)
-        session_date = nifty_label(timestamp)[:10]
-        return Aggregate(
-            timestamp, timestamp, timestamp, "1m", 1, bar.open, bar.high, bar.low,
-            bar.close, int(bar.volume or 0), bar.instrument.symbol,
-            bar.instrument.expiry or "", bar.instrument.instrument_type,
-            session_date, f"live:{timestamp}:{bar.instrument.symbol}",
-        )
 
     def on_execution_event(self, event: ExecutionNotification) -> None:
         self._transition_owner.on_execution_event(event)
@@ -94,6 +79,11 @@ class OrderflowStrategy:
             self._transition_owner.execution_adapter = self._execution_adapter
         self._execution_adapter.service = service
         self._execution_adapter.diagnostic = diagnostic
+
+    def bind_input_provider(
+        self, provider: Callable[[object], OrderflowClockInput],
+    ) -> None:
+        self._clock_input_provider = provider
 
     def snapshot(self) -> Mapping[str, object]:
         return {

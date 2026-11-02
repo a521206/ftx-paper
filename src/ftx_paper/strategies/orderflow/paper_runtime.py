@@ -17,6 +17,8 @@ from .execution_adapter import OrderflowExecutionAdapter
 from .opportunity_coordinator import LifecycleFormation
 from .state_machine_types import LocationRegistry
 from .transition import OrderflowTransitionOwner
+from .providers import CanonicalInputProvider, CanonicalFormationProvider
+from .state_machine_reporting import build_replay_payload
 
 
 class PaperOrderflowRuntime:
@@ -35,6 +37,7 @@ class PaperOrderflowRuntime:
         execution_adapter: OrderflowExecutionAdapter | None = None,
         clock_input_provider: Callable[[object], OrderflowClockInput] | None = None,
         formation_provider: Callable[[OrderflowClockInput], Sequence[LifecycleFormation]] | None = None,
+        formation_owner: object | None = None,
     ) -> None:
         self.execution_adapter = execution_adapter or OrderflowExecutionAdapter()
         self.transition_owner = transition_owner or OrderflowTransitionOwner(
@@ -47,6 +50,26 @@ class PaperOrderflowRuntime:
             transition_owner=self.transition_owner,
             execution_adapter=self.execution_adapter,
             clock_input_provider=clock_input_provider,
+            formation_provider=formation_provider or CanonicalFormationProvider(owner=formation_owner),
+        )
+
+    @classmethod
+    def from_rows(
+        cls,
+        rows: Sequence[Mapping[str, Any]],
+        *,
+        rows_by_date: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+        formations: Iterable[LifecycleFormation] = (),
+        config: OrderflowConfig | None = None,
+        execution_adapter: OrderflowExecutionAdapter | None = None,
+    ) -> "PaperOrderflowRuntime":
+        """Construct an isolated bounded runtime from canonical source rows."""
+        input_provider = CanonicalInputProvider.from_rows(rows, rows_by_date=rows_by_date)
+        formation_provider = CanonicalFormationProvider(formations=formations)
+        return cls(
+            config=config,
+            execution_adapter=execution_adapter,
+            clock_input_provider=input_provider,
             formation_provider=formation_provider,
         )
 
@@ -65,6 +88,21 @@ class PaperOrderflowRuntime:
 
     def bind_execution_service(self, service: ExecutionService, *, diagnostic: bool = False) -> None:
         self.strategy.bind_execution_service(service, diagnostic=diagnostic)
+
+    def bind_replay_rows(
+        self,
+        rows: Sequence[Mapping[str, Any]],
+        *,
+        rows_by_date: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+    ) -> None:
+        """Install the bounded canonical provider before replay starts."""
+        self.strategy.bind_input_provider(
+            CanonicalInputProvider.from_rows(rows, rows_by_date=rows_by_date),
+        )
+
+    def bind_replay_bars(self, bars: Sequence[Any]) -> None:
+        """Install canonical input from the bounded completed-bar scope."""
+        self.strategy.bind_input_provider(CanonicalInputProvider.from_market_bars(bars))
 
     def replay(
         self,
@@ -90,6 +128,10 @@ class PaperOrderflowRuntime:
         snapshot = dict(self.strategy.snapshot())
         snapshot["runtime_schema_version"] = 1
         return snapshot
+
+    def parity_payload(self, rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
+        """Project only producer-owned facts emitted by the canonical owner."""
+        return build_replay_payload(self.transition_owner, [], [], [dict(row) for row in rows], capture_mode="replay")
 
 
 __all__ = ["PaperOrderflowRuntime"]

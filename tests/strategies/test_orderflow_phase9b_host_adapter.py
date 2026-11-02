@@ -10,6 +10,10 @@ from ftx_paper.strategies.orderflow.host_adapter import (
     MarketEvidence,
     ReplayHostInputAdapter,
 )
+from ftx_paper.strategies.orderflow.providers import (
+    CanonicalFormationProvider,
+    CanonicalInputProvider,
+)
 
 
 UTC = timezone.utc
@@ -87,3 +91,80 @@ def test_output_envelope_is_versioned_and_contains_only_supplied_facts() -> None
 def test_output_adapter_rejects_non_json_host_metadata() -> None:
     with pytest.raises(ValueError, match="snapshot must be a JSON object"):
         CanonicalOutputAdapter.envelope(snapshot={"timestamp": object()})
+
+
+def _rows() -> list[dict[str, object]]:
+    return [
+        {
+            "time": f"2026-10-01T09:{15 + index:02d}",
+            "open": 100 + index,
+            "high": 101 + index,
+            "low": 99 + index,
+            "close": 100 + index,
+            "volume": 10,
+            "oi": 1,
+            "symbol": "NIFTY",
+            "expiry": "",
+            "contract_type": "CONTINUOUS",
+            "session_date": "2026-10-01",
+        }
+        for index in range(5)
+    ]
+
+
+def test_bounded_provider_publishes_causal_aggregates_and_lineage() -> None:
+    provider = CanonicalInputProvider.from_rows(_rows())
+
+    assert len(provider.envelopes) == 5
+    first = provider.envelopes[0]
+    assert first.input.one_minute.timeframe == "1m"
+    assert first.source_ids[0].startswith("aggregate:1m:")
+    assert first.input.atr is not None
+    assert first.input.atr.value is None
+    assert "insufficient_daily_atr_history" in first.unavailable
+    assert provider.envelopes[-1].input.five_minute is not None
+
+
+def test_live_provider_rejects_malformed_explicit_input_without_bar_fallback() -> None:
+    provider = CanonicalInputProvider()
+    evidence = MarketEvidence(
+        source_id="bar-1",
+        observed_at=datetime(2026, 10, 1, 3, 45, tzinfo=UTC),
+        available_at=datetime(2026, 10, 1, 3, 45, tzinfo=UTC),
+        values={"canonical_input": object()},
+    )
+
+    with pytest.raises(ValueError, match="explicit canonical orderflow input"):
+        provider.from_bundle(evidence)
+
+
+def test_live_provider_accepts_mapping_with_explicit_canonical_input() -> None:
+    clock = CanonicalInputProvider.from_rows(_rows()).envelopes[0].input
+
+    envelope = CanonicalInputProvider().from_bundle({"orderflow_clock_input": clock})
+    supporting = CanonicalInputProvider().from_bundle(
+        {"supporting_inputs": {"orderflow_clock_input": clock}},
+    )
+
+    assert envelope.input is clock
+    assert envelope.source_ids == ()
+    assert supporting.input is clock
+
+
+def test_formation_provider_is_causal_and_retry_idempotent() -> None:
+    formation = type(
+        "Formation",
+        (),
+        {
+            "identity": "setup-1",
+            "lifecycle_id": "life-1",
+            "values": {},
+            "observed_at": "2026-10-01T03:50:00Z",
+            "available_at": "2026-10-01T03:50:00Z",
+        },
+    )()
+    provider = CanonicalFormationProvider(formations=(formation,))
+    clock = CanonicalInputProvider.from_rows(_rows()).envelopes[-1].input
+
+    assert provider(clock) == (formation,)
+    assert provider(clock) == ()

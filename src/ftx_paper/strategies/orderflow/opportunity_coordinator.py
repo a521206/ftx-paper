@@ -49,6 +49,7 @@ from .templates import (
     TradeTemplate,
 )
 from .timestamps import nifty_label, serialize_utc
+from .timestamps import coerce_timestamp
 
 LIQUIDITY_PROBE = "LIQUIDITY_PROBE"
 TIMEFRAME_VARIANT = "1m_5m"
@@ -66,6 +67,10 @@ class LifecycleFormation:
     available_at: Any
     lifecycle: Any = None
     setup: Any = None
+    context_references: tuple[Any, ...] = ()
+    evidence_lineage: tuple[str, ...] = ()
+    execution_group: str | None = None
+    availability: str = "available"
 
 
 def policy_for(location: LocationTemplate) -> LocationPolicy:
@@ -104,6 +109,15 @@ class OpportunityCoordinator:
     def __init__(self, host: OpportunityReplayHost) -> None:
         self.host = host
         self._last_invalidation_5m_available_at: datetime | None = None
+        self._formations: list[LifecycleFormation] = []
+
+    def formations_for(self, clock: datetime | str) -> tuple[LifecycleFormation, ...]:
+        """Return owner-published formations causally available at ``clock``."""
+        available = coerce_timestamp(clock)
+        return tuple(
+            item for item in self._formations
+            if coerce_timestamp(item.available_at) <= available
+        )
 
     def publish_interaction_context(
         self, interaction: InteractionSnapshot, bar_events: list[dict[str, Any]],
@@ -235,7 +249,7 @@ class OpportunityCoordinator:
         return ctx.register_opportunity(life)
 
     def _attach_setup(self, life: SetupOpportunity, setup: Any) -> None:
-        self.host.execution.attach_setup(LifecycleFormation(
+        formation = LifecycleFormation(
             identity=life.causal_identity or life.lifecycle_id,
             lifecycle_id=life.lifecycle_id,
             values={},
@@ -243,7 +257,9 @@ class OpportunityCoordinator:
             available_at=life.formation_available_at,
             lifecycle=life,
             setup=setup,
-        ))
+        )
+        self._formations.append(formation)
+        self.host.execution.attach_setup(formation)
 
     def _seed_or_directional_episode(
         self, candle: Aggregate, row: dict[str, Any], bar_events: list[dict[str, Any]],

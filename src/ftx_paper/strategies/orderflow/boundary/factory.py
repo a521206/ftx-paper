@@ -22,11 +22,13 @@ class OrderflowStrategyFactory:
         *,
         clock_input_provider: Callable[[object], OrderflowClockInput] | None = None,
         formation_provider: Callable[[OrderflowClockInput], Sequence[LifecycleFormation]] | None = None,
+        formation_owner: object | None = None,
         execution_adapter: OrderflowExecutionAdapter | None = None,
     ) -> None:
         self.config = config
         self.clock_input_provider = clock_input_provider
         self.formation_provider = formation_provider
+        self.formation_owner = formation_owner
         self.execution_adapter = execution_adapter
 
     def create(self, context: StrategyContext) -> Strategy:
@@ -35,6 +37,7 @@ class OrderflowStrategyFactory:
             config=self.config,
             clock_input_provider=self.clock_input_provider,
             formation_provider=self.formation_provider,
+            formation_owner=self.formation_owner,
             execution_adapter=self.execution_adapter,
         )
 
