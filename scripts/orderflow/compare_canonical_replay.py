@@ -64,7 +64,7 @@ PHASE6_PROVENANCE_FIELDS = (
 )
 MIN_COMPARISON_DATE = date(2026, 9, 15)
 _CAUSAL_TIMESTAMP_KEYS = frozenset({
-    "as_of", "available_at", "current_available_at", "end_time", "formation_at",
+    "as_of", "available_at", "created_at", "current_available_at", "end_time", "formation_at",
     "formation_available_at", "observed_at", "occurred_at", "response_available_at",
     "response_observed_at", "causal_available_at", "causal_observed_at",
     "context_candle_available_at", "time",
@@ -520,7 +520,30 @@ def _compare_phase35(canonical: dict[str, Any], paper: dict[str, Any]) -> dict[s
             },
             "independent": independent,
         }
-    return _compare_fields(canonical_value, paper_value, PHASE35_FIELDS, label="phase3_5")
+    # Prior-value geometry and causal availability are semantic evidence.  The
+    # reference id and fingerprint are producer-owned profile-store lineage,
+    # so compare them through the same bounded semantic path used when ATR
+    # histories differ rather than treating repository provenance as parity.
+    independent = _compare_phase35_independent(canonical_value, paper_value, 0.0)
+    if independent["status"] != "MATCHED":
+        return {
+            **independent,
+            "layer": "phase3_5",
+        }
+    dependent = _compare_fields(
+        canonical_value,
+        paper_value,
+        PHASE35_ATR_DEPENDENT_FIELDS,
+        label="phase3_5",
+    )
+    if dependent["status"] != "MATCHED":
+        return dependent
+    return {
+        "status": "MATCHED",
+        "layer": "phase3_5",
+        "manifest": dependent["manifest"],
+        "prior_value": independent,
+    }
 
 
 def _bounded_atr_dependent_difference(phase4: dict[str, Any], tolerance: float) -> bool:
@@ -545,6 +568,7 @@ def _paper_phase35_projection(session_result: dict[str, Any]) -> dict[str, Any]:
     locations = raw.get("locations", [])
     if not isinstance(locations, list):
         locations = []
+    locations = _normalize_phase35_locations(locations, str(session_result.get("session_date", "")))
     atr = {
         "value": raw_atr.get("value"),
         # Match the canonical projection: ATR lineage is represented by the
@@ -596,6 +620,34 @@ def _paper_phase35_projection(session_result: dict[str, Any]) -> dict[str, Any]:
         "context_stream_id": raw.get("context_stream_id"),
         "location_stream_id": raw.get("location_stream_id"),
     }
+
+
+def _normalize_phase35_locations(
+    locations: list[Any], session_date: str,
+) -> list[dict[str, Any]]:
+    """Normalize Paper location records to the canonical causal projection."""
+    priority = {
+        "OR_HIGH": 0, "OR_LOW": 0, "SESSION_HIGH": 1, "SESSION_LOW": 1,
+        "PD_HIGH": 2, "PD_LOW": 2,
+    }
+    normalized: list[dict[str, Any]] = []
+    for item in locations:
+        if not isinstance(item, dict):
+            continue
+        value = _normalize_canonical_timestamps(dict(item), session_date)
+        band = value.get("band")
+        if isinstance(band, dict):
+            value.setdefault("band_low", band.get("low"))
+            value.setdefault("band_high", band.get("high"))
+        normalized.append(value)
+    normalized.sort(key=lambda item: (
+        str(item.get("available_at", "")),
+        priority.get(str(item.get("alias", "")), 99),
+        0 if item.get("alias") == "VWAP" and item.get("timeframe") == "5m" else 1,
+        str(item.get("source_aggregate_id") or ""),
+        int(item.get("generation", 0)),
+    ))
+    return normalized
 
 
 def _compare_phase4(canonical_path: Path, paper: dict[str, Any], session_date: str) -> dict[str, Any]:

@@ -66,7 +66,7 @@ class ReplayInput:
             timestamp = parse_utc(str(row["minute"]), field="replay minute")
             local = timestamp.astimezone(IST)
             minute = local.hour * 60 + local.minute
-            if not SESSION_OPEN_MINUTES <= minute < SESSION_DATA_END_MINUTES:
+            if not SESSION_OPEN_MINUTES <= minute <= SESSION_DATA_END_MINUTES:
                 continue
             selected = source is not None and kind in {"FUT", "FUTURES"} and (
                 str(row.get("symbol")) == source.symbol
@@ -145,7 +145,7 @@ class ReplayInput:
         current = provenance["current"]
         selected_count = int(current["source_bar_count"] if current is not None
                              and "source_bar_count" in current else completed)
-        expected = SESSION_DATA_END_MINUTES - SESSION_OPEN_MINUTES
+        expected = SESSION_DATA_END_MINUTES - SESSION_OPEN_MINUTES + 1
         payload = {
             "available_date": session_date, "date": session_date, "session_date": session_date,
             "bar_count": len(strategy_rows), "raw_bar_count": len(loaded),

@@ -70,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
 def _before_close(value: object, session_date: str) -> bool:
     if not isinstance(value, (datetime, str)):
         raise ValueError("source artifact row time must be a timestamp")
-    return session_minute(session_date, value)[-5:] < "15:30"
+    return session_minute(session_date, value)[-5:] <= "15:30"
 
 
 if __name__ == "__main__":
