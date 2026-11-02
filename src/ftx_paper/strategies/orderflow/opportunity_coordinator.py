@@ -18,7 +18,7 @@ from .opportunity import (
     form_opportunity,
     opportunity_identity,
 )
-from .orderflow_common import Aggregate
+from .orderflow_common import Aggregate, candle_reference
 from .policies.base import HypothesisEvaluation
 from .state_machine_types import LocationRegistry
 from .templates import Direction, TradeTemplate
@@ -146,6 +146,8 @@ class OpportunityCoordinator:
         )
         lifecycle.comparison_key = identity
         lifecycle.conflict_key = f"{lifecycle.session_date}:{lifecycle.instrument}:{interaction.location}"
+        if not response.evidence:
+            raise ValueError("selected response requires candle evidence")
         values = {
             **lifecycle.to_dict(),
             "kind": "lifecycle_formed",
@@ -167,9 +169,11 @@ class OpportunityCoordinator:
             "reference_level": lifecycle.reference_level,
             "entry_boundary": setup.entry_zone_low,
             "failure_boundary": lifecycle.failure_boundary,
-            "context_candle_id": context_candle.time,
+            "context_candle_id": nifty_label(context_candle.time),
+            "context_candle_reference": candle_reference(context_candle),
             "context_candle_available_at": context_candle.available_at,
             "response_candle_id": response.evidence_ids[-1],
+            "response_candle_reference": candle_reference(response.evidence[-1]),
             "response_observed_at": response.observed_at,
             "response_available_at": response.available_at,
             "response_evidence_ids": list(response.evidence_ids),
@@ -310,9 +314,11 @@ class OpportunityCoordinator:
             "reference_level": record.price,
             "entry_boundary": setup.entry_zone_low,
             "failure_boundary": response.invalidation_boundary,
-            "context_candle_id": candle.time,
+            "context_candle_id": nifty_label(candle.time),
+            "context_candle_reference": candle_reference(candle),
             "context_candle_available_at": candle.available_at,
-            "response_candle_id": candle.time,
+            "response_candle_id": response.evidence_ids[-1],
+            "response_candle_reference": candle_reference(response.evidence[-1]),
             "response_observed_at": response.observed_at,
             "response_available_at": response.available_at,
             "response_evidence_ids": list(response.evidence_ids),

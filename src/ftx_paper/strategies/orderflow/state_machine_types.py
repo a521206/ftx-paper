@@ -4,17 +4,51 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
+import hashlib
+import json
 from typing import Any, Iterable, Mapping, Sequence
 from datetime import datetime
 
 from .hierarchy import ContextVersionRef, MarketContext
 from .location_geometry import BAND_ATR_FRACTION, LocationBand
 from .orderflow_common import Aggregate
-from .timestamps import coerce_timestamp, nifty_label
+from .timestamps import coerce_timestamp, nifty_label, serialize_utc
+
 from .lifecycle import EvidenceRef, LifecycleEvent, LifecycleStage, OpportunityStatus, SetupOpportunity  # noqa: F401
 from .opportunity import DirectionalResponse, OpportunityOutcome, OpportunityOutcomeStatus  # noqa: F401
 from .templates import Direction
 from .hierarchy import TriggerObservation
+
+_EXECUTION_TRANSITION_KINDS = frozenset({
+    "entry_pending", "admission_decided", "intent_effective",
+    "intent_cancelled", "entry_cancelled", "exit_signal",
+    "exit_decision", "filled", "position_closed",
+})
+
+
+def _parity_safe(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return serialize_utc(value)
+    if isinstance(value, Mapping):
+        return {str(key): _parity_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_parity_safe(item) for item in value]
+    return value
+
+
+_EXECUTION_DIAGNOSTIC_KINDS = frozenset({
+    "intent_armed", "trigger_observation", "execution_proposal_created",
+    "execution_proposal_selected", "execution_proposal_suppressed",
+    "admission_decided", "entry_pending", "filled", "position_closed",
+    "intent_cancelled", "entry_cancelled", "entry_blocked_risk",
+    "entry_blocked_rr", "entry_blocked_exit_plan", "trigger_denied_portfolio",
+    "exit_signal", "exit_order", "exit_trigger_observed", "exit_decision",
+    "stop_updated",
+    "position_reversal_requested",
+})
+
+ORDERFLOW_TRAIL_ACTIVATE_BP = 20.0
+ORDERFLOW_TRAIL_BP = 20.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,6 +284,9 @@ class ReplayContext:
     regime_gate_blocked_lifecycles: set[str] = field(default_factory=set)
     session_extreme_gate_blocked_lifecycles: set[str] = field(default_factory=set)
     events: list[dict[str, Any]] = field(default_factory=list)
+    pending_bar_events: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    execution_diagnostics: list[dict[str, Any]] = field(default_factory=list)
+    neutral_event_ordinals: dict[tuple[str, ...], int] = field(default_factory=dict, repr=False)
     transitions: list[dict[str, Any]] = field(default_factory=list)
     decision_context_evidence: list[dict[str, Any]] = field(default_factory=list)
     opportunity_identities: dict[str, str] = field(default_factory=dict)
@@ -307,15 +344,90 @@ class ReplayContext:
     def record_decision_context(self, evidence: dict[str, Any]) -> None:
         self.decision_context_evidence.append(dict(evidence))
 
-    def record_event(self, event: dict[str, Any]) -> None:
+    def record_event(self, event: dict[str, Any], *, record_lifecycle: bool = True) -> None:
         payload = dict(event)
-        self.events.append(payload)
         lifecycle_id = payload.get("lifecycle_id")
-        if lifecycle_id is None:
-            return
-        lifecycle = self.opportunities.get(str(lifecycle_id))
-        if lifecycle is not None:
-            lifecycle.record(payload)
+        lifecycle = (
+            self.opportunities.get(str(lifecycle_id))
+            if lifecycle_id is not None else None
+        )
+        if lifecycle is not None and record_lifecycle:
+            payload = lifecycle.record(payload)
+        elif lifecycle is not None:
+            payload.setdefault("lifecycle_id", lifecycle.lifecycle_id)
+            payload.setdefault("direction", lifecycle.direction.value)
+            payload.setdefault("lifecycle_stage", lifecycle.stage.value)
+        observed_at = payload.get("observed_at", payload.get("time"))
+        available_at = payload.get("available_at", observed_at)
+        payload.setdefault("session_date", str(
+            payload.get("session_date")
+            or (lifecycle.session_date if lifecycle is not None else "")
+            or self.current_session_date
+            or ""
+        ))
+        payload.setdefault("observed_at", observed_at)
+        payload.setdefault("available_at", available_at)
+        if isinstance(observed_at, str):
+            payload.setdefault("causal_observed_at", observed_at)
+        if isinstance(available_at, str):
+            payload.setdefault("causal_available_at", available_at)
+        payload.setdefault("event_id", f"replay:{len(self.events)}")
+        payload.setdefault("sequence", len(self.events))
+        payload.setdefault("policy_version", "orderflow-v1")
+        payload.setdefault("provenance", "causal_replay")
+        causal_ids = tuple(
+            (name, str(payload[name]))
+            for name in (
+                "interaction_id", "lifecycle_id", "candidate_id", "setup_id",
+                "opportunity_id", "intent_id", "reservation_id", "order_id",
+                "position_id", "fill_id",
+            )
+            if payload.get(name) is not None
+        )
+        event_basis = {
+            "kind": str(payload.get("kind", "")),
+            "session_date": payload.get("session_date"),
+            "observed_at": _parity_safe(observed_at),
+            "available_at": _parity_safe(available_at),
+            "causal_ids": causal_ids,
+            "causal_parent_id": payload.get("causal_parent_id") or payload.get("parent_id"),
+            "level": payload.get("level"),
+            "reason": payload.get("reason") or payload.get("reason_code"),
+        }
+        ordinal_key = tuple(
+            str(event_basis[key]) for key in (
+                "kind", "observed_at", "available_at", "level", "reason",
+            ) + ("causal_parent_id",)
+        ) + tuple(value for pair in causal_ids for value in pair)
+        ordinal = self.neutral_event_ordinals.get(ordinal_key, 0)
+        self.neutral_event_ordinals[ordinal_key] = ordinal + 1
+        neutral_event_key = "niftyzoning:derived:" + hashlib.sha256(
+            json.dumps(event_basis, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+        ).hexdigest()
+        if ordinal:
+            neutral_event_key = f"{neutral_event_key}:occurrence-{ordinal}"
+        payload.setdefault("neutral_event_key", neutral_event_key)
+        parity_stream = payload.get("parity_stream")
+        if parity_stream is None and payload.get("kind") in _EXECUTION_TRANSITION_KINDS:
+            parity_stream = "execution_transitions"
+        if parity_stream is not None:
+            self.record_parity_fact(str(parity_stream), {
+                "kind": str(payload.get("kind", "")),
+                "occurred_at": _parity_safe(observed_at),
+                "observed_at": _parity_safe(observed_at),
+                "available_at": _parity_safe(available_at),
+                "sequence": len(self.parity_streams.get(str(parity_stream), [])),
+                "identity": str(payload.get("neutral_event_key", payload.get("event_id", ""))),
+                "causal_parent_id": lifecycle_id,
+                "values": _parity_safe(payload),
+                "unavailable": [],
+            })
+        self.events.append(payload)
+        if payload.get("kind") in _EXECUTION_DIAGNOSTIC_KINDS:
+            self.execution_diagnostics.append({
+                "sequence": len(self.execution_diagnostics),
+                **payload,
+            })
 
     def record_transition(self, transition: dict[str, Any]) -> None:
         self.transitions.append(dict(transition))

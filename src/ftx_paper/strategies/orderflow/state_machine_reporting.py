@@ -45,40 +45,42 @@ def build_replay_payload(
     execution_fills = [
         asdict(fill) for state in execution_states for fill in state.fills
     ]
-    ledger_mutations: list[dict[str, Any]] = []
-    for state in execution_states:
-        parent = state.opportunity_id
-        for reservation in state.reservation_history:
-            ledger_mutations.append({
-                "kind": "reservation", "opportunity_id": parent,
-                **asdict(reservation),
-            })
-            if reservation.released_at:
+    execution_transitions = list(streams.get("execution_transitions", ()))
+    ledger_mutations = list(streams.get("ledger_mutations", ()))
+    if not ledger_mutations:
+        for state in execution_states:
+            parent = state.opportunity_id
+            for reservation in state.reservation_history:
                 ledger_mutations.append({
-                    "kind": "reservation_release", "opportunity_id": parent,
-                    "reservation_id": reservation.reservation_id,
-                    "occurred_at": reservation.released_at,
-                    "reason": reservation.release_reason,
+                    "kind": "reservation",
+                    "opportunity_id": parent,
+                    **asdict(reservation),
                 })
-        for admission in state.admission_history:
-            if admission.status.value != "NOT_EVALUATED":
+                if reservation.released_at:
+                    ledger_mutations.append({
+                        "kind": "reservation_release",
+                        "opportunity_id": parent,
+                        "reservation_id": reservation.reservation_id,
+                        "occurred_at": reservation.released_at,
+                        "reason": reservation.release_reason,
+                    })
+            for admission in state.admission_history:
+                if admission.status.value != "NOT_EVALUATED":
+                    ledger_mutations.append({
+                        "kind": "authorization",
+                        "opportunity_id": parent,
+                        **asdict(admission),
+                    })
+            for fill in state.fills:
                 ledger_mutations.append({
-                    "kind": "authorization", "opportunity_id": parent,
-                    **asdict(admission),
+                    "kind": (
+                        "exit_settlement"
+                        if fill.kind in {"exit", "partial_exit"}
+                        else "fill"
+                    ),
+                    "opportunity_id": parent,
+                    **asdict(fill),
                 })
-        for fill in state.fills:
-            ledger_mutations.append({
-                "kind": "exit_settlement" if fill.kind in {"exit", "partial_exit"} else "fill",
-                "opportunity_id": parent, **asdict(fill),
-            })
-    execution_transitions = [
-        record for record in records
-        if record.get("kind") in {
-            "entry_pending", "admission_decided", "intent_effective",
-            "intent_cancelled", "entry_cancelled", "exit_signal",
-            "exit_decision", "filled", "position_closed",
-        }
-    ]
     phase7_input = {
         "parity_phase_facts": streams,
         "execution_fills": execution_fills,
@@ -107,6 +109,9 @@ def build_replay_payload(
         "execution_fills": _json_safe(execution_fills),
         "execution_transitions": _json_safe(execution_transitions),
         "ledger_mutations": _json_safe(ledger_mutations),
+        "execution_diagnostics": _json_safe(
+            getattr(context, "execution_diagnostics", ())
+        ),
     }
     # Validate the producer-owned shape without manufacturing missing streams.
     if phase_facts or execution_states:

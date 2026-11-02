@@ -25,6 +25,16 @@ def canonical_timestamp(value: str | datetime) -> datetime:
     return parse_nifty_label(text)
 
 
+def candle_reference(candle: "Aggregate") -> dict[str, str]:
+    """Return the repository-neutral identity of a completed candle."""
+    return {
+        "session_date": candle.session_date,
+        "timeframe": candle.timeframe,
+        "start_at": serialize_utc(candle.time),
+        "end_at": serialize_utc(candle.end_time),
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class Aggregate:
     time: datetime

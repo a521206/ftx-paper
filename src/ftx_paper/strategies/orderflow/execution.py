@@ -28,7 +28,7 @@ from .hierarchy import (
 from .lifecycle import SetupOpportunity
 from .templates import Direction, OpeningInteractionKind, StopPolicy
 from .state_machine_types import CanonicalExecutionProposal, ReplayContext
-from .timestamps import coerce_timestamp, nifty_label
+from .timestamps import coerce_timestamp, nifty_label, parse_session_timestamp
 from .allocation import entry_block_reason
 from .active_position_gate import ActivePositionGate
 from .response import (
@@ -41,8 +41,13 @@ from .response import (
 from .features import daily_atr
 from .interactions import InteractionSnapshot
 from .state_machine_evidence import acceptance_trigger_evidence
-from .state_machine_types import DISPLACEMENT_RULES
+from .state_machine_types import (
+    DISPLACEMENT_RULES,
+    ORDERFLOW_TRAIL_ACTIVATE_BP,
+    ORDERFLOW_TRAIL_BP,
+)
 from .orderflow_common import build_aggregate_result
+from ftx_paper.risk.trail_stop import TrailConfig, TrailTracker
 
 SESSION_EXIT_DEADLINE = "15:10"
 STRUCTURE_TIMEFRAME = "5m"
@@ -810,7 +815,7 @@ class ExecutionEngine:
         state.position = updated
         state.fills.append(
             Fill(
-                f"{position.position_id}:partial:{filled_at}",
+                f"{position.position_id}:partial:{nifty_label(coerce_timestamp(filled_at))}",
                 life.lifecycle_id,
                 "partial_exit",
                 quantity,
@@ -934,6 +939,18 @@ def protective_stop_price(
     ) and entry_price != failure_boundary:
         return float(failure_boundary), "failure_boundary"
     return None, "trail_distance_fallback"
+
+
+def protective_stop_distance_bp(
+    direction: str,
+    entry_price: float,
+    failure_boundary: float,
+    fallback_bp: float,
+) -> tuple[float, str]:
+    stop, source = protective_stop_price(direction, entry_price, failure_boundary)
+    if stop is not None:
+        return abs(entry_price - stop) / entry_price * 10000.0, source
+    return fallback_bp, "trail_distance_fallback"
 
 
 def risk_adjustment(
@@ -1119,7 +1136,7 @@ def update_position_stop(
     is_or_vwap = (
         setup is not None
         and getattr(getattr(setup, "template", None), "stop_policy", None)
-        is StopPolicy.OR_VWAP
+        == StopPolicy.OR_VWAP
     )
     candidate = current_vwap_stop if is_or_vwap else current_trailing_stop
     source = "vwap" if is_or_vwap else "trailing"
@@ -1129,14 +1146,23 @@ def update_position_stop(
             if position.direction == "long"
             else entry - position.initial_risk_points
         )
-        candidate = (
-            max(one_r, candidate)
-            if position.direction == "long" and candidate is not None
-            else min(one_r, candidate)
-            if position.direction == "short" and candidate is not None
-            else one_r
-        )
-        source = "post_3r_1r"
+        locations = {
+            str(item)
+            for item in getattr(getattr(setup, "template", None), "locations", ())
+        }
+        if "OR_LOW" in locations and position.direction == "short":
+            candidate = min(one_r, candidate) if candidate is not None else one_r
+        elif "OR_HIGH" in locations and position.direction == "long":
+            candidate = max(one_r, candidate) if candidate is not None else one_r
+        else:
+            candidate = (
+                max(one_r, candidate)
+                if position.direction == "long" and candidate is not None
+                else min(one_r, candidate)
+                if position.direction == "short" and candidate is not None
+                else one_r
+            )
+        source = "post_3r_1r" if candidate == one_r else source
     current = position.protective_stop
     if candidate is None:
         return StopUpdate(current, "existing_stop_retained", False)
@@ -1247,9 +1273,19 @@ class ExecutionCoordinator:
         return self.context.parity_streams
 
     def _record_fill(self, fill: Fill) -> None:
+        self.context.record_event({
+            "kind": "filled",
+            "lifecycle_id": fill.opportunity_id,
+            "observed_at": fill.filled_at,
+            "available_at": fill.filled_at,
+            "fill_price": fill.price,
+            "quantity": fill.quantity,
+            "requested_price": fill.price,
+        }, record_lifecycle=False)
         self.context.record_parity_fact("execution_fills", {
-            "kind": f"{fill.kind}_fill",
-            "identity": fill.fill_id,
+            "kind": fill.kind,
+            "fill_id": fill.fill_id,
+            "opportunity_id": fill.opportunity_id,
             "causal_parent_id": fill.opportunity_id,
             "occurred_at": fill.filled_at,
             "observed_at": fill.filled_at,
@@ -1257,13 +1293,46 @@ class ExecutionCoordinator:
             "values": {
                 "fill_id": fill.fill_id,
                 "opportunity_id": fill.opportunity_id,
-                "kind": fill.kind,
-                "quantity": fill.quantity,
+                 "kind": fill.kind,
+                 "filled_at": fill.filled_at,
+                 "quantity": fill.quantity,
                 "price": fill.price,
                 "cost": fill.cost,
             },
             "unavailable": [],
         })
+
+    def _initialize_trail_tracker(self, life: SetupOpportunity) -> None:
+        state = self.engine.state_for(life.lifecycle_id)
+        position = state.position
+        setup = state.setup
+        if position is None or position.fill_price is None:
+            raise ValueError("trail tracker requires a filled position")
+        if (
+            setup is not None
+            and getattr(getattr(setup, "template", None), "stop_policy", None)
+            == StopPolicy.OR_VWAP
+        ):
+            return
+        hard_stop_bp, _ = protective_stop_distance_bp(
+            position.direction,
+            position.fill_price,
+            position.failure_boundary,
+            ORDERFLOW_TRAIL_BP,
+        )
+        self.engine.set_trail_tracker(
+            life,
+            TrailTracker(
+                entry_price=position.fill_price,
+                direction=position.direction,
+                hard_stop_bp=hard_stop_bp,
+                config=TrailConfig(
+                    activation_bp=ORDERFLOW_TRAIL_ACTIVATE_BP,
+                    distance_bp=ORDERFLOW_TRAIL_BP,
+                    breakeven_lock=True,
+                ),
+            ),
+        )
 
     def settle_exit(
         self, life: SetupOpportunity, *, filled_at: str, open_price: float,
@@ -1681,6 +1750,7 @@ class ExecutionCoordinator:
                     protective_stop=decision.hard_stop,
                     exit_plan=accepted,
                 )
+                self._initialize_trail_tracker(life)
                 self._record_fill(self.engine.state_for(life.lifecycle_id).fills[-1])
                 self.context.record_parity_fact("ledger_mutations", {
                     "kind": "position_opened",
@@ -1764,7 +1834,7 @@ class ExecutionCoordinator:
         return bool(
             life.active
             and setup is not None
-            and timestamp >= str(setup.expires_at)
+            and coerce_timestamp(timestamp) >= coerce_timestamp(setup.expires_at)
             and not self.context.position_is_open(life)
         )
 
@@ -1837,7 +1907,7 @@ class ExecutionCoordinator:
             or life.candidate_invalidated
             or setup is None
             or not setup.active
-            or as_of >= str(setup.expires_at)
+            or coerce_timestamp(as_of) >= coerce_timestamp(setup.expires_at)
         ):
             return False
         latest = getattr(self.context, "latest_completed_5m", None)
@@ -2096,6 +2166,7 @@ class ExecutionCoordinator:
                             or ()
                         ),
                     )
+                    self._initialize_trail_tracker(life)
             return
         if (
             state.intent is None
@@ -2103,12 +2174,13 @@ class ExecutionCoordinator:
             or state.position is not None
         ):
             return
-        if timestamp >= str(state.intent.expiry):
+        if coerce_timestamp(timestamp) >= coerce_timestamp(state.intent.expiry):
             cancelled = cancel_intent(intent=state.intent, reason="expired")
             self.engine.update_intent(life, cancelled)
             event = {
                 "kind": "intent_cancelled",
                 "intent_id": cancelled.intent_id,
+                "lifecycle_id": life.lifecycle_id,
                 "time": timestamp,
                 "reason": "expired",
             }
@@ -2209,6 +2281,9 @@ class ExecutionCoordinator:
             "intent_id": state.intent.intent_id,
             "lifecycle_id": life.lifecycle_id,
             "setup_id": state.intent.setup_id,
+            "location": life.location,
+            "template_id": getattr(setup.template, "template_id", None),
+            "stop_policy": getattr(setup.template, "stop_policy", ""),
             "observed_at": timestamp,
             "available_at": next_time,
             "crossed": observation.crossed,
@@ -2335,6 +2410,7 @@ class ExecutionCoordinator:
                 bar_events.append(event)
                 continue
             blocked = None
+            gate_evidence = None
             if not getattr(life, "episode_confirmed", True):
                 blocked = "response_episode_unconfirmed"
             elif self.engine.entry_owner(
@@ -2343,8 +2419,46 @@ class ExecutionCoordinator:
                 entry_price=proposal.observation.price,
             ) not in {None, life.lifecycle_id}:
                 blocked = "entry_already_owned"
-            elif self.active_position_gate.check(self.context, life, timestamp) is not None:
+            elif (gate_evidence := self.active_position_gate.check(
+                self.context, life, timestamp
+            )) is not None:
                 blocked = "active_position_session_extreme_gate"
+            if str(life.location) in {"SESSION_LOW", "SESSION_HIGH"}:
+                self.context.execution_diagnostics.append({
+                    "kind": "active_position_gate_evaluated",
+                    "lifecycle_id": life.lifecycle_id,
+                    "location": str(life.location),
+                    "observed_at": timestamp,
+                    "available_at": next_time,
+                    "active_positions": [
+                        {
+                            "position_id": position.position_id,
+                            "lifecycle_id": getattr(position, "lifecycle_id", None),
+                            "direction": position.direction,
+                        }
+                        for position in self.engine.open_positions()
+                    ],
+                    "gate_result": blocked,
+                    "blocking_reason": (
+                        gate_evidence.get("block_reason")
+                        if gate_evidence is not None else None
+                    ),
+                    "gate_evidence": gate_evidence,
+                    "gate_state": {
+                        "bars_count": len(self.context.aggregates.get("5m", ())),
+                        "latest_bar_end_time": getattr(
+                            getattr(self.active_position_gate, "_latest_bar", None),
+                            "end_time", None,
+                        ),
+                        "latest_bar_available_at": getattr(
+                            getattr(self.active_position_gate, "_latest_bar", None),
+                            "available_at", None,
+                        ),
+                        "latest_vwap": getattr(
+                            self.active_position_gate, "_latest_vwap", None
+                        ),
+                    },
+                })
             if blocked is None:
                 blocked = self._failed_reversal_block_reason(life, timestamp, bar_events)
             regime_gate = getattr(self.context, "regime_gate", None)
@@ -2404,6 +2518,7 @@ class ExecutionCoordinator:
                         "kind": "position_reversal_requested",
                         "time": timestamp,
                         "available_at": next_time,
+                        "lifecycle_id": reversal_from.lifecycle_id,
                         "from_lifecycle_id": reversal_from.lifecycle_id,
                         "to_lifecycle_id": life.lifecycle_id,
                         "direction": life.direction.value,
@@ -2496,10 +2611,11 @@ class ExecutionCoordinator:
                             "position_id": cancelled.position_id,
                             "rule_id": cancelled.rule_id,
                             "reason": "expired",
+                            "lifecycle_id": life.lifecycle_id,
                             "observed_at": timestamp,
                             "available_at": timestamp,
                         }
-                        context.record_event(event)
+                        context.record_event(event, record_lifecycle=False)
                         bar_events.append(event)
                     return self.handle_management(
                         index, timestamp, next_time, row, available5, bar_events, life
@@ -2526,10 +2642,11 @@ class ExecutionCoordinator:
                         "position_id": intent.position_id,
                         "rule_id": intent.rule_id,
                         "reason": f"delayed_revalidation:{admission}",
+                        "lifecycle_id": life.lifecycle_id,
                         "observed_at": timestamp,
                         "available_at": timestamp,
                     }
-                    context.record_event(event)
+                    context.record_event(event, record_lifecycle=False)
                     bar_events.append(event)
                     return self.handle_management(
                         index, timestamp, next_time, row, available5, bar_events, life
@@ -2547,7 +2664,7 @@ class ExecutionCoordinator:
                 "lifecycle_id": life.lifecycle_id,
                 "execution_assumptions": execution.order.execution_policy,
             }
-            context.record_event(event)
+            context.record_event(event, record_lifecycle=False)
             bar_events.append(event)
             after = self.engine.state_for(life.lifecycle_id)
             if execution.position_after.status is PositionStatus.OPEN:
@@ -2563,7 +2680,7 @@ class ExecutionCoordinator:
                     "execution_assumptions": execution.order.execution_policy,
                     "lifecycle_id": life.lifecycle_id,
                 }
-                context.record_event(partial)
+                context.record_event(partial, record_lifecycle=False)
                 bar_events.append(partial)
             if execution.position_after.status is PositionStatus.CLOSED:
                 closed = {
@@ -2579,7 +2696,7 @@ class ExecutionCoordinator:
                     "reward_points": after.realized_points,
                     "lifecycle_id": life.lifecycle_id,
                 }
-                context.record_event(closed)
+                context.record_event(closed, record_lifecycle=False)
                 bar_events.append(closed)
                 position_intent = after.position.exit_intent if after.position is not None else None
                 if position_intent is not None:
@@ -2596,10 +2713,11 @@ class ExecutionCoordinator:
                                 "position_id": cancelled.position_id,
                                 "rule_id": cancelled.rule_id,
                                 "reason": "position_closed",
+                                "lifecycle_id": life.lifecycle_id,
                                 "observed_at": timestamp,
                                 "available_at": timestamp,
                             }
-                            context.record_event(intent_event)
+                            context.record_event(intent_event, record_lifecycle=False)
                             bar_events.append(intent_event)
                 self.engine.clear_pending_exit(life)
             return
@@ -2632,7 +2750,7 @@ class ExecutionCoordinator:
         is_or_vwap = (
             setup is not None
             and getattr(getattr(setup, "template", None), "stop_policy", None)
-            is StopPolicy.OR_VWAP
+            == StopPolicy.OR_VWAP
         )
         if is_or_vwap:
             previous_trail, trailing_stop, trail_was_active = None, None, False
@@ -2682,6 +2800,7 @@ class ExecutionCoordinator:
                 "kind": "exit_signal",
                 "level": "3R",
                 "reason": "partial_3r",
+                "lifecycle_id": life.lifecycle_id,
                 "observed_at": timestamp,
                 "available_at": next_time,
                 "quantity": quantity,
@@ -2690,7 +2809,7 @@ class ExecutionCoordinator:
                 "owner": "position_management",
                 "evidence_timeframe": "1m",
             }
-            context.record_event(event)
+            context.record_event(event, record_lifecycle=False)
             bar_events.append(event)
         synthetic_snapshots = None
         if state.intent is not None:
@@ -2711,7 +2830,17 @@ class ExecutionCoordinator:
                 return
             entry_price = position.fill_price
             continuation = failed_continuation(
-                context.rows[:index],
+                [
+                    {
+                        **item,
+                        "time": nifty_label(
+                            parse_session_timestamp(
+                                str(life.session_date), item["time"]
+                            )
+                        )[11:],
+                    }
+                    for item in context.rows[:index]
+                ],
                 [
                     item
                     for item in context.aggregates.get("1m", [])
@@ -2723,9 +2852,41 @@ class ExecutionCoordinator:
                 direction=life.direction.value,
                 entry_price=entry_price,
                 failure_boundary=life.failure_boundary,
-                entry_time=state.entry_at,
+                # ``prior`` contains session-local source-row labels while
+                # execution state stores UTC instants. Compare like-for-like
+                # so pre-entry rows cannot satisfy continuation evidence.
+                entry_time=(
+                    nifty_label(coerce_timestamp(state.entry_at))[11:]
+                    if state.entry_at is not None else None
+                ),
                 synthetic=synthetic_snapshots,
             )
+            if life.lifecycle_id.endswith("short-candidate-1") and (
+                continuation is not None or len(synthetic_snapshots or ()) >= 2
+            ):
+                context.execution_diagnostics.append({
+                    "kind": "failed_continuation_evaluated",
+                    "lifecycle_id": life.lifecycle_id,
+                    "observed_at": timestamp,
+                    "available_at": next_time,
+                    "location_interaction_id": life.location_interaction_id,
+                    "entry_at": state.entry_at,
+                    "completed_1m_count": len(context.aggregates.get("1m", ())),
+                    "completed_5m_count": len(available5),
+                    "synthetic_snapshot_count": len(synthetic_snapshots or ()),
+                    "synthetic_snapshots": [
+                        {
+                            "available_at": item.available_at,
+                            "last_source_end": item.last_source_end,
+                            "source_candle_ids": list(item.source_candle_ids),
+                            "high": item.high,
+                            "low": item.low,
+                            "close": item.close,
+                        }
+                        for item in (synthetic_snapshots or ())[-3:]
+                    ],
+                    "continuation": continuation,
+                })
             if continuation is not None:
                 self._queue_exit("failed_continuation", next_time, life)
                 event = {
@@ -2763,6 +2924,7 @@ class ExecutionCoordinator:
                 "available_at": source_bar.available_at
                 if source_bar is not None
                 else next_time,
+                "lifecycle_id": life.lifecycle_id,
                 "position_id": position.position_id,
                 "previous_stop": prior_stop,
                 "trailing_stop": trailing_stop,
@@ -2772,7 +2934,7 @@ class ExecutionCoordinator:
                 "active_stop": position.protective_stop,
                 "stop_source": stop_update.source,
             }
-            context.record_event(event)
+            context.record_event(event, record_lifecycle=False)
             bar_events.append(event)
         protective_stop = position.protective_stop
         can_trigger = (
@@ -2818,6 +2980,7 @@ class ExecutionCoordinator:
                 "kind": "exit_signal",
                 "level": "1m",
                 "reason": reason,
+                "lifecycle_id": life.lifecycle_id,
                 "observed_at": timestamp,
                 "available_at": next_time,
                 "fill_price": fill_price,
@@ -2826,7 +2989,7 @@ class ExecutionCoordinator:
                 "owner": "1m",
                 "evidence_timeframe": "1m",
             }
-            context.record_event(event)
+            context.record_event(event, record_lifecycle=False)
             bar_events.append(event)
 
     def evaluate_position_exit_plan(

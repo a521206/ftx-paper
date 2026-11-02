@@ -35,6 +35,17 @@ from ftx_paper.strategies.orderflow.value_publication import (
 from ftx_paper.strategies.orderflow.timestamps import coerce_timestamp, nifty_label, session_minute
 from ftx_paper.strategies.orderflow.phase7_projection import PHASE7_STREAMS
 
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class _AvailableAggregate:
     available_at: datetime
@@ -388,11 +399,15 @@ class OrderflowReplayEngine:
                 **({"opportunity_lifecycle": interaction_phase_facts["opportunity_lifecycle"]}
                    if interaction_phase_facts else {}),
                  **({"interaction_response": list(interaction_response)} if include_interactions else {}),
-                 **({
+             **({
                      name: list(interaction_replay.execution_phase_facts.get(name, ()))
                      for name in PHASE7_STREAMS
-                 } if interaction_replay is not None else {}),
-            },
+                  } if interaction_replay is not None else {}),
+              },
+             "execution_diagnostics": (
+                 _json_safe(list(interaction_replay.execution_diagnostics))
+                 if interaction_replay is not None else []
+             ),
             "evidence": final_evidence,
         }
 

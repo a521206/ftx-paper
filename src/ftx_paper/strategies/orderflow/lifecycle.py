@@ -11,7 +11,7 @@ from datetime import datetime
 
 from .hierarchy import ContextVersionRef
 from .orderflow_common import Aggregate, canonical_timestamp
-from .templates import Direction
+from .templates import Direction, LocationTemplate
 from .timestamps import coerce_timestamp, nifty_label
 
 
@@ -71,7 +71,7 @@ class SetupOpportunity:
     formation_available_at: datetime
     candidate_id: str
     parent_context: ContextVersionRef | None
-    location: str | None
+    location: LocationTemplate | str | None
     reference_level: float | None
     context_candle: Aggregate | None
     breakout_level: float

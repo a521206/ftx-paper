@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
 
 from .coordinator import OrderflowAdvance, OrderflowClockInput, OrderflowCoordinator
-from .execution import ExecutionCoordinator, ExecutionEngine
+from .execution import AdmissionStatus, ExecutionCoordinator, ExecutionEngine, IntentStatus
 from .hierarchy import ContextVersionRef, TriggerObservation
 from .opportunity_coordinator import LifecycleFormation
 from .opportunity_timeout import advance_opportunity_timeout
@@ -42,6 +42,22 @@ class OrderflowTransitionOwner:
     mode: str = "FULL"
     _clock: datetime | None = field(default=None, init=False, repr=False)
     _published_intents: set[str] = field(default_factory=set, init=False, repr=False)
+
+    @staticmethod
+    def _intent_allows_requalification(state: Any) -> bool:
+        intent = state.intent
+        if intent is None:
+            return state.admission.status is AdmissionStatus.NOT_EVALUATED
+        return (
+            intent.status is IntentStatus.CANCELLED
+            and intent.cancel_reason in {
+                "opening_gap_permission_changed",
+                "decision_context_unavailable",
+                "decision_context_scores_unavailable",
+                "fill_permission_mismatch",
+                "active_position_session_extreme_gate",
+            }
+        )
 
     def __post_init__(self) -> None:
         self.observation_owner = OrderflowCoordinator(self.location_registry)
@@ -265,7 +281,13 @@ class OrderflowTransitionOwner:
         observations are evaluated only after that pass and are selected for
         the next bar, preventing same-bar trigger/fill transitions.
         """
-        events: list[dict[str, Any]] = []
+        # The gate and position-management policies consume the same completed
+        # 5m evidence that drove this execution clock. Keep it visible on the
+        # shared context before any proposal is evaluated.
+        if available5:
+            self.context.aggregates["5m"] = list(available5)
+        events = list(self.context.pending_bar_events)
+        self.context.pending_bar_events.clear()
         managed: list[Any] = list(formations)
         formation_ids = {
             item.lifecycle.lifecycle_id
@@ -292,7 +314,7 @@ class OrderflowTransitionOwner:
                 life,
                 interaction=interaction,
                 evidence=available5,
-                as_of=next_time,
+                as_of=timestamp,
             )
             if life.timeout_count >= life.timeout_limit:
                 self.execution_owner.expire_opportunity(
@@ -329,14 +351,36 @@ class OrderflowTransitionOwner:
                 timestamp=timestamp,
                 bar_events=events,
             )
+            state = self.execution_owner.engine.state_for(life.lifecycle_id)
+            if (
+                self.mode == "FULL"
+                and
+                life.active
+                and self.context.regime is not None
+                and self._intent_allows_requalification(state)
+                and not self.execution_owner.opportunity_expired(
+                    life, timestamp=timestamp
+                )
+            ):
+                self.execution_owner.admit_opportunity(life, next_time, events)
             self.execution_owner.handle_management(
                 index, timestamp, next_time, dict(row), list(available5), events, life,
                 defer_discretionary_execution=True,
             )
-            self.execution_owner.handle_execution(
-                index, timestamp, next_time, dict(row), [], events, life,
-                evaluate_entries=True,
-            )
+            if (
+                self.mode == "FULL"
+                and
+                life.active
+                and (
+                    getattr(life, "episode_confirmed", True)
+                    or coerce_timestamp(timestamp)
+                    > coerce_timestamp(life.formation_available_at)
+                )
+            ):
+                self.execution_owner.handle_execution(
+                    index, timestamp, next_time, dict(row), [], events, life,
+                    evaluate_entries=True,
+                )
         self.execution_owner.select_execution_proposals(timestamp, next_time, events)
         if self.execution_adapter is not None and instrument is not None:
             self._publish_execution_proposals(

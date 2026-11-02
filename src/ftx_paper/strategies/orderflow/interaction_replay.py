@@ -17,7 +17,7 @@ from .location_observation import LocationObservation
 from .orderflow_common import Aggregate, parse_timestamp, serialize_timestamp
 from .timestamps import NIFTY_ZONE, nifty_label, serialize_utc
 from .state_machine_types import LocationRegistry
-from .templates import TRADE_TEMPLATES, TradeTemplate
+from .templates import Direction, OpeningInteractionKind, TRADE_TEMPLATES, TradeTemplate
 from .value_publication import ValuePublication
 from .policies import PDPolicy, StandardLocationPolicy
 from .opportunity_coordinator import OpportunityCoordinator
@@ -32,6 +32,7 @@ class InteractionResponseReplay:
     formations: tuple[Any, ...] = ()
     regime_publications: tuple[tuple[str, Any], ...] = ()
     execution_phase_facts: dict[str, tuple[dict[str, Any], ...]] = field(default_factory=dict)
+    execution_diagnostics: tuple[dict[str, Any], ...] = ()
 
     def parity_phase_facts(self) -> dict[str, list[dict[str, Any]]]:
         return {
@@ -71,6 +72,88 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_jsonable(item) for item in value]
     return value
+
+
+def _handle_opening_interaction(
+    context: Any,
+    row: Mapping[str, Any],
+    facts: list[dict[str, Any]],
+    *,
+    timestamp: str,
+    next_time: str,
+) -> None:
+    """Attach the first completed 1m evidence to provisional opening seeds."""
+    for life in tuple(context.opportunities.values()):
+        if (
+            not life.active
+            or life.opening_policy_version is None
+            or life.opening_interaction_kind in {
+                OpeningInteractionKind.OPENING_BREAKOUT.value,
+                OpeningInteractionKind.OPENING_RETEST.value,
+            }
+            or life.formation_available_at >= parse_timestamp(timestamp)
+        ):
+            continue
+        boundary = life.reference_level
+        if boundary is None or life.context_candle is None:
+            continue
+        high = float(row["high"])
+        low = float(row["low"])
+        close = float(row["close"])
+        direction = Direction(life.direction)
+        crossed = close >= boundary if direction is Direction.LONG else close <= boundary
+        touched = low <= boundary <= high
+        if not (crossed or touched):
+            continue
+        policy = life.opening_policy_version
+        if policy.startswith(OpeningInteractionKind.OPENING_BREAKOUT.value):
+            if not crossed:
+                continue
+            kind = OpeningInteractionKind.OPENING_BREAKOUT
+        elif not life.opening_interaction_evidence:
+            kind = OpeningInteractionKind.OPENING_REJECTION
+        else:
+            has_recovery = any(
+                item.get("kind") == "opening_recovery"
+                for item in life.opening_interaction_evidence
+            )
+            recovered = close > boundary if direction is Direction.SHORT else close < boundary
+            if not has_recovery and recovered:
+                kind = OpeningInteractionKind.OPENING_REJECTION
+            elif has_recovery and crossed:
+                kind = OpeningInteractionKind.OPENING_RETEST
+            else:
+                continue
+        evidence = {
+            "time": str(row["time"]), "observed_at": timestamp,
+            "available_at": next_time, "open": float(row["open"]),
+            "high": high, "low": low, "close": close,
+            "reference_level": boundary,
+            "kind": (
+                "opening_recovery"
+                if kind is OpeningInteractionKind.OPENING_REJECTION
+                and life.opening_interaction_evidence
+                and (close > boundary if direction is Direction.SHORT else close < boundary)
+                else kind.value
+            ),
+        }
+        life.opening_interaction_kind = kind.value
+        life.opening_interaction_evidence.append(evidence)
+        event = {
+            "kind": "opening_interaction",
+            "lifecycle_id": life.lifecycle_id,
+            "interaction_kind": kind.value,
+            "location_interaction_id": None,
+            "evidence": list(life.opening_interaction_evidence),
+            "policy_version": life.opening_policy_version,
+            "observed_at": timestamp,
+            "available_at": next_time,
+        }
+        context.record_event(event)
+        pending_bar_events = getattr(context, "pending_bar_events", None)
+        if isinstance(pending_bar_events, list):
+            pending_bar_events.append(event)
+        facts.append(event)
 
 
 def _publish_replaced_interactions(
@@ -582,6 +665,14 @@ def replay_interaction_response(
             iid: state.evaluation_snapshot()
             for iid, state in detector.interactions.items()
         }
+        if current.timeframe == "1m":
+            _handle_opening_interaction(
+                transition_owner.context,
+                current.to_dict(),
+                facts,
+                timestamp=serialize_utc(current.end_time),
+                next_time=next_time,
+            )
         new_formations = tuple(opportunity_coordinator.formations[processed_formations:])
         if new_formations:
             scores = {
@@ -598,6 +689,10 @@ def replay_interaction_response(
             )
             processed_formations += len(new_formations)
         if current.timeframe == "1m" and opportunity_coordinator.formations:
+            # Preserve the completed evidence window for position-management
+            # policies that consume causal 1m/5m history.
+            transition_owner.context.aggregates["1m"] = list(available1)
+            transition_owner.context.aggregates["5m"] = list(available5)
             transition_owner.advance_replay_bar(
                 tuple(opportunity_coordinator.formations),
                 index=one.index(current),
@@ -621,6 +716,7 @@ def replay_interaction_response(
         tuple(opportunity_coordinator.formations),
         tuple(regime_publications),
         {name: tuple(values) for name, values in transition_owner.context.parity_snapshot().items()},
+        tuple(transition_owner.context.execution_diagnostics),
     )
 
 

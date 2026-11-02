@@ -55,7 +55,7 @@ PHASE6_EVENT_KINDS = frozenset({
 })
 PHASE6_PROVENANCE_FIELDS = (
     "candidate_id", "lifecycle_id", "location", "direction", "template_id",
-    "response_episode_id", "response_candle_id", "response_evidence_ids",
+    "response_episode_id", "context_candle_reference", "response_candle_reference",
     "response_observed_at", "response_available_at", "formation_at",
     "formation_available_at", "stage",
 )
@@ -64,7 +64,9 @@ _CAUSAL_TIMESTAMP_KEYS = frozenset({
     "as_of", "available_at", "current_available_at", "end_time", "formation_at",
     "formation_available_at", "observed_at", "occurred_at", "response_available_at",
     "response_observed_at", "causal_available_at", "causal_observed_at",
-    "context_candle_available_at", "context_candle_id", "response_candle_id", "time",
+    "context_candle_available_at", "time",
+    "filled_at", "reserved_at", "released_at", "decided_at", "effective_at",
+    "triggered_at",
 })
 _TRANSPORT_METADATA_KEYS = frozenset({
     "identity", "neutral_event_key", "event_id", "sequence", "stream_sequence",
@@ -208,8 +210,11 @@ def _canonical_timestamp(value: Any, session_date: str) -> Any:
     text = value.strip()
     if len(text) == 5 and text[2] == ":":
         text = f"{session_date}T{text}"
-    if len(text) == 16 and text[4] == "-" and text[7] == "-" and text[10] == "T":
-        return serialize_utc(parse_session_timestamp(session_date, text))
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-" and text[10] in {"T", " "}:
+        try:
+            return serialize_utc(parse_session_timestamp(session_date, text))
+        except ValueError:
+            return value
     return value
 
 
@@ -243,6 +248,34 @@ def _normalize_observation_payload(payload: dict[str, Any], session_date: str) -
 
 def _normalize_phase_record_for_compare(record: dict[str, Any], session_date: str) -> dict[str, Any]:
     normalized = _normalize_canonical_timestamps(record, session_date)
+
+    candle_reference_keys = {
+        "context_candle_reference", "response_candle_reference",
+        "context_candle_ref", "response_candle_ref",
+    }
+
+    def normalize_candle_references(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            result = {}
+            for item_key, item_value in value.items():
+                key = str(item_key)
+                if key in candle_reference_keys and isinstance(item_value, Mapping):
+                    result[key] = {
+                        str(ref_key): (
+                            _canonical_timestamp(ref_value, session_date)
+                            if str(ref_key) in {"start_at", "end_at"}
+                            else ref_value
+                        )
+                        for ref_key, ref_value in item_value.items()
+                    }
+                else:
+                    result[key] = normalize_candle_references(item_value)
+            return result
+        if isinstance(value, list):
+            return [normalize_candle_references(item) for item in value]
+        return value
+
+    normalized = normalize_candle_references(normalized)
 
     def remove_labels(value: Any) -> Any:
         if isinstance(value, dict):
@@ -752,12 +785,161 @@ def _decision_clock_diagnostics(
             continue
         clock = record.get("decision_clock")
         if isinstance(clock, Mapping):
+            available_1m = clock.get("available_1m")
+            available_5m = clock.get("available_5m")
             diagnostics.append({
+                "sequence": record.get("sequence"),
                 "timestamp": record.get("timestamp"),
                 "available_at": record.get("available_at"),
-                "decision_clock": dict(clock),
+                "decision_at": clock.get("decision_at"),
+                "next_decision_at": clock.get("next_decision_at"),
+                "new_5m": clock.get("new_5m"),
+                "source_1m_time": clock.get("source_1m_time"),
+                "available_1m": _bounded_diagnostic_values(available_1m),
+                "available_5m": _bounded_diagnostic_values(available_5m),
             })
-    return diagnostics
+    if len(diagnostics) <= 8:
+        return diagnostics
+    return [
+        *diagnostics[:4],
+        {"omitted": len(diagnostics) - 8},
+        *diagnostics[-4:],
+    ]
+
+
+def _execution_diagnostics(
+    payload: Mapping[str, Any], lifecycle_id: str, *, canonical: bool,
+) -> list[dict[str, Any]]:
+    diagnostic = payload.get("diagnostic")
+    source: Any = (
+        diagnostic.get("execution_diagnostics", [])
+        if canonical and isinstance(diagnostic, Mapping)
+        else payload.get("execution_diagnostics", [])
+    )
+    if not isinstance(source, list):
+        return []
+    identity_keys = {"lifecycle_id", "opportunity_id", "causal_parent_id"}
+    records = [
+        item for item in source
+        if isinstance(item, Mapping)
+        and any(item.get(key) == lifecycle_id for key in identity_keys)
+    ]
+    keep = {
+        "sequence", "kind", "lifecycle_id", "observed_at", "available_at",
+        "location_interaction_id", "entry_at", "active_positions", "gate_result",
+        "blocking_reason", "gate_evidence", "vwap_source", "synthetic_snapshots",
+        "synthetic_snapshot_count", "continuation", "completed_1m_count",
+        "completed_5m_count", "reason", "evidence_time", "evidence_available_at",
+    }
+    result = [{str(key): value for key, value in item.items() if key in keep} for item in records]
+    if len(result) <= 12:
+        return result
+    return [*result[:6], {"omitted": len(result) - 12}, *result[-6:]]
+
+
+def _bounded_diagnostic_values(value: Any, limit: int = 12) -> list[Any]:
+    if not isinstance(value, list):
+        return []
+    if len(value) <= limit:
+        return list(value)
+    head = limit // 2
+    return [*value[:head], {"omitted": len(value) - limit}, *value[-(limit - head):]]
+
+
+def _lifecycle_records(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    facts = payload.get("parity_phase_facts")
+    records = facts.get("opportunity_lifecycle") if isinstance(facts, Mapping) else None
+    return [item for item in records if isinstance(item, Mapping)] if isinstance(records, list) else []
+
+
+def _lifecycle_id(record: Mapping[str, Any]) -> str | None:
+    values = record.get("values")
+    if isinstance(values, Mapping):
+        value = values.get("lifecycle_id") or values.get("opportunity_id")
+        if value is not None:
+            return str(value)
+    value = record.get("lifecycle_id") or record.get("opportunity_id")
+    return str(value) if value is not None else None
+
+
+def _causal_time(record: Mapping[str, Any]) -> str | None:
+    value = record.get("observed_at") or record.get("occurred_at") or record.get("available_at")
+    if isinstance(value, str):
+        try:
+            return serialize_utc(parse_utc(value))
+        except ValueError:
+            return serialize_utc(parse_session_timestamp(value[:10], value))
+    values = record.get("values")
+    if isinstance(values, Mapping):
+        value = values.get("observed_at") or values.get("available_at") or values.get("time")
+        if isinstance(value, str):
+            try:
+                return serialize_utc(parse_utc(value))
+            except ValueError:
+                return serialize_utc(parse_session_timestamp(value[:10], value))
+    return None
+
+
+def _timeout_before_canonical_trigger(
+    canonical_session: Mapping[str, Any], paper: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Reject Paper expiry that preempts Canonical's first eligible 1m trigger."""
+    paper_expiries: dict[str, Mapping[str, Any]] = {}
+    for record in _lifecycle_records(paper):
+        lifecycle_id = _lifecycle_id(record)
+        if lifecycle_id is not None and record.get("kind") in {"setup_expired", "opportunity_timeout"}:
+            previous = paper_expiries.get(lifecycle_id)
+            current_time = _causal_time(record)
+            previous_time = _causal_time(previous) if previous is not None else None
+            if previous is None or (
+                current_time is not None
+                and (previous_time is None or parse_utc(current_time) < parse_utc(previous_time))
+            ):
+                paper_expiries[lifecycle_id] = record
+    if not paper_expiries:
+        return None
+    canonical_lifecycles: dict[str, Mapping[str, Any]] = {}
+    for record in _lifecycle_records(canonical_session):
+        lifecycle_id = _lifecycle_id(record)
+        if lifecycle_id is not None:
+            canonical_lifecycles[lifecycle_id] = record
+    for lifecycle_id, expiry in paper_expiries.items():
+        if lifecycle_id not in canonical_lifecycles:
+            continue
+        diagnostic = canonical_session.get("diagnostic", {})
+        diagnostics = diagnostic.get("execution_diagnostics", []) if isinstance(diagnostic, Mapping) else []
+        triggers = [
+            item for item in diagnostics
+            if isinstance(item, Mapping)
+            and (
+                item.get("lifecycle_id") == lifecycle_id
+                or item.get("opportunity_id") == lifecycle_id
+                or item.get("causal_parent_id") == lifecycle_id
+            )
+            if item.get("kind") == "trigger_observation"
+            and item.get("level") == "1m"
+            and item.get("eligible") is True
+        ]
+        if not triggers:
+            continue
+        trigger_times = [
+            value for item in triggers
+            if (value := _causal_time(item)) is not None
+        ]
+        trigger_time = min(trigger_times) if trigger_times else None
+        expiry_time = _causal_time(expiry)
+        if trigger_time is None or expiry_time is None:
+            continue
+        if parse_utc(expiry_time) <= parse_utc(trigger_time):
+            return {
+                "status": "MISMATCHED",
+                "stream": "trigger_exit",
+                "reason": "paper_timeout_precedes_first_eligible_canonical_trigger",
+                "lifecycle_id": lifecycle_id,
+                "paper_expiry": expiry_time,
+                "canonical_trigger": serialize_utc(parse_utc(trigger_time)),
+            }
+    return None
 
 
 def _compare_phase6(canonical_path: Path, paper: dict[str, Any], session_date: str) -> dict[str, Any]:
@@ -897,6 +1079,11 @@ def _compare_phase7(canonical_path: Path, paper: dict[str, Any], session_date: s
             canonical_records=lambda stream: canonical_artifact["phase_streams"][stream],
             paper_records=lambda stream: paper_artifact["phase_streams"][stream],
         )
+        ordering = _timeout_before_canonical_trigger(canonical_session, paper)
+        if ordering is not None and result.get("status") == "MATCHED":
+            result = ordering
+        elif ordering is not None:
+            result["causal_ordering"] = ordering
         if result.get("status") == "MISMATCHED":
             records = (result.get("canonical_record"), result.get("paper_record"))
             lifecycle_id = next(
@@ -914,6 +1101,14 @@ def _compare_phase7(canonical_path: Path, paper: dict[str, Any], session_date: s
                 result["decision_clock"] = {
                     "canonical": _decision_clock_diagnostics(canonical_replay, lifecycle_id),
                     "paper": _decision_clock_diagnostics(paper, lifecycle_id),
+                }
+                result["execution_diagnostics"] = {
+                    "canonical": _execution_diagnostics(
+                        canonical_session, lifecycle_id, canonical=True,
+                    ),
+                    "paper": _execution_diagnostics(
+                        paper, lifecycle_id, canonical=False,
+                    ),
                 }
         return result
     except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:

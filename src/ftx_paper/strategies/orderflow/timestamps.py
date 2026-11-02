@@ -46,7 +46,7 @@ def parse_nifty_label(value: str, *, field: str = "NiftyZoning timestamp") -> da
 def parse_session_timestamp(
     session_date: str, value: datetime | str, *, field: str = "session timestamp"
 ) -> datetime:
-    """Parse a session-local minute, full local label, or persisted UTC value."""
+    """Parse a session-local timestamp or persisted timezone-aware value."""
     if isinstance(value, datetime):
         timestamp = require_utc(value, field=field)
     elif isinstance(value, str):
@@ -56,7 +56,16 @@ def parse_session_timestamp(
         if _NIFTY_LABEL.fullmatch(text):
             timestamp = parse_nifty_label(text, field=field)
         else:
-            timestamp = parse_utc(text, field=field)
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ValueError(f"{field} must be an ISO-8601 timestamp") from exc
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                if text[:10] != session_date:
+                    raise ValueError(f"{field} does not belong to session {session_date}")
+                timestamp = parsed.replace(tzinfo=NIFTY_ZONE).astimezone(UTC)
+            else:
+                timestamp = require_utc(parsed, field=field)
     else:
         raise TypeError(f"{field} must be a datetime or timestamp string")
     if nifty_label(timestamp)[:10] != session_date:
@@ -90,7 +99,9 @@ def coerce_timestamp(value: datetime | str, *, field: str = "timestamp") -> date
     text = value.strip()
     if text.endswith("Z") or "+" in text[10:] or "-" in text[10:]:
         return parse_utc(text, field=field)
-    return parse_nifty_label(text, field=field)
+    if len(text) == 5 and text[2] == ":":
+        raise ValueError(f"{field} requires a session date for local minute labels")
+    return parse_session_timestamp(text[:10], text, field=field)
 
 
 def nifty_label(value: datetime) -> str:

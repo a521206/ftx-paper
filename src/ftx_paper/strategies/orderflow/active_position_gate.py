@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from .timestamps import coerce_timestamp
+
 
 @dataclass
 class ActivePositionGate:
@@ -18,6 +20,7 @@ class ActivePositionGate:
     _latest_vwap: float | None = field(default=None, init=False, repr=False)
 
     def update(self, context: Any, timestamp: str) -> None:
+        timestamp_at = coerce_timestamp(timestamp, field="active-position gate timestamp")
         if not tuple(context.execution_engine.open_positions()):
             self.blocks.clear()
             self.blocked_lifecycles.clear()
@@ -35,7 +38,10 @@ class ActivePositionGate:
             self._latest_vwap = None
         while self._cursor_index < len(bars):
             bar = bars[self._cursor_index]
-            if bar.session_date != self._cursor_session or bar.available_at > timestamp:
+            if (
+                bar.session_date != self._cursor_session
+                or coerce_timestamp(bar.available_at) > timestamp_at
+            ):
                 break
             volume = max(0.0, float(bar.volume))
             self._volume += volume
@@ -73,6 +79,11 @@ class ActivePositionGate:
             "available_at": bar.available_at,
             "blocking_timestamp": timestamp,
             "block_reason": "active_position_session_extreme_gate",
+            "active_position_lifecycle_id": getattr(active, "lifecycle_id", None),
+            "active_position_status": getattr(
+                getattr(active, "status", None), "value", getattr(active, "status", None)
+            ),
+            "active_position_quantity": getattr(active, "quantity", None),
         }
         self.blocks.setdefault(key, []).append(evidence)
         self.blocked_lifecycles.add(life.lifecycle_id)

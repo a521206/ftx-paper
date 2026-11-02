@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from ftx_paper.strategies.orderflow.state_machine import ReplayMachine
+from ftx_paper.strategies.orderflow.execution import ExecutionEngine
+from ftx_paper.strategies.orderflow.state_machine_types import ReplayContext
 
 
 def test_replay_records_decision_clock_at_five_minute_boundary() -> None:
@@ -61,3 +63,53 @@ def test_replay_records_decision_clock_at_five_minute_boundary() -> None:
     assert second_clock["available_5m"][-1] == {
         "time": "2026-09-29T09:25", "available_at": "2026-09-29T09:30",
     }
+
+
+def test_replay_captures_execution_diagnostic_order_without_changing_events() -> None:
+    context = ReplayContext(execution_engine=ExecutionEngine())
+    context.record_event({
+        "kind": "trigger_observation",
+        "lifecycle_id": "life-1",
+        "observed_at": "2026-09-29T09:21:00Z",
+        "available_at": "2026-09-29T09:22:00Z",
+        "eligible": True,
+    })
+    context.record_event({"kind": "location_interaction_observed"})
+
+    assert [item["kind"] for item in context.execution_diagnostics] == [
+        "trigger_observation",
+    ]
+    assert context.execution_diagnostics[0]["sequence"] == 0
+    assert len(context.events) == 2
+
+
+def test_replay_event_identity_is_not_based_on_global_event_ordinal() -> None:
+    first = ReplayContext(execution_engine=ExecutionEngine())
+    second = ReplayContext(execution_engine=ExecutionEngine())
+    event = {
+        "kind": "filled",
+        "lifecycle_id": "life-1",
+        "intent_id": "intent-1",
+        "observed_at": "2026-09-29T09:21:00Z",
+        "available_at": "2026-09-29T09:21:00Z",
+    }
+    first.record_event(event)
+    second.record_event({"kind": "location_interaction_observed"})
+    second.record_event(event)
+
+    assert first.events[0]["neutral_event_key"] == second.events[1]["neutral_event_key"]
+
+
+def test_replay_event_identity_includes_causal_parent() -> None:
+    first = ReplayContext(execution_engine=ExecutionEngine())
+    second = ReplayContext(execution_engine=ExecutionEngine())
+    event = {
+        "kind": "exit_signal",
+        "lifecycle_id": "life-1",
+        "observed_at": "2026-09-29T09:21:00Z",
+        "available_at": "2026-09-29T09:22:00Z",
+    }
+    first.record_event({**event, "causal_parent_id": "parent-1"})
+    second.record_event({**event, "causal_parent_id": "parent-2"})
+
+    assert first.events[0]["neutral_event_key"] != second.events[0]["neutral_event_key"]

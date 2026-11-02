@@ -13,7 +13,7 @@ from .interactions import candle_identity
 from .lifecycle import EvidenceRef as LifecycleEvidenceRef, SetupOpportunity
 from .timestamps import coerce_timestamp, nifty_label, parse_nifty_label, serialize_utc
 from .response import ResponseCandle, ResponseOutcomeStatus, build_response_spec, evaluate_response_window
-from .templates import Direction, ResponseType, TradeTemplate
+from .templates import Direction, LocationTemplate, ResponseType, TradeTemplate
 
 
 class OpportunityOutcomeStatus(StrEnum):
@@ -33,7 +33,7 @@ class EvidenceRef:
 @dataclass(frozen=True, slots=True)
 class DirectionalResponse:
     direction: Direction
-    anchor: str
+    anchor: LocationTemplate | str
     reference_level: float
     structure_boundary: float
     invalidation_boundary: float
@@ -181,7 +181,7 @@ def evaluate_response(template: TradeTemplate, interaction: Any, bars: Sequence[
     fields = candle.features if hasattr(candle, "features") else {"high": _value(candle, "high"), "low": _value(candle, "low"), "close": _value(candle, "close")}
     direction = evaluation.direction or template.direction
     band = _value(interaction, "band")
-    response = DirectionalResponse(direction, str(_value(interaction, "location")), float(_value(interaction, "reference_level")), float(fields["high"] if direction is Direction.LONG else fields["low"]), float(band.low if direction is Direction.LONG else band.high), float(band.high if direction is Direction.LONG else band.low) if template.response_type is ResponseType.REJECTION else None, (str(_value(interaction, "interaction_id")), candle_identity(candle)), _value(candle, "end_time"), _value(candle, "available_at"), band=band, evidence=evidence, evidence_lineage=lineage)
+    response = DirectionalResponse(direction, _value(interaction, "location"), float(_value(interaction, "reference_level")), float(fields["high"] if direction is Direction.LONG else fields["low"]), float(band.low if direction is Direction.LONG else band.high), float(band.high if direction is Direction.LONG else band.low) if template.response_type is ResponseType.REJECTION else None, (str(_value(interaction, "interaction_id")), candle_identity(candle)), _value(candle, "end_time"), _value(candle, "available_at"), band=band, evidence=evidence, evidence_lineage=lineage)
     return OpportunityOutcome(OpportunityOutcomeStatus.RESOLVED, f"causal_{template.response_type.value}", response.observed_at, response.available_at, evidence, response, lineage, template.policy_version, template, as_of)
 
 
