@@ -14,6 +14,8 @@ from .timestamps import coerce_timestamp, nifty_label, parse_session_timestamp, 
 
 EvidenceAtClock = Callable[[str], dict[str, Any]]
 InteractionFactsAtClock = Callable[[str], Sequence[dict[str, Any]]]
+
+
 @dataclass(frozen=True, slots=True)
 class ReplayState:
     """Immutable state exposed after one bounded replay prefix."""

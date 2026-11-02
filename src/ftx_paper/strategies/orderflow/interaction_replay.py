@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, field, is_dataclass, replace
+from dataclasses import dataclass, field, is_dataclass, replace
 from datetime import datetime
 from enum import Enum
 from typing import Any
@@ -21,6 +21,8 @@ from .value_publication import ValuePublication
 from .opportunity_replay_host import bar_events_to_facts, build_opportunity_coordinator
 from .opening_gap_policy import OpeningGapPolicy
 from .transition import OrderflowTransitionOwner
+from .contextual import build_context_scores
+from .hierarchy import MarketContext
 
 @dataclass(frozen=True, slots=True)
 class InteractionResponseReplay:
@@ -28,6 +30,7 @@ class InteractionResponseReplay:
     opportunity_facts: tuple[dict[str, Any], ...] = ()
     formations: tuple[Any, ...] = ()
     regime_publications: tuple[tuple[str, Any], ...] = ()
+    context_publications: tuple[dict[str, Any], ...] = ()
     execution_phase_facts: dict[str, tuple[dict[str, Any], ...]] = field(default_factory=dict)
     parity_layers: dict[str, tuple[dict[str, Any], ...]] = field(default_factory=dict)
     execution_diagnostics: tuple[dict[str, Any], ...] = ()
@@ -70,10 +73,10 @@ def _jsonable(value: Any) -> Any:
         return serialize_utc(value)
     if isinstance(value, Enum):
         return value.value
-    if is_dataclass(value):
-        return _jsonable(asdict(value))
     if isinstance(value, Mapping):
         return {str(key): _jsonable(item) for key, item in value.items()}
+    if is_dataclass(value):
+        return _jsonable({item.name: getattr(value, item.name) for item in value.__dataclass_fields__.values()})
     if isinstance(value, (list, tuple)):
         return [_jsonable(item) for item in value]
     if isinstance(value, (set, frozenset)):
@@ -218,6 +221,7 @@ def replay_interaction_response(
     vwap_response_published: set[str] = set()
     opening_gap_policy = OpeningGapPolicy()
     regime_publications: list[tuple[str, Any]] = []
+    context_publications: list[dict[str, Any]] = []
     gap_direction: str | None = None
     opening_gap_state: str | None = None
     opening_gap_reference: float | None = None
@@ -356,6 +360,77 @@ def replay_interaction_response(
                     continue
                 published_registry.register(record)
                 vwap_registered.add(key)
+        # Permission is a state-machine boundary: publish the ordinary context
+        # from mutable market state before any interaction detector observes
+        # this clock. Phase 3 evidence never supplies these contexts.
+        if new5 and latest5 is not None:
+            scores = build_context_scores(
+                latest5,
+                raw_rows=raw_rows,
+                aggregates={"1m": list(available1), "5m": list(available5)},
+                atr=atr,
+            )
+            long_score, short_score = scores or (None, None)
+            context_id = (
+                f"5m-context-{latest5.symbol}-{latest5.session_date}-1m_5m"
+            )
+            versions = transition_owner.context.market_contexts.versions.get(context_id, ())
+            permission_context = MarketContext(
+                context_id=context_id,
+                version=f"v{len(versions) + 1}",
+                timestamp=latest5.time,
+                available_at=latest5.available_at,
+                location=None,
+                market_state=transition_owner.context.market_state,
+                long_score=long_score,
+                short_score=short_score,
+                evidence=({
+                    "completed_bar": True,
+                    "open": latest5.open,
+                    "high": latest5.high,
+                    "low": latest5.low,
+                    "close": latest5.close,
+                },),
+                source_timeframe="5m",
+                definition_version="1m_5m",
+                source_provenance=({
+                    "source_candle_id": latest5.time,
+                    "available_at": latest5.available_at,
+                },),
+            )
+            reference = transition_owner.context.publish_context(permission_context)
+            transition_owner.context.market_contexts.ordinary_context = reference
+            publication = {
+                "kind": "context_observed",
+                "context_id": permission_context.context_id,
+                "version": permission_context.version,
+                "market_state": permission_context.market_state,
+                "long_score": long_score,
+                "short_score": short_score,
+                "observed_at": serialize_utc(latest5.end_time),
+                "available_at": serialize_utc(latest5.available_at),
+                "context": _jsonable(permission_context),
+            }
+            context_publications.append(publication)
+            transition_owner.context.emit({
+                **publication,
+            }, bar_events)
+            transition_owner.context.emit({
+                "kind": "permission",
+                "level": "5m",
+                "time": serialize_utc(latest5.end_time),
+                "decision_at": serialize_utc(current.end_time),
+                "observed_at": serialize_utc(latest5.end_time),
+                "aggregate_time": serialize_utc(latest5.time),
+                "available_at": serialize_utc(latest5.available_at),
+                "status": "allowed",
+                "owner": "5m",
+                "evidence_timeframe": "5m",
+                "context_id": permission_context.context_id,
+                "market_state": permission_context.market_state,
+                "long_score": long_score,
+                "short_score": short_score,
+            }, bar_events)
         _publish_replaced_interactions(
             detector=detector,
             registry=published_registry,
@@ -500,7 +575,7 @@ def replay_interaction_response(
                     "reference_generation": transition.interaction.reference_generation,
                     "reference_level": transition.interaction.reference_level,
                     "band_low": transition.interaction.band_low, "band_high": transition.interaction.band_high,
-                    "source_aggregate_id": observation.source_aggregate_id if observation is not None else None,
+                    "source_aggregate_id": None,
                     "source_observation_id": observation.source_observation_id if observation is not None else None,
                     "stage": "OBSERVING_LOCATION", "evidence": [event_current.to_dict()],
                 }, observed_at=event_current.end_time, available_at=event_current.available_at))
@@ -560,13 +635,20 @@ def replay_interaction_response(
     interaction_facts = tuple(facts)
     opportunity_facts = tuple(parity_streams.get("opportunity_lifecycle", ()))
     return InteractionResponseReplay(
-        interaction_facts,
-        opportunity_facts,
-        (),
-        tuple(regime_publications),
-        {name: tuple(values) for name, values in transition_owner.context.parity_snapshot().items()},
-        {name: tuple(values) for name, values in transition_owner.context.parity_layers.items()},
-        tuple(transition_owner.context.execution_diagnostics),
+        facts=interaction_facts,
+        opportunity_facts=opportunity_facts,
+        formations=(),
+        regime_publications=tuple(regime_publications),
+        context_publications=tuple(context_publications),
+        execution_phase_facts={
+            name: tuple(values)
+            for name, values in transition_owner.context.parity_snapshot().items()
+        },
+        parity_layers={
+            name: tuple(values)
+            for name, values in transition_owner.context.parity_layers.items()
+        },
+        execution_diagnostics=tuple(transition_owner.context.execution_diagnostics),
     )
 
 

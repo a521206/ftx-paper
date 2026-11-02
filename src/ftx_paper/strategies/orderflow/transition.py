@@ -617,9 +617,10 @@ class OrderflowTransitionOwner:
         )
 
     def refresh_decision_context(self, life: Any, *, timestamp: str) -> Any | None:
-        context = self.context.market_contexts.latest_as_of(
-            "ordinary", coerce_timestamp(timestamp)
-        )
+        reference = self.context.market_contexts.ordinary_context
+        context = self.context.market_contexts.resolve(reference) if reference is not None else None
+        if context is not None and context.available_at > coerce_timestamp(timestamp):
+            context = None
         if context is None:
             return self.decision_context_for_life(life, timestamp)
         self.execution_owner.engine.update_decision_context(
@@ -632,9 +633,9 @@ class OrderflowTransitionOwner:
         context = self.context.context(reference) if reference is not None else None
         if context is not None and context.available_at <= coerce_timestamp(as_of):
             return context
-        return self.context.market_contexts.latest_as_of(
-            "ordinary", coerce_timestamp(as_of)
-        )
+        reference = self.context.market_contexts.ordinary_context
+        context = self.context.market_contexts.resolve(reference) if reference is not None else None
+        return context if context is not None and context.available_at <= coerce_timestamp(as_of) else None
 
     def decision_context_for_location(
         self, location: str | None, *, as_of: str
@@ -655,9 +656,7 @@ class OrderflowTransitionOwner:
         )
 
     def local_scores_at(self, timestamp: str) -> tuple[float | None, float | None]:
-        context = self.context.market_contexts.latest_as_of(
-            "ordinary", coerce_timestamp(timestamp)
-        )
+        context = self.decision_context_for_life(None, timestamp)
         return (
             getattr(context, "long_score", None),
             getattr(context, "short_score", None),

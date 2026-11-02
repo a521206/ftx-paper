@@ -438,7 +438,10 @@ class OrderflowReplayEngine:
             name: [] for name in PHASE_STREAMS
         }
         phase_facts.update({
-            "context_publication": list(final_state.context_publications),
+            "context_publication": (
+                list(interaction_replay.context_publications)
+                if interaction_replay is not None else list(final_state.context_publications)
+            ),
             **phase4_replay.parity_phase_facts(),
             **({"opportunity_lifecycle": interaction_phase_facts["opportunity_lifecycle"]}
                if interaction_phase_facts else {}),

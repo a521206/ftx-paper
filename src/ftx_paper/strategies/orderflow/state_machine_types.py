@@ -343,7 +343,7 @@ class ReplayContext:
     or_seed_candles: set[datetime] = field(default_factory=set)
     setup_number: int = 0
     child_observation: ContextObservation | None = None
-    market_state: str | None = None
+    market_state: str | None = "BALANCE"
     neutral_keys_by_causal_id: dict[tuple[str, str], str] = field(default_factory=dict, repr=False)
 
     def record_opportunity_outcome(

@@ -115,7 +115,6 @@ def bar_events_to_facts(
                 "causal_available_at", "event_id", "sequence", "neutral_event_key",
             }
         }
-        values["session_date"] = values.get("session_date") or session_date
         facts.append({
             "kind": str(event.get("kind", "")),
             "occurred_at": serialize_utc(observed) if not isinstance(observed, str) else observed,

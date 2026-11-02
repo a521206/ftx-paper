@@ -40,7 +40,7 @@ def _freeze(value: Any) -> Any:
         return tuple(_freeze(item) for item in value)
     if isinstance(value, (set, frozenset)):
         return frozenset(_freeze(item) for item in value)
-    if value is None or isinstance(value, (str, int, float, bool, bytes)):
+    if value is None or isinstance(value, (str, int, float, bool, bytes, datetime)):
         return value
     raise TypeError(f"unsupported mutable context value: {type(value).__name__}")
 

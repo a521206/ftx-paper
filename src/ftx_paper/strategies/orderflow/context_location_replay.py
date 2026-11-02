@@ -105,6 +105,24 @@ def _context_fact(
     unavailable: Sequence[str],
 ) -> dict[str, Any]:
     identity = f"context-location:{aggregate.timeframe}:{nifty_label(aggregate.time)}"
+    context_value = None
+    if context is not None:
+        context_value = {
+            "context_id": context.context_id,
+            "version": context.version,
+            "location": context.location,
+            "market_state": context.market_state,
+            "available_at": serialize_utc(coerce_timestamp(context.available_at)),
+            "parent_context_id": context.parent_context_id,
+            "definition_version": context.definition_version,
+            "source_provenance": [
+                {
+                    key: serialize_utc(value) if isinstance(value, datetime) else value
+                    for key, value in item.items()
+                }
+                for item in context.source_provenance
+            ],
+        }
     return {
         "kind": "context_location_observed",
         "occurred_at": serialize_utc(coerce_timestamp(aggregate.end_time)),
@@ -115,16 +133,7 @@ def _context_fact(
         "values": {
             "timeframe": aggregate.timeframe,
             "source_observation_id": f"aggregate:{aggregate.timeframe}:{nifty_label(aggregate.time)}",
-            "context": {
-                "context_id": context.context_id,
-                "version": context.version,
-                "location": context.location,
-                "market_state": context.market_state,
-                "available_at": serialize_utc(coerce_timestamp(context.available_at)),
-                "parent_context_id": context.parent_context_id,
-                "definition_version": context.definition_version,
-                "source_provenance": list(context.source_provenance),
-            } if context is not None else None,
+            "context": context_value,
             "locations": [item.to_dict() for item in observations],
         },
         "unavailable": list(unavailable),
