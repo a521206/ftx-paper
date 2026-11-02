@@ -1531,10 +1531,15 @@ Phase 9 provider verification record:
   `OrderflowClockInput`, preserving aggregate, ATR, session-level, prior-value,
   VWAP, location-observation, lineage, and unavailable publications at each
   causal availability boundary.
+- Live input accepts explicit canonical clock inputs from both object and
+  mapping-based host envelopes; malformed explicit evidence is rejected rather
+  than repaired from a market bar.
 - `CanonicalFormationProvider` consumes owner-published lifecycle formations,
   preserves identity and availability ordering, and suppresses duplicate retries.
 - `PaperOrderflowRuntime.from_rows` constructs a fresh bounded owner with the
   same strategy transition boundary used by live hosting.
+- Commit `c94d43b` records this provider/runtime integration. Verification passed
+  with 325 tests, Ruff, Pyright, and `git diff --check` on 2026-11-02.
 - `scripts/orderflow/orderflow_replay.py` remains in place. The remaining
   retirement gate is production replay capture of all producer-owned evidence,
   interaction, execution, artifact, and recovery streams without the harness.
