@@ -213,29 +213,6 @@ class OpportunityCoordinator:
         self, life: SetupOpportunity, bar_events: list[dict[str, Any]],
     ) -> bool:
         ctx = self.host.context
-        owner = ctx.continuation_owner(life.continuation_key)
-        if owner is not None and owner != life.lifecycle_id:
-            life.supersede(
-                at=life.formation_available_at,
-                reason="continuation_owner_exists",
-                superseded_by_lifecycle_id=owner,
-            )
-            ctx.emit(
-                {
-                    "kind": "candidate_suppressed",
-                    "lifecycle_id": life.lifecycle_id,
-                    "continuation_key": life.continuation_key,
-                    "superseded_by_lifecycle_id": owner,
-                    "supersession_reason": "continuation_owner_exists",
-                    "observed_at": life.formation_at,
-                    "available_at": life.formation_available_at,
-                    "reason": "continuation_owner_exists",
-                },
-                bar_events,
-                life,
-                record_lifecycle=False,
-            )
-            return False
         # A predefined execution group is single-fill, but candidates formed
         # before that fill must remain eligible; only a consumed claim denies.
         claim = ctx.execution_engine.execution_group_claim(life.execution_group_id)

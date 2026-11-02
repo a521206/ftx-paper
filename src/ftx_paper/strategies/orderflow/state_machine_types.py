@@ -16,7 +16,7 @@ from .location_geometry import BAND_ATR_FRACTION, LocationBand
 from .orderflow_common import Aggregate
 from .timestamps import coerce_timestamp, nifty_label, serialize_utc
 
-from .lifecycle import ContinuationKey, EvidenceRef, LifecycleEvent, LifecycleStage, OpportunityStatus, SetupOpportunity  # noqa: F401
+from .lifecycle import EvidenceRef, LifecycleEvent, LifecycleStage, OpportunityStatus, SetupOpportunity  # noqa: F401
 from .opportunity import DirectionalResponse, OpportunityOutcome, OpportunityOutcomeStatus  # noqa: F401
 from .templates import Direction
 from .hierarchy import TriggerObservation
@@ -30,9 +30,6 @@ _EXECUTION_DIAGNOSTIC_KINDS = frozenset({
     "exit_signal", "exit_order", "exit_trigger_observed", "exit_decision",
     "stop_updated",
     "position_reversal_requested",
-    "candidate_suppressed", "trigger_requalification_queued",
-    "trigger_requalification_ready", "trigger_requalification_attempted",
-    "trigger_requalification_denied", "trigger_requalification_cancelled",
 })
 
 _INTERACTION_RESPONSE_KINDS = frozenset({
@@ -338,7 +335,6 @@ class ReplayContext:
     transitions: list[dict[str, Any]] = field(default_factory=list)
     decision_context_evidence: list[dict[str, Any]] = field(default_factory=list)
     opportunity_identities: dict[str, str] = field(default_factory=dict)
-    continuation_owners: dict[ContinuationKey, str] = field(default_factory=dict)
     published_resolved_responses: set[tuple[str, str]] = field(default_factory=set)
     opportunity_outcomes: dict[tuple[str, str], list[Any]] = field(default_factory=dict)
     or_seed_candles: set[datetime] = field(default_factory=set)
@@ -458,30 +454,15 @@ class ReplayContext:
                 return False
         if self.execution_engine.execution_group_claim(opportunity.execution_group_id) is not None:
             return False
-        owner = self.continuation_owner(opportunity.continuation_key)
-        if owner is not None and owner != opportunity.lifecycle_id:
-            opportunity.supersede(
-                at=opportunity.formation_available_at,
-                reason="continuation_owner_exists",
-                superseded_by_lifecycle_id=owner,
-            )
-            return False
         if opportunity.lifecycle_id in self.opportunities:
             return False
         self.execution_engine.register(opportunity.lifecycle_id)
         self.opportunities[opportunity.lifecycle_id] = opportunity
-        if opportunity.continuation_key is not None:
-            self.continuation_owners.setdefault(
-                opportunity.continuation_key, opportunity.lifecycle_id,
-            )
         if opportunity.causal_identity is not None:
             self.opportunity_identities.setdefault(
                 opportunity.causal_identity, opportunity.lifecycle_id,
             )
         return True
-
-    def continuation_owner(self, key: ContinuationKey | None) -> str | None:
-        return self.continuation_owners.get(key) if key is not None else None
 
     def first_lifecycle_for_identity(self, causal_identity: str) -> str | None:
         return self.opportunity_identities.get(causal_identity)
