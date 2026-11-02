@@ -70,6 +70,8 @@ class OpportunityCoordinator:
         raw_rows: Sequence[Mapping[str, Any]],
         atr: float | None,
         regime_version: str = "unresolved",
+        confirmation_candle: Aggregate | None = None,
+        rows_by_date: Mapping[str, Sequence[Mapping[str, object]]] | None = None,
     ) -> LifecycleFormation | None:
         response = outcome.response
         identity = evaluation.identity
@@ -81,25 +83,31 @@ class OpportunityCoordinator:
         ):
             return None
 
-        score_candle = max(
+        score_candle = confirmation_candle or max(
             aggregates.get("5m", ()),
             key=lambda item: item.available_at,
             default=interaction.creation_candle,
+        )
+        score_atr = (
+            daily_atr(score_candle.session_date, rows_by_date)
+            if rows_by_date
+            else atr
         )
         scores = build_context_scores(
             score_candle,
             raw_rows=raw_rows,
             aggregates=dict(aggregates),
-            atr=atr,
+            atr=score_atr,
         )
         if scores is None:
             return None
         long_score, short_score = scores
         own_score = long_score if response.direction is Direction.LONG else short_score
         opposing_score = short_score if response.direction is Direction.LONG else long_score
-        if (
-            self.fill_permission_margin is not None
-            and own_score - opposing_score < self.fill_permission_margin
+        if self.fill_permission_margin is not None and (
+            own_score is None
+            or opposing_score is None
+            or own_score - opposing_score < self.fill_permission_margin
         ):
             return None
         if not evaluation.selected:

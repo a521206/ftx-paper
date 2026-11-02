@@ -320,6 +320,21 @@ class OrderflowTransitionOwner:
             self.context.aggregates["5m"] = list(available5)
         events = list(self.context.pending_bar_events)
         self.context.pending_bar_events.clear()
+        self.context.execution_proposals.clear()
+        if self.mode == "FULL":
+            row_dict = dict(row)
+            for life in tuple(self.context.opportunities.values()):
+                if life.active or self.context.position_is_open(life):
+                    self.execution_owner.handle_execution(
+                        index,
+                        timestamp,
+                        next_time,
+                        row_dict,
+                        [],
+                        events,
+                        life,
+                        evaluate_entries=False,
+                    )
         managed: list[Any] = list(formations)
         formation_ids = {
             item.lifecycle.lifecycle_id
@@ -371,16 +386,6 @@ class OrderflowTransitionOwner:
             state = self.execution_owner.engine.state_for(life.lifecycle_id)
             if not life.active and state.position is None:
                 continue
-            if (
-                state.pending_entry is not None
-                and state.position is None
-                and state.pending_entry.available_at <= timestamp
-            ):
-                self.execution_owner.fill_triggered(
-                    (formation,),
-                    bar_open={life.lifecycle_id: float(row["open"])},
-                    fill_at=timestamp,
-                )
             self.execution_owner.apply_session_deadline(
                 life,
                 session_date=str(life.session_date),
@@ -406,16 +411,7 @@ class OrderflowTransitionOwner:
                 index, timestamp, next_time, dict(row), list(available5), events, life,
                 defer_discretionary_execution=True,
             )
-            if (
-                self.mode == "FULL"
-                and
-                life.active
-                and (
-                    getattr(life, "episode_confirmed", True)
-                    or coerce_timestamp(timestamp)
-                    > coerce_timestamp(life.formation_available_at)
-                )
-            ):
+            if self.mode == "FULL" and life.active:
                 self.execution_owner.handle_execution(
                     index, timestamp, next_time, dict(row), [], events, life,
                     evaluate_entries=True,

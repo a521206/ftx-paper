@@ -283,6 +283,7 @@ class ExecutionState:
     realized_points: float | None = None
     fills: list[Fill] = field(default_factory=list)
     entry_attempted: bool = False
+    entry_aliases: tuple[str, ...] = ()
     retest_touched: bool = False
     retest_touch_observed_at: str | None = None
     retest_touch_available_at: str | None = None
@@ -328,6 +329,11 @@ class ExecutionEngine:
     ) -> str | None:
         identity = self._entry_identity(life, available_at, entry_price)
         return self._entry_owners.get(identity) if identity is not None else None
+
+    def alias_entry(self, owner_id: str, alias_id: str) -> None:
+        state = self._state(owner_id)
+        if alias_id != owner_id and alias_id not in state.entry_aliases:
+            state.entry_aliases += (alias_id,)
 
     def execution_group_claim(self, group_id: str | None) -> tuple[str, str] | None:
         return (
@@ -537,7 +543,7 @@ class ExecutionEngine:
         if admission.status is AdmissionStatus.DENIED:
             self.clear_pending_entry(life)
             if previous is not None and (
-                previous.status is IntentStatus.ARMED or had_pending
+                previous.status.value == "ARMED" or had_pending
             ):
                 self.update_intent(
                     life,
@@ -2489,6 +2495,7 @@ class ExecutionCoordinator:
             setup = self.engine.setup_for(life.lifecycle_id)
             if (
                 life.candidate_invalidated
+                or not getattr(life, "episode_confirmed", True)
                 or setup is None
                 or not setup.active
                 or state.entry_attempted
@@ -2511,6 +2518,7 @@ class ExecutionCoordinator:
                 or state.intent.trigger_price,
             )
             if duplicate_owner is not None and duplicate_owner != life.lifecycle_id:
+                self.engine.alias_entry(duplicate_owner, life.lifecycle_id)
                 self.engine.apply_entry_admission(
                     life,
                     ExecutionAdmission(

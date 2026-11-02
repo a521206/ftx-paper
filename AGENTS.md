@@ -4,12 +4,11 @@
 
 - Windows with PowerShell; use `.venv\Scripts\python.exe` for Python. Run commands directly through the configured shell, without nesting another PowerShell invocation.
 - Use the `ftx_paper` package imports from `src/`; do not add repository-root import hacks.
-- Run `.venv\Scripts\python.exe -m pytest` from the repository root for the test suite, or target the relevant test files when iterating.
-- Run `.venv\Scripts\ruff.exe check .` from the repository root when Ruff is installed in the virtual environment. If that executable is unavailable, use `py -m ruff check .` when the system Python provides Ruff. Add `--fix` only when intentionally applying autofixes.
 
 ## Engineering Principles
 
 - Follow the agreed design and canonical implementation; investigate discrepancies and fix their underlying causes rather than layering patches.
+- For orderflow, port behavior from `NiftyZoning/src/orderflow`, especially `execution.py`, `opportunity_coordinator.py`, and `state_machine_reporting.py`. Trace remaining gaps to the canonical implementation; do not add Paper policy or comparator-driven shortcuts.
 - Prefer the smallest clear solution and established project patterns. Avoid speculative abstractions, indirection, fallbacks, and parallel implementations.
 - Make forward-only changes: remove obsolete paths, dead code, and compatibility shims unless backward compatibility is explicitly required.
 - For substantial work, use a concise phased plan; keep each phase focused, verify it against the design, and simplify before proceeding.
@@ -20,7 +19,9 @@
 ## Validation
 
 - Install development dependencies with `.venv\Scripts\python.exe -m pip install -e ".[dev]"` when needed.
-- For every task that changes Python files, run `.venv\Scripts\pyright.exe <changed Python files>` from the repository root. Resolve reported errors in changed files and include the command result in the final response.
+- Run `.venv\Scripts\python.exe -m pytest` from the repository root, targeting relevant tests when iterating.
+- Run `.venv\Scripts\ruff.exe check .` from the repository root. If that executable is unavailable, use `py -m ruff check .`. Add `--fix` only when intentionally applying autofixes.
+- For tasks that change Python files, run `.venv\Scripts\pyright.exe <changed Python files>` from the repository root and resolve reported errors.
 
 ## Testing
 
@@ -31,9 +32,6 @@
 - Avoid duplicate implementation-detail tests; keep lower-level tests only when integration tests do not provide equivalent coverage.
 - Keep tests focused, deterministic, and maintainable.
 - By default, run only tests relevant to changed code; do not run the entire suite unless explicitly requested.
-- Use the repository-configured test runner: `.venv\Scripts\python.exe -m pytest`.
-- For Python changes, also run `.venv\Scripts\pyright.exe <changed Python files>` and report the exact command and pass/fail result.
-- Run lint with `.venv\Scripts\ruff.exe check .`.
 
 ## Critical Boundaries
 
@@ -50,7 +48,6 @@
 - Keep strategy policy and decision policy in `ftx_paper.strategies`; keep market normalization and decision-clock processing in `ftx_paper.market`.
 - Treat runtime, portfolio, broker, and execution mutations as in-memory operations that are persisted afterward; do not imply that SQLite writes roll back those mutations.
 - Preserve startup recovery behavior: interrupted runtime sessions become `STOPPED` and retain an audit event without reconstructing the in-memory engine.
-- Add tests for reusable behavior and architecture boundaries according to the testing guidance above.
 - Do not commit files under `data/runtime/`, SQLite databases, broker configuration, `.env` files, or other generated/runtime artifacts.
 - For `apply_patch` edits, read the current symbol and patch the smallest stable hunk. After changing a function signature, search all call sites before applying follow-up patches.
 

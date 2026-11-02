@@ -759,7 +759,7 @@ available. Cross-repository Phase 4.5 parity is established for the validated
 2026-10-01 replay; Phase 3.5/4 ATR-dependent context/location variance remains
 accepted input variance. Phase 9 runtime/database integration is deferred.
 
-Next implementation slice:
+Implemented boundary scope:
 
 - Add one runtime-neutral interaction replay boundary consuming the explicit
   Phase 4B streams, with independent `1m` and `5m` detector state.
@@ -824,23 +824,6 @@ response outcomes before opportunity formation.
 
 Status: Complete for the deterministic Canonical contract and Phase 4.5 replay
 parity gate. Runtime and database parity remain deferred to Phase 9.
-
-Phase 5 pending strategy-port repairs:
-
-- Align Paper response evaluation with canonical `opportunity.py` before using
-  it in the Phase 4.5 boundary. This is a Phase 5 policy defect, not a Paper
-  input-adapter fallback.
-- Preserve canonical `carry_sessions` expiry and the
-  `response_window_expired` outcome.
-- Filter response evidence by the canonical instrument/symbol and causal
-  availability boundary.
-- Stop evaluation at the canonical terminal interaction candle.
-- Locate and require the canonical contact candle before evaluating the response
-  window; emit `contact_not_available` when it cannot be found.
-- Preserve canonical as-of filtering, completed-bar filtering, response-window
-  expiry, and invalidation-before-confirmation ordering.
-- Do not replace any missing rule with a Paper-specific fallback or inferred
-  neutral outcome.
 
 Port only the canonical interaction and response modules and their newly required
 direct dependencies. Do not preserve the deleted Paper interaction or response
@@ -928,7 +911,7 @@ Parity gate:
   close reasons match canonical output.
 - Duplicate/retry replay is idempotent and does not create duplicate candidates.
 
-Current Phase 6 verification record:
+Phase 6 verification record:
 
 - Canonical opportunity and timeout tests pass (30 tests) at the pinned baseline.
 - Paper Phase 6 opportunity, setup, timeout, lineage, future-evidence, and
@@ -960,11 +943,9 @@ Current Phase 6 verification record:
 Validate the complete canonical execution lifecycle only after the opportunity
 and setup-lifecycle gate passes.
 
-Status: **Blocked before implementation.** The deterministic entry slice and
-the replay/export contract exist, but Paper does not yet contain the canonical
-execution dependency closure or an execution-owning replay boundary. Phase 7
-must not be marked in progress merely because its projection and comparison
-utilities exist.
+Status: **In progress; full parity is blocked.** The deterministic entry slice
+and replay/export contract exist, but exits, settlement, and the complete
+canonical execution dependency closure are not yet ported.
 
 ### Phase 7 Ownership And Non-Goals
 
@@ -1083,17 +1064,6 @@ state. The Paper adapter maps successful canonical fills to the existing Paper
 paper-accounting boundary. It must not create a second orderflow execution
 coordinator or claim an execution group before canonical fill.
 
-Parity gate:
-
-- Canonical and ported decisions match before any Paper accounting call.
-- Entry/exit observed and effective times, prices, direction, quantity, reasons,
-  reservation transitions, and fills match canonical output.
-- Duplicate/retry replay is idempotent.
-- Diagnostic runs mutate no Paper account state; explicit paper execution runs
-  mutate only the existing Paper portfolio and ledger owner.
-- Live and replay invoke the same ported proposal and lifecycle implementation;
-  only the selected Paper execution/capture adapter may differ.
-
 ### Phase 7 Initial Slice Verification Record
 
 - `transition.py` now owns the shared chronological boundary for live and
@@ -1124,16 +1094,7 @@ The canonical owners are `src/orderflow/hierarchy.py` (`TradeIntent`,
 `src/orderflow/state_machine_reporting.py` (`build_replay_payload`). The shared
 projection is `phase7_projection.py` in each repository.
 
-The explicit streams are ordered as follows:
-
-1. `intent_admission`
-2. `trigger_exit`
-3. `execution_fills`
-4. `execution_transitions`
-5. `ledger_mutations`
-
-Each record preserves `kind`, `identity`, `causal_parent_id`,
-`occurred_at`, `observed_at`, `available_at`, `values`, and `unavailable`.
+The stream order and common record shape are defined in Phase 7C above.
 Manifests are compared before records; records are then compared in stream and
 sequence order, reporting the first stream, record, or field mismatch.
 Canonical replay payloads publish fills, execution transitions, reservations,
@@ -1285,3 +1246,11 @@ Orderflow replacement is complete only when all of the following are true:
 - Paper-specific code is limited to input, runtime, persistence, API, and paper
   accounting boundaries.
 - No canonical behavior is replaced by a Paper fallback or inferred state.
+
+## Principle Going Forward
+
+Port behavior from `NiftyZoning/src/orderflow`, especially `execution.py`,
+`opportunity_coordinator.py`, and `state_machine_reporting.py`, rather than
+adding comparator-driven shortcuts. Remaining gaps, including Phase 7 fill
+ordering and the `2026-10-05` `+1` formation discrepancy, require canonical
+tracing, not new Paper policy.

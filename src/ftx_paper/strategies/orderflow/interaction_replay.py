@@ -15,11 +15,12 @@ from .interaction_detector import InteractionDetector
 from .interactions import candle_identity
 from .location_observation import LocationObservation
 from .orderflow_common import Aggregate, parse_timestamp, serialize_timestamp
-from .timestamps import NIFTY_ZONE, nifty_label, serialize_utc
+from .timestamps import NIFTY_ZONE, coerce_timestamp, nifty_label, serialize_utc
 from .state_machine_types import LocationRegistry
 from .templates import Direction, OpeningInteractionKind, TRADE_TEMPLATES, TradeTemplate
 from .value_publication import ValuePublication
 from .policies import PDPolicy, StandardLocationPolicy
+from .opportunity import OpportunityOutcomeStatus
 from .opportunity_coordinator import OpportunityCoordinator
 from .opening_gap_policy import OpeningGapPolicy
 from .transition import OrderflowTransitionOwner
@@ -649,6 +650,7 @@ def replay_interaction_response(
                 opportunity_coordinator=opportunity_coordinator,
                 raw_rows=raw_rows,
                 atr=atr,
+                rows_by_date=rows_by_date or {},
                 regime_version=(
                     transition_owner.context.regime.version
                     if transition_owner.context.regime is not None
@@ -737,6 +739,7 @@ def _dispatch_structure(
     opportunity_coordinator: OpportunityCoordinator,
     raw_rows: Sequence[Mapping[str, Any]],
     atr: float | None,
+    rows_by_date: Mapping[str, Sequence[Mapping[str, object]]] | None = None,
     regime_version: str = "unresolved",
 ) -> None:
     """Run the canonical structure phase after all interaction publications."""
@@ -834,14 +837,6 @@ def _dispatch_structure(
             if response_to_publish is not None:
                 assert response_key is not None
                 resolved_response_emitted.add(response_key)
-                append_policy_fact("hypothesis_arbitrated", emission_identity("hypothesis_arbitrated", identity), iid, {
-                    "interaction_id": iid, "location": interaction.location,
-                    "template_id": evaluation.template.template_id,
-                    "response_type": evaluation.template.response_type.value,
-                    "direction": response_to_publish.direction.value,
-                    "arbitration_selected": evaluation.selected,
-                    "arbitration_reason": evaluation.arbitration_reason,
-                }, observed_at=response_to_publish.observed_at, available_at=response_to_publish.available_at)
             facts.append(_fact("opportunity_outcome", identity, iid, {
                 "interaction_id": iid,
                 "location": interaction.location,
@@ -857,8 +852,13 @@ def _dispatch_structure(
                 "evidence_lineage": [dataclasses.asdict(item) for item in outcome.evidence_lineage],
             }, observed_at=outcome.observed_at, available_at=outcome.available_at))
             formation = None
-            if response_to_publish is not None:
-                confirmation_available_at = serialize_utc(as_of)
+            if (
+                response is not None
+                and outcome.status is OpportunityOutcomeStatus.RESOLVED
+            ):
+                confirmation_available_at = nifty_label(
+                    coerce_timestamp(latest.available_at)
+                )
                 setup_expires_at = (
                     f"{interaction.session_date}T{evaluation.template.expiry_at}"
                 )
@@ -873,7 +873,7 @@ def _dispatch_structure(
                             "interaction_id": iid,
                             "template_id": evaluation.template.template_id,
                             "location_id": str(interaction.location),
-                            "response_available_at": response_to_publish.available_at,
+                            "response_available_at": response.available_at,
                             "confirmation_available_at": confirmation_available_at,
                             "setup_expires_at": setup_expires_at,
                             "reason": "response_available_at_or_after_setup_expiry",
@@ -890,19 +890,19 @@ def _dispatch_structure(
                         aggregates={"1m": list(available1), "5m": list(available5)},
                         raw_rows=raw_rows,
                         atr=atr,
+                        confirmation_candle=latest,
+                        rows_by_date=rows_by_date,
                         regime_version=regime_version,
                     )
-            else:
-                formation = opportunity_coordinator.form_resolved(
-                    interaction=interaction,
-                    evaluation=evaluation,
-                    outcome=outcome,
-                    as_of=as_of,
-                    aggregates={"1m": list(available1), "5m": list(available5)},
-                    raw_rows=raw_rows,
-                    atr=atr,
-                    regime_version=regime_version,
-                )
+            if response_to_publish is not None:
+                append_policy_fact("hypothesis_arbitrated", emission_identity("hypothesis_arbitrated", identity), iid, {
+                    "interaction_id": iid, "location": interaction.location,
+                    "template_id": evaluation.template.template_id,
+                    "response_type": evaluation.template.response_type.value,
+                    "direction": response_to_publish.direction.value,
+                    "arbitration_selected": evaluation.selected,
+                    "arbitration_reason": evaluation.arbitration_reason,
+                }, observed_at=response_to_publish.observed_at, available_at=response_to_publish.available_at)
             if formation is not None:
                 facts.append(_fact(
                     "lifecycle_formed",
