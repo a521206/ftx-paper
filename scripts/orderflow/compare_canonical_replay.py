@@ -1815,12 +1815,6 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Existing canonical replay artifact or directory; skips canonical replay execution",
     )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=None,
-        help="Directory for the run-id-named JSON report (default: data/output/orderflow)",
-    )
     args = parser.parse_args(argv)
     paper_root = Path(__file__).resolve().parents[2]
     canonical_root = paper_root.parent / "NiftyZoning"
@@ -1828,7 +1822,7 @@ def main(argv: list[str] | None = None) -> int:
     canonical_python = args.canonical_python or str(
         canonical_python_path if canonical_python_path.exists() else sys.executable
     )
-    output_dir = args.output_dir or paper_root / "data" / "output" / "orderflow"
+    output_dir = paper_root / "data" / "output" / "orderflow"
     generated_at = datetime.now(timezone.utc)
     run_id = f"{generated_at:%Y%m%dT%H%M%SZ}-{uuid4().hex[:8]}"
     artifact_dir = output_dir / "artifacts"
@@ -1850,6 +1844,7 @@ def main(argv: list[str] | None = None) -> int:
     ) else "FAILED"
     report_path = _write_comparison_output(results, output_dir, status=overall, run_id=run_id)
     print(f"Comparison report: {report_path}")
+    print(f"Artifact directory: {artifact_dir}")
     for result in results:
         gate = result["gate"]
         phase_statuses = ", ".join(
