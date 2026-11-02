@@ -105,8 +105,6 @@ class SetupOpportunity:
     response_episode_id: str | None = None
     episode_confirmed: bool = False
     execution_group_id: str | None = None
-    comparison_key: str | None = None
-    conflict_key: str | None = None
     clock: datetime | None = None
     decision_context_required: bool = True
     timeout_limit: int = 6
@@ -135,6 +133,30 @@ class SetupOpportunity:
     @property
     def candidate_invalidated(self) -> bool:
         return not self.active
+
+    @property
+    def comparison_key(self) -> tuple[str, str, str, str, float | None, int, str | None]:
+        """Semantic episode key, excluding response evidence."""
+        return (
+            str(self.session_date),
+            self.instrument,
+            str(self.location),
+            self.direction.value,
+            self.reference_level,
+            self.reference_generation,
+            self.policy_version,
+        )
+
+    @property
+    def conflict_key(self) -> tuple[str, str, str, float | None, int]:
+        """Conflict domain key, excluding direction and policy version."""
+        return (
+            str(self.session_date),
+            self.instrument,
+            str(self.location),
+            self.reference_level,
+            self.reference_generation,
+        )
 
     @property
     def stage(self) -> LifecycleStage:

@@ -23,11 +23,22 @@ from ftx_paper.strategies.orderflow.interactions import ProjectionSnapshot
 from ftx_paper.strategies.orderflow.lifecycle import SetupOpportunity
 from ftx_paper.strategies.orderflow.orderflow_common import Aggregate
 from ftx_paper.strategies.orderflow.opportunity_coordinator import OpportunityCoordinator
+from ftx_paper.strategies.orderflow.opportunity import (
+    DirectionalResponse,
+    OpportunityContext,
+    form_opportunity,
+)
 from ftx_paper.strategies.orderflow.parity_artifacts import normalize_phase_record
 from ftx_paper.strategies.orderflow.phase7_projection import build_phase7_projection
 from ftx_paper.strategies.orderflow.state_machine_reporting import build_replay_payload
 from ftx_paper.strategies.orderflow.state_machine_types import LocationRegistry, ReplayContext
-from ftx_paper.strategies.orderflow.templates import DEFAULT_TEMPLATES, Direction, OpeningInteractionKind
+from ftx_paper.strategies.orderflow.templates import (
+    DEFAULT_TEMPLATES,
+    Direction,
+    LocationTemplate,
+    OpeningInteractionKind,
+    TRADE_TEMPLATES,
+)
 from ftx_paper.strategies.orderflow.timestamps import parse_session_timestamp, serialize_utc
 
 
@@ -38,6 +49,42 @@ def test_resolve_canonical_artifact_reuses_retained_canonical_file(tmp_path) -> 
     artifact.write_text('{"sessions":{"2026-10-05":{}}}', encoding="utf-8")
 
     assert _resolve_canonical_artifact(tmp_path, session_date) == artifact
+
+
+def test_form_opportunity_assigns_location_reference_generation_conflict_key() -> None:
+    observed_at = datetime.fromisoformat("2026-10-01T03:50:00+00:00")
+    response = DirectionalResponse(
+        direction=Direction.LONG,
+        anchor=LocationTemplate.OR_LOW,
+        reference_level=22590.0,
+        structure_boundary=22595.0,
+        invalidation_boundary=22580.0,
+        entry_boundary=22595.0,
+        evidence_ids=("evidence-1",),
+        observed_at=observed_at,
+        available_at=observed_at,
+    )
+    life, _ = form_opportunity(
+        response,
+        OpportunityContext(
+            lifecycle_id="life-1",
+            session_date="2026-10-01",
+            instrument="NIFTY",
+            strategy="orderflow",
+            candidate_id="candidate-1",
+            context_candle=SimpleNamespace(low=22580.0, high=22600.0),
+            clock=observed_at,
+            regime_version="regime-1",
+            policy_version="policy-1",
+            reference_generation=2,
+        ),
+        TRADE_TEMPLATES[("5m_recovery_breakout", "OR_LOW")],
+    )
+
+    assert life.conflict_key == ("2026-10-01", "NIFTY", "OR_LOW", 22590.0, 2)
+    assert life.comparison_key == (
+        "2026-10-01", "NIFTY", "OR_LOW", "long", 22590.0, 2, "policy-1",
+    )
 
 
 def test_parity_artifact_normalizes_embedded_execution_group_timestamp() -> None:

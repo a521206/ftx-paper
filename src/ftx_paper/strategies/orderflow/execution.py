@@ -2786,16 +2786,6 @@ class ExecutionCoordinator:
                     }
                     self.context.record_event(reversal_event)
                     bar_events.append(reversal_event)
-                for opposing in self.context.conflicting_unfilled_opportunities(life):
-                    if opposing.active:
-                        opposing.supersede(at=timestamp, reason="conflicting_entry_selected")
-                        self.context.record_event({
-                            "kind": "setup_superseded",
-                            "lifecycle_id": opposing.lifecycle_id,
-                            "observed_at": timestamp,
-                            "available_at": timestamp,
-                            "reason": "conflicting_entry_selected",
-                        })
                 event = {
                     "kind": "entry_pending",
                     "time": timestamp,

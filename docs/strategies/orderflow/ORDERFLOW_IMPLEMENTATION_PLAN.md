@@ -1373,9 +1373,21 @@ the temporary Phase 8 harness.
   Phase 4/7 helpers remain diagnostic-only.
 - Ruff, Pyright, and `git diff --check`: passed for changed implementation,
   harness, and tests.
-- Remaining `UNAVAILABLE` inputs in contract fixtures: none. The local
-  cross-repo replay gate remains unavailable because no complete canonical
-  artifact containing all six streams and four final layers was available.
+- Remaining `UNAVAILABLE` inputs in contract fixtures: none. The latest
+  cross-repo replay rerun intentionally excludes `2026-10-29`, whose retained
+  canonical source history is incomplete and produces an out-of-bound ATR
+  variance.
+- For the eligible `2026-10-01` and `2026-10-05` replays, Phase 3.5, Phase 4,
+  Phase 4.5, and Phase 6 establish matching causal structure with bounded ATR
+  input variance. Their Phase 7 first differences are downstream execution
+  stream consequences of that accepted ATR-dependent evidence variance, not a
+  separate Paper lifecycle or execution-policy defect. The diagnostic records
+  remain retained rather than being treated as independent parity failures.
+- Unified parity still reports a separate comparison-layer timestamp
+  normalization mismatch: canonical embedded `available_at` values use session
+  labels while Paper values are serialized as UTC timestamps. The Phase 8
+  cross-repo exit gate therefore remains open pending timestamp normalization
+  and a rerun of the eligible dates.
 
 ## Phase 9: Add The Paper Host Adapter
 

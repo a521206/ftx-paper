@@ -363,6 +363,7 @@ class OrderflowTransitionOwner:
         # shared context before any proposal is evaluated.
         if available5:
             self.context.aggregates["5m"] = list(available5)
+        self.execution_owner.active_position_gate.update(self.context, timestamp)
         events = list(self.context.pending_bar_events)
         self.context.pending_bar_events.clear()
         self.context.execution_proposals.clear()
