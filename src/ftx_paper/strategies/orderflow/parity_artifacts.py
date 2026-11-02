@@ -1,4 +1,4 @@
-"""Producer-neutral Phase 4 parity artifacts.
+"""Canonical producer parity contract primitives.
 
 This module accepts only facts emitted by the orderflow runtime.  It never
 reconstructs context, locations, permissions, or replacements from bars or
@@ -17,10 +17,38 @@ from typing import Any
 from .timestamps import parse_causal_timestamp, parse_session_timestamp, parse_utc, serialize_utc
 from .phase7_projection import PHASE7_STREAMS
 
+ARTIFACT_TYPE = "producer_parity"
+SCHEMA_VERSION = 1
+CONTRACT_ID = "orderflow_producer_parity"
+CONTRACT_VERSION = 1
+FILENAME = "parity_artifact.json"
+
 PHASE_STREAMS = ("source_observation", "context_location", "interaction_response", "opportunity_lifecycle", "intent_admission", "trigger_exit")
+LAYERS = ("run_scope", "decision", "execution_settlement", "portfolio_ledger")
+DECISION_STAGES = ("interaction", "candidate", "admission", "trigger", "exit")
+EXECUTION_KINDS = (
+    "reservation", "authorization", "submission", "order_intent", "fill",
+    "pending_exit", "exit", "exit_fill", "cancellation", "settlement",
+    "synthetic_settlement",
+)
+LEDGER_KINDS = (
+    "reservation", "reservation_release", "fill", "partial_fill",
+    "cancellation", "exit_settlement", "daily_reset", "closeout",
+)
+PARITY_PAYLOAD_KEYS = ("parity_phase_facts", "parity_layers", "parity_coverage")
 _EXECUTION_GROUP_ID = re.compile(
     r"^(execution-group:(?P<session_date>\d{4}-\d{2}-\d{2}:[^:]+:[^:]+:)(?P<timestamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?))$"
 )
+
+
+def validate_contract_declarations(
+    phase_streams: Mapping[str, Any], layers: Mapping[str, Any]
+) -> None:
+    """Require the complete canonical stream and layer declaration surface."""
+    if set(phase_streams) != set(PHASE_STREAMS):
+        raise ValueError("all phase streams must be declared")
+    if set(layers) != set(LAYERS):
+        raise ValueError("all final layers must be declared")
 
 
 def _json(value: object) -> bytes:
@@ -260,4 +288,12 @@ def _first_mismatch(left: Any, right: Any, path: str = "") -> tuple[str, Any, An
     return path, left, right
 
 
-__all__ = ["PHASE_STREAMS", "PHASE7_STREAMS", "build_phase4_artifact", "build_phase7_artifact", "canonical_hash", "compare_chronological_streams", "compare_phase4_manifests", "compare_phase7_manifests", "normalize_phase_record", "phase_facts_from_payload"]
+__all__ = [
+    "ARTIFACT_TYPE", "CONTRACT_ID", "CONTRACT_VERSION", "DECISION_STAGES",
+    "EXECUTION_KINDS", "FILENAME", "LAYERS", "LEDGER_KINDS", "PARITY_PAYLOAD_KEYS",
+    "PHASE_STREAMS", "PHASE7_STREAMS", "SCHEMA_VERSION",
+    "build_phase4_artifact", "build_phase7_artifact", "canonical_hash",
+    "compare_chronological_streams", "compare_phase4_manifests",
+    "compare_phase7_manifests", "normalize_phase_record", "phase_facts_from_payload",
+    "validate_contract_declarations",
+]

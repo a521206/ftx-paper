@@ -1239,6 +1239,102 @@ distinct states and must remain distinct in the artifact and manifest.
   contract. Do not duplicate runtime recovery in the Phase 8 artifact builder;
   live/replay persistence and API wiring remain Phase 9.
 
+### Phase 8 Delivery Sequence
+
+Phase 8 will replace the split Paper acceptance path with one canonical artifact
+contract. The existing Phase 4 and Phase 7 projections may remain temporarily as
+producer-side extraction helpers, but neither is a parity artifact or an
+independent acceptance gate.
+
+#### 8A - Freeze The Canonical Contract Surface
+
+- Port the pinned canonical constants and schemas: `PHASE_STREAMS`, `LAYERS`,
+  decision stages, execution kinds, ledger kinds, artifact identity, and schema
+  version.
+- Record the exact Paper-to-canonical symbol mapping and remove any acceptance
+  logic that treats a missing stream as an observed empty stream.
+- Define the explicit payload inputs: six phase streams, four final layers, and
+  phase/layer coverage. Missing inputs remain `UNAVAILABLE` or `INCOMPLETE`.
+
+Exit gate: a contract-focused test rejects missing stream/layer declarations and
+accepts only the canonical envelope shape.
+
+Phase 8A verification record:
+
+- `parity_artifacts.py` now exposes the pinned canonical artifact identity,
+  schema version, six decision streams, four layers, decision stages, execution
+  kinds, ledger kinds, and explicit payload keys.
+- `validate_contract_declarations` rejects missing or extra stream/layer
+  declarations.
+- Missing phase facts remain `UNAVAILABLE`; a declared empty stream is distinct
+  `MATCHED` `observed_empty` coverage.
+- `tests/strategies/test_orderflow_phase8_contract.py`: 4 passed.
+- Ruff, Pyright, and `git diff --check`: passed.
+
+#### 8B - Port Producer Fact Projection
+
+- Change `build_replay_payload` to expose only producer-emitted facts and
+  coverage needed by the unified builder.
+- Stop deriving ledger or execution facts from terminal `ExecutionState`, fills,
+  trades, counters, or presentation summaries. If the canonical producer did not
+  emit a fact, preserve it as unavailable.
+- Keep the existing Phase 4 and Phase 7 helpers as explicit extraction steps
+  only where they preserve canonical stream identity and causal fields.
+
+Exit gate: no-trade and execution-bearing fixtures expose all required stream
+keys without manufacturing absent evidence.
+
+#### 8C - Implement Unified Artifact Construction And Validation
+
+- Add `build_parity_artifact` and `build_parity_artifact_from_payload` with the
+  canonical envelope, `decision_substreams`, `layers`, `coverage`, and manifest.
+- Validate UTC timestamps, availability ordering, contiguous sequences, unique
+  identities, causal parent types, required run scope counts, decision stages,
+  execution kinds, and ledger kinds.
+- Require every phase stream to be `MATCHED` before accepting final layers.
+  Preserve `MATCHED`, `MISMATCHED`, `INCOMPLETE`, and `UNAVAILABLE` distinctly.
+- Match canonical record hashing, excluding only `producer_extensions`, and
+  validate manifest count/hash/coverage consistency.
+
+Exit gate: tampered records, invalid layer kinds, duplicate identities, invalid
+timestamps, coverage mismatches, and non-contiguous sequences are rejected.
+
+#### 8D - Replace Comparison With Manifest-First Parity
+
+- Add canonical-order comparison for all six phase streams followed by all four
+  layers.
+- Compare status, coverage, count, and hash before loading records.
+- On a hash/count mismatch, report the first stream, record, and field mismatch
+  in deterministic causal order.
+- Remove Phase 4/Phase 7 split comparison as an acceptance path; retain only
+  diagnostics needed to explain a unified-artifact mismatch.
+
+Exit gate: comparison passes for no-trade and entry/exit/settlement sessions and
+stops at the first deterministic mismatch.
+
+#### 8E - Persist And Read Canonical Artifacts
+
+- Persist the validated envelope, six decision-stream JSONL files, four layer
+  JSONL files, and the canonical manifest filenames.
+- Add bounded `offset`/`limit` pagination that reads persisted records only and
+  never re-evaluates strategy state.
+- Round-trip persisted artifacts through validation and preserve stable ordering.
+
+Exit gate: JSON and JSONL round-trip tests pass, pagination is bounded, and
+tampering is detected before persistence.
+
+#### 8F - Run The Phase 8 Parity Gate
+
+- Port and adapt the canonical parity-artifact tests with package-root imports
+  only; do not copy presentation/reporting tests that are outside the contract.
+- Run focused Paper tests, Ruff, Pyright, and `git diff --check`.
+- Record the verification evidence and exact remaining `UNAVAILABLE` inputs in
+  this plan.
+
+Exit gate: all Phase 8 artifact checks pass. Phase 9 remains blocked until this
+gate is recorded; no API, runtime-event, or database parity claim is made from
+the temporary Phase 8 harness.
+
 ### Phase 8 Exit Gate
 
 - Canonical reporting and parity-artifact tests pass at the pinned commit, with
