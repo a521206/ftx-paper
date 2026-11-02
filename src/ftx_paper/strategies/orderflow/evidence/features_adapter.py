@@ -7,7 +7,7 @@ import hashlib
 from collections.abc import Mapping, Sequence
 
 from ..features import daily_atr
-from ..market_observation import observe_market
+from ..market_observation import MarketObservation, observe_market
 from ..state_machine_types import SessionLevels
 from ..value_publication import ValuePublication
 from ..evidence_publication import AtrPublication
@@ -25,10 +25,7 @@ class PaperFeatureAdapter(EvidenceAdapter):
     ) -> None:
         self._rows = {date: tuple(rows) for date, rows in rows_by_date.items()}
         self._prior_values = dict(prior_values or {})
-        self._observations = {
-            date: observe_market([dict(row) for row in rows])
-            for date, rows in self._rows.items()
-        }
+        self._observations: dict[str, MarketObservation] = {}
         self._atr_cache: dict[tuple[str, str], AtrPublication] = {}
         self._levels_cache: dict[str, SessionLevels | None] = {}
         self._prior_value_cache: dict[str, ValuePublication] = {}
@@ -69,8 +66,14 @@ class PaperFeatureAdapter(EvidenceAdapter):
             else:
                 prior_dates = sorted(date for date in self._rows if date < session_date)
                 prior_rows = self._rows[prior_dates[-1]] if prior_dates else ()
+                observation = self._observations.get(session_date)
+                if observation is None:
+                    observation = observe_market([
+                        dict(row) for row in rows
+                    ])
+                    self._observations[session_date] = observation
                 first = next(
-                    (item for item in self._observations[session_date].aggregates["5m"] if item.available_at),
+                    (item for item in observation.aggregates["5m"] if item.available_at),
                     None,
                 )
                 if first is None:

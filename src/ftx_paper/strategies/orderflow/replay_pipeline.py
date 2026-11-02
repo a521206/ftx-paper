@@ -215,21 +215,23 @@ def _prior_values(
 
     publications: dict[str, ValuePublication] = {}
     dates = sorted(rows_by_date)
+    trading_session_dates = tuple(dates)
     store: DailyProfileStore = _ReplayDailyProfileStore()
-    for session_date in dates:
-        prior_dates = [value for value in dates if value < session_date]
-        if not prior_dates:
+    prior_date: str | None = None
+    for current_date in dates:
+        if prior_date is None:
+            prior_date = current_date
             continue
-        prior_date = prior_dates[-1]
         prior_rows = list(rows_by_date[prior_date])
-        rows = list(rows_by_date[session_date])
+        rows = list(rows_by_date[current_date])
+        prior_date = current_date
         references = publish_value_references(
             prior_rows,
             rows,
-            session_date,
+            current_date,
             prior_profile_complete=prior_profile_is_complete(prior_rows),
             daily_profile_store=store,
-            trading_session_dates=tuple(dates),
+            trading_session_dates=trading_session_dates,
         )
         reference = next(
             (item for item in references if item.scope == "prior_session"),
@@ -248,7 +250,7 @@ def _prior_values(
             coerce_timestamp(available_at),
             (reference.reference_id, reference.fingerprint),
         )
-        publications[session_date] = ValuePublication(
+        publications[current_date] = ValuePublication(
             value_reference,
             value_reference.observed_at,
             value_reference.available_at,
@@ -259,18 +261,28 @@ def _prior_values(
 
 def _as_of_evidence(evidence: dict[str, Any], clock: str) -> dict[str, Any]:
     """Expose only publications available at the canonical decision clock."""
+    clock_timestamp = coerce_timestamp(clock)
     result = dict(evidence)
     for field in ("locations", "vwap_measurements", "contexts"):
         result[field] = [
             item for item in evidence[field]
-            if item.get("available_at") is None or coerce_timestamp(str(item["available_at"])) <= coerce_timestamp(clock)
+            if item.get("available_at") is None
+            or coerce_timestamp(str(item["available_at"])) <= clock_timestamp
         ]
     atr = evidence.get("atr")
-    if isinstance(atr, dict) and atr.get("available_at") is not None and coerce_timestamp(str(atr["available_at"])) > coerce_timestamp(clock):
+    if (
+        isinstance(atr, dict)
+        and atr.get("available_at") is not None
+        and coerce_timestamp(str(atr["available_at"])) > clock_timestamp
+    ):
         result["atr"] = {**atr, "value": None, "unavailable_reason": "atr_not_yet_available"}
         result["unavailable"] = [*result["unavailable"], "atr_not_yet_available"]
     prior = evidence.get("prior_value")
-    if isinstance(prior, dict) and prior.get("available_at") is not None and coerce_timestamp(str(prior["available_at"])) > coerce_timestamp(clock):
+    if (
+        isinstance(prior, dict)
+        and prior.get("available_at") is not None
+        and coerce_timestamp(str(prior["available_at"])) > clock_timestamp
+    ):
         result["prior_value"] = {
             **prior, "reference": None,
             "unavailable_reason": "prior_value_not_yet_available",
@@ -358,7 +370,8 @@ class OrderflowReplayEngine:
 
         def evidence_at_clock(clock: str) -> dict[str, Any]:
             nonlocal current_evidence, event_index
-            while event_index < len(evidence_events) and evidence_events[event_index][0] <= coerce_timestamp(clock):
+            clock_timestamp = coerce_timestamp(clock)
+            while event_index < len(evidence_events) and evidence_events[event_index][0] <= clock_timestamp:
                 current_evidence = evidence_events[event_index][1]
                 event_index += 1
             return _as_of_evidence(current_evidence, clock)
