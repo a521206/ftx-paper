@@ -127,19 +127,16 @@ def _retain_replay_artifacts(
     run_id: str,
     canonical_path: Path | None,
     paper_path: Path,
-    canonical_source_path: Path,
 ) -> dict[str, dict[str, Any]]:
     """Copy subprocess replay artifacts out of the temporary work directory."""
     if artifact_dir is None:
         return {
-            "canonical_source": {"status": "NOT_RETAINED", "path": None},
             "canonical": {"status": "NOT_RETAINED", "path": None},
             "paper": {"status": "NOT_RETAINED", "path": None},
         }
     destination = artifact_dir / session_date / run_id
     result: dict[str, dict[str, Any]] = {}
     for name, source in (
-        ("canonical_source", canonical_source_path),
         ("canonical", canonical_path),
         ("paper", paper_path),
     ):
@@ -1487,24 +1484,22 @@ def _compare_phase7(canonical_path: Path, paper: dict[str, Any], session_date: s
         return {"status": "INCOMPLETE", "stream": PHASE7_STREAMS[0], "reason": str(exc)}
 
 
-def _environment(root: Path, *, paper_root: Path | None = None) -> dict[str, str]:
+def _environment(root: Path) -> dict[str, str]:
     environment = os.environ.copy()
     existing = environment.get("PYTHONPATH")
     environment["PYTHONPATH"] = str(root) if not existing else os.pathsep.join((str(root), existing))
-    if paper_root is not None:
-        environment["FTX_PAPER_ROOT"] = str(paper_root)
     return environment
 
 
 def _run_json(
     command: list[str], *, cwd: Path, output: Path | None = None,
-    paper_root: Path | None = None, debug_dir: Path | None = None, label: str = "subprocess",
+    debug_dir: Path | None = None, label: str = "subprocess",
 ) -> tuple[Any | None, str | None]:
     try:
         result = subprocess.run(
             command,
             cwd=cwd,
-            env=_environment(cwd, paper_root=paper_root),
+            env=_environment(cwd),
             capture_output=True,
             text=True,
         )
@@ -1663,66 +1658,6 @@ def _canonical_projection_command(
     return [canonical_python, "-c", code, str(replay_path), session_date]
 
 
-def _canonical_source_command(canonical_python: str, session_date: str, output: Path) -> list[str]:
-    code = """
-import json, sys
-from datetime import datetime, time
-from src.data.db import db_connection
-from src.data.repos.futures_repo import fetch_futures
-from src.data.repos.index_repo import load_trading_dates
-
-session_date = sys.argv[1]
-output = sys.argv[2]
-with db_connection() as connection:
-    trading_dates = load_trading_dates(date_to=int(session_date.replace('-', '')), con=connection)
-    dates = [item for item in trading_dates if item <= session_date]
-    rows = fetch_futures(
-        date_from=int(dates[0].replace('-', '')),
-        date_to=int(session_date.replace('-', '')),
-        contract_type='CONTINUOUS', series='I', con=connection,
-    ) if dates else []
-raw = {}
-for row in rows:
-    value = row.time
-    if isinstance(value, datetime):
-        minute = value.strftime('%H:%M')
-    elif isinstance(value, time):
-        minute = value.strftime('%H:%M')
-    elif isinstance(value, str):
-        text = value.strip()
-        parsed = datetime.fromisoformat(text.replace('Z', '+00:00')) if 'T' in text else time.fromisoformat(text)
-        minute = parsed.strftime('%H:%M')
-    else:
-        raise TypeError('canonical source row time must be a datetime, time, or string')
-    if minute > '15:30':
-        continue
-    raw.setdefault(str(row.date), []).append({
-        'time': f'{row.date}T{minute}', 'open': row.open, 'high': row.high, 'low': row.low,
-        'close': row.close, 'volume': row.volume, 'oi': row.oi,
-        'symbol': row.symbol, 'expiry': row.expiry,
-        'contract_type': row.contract_type, 'session_date': row.date,
-    })
-full_dates = set(dates[-6:])
-payload = {}
-for item_date, items in raw.items():
-    items.sort(key=lambda item: item['time'])
-    if item_date in full_dates:
-        payload[item_date] = items
-        continue
-    payload[item_date] = [{
-        **items[0], 'time': f'{item_date}T15:30',
-        'high': max(item['high'] for item in items),
-        'low': min(item['low'] for item in items),
-        'close': items[-1]['close'],
-        'volume': sum(item['volume'] for item in items),
-        'oi': items[-1]['oi'],
-    }]
-with open(output, 'w', encoding='utf-8') as handle:
-    json.dump({'sessions': payload}, handle, sort_keys=True)
-"""
-    return [canonical_python, "-c", code, session_date, str(output)]
-
-
 def _compare_unified_artifact(
     canonical_path: Path | None, paper: Mapping[str, Any] | None, session_date: str,
 ) -> dict[str, Any]:
@@ -1765,19 +1700,14 @@ def compare_date(
     with tempfile.TemporaryDirectory(prefix="orderflow-cross-repo-") as directory_name:
         directory = Path(directory_name)
         paper_replay_path = directory / "paper-replay.json"
-        canonical_source_path = directory / "canonical-source.json"
         canonical_path = (
             _resolve_canonical_artifact(canonical_artifact, session_date)
             if canonical_artifact else None
         )
         canonical_output_dir = directory / "canonical-replay"
-        canonical_source_error = _run_command(
-            _canonical_source_command(canonical_python, session_date, canonical_source_path),
-            cwd=canonical_root, debug_dir=debug_dir, label=f"{session_date}-canonical-source",
-        )
         paper_command = [
             paper_python, "scripts/orderflow/orderflow_replay.py", "--date", session_date,
-            "--source-artifact", str(canonical_source_path), "--include-interactions",
+            "--include-interactions",
             "--output", str(paper_replay_path),
         ]
         with ThreadPoolExecutor(max_workers=2) as executor:
@@ -1841,12 +1771,12 @@ def compare_date(
             canonical_projection, projection_error = (
                 canonical_projection_future.result()
                 if canonical_projection_future is not None
-                else (None, canonical_error or canonical_source_error or "canonical replay artifact was not produced")
+                else (None, canonical_error or "canonical replay artifact was not produced")
             )
             canonical_phase3, canonical_phase3_error = (
                 canonical_phase3_future.result()
                 if canonical_phase3_future is not None
-                else (None, canonical_error or canonical_source_error or "canonical replay artifact was not produced")
+                else (None, canonical_error or "canonical replay artifact was not produced")
             )
             paper_phase3, paper_phase3_error = (
                 paper_phase3_future.result()
@@ -1928,7 +1858,6 @@ def compare_date(
             }
         retained_artifacts = _retain_replay_artifacts(
             artifact_dir, session_date, run_id or uuid4().hex[:8], canonical_path, paper_replay_path,
-            canonical_source_path,
         )
         result = {
             "date": session_date,
@@ -1948,7 +1877,6 @@ def compare_date(
                 "status": "MATCHED" if paper_replay else "INCOMPLETE",
                 **retained_artifacts["paper"],
             },
-            "canonical_source": retained_artifacts["canonical_source"],
         }
         result["gate"] = _gate_result(result)
         return result
