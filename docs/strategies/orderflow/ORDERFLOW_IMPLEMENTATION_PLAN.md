@@ -970,9 +970,10 @@ Phase 6 verification record:
 Validate the complete canonical execution lifecycle only after the opportunity
 and setup-lifecycle gate passes.
 
-Status: **In progress; full parity is blocked.** The deterministic entry slice
-and replay/export contract exist, but exits, settlement, and the complete
-canonical execution dependency closure are not yet ported.
+Status: **Complete for the Phase 7 replay parity gate.** The shared execution
+owner now covers admission, ownership transfer, entry/exit execution facts, and
+artifact parity for the validated source-matched dates. Remaining host
+integration work belongs to Phase 8/9 and is not a Phase 7 blocker.
 
 ### Phase 7 Ownership And Non-Goals
 
@@ -1108,9 +1109,9 @@ coordinator or claim an execution group before canonical fill.
   and cooldown gates and keeps unavailable inputs as explicit reasons.
 - Focused tests cover unresolved-regime admission, allowed intent arming,
   deterministic reservation release, duplicate entry selection idempotence, and
-  rejected duplicate fills. This is not the Phase 7 parity gate; exits,
-  protective stops, partial fills, settlement, and ledger projection remain
-  incomplete.
+  rejected duplicate fills. The Phase 7 replay gate now passes for the validated
+  source-matched dates; bounded ATR-dependent differences are reported as
+  accepted `INPUT_VARIANCE`.
 
 ### Phase 7 Stream Contract And Current Evidence
 
@@ -1126,12 +1127,12 @@ Manifests are compared before records; records are then compared in stream and
 sequence order, reporting the first stream, record, or field mismatch.
 Canonical replay payloads publish fills, execution transitions, reservations,
 authorizations, and settlement mutations through `parity_phase_facts` without
-reconstructing them from trades or terminal snapshots. Paper now invokes the
-tested execution owner from the chronological interaction clock for newly
-formed lifecycle/setup objects and emits explicit admission facts. Trigger,
-reservation, fill, exit, settlement, and ledger transitions remain incomplete
-until their causal observations and next-bar execution boundary are wired. The
-projection cannot create facts that the execution owner did not emit.
+reconstructing them from trades or terminal snapshots. Paper invokes the shared
+execution owner from the chronological interaction clock, transfers same-
+direction position ownership to successors, and emits the corresponding
+execution diagnostics and parity facts. Parity artifact construction also
+normalizes embedded execution-group timestamps so local canonical labels and
+UTC Paper timestamps compare as the same causal instant.
 
 Verification evidence for the requested source-matched dates (`2026-10-01`,
 `2026-10-05`) is:
@@ -1141,10 +1142,8 @@ Verification evidence for the requested source-matched dates (`2026-10-01`,
 - Phase 4: accepted bounded ATR-dependent `INPUT_VARIANCE`.
 - Phase 4.5: `MATCHED`.
 - Phase 6: accepted bounded ATR-dependent `INPUT_VARIANCE`.
-- Phase 7: `INCOMPLETE`; Paper now emits chronological `intent_admission`,
-  trigger, and entry execution facts from the shared replay owner, but canonical
-  exit-policy evaluation, live shared-owner wiring, and complete settlement
-  coverage are still absent. The comparison command correctly remains non-zero.
+- Phase 7: accepted `INPUT_VARIANCE`; the comparison gate passes for both
+  `2026-10-01` and `2026-10-05`.
 
 `execution_adapter.py` now defines the Paper host boundary: it maps an already
 triggered canonical `TradeIntent` to the existing `OrderIntent` contract and
@@ -1154,41 +1153,113 @@ boundary accepts execution notifications without owning a second coordinator.
 
 The bounded ATR tolerance remains 1% relative / 2.5 absolute, and prior-value
 variance remains accepted only through the existing Phase 3.5 input-variance
-rule. The Phase 7 gaps are now explicitly divided into the canonical execution
-dependency closure (7A), shared transition boundary (7B), fact publication
-(7C), and Paper host adapter (7D). No Phase 7 parity claim is made until all
-five streams match on both no-trade and execution-bearing sessions.
+rule. Phase 7 is complete for the bounded replay parity contract. Remaining
+work is the reporting/artifact contract and host integration described in Phase
+8 and Phase 9; no new Paper execution policy should be added.
 
 ## Phase 8: Canonical Reporting And Four-Layer Parity Artifacts
 
-Port and validate canonical reporting before exposing orderflow through Paper API
-or runtime events.
+Status: **Next.**
 
-Required layers:
+Port the canonical producer-reporting contract before exposing orderflow through
+Paper API or runtime events. This is an artifact and validation phase, not a
+human-readable reporting or host-integration phase. The Phase 7 projection and
+manifest helpers are groundwork only: they do not satisfy the canonical
+four-layer artifact contract.
 
-1. source/run scope;
-2. decision lifecycle;
-3. execution and settlement;
-4. portfolio ledger.
+### Canonical Scope And Current Gap
 
-Required work:
+Trace the implementation to the pinned NiftyZoning commit:
 
-- Use canonical projection, identity, causal-parent, hashing, pagination, and
-  unavailable semantics.
-- Project the canonical replay payload fields produced by
-  `state_machine_reporting.py`, including `execution_fills`,
-  `execution_transitions`, and `ledger_mutations`.
-- Compare manifests before records and stop at the first causal mismatch.
-- Keep Paper transport, broker, database, and runtime metadata outside canonical
-  values unless the canonical contract explicitly includes them.
+- `src/orderflow/state_machine_reporting.py`: `build_replay_payload` and the
+  causal source/decision/execution projections. Port only fields that are
+  producer-owned parity facts; do not port presentation summaries, waterfalls,
+  trade tables, or shadow-outcome reporting unless a later approved contract
+  requires them.
+- `src/orderflow/parity_artifacts.py`: `PHASE_STREAMS`, `LAYERS`, record
+  validation, coverage/status rules, canonical hashing, artifact construction,
+  artifact validation, JSON/JSONL persistence, and bounded `read_parity_page`.
+- `src/orderflow/phase7_projection.py`: retain the five execution streams and
+  use them as explicit inputs to the final artifact. Do not infer them from
+  trades, terminal snapshots, counters, or presentation output.
 
-Parity gate:
+Paper currently has separate `build_phase4_artifact` and `build_phase7_artifact`
+helpers. Phase 8 must replace that split acceptance path with one canonical
+artifact contract. It must not silently treat a missing stream as an observed
+empty stream, and it must not claim parity from the top-level execution fields
+that are only projections.
 
-- The ported canonical reporting and artifact tests pass.
-- Any contract mismatch identifies the first layer, symbol, field, or transition
-  that differs from the pinned canonical commit.
-- Missing Paper runtime evidence is tracked as `INCOMPLETE` and cannot be called
-  parity.
+### Contract Shape
+
+The artifact must declare all six decision substreams in canonical order:
+
+1. `source_observation`
+2. `context_location`
+3. `interaction_response`
+4. `opportunity_lifecycle`
+5. `intent_admission`
+6. `trigger_exit`
+
+It must also declare all four final layers:
+
+1. `run_scope`: source identity, selected/filtered/completed rows, gaps, and
+   processed decision bars;
+2. `decision`: interaction, candidate, admission, trigger, and exit decisions;
+3. `execution_settlement`: reservations, authorizations, submissions, order
+   intents, fills, pending exits, exits, cancellations, and settlement;
+4. `portfolio_ledger`: reservations, releases, fills, partial fills,
+   cancellations, exit settlement, daily reset, and closeout.
+
+Every phase and layer record must preserve `kind`, causal timestamps,
+contiguous `sequence`, stable unique `identity`, `causal_parent_id`, `values`,
+and explicit `unavailable`. Normalize timestamps to UTC, reject naive or
+invalid timestamps, reject duplicate identities, and reject invalid layer kinds.
+Final layers may be built only when every required phase stream has a valid
+`MATCHED` coverage entry. `UNAVAILABLE`, `INCOMPLETE`, and observed-empty are
+distinct states and must remain distinct in the artifact and manifest.
+
+### Required Work
+
+- Add one Paper `build_parity_artifact` boundary matching the canonical
+  envelope: artifact type/schema, contract identity, producer, run scope,
+  coverage, decision substreams, final layers, and manifest.
+- Make `build_replay_payload` expose the explicit facts and coverage needed by
+  that boundary. It may project canonical facts, but it may not manufacture
+  missing streams or derive a decision from a report or terminal state.
+- Replace the current split Phase 4/Phase 7 comparison path with one
+  manifest-first comparator that checks phase streams in order, then final
+  layers, and reports the first stream, record, or field mismatch.
+- Implement canonical SHA-256 hashing, excluding only the explicitly allowed
+  producer-extension fields. Hashes must be deterministic across process runs
+  and must not include Paper broker, transport, database, or runtime metadata.
+- Persist the validated envelope, each decision/layer stream as JSONL, and the
+  manifest using the canonical filenames and schema. Add bounded offset/limit
+  pagination that reads persisted facts without re-evaluating strategy state.
+- Keep runtime-boundary snapshot/recovery comparison on the existing Phase 2
+  contract. Do not duplicate runtime recovery in the Phase 8 artifact builder;
+  live/replay persistence and API wiring remain Phase 9.
+
+### Phase 8 Exit Gate
+
+- Canonical reporting and parity-artifact tests pass at the pinned commit, with
+  only package-root import adaptations.
+- Paper emits all six decision substreams and all four final layers with
+  explicit coverage; missing or invalid evidence is `INCOMPLETE` or
+  `UNAVAILABLE`, never successful empty parity.
+- Artifact validation rejects missing stream declarations, invalid timestamps,
+  non-contiguous sequences, duplicate identities, invalid layer kinds, coverage
+  mismatches, and tampered record hashes.
+- Manifest comparison checks status, count, and hash before loading records, then
+  reports the first causal mismatch in deterministic stream/sequence/field
+  order. It passes on a no-trade session and an execution-bearing session with
+  entry, exit, and settlement facts.
+- Persisted JSONL pages round-trip through the reader with stable ordering and
+  bounded `offset`/`limit`; pagination does not mutate or recompute facts.
+- The artifact contains no Paper transport, broker, database, or runtime
+  metadata in canonical values, and no human-readable summary is used as a
+  parity source.
+- Phase 9 remains blocked until this gate passes; no API/runtime event or DB
+  parity claim is made from the Phase 8 harness alone.
 
 ## Phase 9: Add The Paper Host Adapter
 
