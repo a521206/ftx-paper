@@ -2851,13 +2851,13 @@ class ExecutionCoordinator:
                 [item for item in available5 if item.available_at <= coerce_timestamp(timestamp)],
                 direction=life.direction.value,
                 entry_price=entry_price,
-                failure_boundary=life.failure_boundary,
+                failure_boundary=position.failure_boundary,
                 # ``prior`` contains session-local source-row labels while
                 # execution state stores UTC instants. Compare like-for-like
                 # so pre-entry rows cannot satisfy continuation evidence.
                 entry_time=(
-                    nifty_label(coerce_timestamp(state.entry_at))[11:]
-                    if state.entry_at is not None else None
+                    nifty_label(coerce_timestamp(state.intent.triggered_at))[11:]
+                    if state.intent.triggered_at is not None else None
                 ),
                 synthetic=synthetic_snapshots,
             )

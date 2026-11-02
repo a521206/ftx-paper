@@ -153,7 +153,6 @@ def _handle_opening_interaction(
         pending_bar_events = getattr(context, "pending_bar_events", None)
         if isinstance(pending_bar_events, list):
             pending_bar_events.append(event)
-        facts.append(event)
 
 
 def _publish_replaced_interactions(

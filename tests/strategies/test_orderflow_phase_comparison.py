@@ -183,7 +183,7 @@ def test_phase7_reporting_preserves_producer_owned_transition_and_ledger_facts()
     assert payload["ledger_mutations"] == [ledger]
 
 
-def test_opening_interaction_is_published_as_a_phase45_fact() -> None:
+def test_opening_interaction_is_published_as_a_lifecycle_event_only() -> None:
     class Context:
         opportunities: dict[str, object]
 
@@ -215,7 +215,7 @@ def test_opening_interaction_is_published_as_a_phase45_fact() -> None:
         next_time="2026-10-01T09:22:00Z",
     )
 
-    assert facts[0]["kind"] == "opening_interaction"
+    assert facts == []
     assert context.events[0]["kind"] == "opening_interaction"
 
 
