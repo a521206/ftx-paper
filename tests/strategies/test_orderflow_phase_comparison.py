@@ -240,8 +240,12 @@ def test_phase7_reporting_preserves_producer_owned_transition_and_ledger_facts()
 
     payload = build_replay_payload(Context(), [], [], [])
 
-    assert payload["execution_transitions"] == [transition]
-    assert payload["ledger_mutations"] == [ledger]
+    assert payload["execution_transitions"][0]["identity"] == transition["identity"]
+    assert payload["execution_transitions"][0]["sequence"] == 0
+    assert payload["execution_transitions"][0]["occurred_at"] == "2026-10-01T09:21:00.000000Z"
+    assert payload["ledger_mutations"][0]["identity"] == ledger["identity"]
+    assert payload["ledger_mutations"][0]["sequence"] == 0
+    assert payload["ledger_mutations"][0]["occurred_at"] == "2026-10-01T09:20:00.000000Z"
     assert payload["execution_diagnostic_summary"] == {
         "record_count": 0,
         "by_kind": {},

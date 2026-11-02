@@ -320,6 +320,7 @@ class ReplayContext:
     execution_proposals: list["CanonicalExecutionProposal"] = field(default_factory=list)
     parity_streams: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     parity_observed: set[str] = field(default_factory=set, repr=False)
+    parity_layers: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     # Chronological state retained by the canonical state-machine boundary.
     current_session_date: str | None = None
     continuous: Any = None
@@ -427,6 +428,23 @@ class ReplayContext:
                 "values": values,
                 "unavailable": [],
             })
+        layer_kinds = {
+            "filled": (("execution_settlement", "fill"), ("portfolio_ledger", "fill")),
+            "position_closed": (("execution_settlement", "settlement"), ("portfolio_ledger", "exit_settlement")),
+        }
+        if str(event_data.get("kind")) in layer_kinds and isinstance(observed_at, str) and isinstance(available_at, str):
+            for layer, kind in layer_kinds[str(event_data["kind"])]:
+                self.record_parity_layer_fact(layer, {
+                    "kind": kind,
+                    "occurred_at": observed_at,
+                    "observed_at": observed_at,
+                    "available_at": available_at,
+                    "sequence": len(self.parity_layers.get(layer, [])),
+                    "identity": str(event_data.get("neutral_event_key", event_data["event_id"])),
+                    "causal_parent_id": event_data.get("causal_parent_id"),
+                    "values": dict(event_data),
+                    "unavailable": [],
+                })
 
     def emit_market_event(
         self,
@@ -598,7 +616,7 @@ class ReplayContext:
         state = self.execution_engine.state_for(opportunity.lifecycle_id)
         return state.position is not None and state.position.status.value == "open"
 
-    def record_parity_fact(self, stream: str, fact: dict[str, Any]) -> None:
+    def record_parity_fact(self, stream: str, fact: Mapping[str, Any]) -> None:
         allowed = set(PHASE_STREAMS) | {
             "execution_fills", "execution_transitions", "ledger_mutations",
         }
@@ -606,6 +624,12 @@ class ReplayContext:
             raise ValueError(f"unknown parity stream: {stream}")
         self.parity_observed.add(stream)
         self.parity_streams.setdefault(stream, []).append(_parity_safe(dict(fact)))
+
+    def record_parity_layer_fact(self, layer: str, fact: Mapping[str, Any]) -> None:
+        """Publish one producer-owned final-layer fact."""
+        if layer not in {"run_scope", "decision", "execution_settlement", "portfolio_ledger"}:
+            raise ValueError(f"unknown parity layer: {layer}")
+        self.parity_layers.setdefault(layer, []).append(_parity_safe(dict(fact)))
 
     def parity_snapshot(self) -> dict[str, list[dict[str, Any]]]:
         return {

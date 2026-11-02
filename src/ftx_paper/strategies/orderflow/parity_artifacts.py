@@ -59,6 +59,24 @@ def canonical_hash(value: object) -> str:
     return hashlib.sha256(_json(value)).hexdigest()
 
 
+def _records_hash(records: Sequence[Mapping[str, Any]]) -> str:
+    return canonical_hash([
+        {key: value for key, value in record.items() if key != "producer_extensions"}
+        for record in records
+    ])
+
+
+def _coverage(status: str, observed: bool, count: int, coverage: str | None = None) -> dict[str, Any]:
+    if status not in {"MATCHED", "MISMATCHED", "INCOMPLETE", "UNAVAILABLE"}:
+        raise ValueError(f"invalid parity status: {status}")
+    state = coverage or ("observed" if observed else "unavailable")
+    if state not in {"observed", "observed_empty", "unavailable"}:
+        raise ValueError(f"invalid parity coverage: {state}")
+    if state == "observed_empty" and (not observed or count != 0):
+        raise ValueError("observed_empty requires observed zero-row coverage")
+    return {"status": status, "observed": observed, "coverage": state, "count": count}
+
+
 def _timestamp(value: object) -> str:
     if value is None:
         raise ValueError("parity timestamps are required")
@@ -125,6 +143,200 @@ def normalize_phase_record(record: Mapping[str, Any], *, sequence: int) -> dict[
     if parent is not None and not isinstance(parent, str):
         raise ValueError("phase record causal_parent_id must be a string or null")
     return result
+
+
+def _normalize_record(
+    record: Mapping[str, Any], *, stream: str, sequence: int, layer: str | None = None,
+) -> dict[str, Any]:
+    required = {
+        "kind", "occurred_at", "observed_at", "available_at", "sequence",
+        "identity", "causal_parent_id", "values", "unavailable",
+    }
+    missing = required - set(record)
+    if missing:
+        raise ValueError(f"{stream} record missing {sorted(missing)}")
+    result = _normalize_embedded_ids(_copy(record))
+    result["occurred_at"] = _timestamp(result["occurred_at"])
+    result["observed_at"] = _timestamp(result["observed_at"])
+    result["available_at"] = _timestamp(result["available_at"])
+    if result["sequence"] != sequence:
+        raise ValueError(f"{stream} record sequence must be contiguous")
+    if not isinstance(result["identity"], str) or not result["identity"]:
+        raise ValueError(f"{stream} record identity is required")
+    if not isinstance(result["values"], Mapping) or not isinstance(result["unavailable"], list):
+        raise ValueError(f"{stream} record values and unavailable are required")
+    if any(not isinstance(item, str) for item in result["unavailable"]):
+        raise ValueError(f"{stream} unavailable values must be named strings")
+    if result["causal_parent_id"] is not None and not isinstance(result["causal_parent_id"], str):
+        raise ValueError(f"{stream} causal_parent_id must be a string or null")
+    if layer == "run_scope":
+        if result["kind"] != "run_scope":
+            raise ValueError("run_scope records must use kind run_scope")
+        required_counts = {
+            "selected_source_rows", "filtered_source_rows", "completed_source_rows",
+            "gap_rows", "processed_decision_bars",
+        }
+        if not required_counts <= set(result["values"]):
+            raise ValueError("run_scope records require source and decision-bar counts")
+    elif layer == "decision":
+        if result["kind"] != "decision" or result.get("stage") not in DECISION_STAGES:
+            raise ValueError("decision records require a valid decision stage")
+    elif layer == "execution_settlement" and result["kind"] not in EXECUTION_KINDS:
+        raise ValueError("invalid execution_settlement kind")
+    elif layer == "portfolio_ledger" and result["kind"] not in LEDGER_KINDS:
+        raise ValueError("invalid portfolio_ledger kind")
+    return result
+
+
+def _stream_manifest(
+    records: Sequence[Mapping[str, Any]], *, status: str, observed: bool,
+    coverage: str | None = None,
+) -> dict[str, Any]:
+    return {
+        **_coverage(status, observed, len(records), coverage),
+        "sha256": _records_hash(records),
+    }
+
+
+def build_parity_artifact(
+    *, run_id: str, producer: Mapping[str, Any], scope: Mapping[str, Any],
+    phase_streams: Mapping[str, Sequence[Mapping[str, Any]]],
+    layers: Mapping[str, Sequence[Mapping[str, Any]]], coverage: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build and validate the unified producer parity artifact."""
+    validate_contract_declarations(phase_streams, layers)
+    normalized_phases = {
+        name: [_normalize_record(item, stream=name, sequence=index)
+               for index, item in enumerate(records)]
+        for name, records in phase_streams.items()
+    }
+    normalized_layers = {
+        name: [_normalize_record(item, stream=name, sequence=index, layer=name)
+               for index, item in enumerate(records)]
+        for name, records in layers.items()
+    }
+    coverage_phases = coverage.get("phase_streams") if isinstance(coverage, Mapping) else None
+    coverage_layers = coverage.get("layers") if isinstance(coverage, Mapping) else None
+    if not isinstance(coverage_phases, Mapping) or not isinstance(coverage_layers, Mapping):
+        raise ValueError("coverage must declare phase_streams and layers")
+    if set(coverage_phases) != set(PHASE_STREAMS) or set(coverage_layers) != set(LAYERS):
+        raise ValueError("coverage must declare every phase stream and final layer")
+    for group, names in ((coverage_phases, PHASE_STREAMS), (coverage_layers, LAYERS)):
+        for name in names:
+            entry = group[name]
+            if not isinstance(entry, Mapping):
+                raise ValueError(f"{name} coverage entry must be an object")
+            _coverage(str(entry.get("status")), bool(entry.get("observed")),
+                      len(normalized_phases[name] if name in PHASE_STREAMS else normalized_layers[name]),
+                      entry.get("coverage"))
+    if any(coverage_phases[name]["status"] != "MATCHED" for name in PHASE_STREAMS):
+        raise ValueError("final parity layers require complete phase streams")
+    manifest = {
+        "version": 1, "hash_algorithm": "sha256", "run_id": run_id,
+        "phase_streams": {
+            name: _stream_manifest(normalized_phases[name],
+                                   status=str(coverage_phases[name]["status"]),
+                                   observed=bool(coverage_phases[name]["observed"]),
+                                   coverage=coverage_phases[name].get("coverage"))
+            for name in PHASE_STREAMS
+        },
+        "layers": {
+            name: _stream_manifest(normalized_layers[name],
+                                   status=str(coverage_layers[name]["status"]),
+                                   observed=bool(coverage_layers[name]["observed"]),
+                                   coverage=coverage_layers[name].get("coverage"))
+            for name in LAYERS
+        },
+    }
+    artifact = {
+        "artifact_type": ARTIFACT_TYPE, "schema_version": SCHEMA_VERSION,
+        "contract": {"id": CONTRACT_ID, "version": CONTRACT_VERSION},
+        "producer": _copy(producer), "run_id": run_id, "scope": _copy(scope),
+        "coverage": _copy(coverage), "decision_substreams": normalized_phases,
+        "layers": normalized_layers, "manifest": manifest,
+    }
+    validate_parity_artifact(artifact)
+    return artifact
+
+
+def build_parity_artifact_from_payload(
+    payload: Mapping[str, Any], *, run_id: str, producer: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build from explicit producer facts attached to a replay payload."""
+    phase_streams = payload.get("parity_phase_facts")
+    layers = payload.get("parity_layers")
+    coverage = payload.get("parity_coverage")
+    if not isinstance(phase_streams, Mapping) or not isinstance(layers, Mapping) or not isinstance(coverage, Mapping):
+        raise ValueError("replay payload is missing explicit parity facts and coverage")
+    return build_parity_artifact(
+        run_id=run_id, producer=producer, scope=payload.get("scope", {}),
+        phase_streams=phase_streams, layers=layers, coverage=coverage,
+    )
+
+
+def validate_parity_artifact(payload: Mapping[str, Any]) -> None:
+    """Validate the complete canonical artifact envelope and manifests."""
+    required = {"artifact_type", "schema_version", "contract", "producer", "run_id", "scope", "coverage", "decision_substreams", "layers", "manifest"}
+    if set(payload) != required:
+        raise ValueError("invalid producer parity artifact envelope")
+    if payload["artifact_type"] != ARTIFACT_TYPE or payload["schema_version"] != SCHEMA_VERSION:
+        raise ValueError("invalid producer parity artifact version")
+    if payload["contract"] != {"id": CONTRACT_ID, "version": CONTRACT_VERSION}:
+        raise ValueError("invalid producer parity contract")
+    scope, producer = payload["scope"], payload["producer"]
+    if not isinstance(scope, Mapping) or not isinstance(scope.get("timezone"), str):
+        raise ValueError("parity scope timezone is required")
+    if not isinstance(producer, Mapping) or not producer.get("name"):
+        raise ValueError("parity producer identity is required")
+    manifest = payload["manifest"]
+    if not isinstance(manifest, Mapping) or manifest.get("version") != 1 or manifest.get("hash_algorithm") != "sha256" or manifest.get("run_id") != payload["run_id"]:
+        raise ValueError("parity manifest identity is invalid")
+    coverage = payload["coverage"]
+    if not isinstance(coverage, Mapping):
+        raise ValueError("parity coverage is required")
+    for collection_name, names in (("decision_substreams", PHASE_STREAMS), ("layers", LAYERS)):
+        collection = payload[collection_name]
+        manifest_name = "phase_streams" if collection_name == "decision_substreams" else "layers"
+        group = coverage.get(manifest_name)
+        manifest_group = manifest.get(manifest_name)
+        if not isinstance(collection, Mapping) or set(collection) != set(names):
+            raise ValueError(f"{collection_name} must declare every stream")
+        if not isinstance(group, Mapping) or set(group) != set(names) or not isinstance(manifest_group, Mapping):
+            raise ValueError(f"coverage must declare every {manifest_name} entry")
+        for name in names:
+            records = collection[name]
+            if not isinstance(records, list):
+                raise ValueError(f"{name} must be a list")
+            identities: set[str] = set()
+            for index, item in enumerate(records):
+                if not isinstance(item, Mapping) or item.get("sequence") != index:
+                    raise ValueError(f"{name} sequence is not contiguous")
+                identity = item.get("identity")
+                if not isinstance(identity, str) or identity in identities:
+                    raise ValueError(f"{name} identity is invalid or duplicated")
+                identities.add(identity)
+                _normalize_record(item, stream=name, sequence=index, layer=name if collection_name == "layers" else None)
+            entry, manifest_entry = group[name], manifest_group.get(name)
+            if not isinstance(entry, Mapping) or not isinstance(manifest_entry, Mapping):
+                raise ValueError(f"invalid coverage entry: {name}")
+            if not isinstance(entry.get("observed"), bool):
+                raise ValueError(f"{name} coverage observed must be boolean")
+            if entry.get("status") not in {"MATCHED", "MISMATCHED", "INCOMPLETE", "UNAVAILABLE"}:
+                raise ValueError(f"{name} coverage status is invalid")
+            if entry.get("coverage") not in {"observed", "observed_empty", "unavailable"}:
+                raise ValueError(f"{name} coverage value is invalid")
+            for field in ("status", "observed", "coverage"):
+                if entry.get(field) != manifest_entry.get(field):
+                    raise ValueError(f"coverage mismatch: {name}.{field}")
+            if manifest_entry.get("count") != len(records) or manifest_entry.get("sha256") != _records_hash(records):
+                raise ValueError(f"{name} manifest count or hash mismatch")
+            status = manifest_entry.get("status")
+            if status == "MATCHED" and not manifest_entry.get("observed"):
+                raise ValueError(f"{name} matched stream is not observed")
+            if not records and status == "MATCHED" and manifest_entry.get("coverage") != "observed_empty":
+                raise ValueError(f"{name} empty stream is not observed")
+            if status == "UNAVAILABLE" and records:
+                raise ValueError(f"{name} unavailable stream contains records")
 
 
 def _manifest(records: Sequence[Mapping[str, Any]], *, status: str, observed: bool) -> dict[str, Any]:
@@ -292,8 +504,9 @@ __all__ = [
     "ARTIFACT_TYPE", "CONTRACT_ID", "CONTRACT_VERSION", "DECISION_STAGES",
     "EXECUTION_KINDS", "FILENAME", "LAYERS", "LEDGER_KINDS", "PARITY_PAYLOAD_KEYS",
     "PHASE_STREAMS", "PHASE7_STREAMS", "SCHEMA_VERSION",
+    "build_parity_artifact", "build_parity_artifact_from_payload",
     "build_phase4_artifact", "build_phase7_artifact", "canonical_hash",
     "compare_chronological_streams", "compare_phase4_manifests",
     "compare_phase7_manifests", "normalize_phase_record", "phase_facts_from_payload",
-    "validate_contract_declarations",
+    "validate_contract_declarations", "validate_parity_artifact",
 ]

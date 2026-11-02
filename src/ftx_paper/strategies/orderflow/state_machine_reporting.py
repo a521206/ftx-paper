@@ -8,10 +8,13 @@ facts into ``parity_streams`` before they can appear in a replay payload.
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import asdict, is_dataclass
+from datetime import datetime, timezone
 from typing import Any, cast
+from zoneinfo import ZoneInfo
 
-from .phase7_projection import PHASE7_STREAMS, build_phase7_projection
+from .parity_artifacts import LAYERS, PHASE_STREAMS
 
 
 def _json_safe(value: Any) -> Any:
@@ -44,6 +47,28 @@ def _execution_diagnostic_summary(records: list[dict[str, Any]] | tuple[dict[str
     }
 
 
+def _transport_parity_facts(raw: list[Any] | tuple[Any, ...]) -> list[dict[str, Any]]:
+    """Copy producer facts and normalize causal timestamps to UTC."""
+    result: list[dict[str, Any]] = []
+    for sequence, item in enumerate(raw):
+        if not isinstance(item, Mapping):
+            raise ValueError("parity facts must contain objects")
+        fact = _json_safe(dict(item))
+        fact.setdefault("sequence", sequence)
+        for field in ("occurred_at", "observed_at", "available_at"):
+            value = fact.get(field)
+            if value is None:
+                continue
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+            fact[field] = parsed.astimezone(timezone.utc).isoformat(
+                timespec="microseconds"
+            ).replace("+00:00", "Z")
+        result.append(fact)
+    return result
+
+
 def build_replay_payload(
     machine: Any,
     records: list[dict[str, Any]],
@@ -55,62 +80,47 @@ def build_replay_payload(
     """Build a bounded payload from facts explicitly emitted by the machine."""
     context = getattr(machine, "context", machine)
     streams = getattr(context, "parity_streams", {})
-    if not isinstance(streams, dict):
-        streams = {}
-    execution_states = (
-        tuple(context.execution_engine.snapshot().values())
-        if getattr(context, "execution_engine", None) is not None else ()
-    )
-    execution_fills = [
-        asdict(fill) for state in execution_states for fill in state.fills
-    ]
-    execution_transitions = list(streams.get("execution_transitions", ()))
-    ledger_mutations = list(streams.get("ledger_mutations", ()))
-    if not ledger_mutations:
-        for state in execution_states:
-            parent = state.opportunity_id
-            for reservation in state.reservation_history:
-                ledger_mutations.append({
-                    "kind": "reservation",
-                    "opportunity_id": parent,
-                    **asdict(reservation),
-                })
-                if reservation.released_at:
-                    ledger_mutations.append({
-                        "kind": "reservation_release",
-                        "opportunity_id": parent,
-                        "reservation_id": reservation.reservation_id,
-                        "occurred_at": reservation.released_at,
-                        "reason": reservation.release_reason,
-                    })
-            for admission in state.admission_history:
-                if admission.status.value != "NOT_EVALUATED":
-                    ledger_mutations.append({
-                        "kind": "authorization",
-                        "opportunity_id": parent,
-                        **asdict(admission),
-                    })
-            for fill in state.fills:
-                ledger_mutations.append({
-                    "kind": (
-                        "exit_settlement"
-                        if fill.kind in {"exit", "partial_exit"}
-                        else "fill"
-                    ),
-                    "opportunity_id": parent,
-                    **asdict(fill),
-                })
-    phase7_input = {
-        "parity_phase_facts": streams,
-        "execution_fills": execution_fills,
-        "execution_transitions": execution_transitions,
-        "ledger_mutations": ledger_mutations,
-    }
+    layers = getattr(context, "parity_layers", {})
+    if not isinstance(streams, Mapping) or not isinstance(layers, Mapping):
+        raise ValueError("replay context parity facts must be mappings")
+    # Parity evidence is producer-owned.  Terminal execution snapshots and
+    # presentation records are deliberately not evidence sources.
+    observed = getattr(context, "parity_observed", None)
+    observed_streams = set(observed) if isinstance(observed, set) else set(streams)
     phase_facts = {
-        name: _json_safe(list(streams[name]))
-        for name in PHASE7_STREAMS
-        if name in streams
+        name: _transport_parity_facts(streams[name]) if name in streams and name in observed_streams else []
+        for name in PHASE_STREAMS
     }
+    observed_layers = set(layers)
+    parity_layers = {
+        name: _transport_parity_facts(layers[name]) if name in layers and name in observed_layers else []
+        for name in LAYERS
+    }
+    coverage = {
+        "phase_streams": {
+            name: {
+                "status": "MATCHED" if name in streams and name in observed_streams else "UNAVAILABLE",
+                "observed": name in streams and name in observed_streams,
+                "coverage": "observed_empty" if name in streams and name in observed_streams and not phase_facts[name] else (
+                    "observed" if name in streams and name in observed_streams else "unavailable"
+                ),
+            }
+            for name in PHASE_STREAMS
+        },
+        "layers": {
+            name: {
+                "status": "MATCHED" if name in layers and name in observed_layers else "UNAVAILABLE",
+                "observed": name in layers and name in observed_layers,
+                "coverage": "observed_empty" if name in layers and name in observed_layers and not parity_layers[name] else (
+                    "observed" if name in layers and name in observed_layers else "unavailable"
+                ),
+            }
+            for name in LAYERS
+        },
+    }
+    execution_fills = _transport_parity_facts(streams["execution_fills"]) if "execution_fills" in streams and "execution_fills" in observed_streams else []
+    execution_transitions = _transport_parity_facts(streams["execution_transitions"]) if "execution_transitions" in streams and "execution_transitions" in observed_streams else []
+    ledger_mutations = _transport_parity_facts(streams["ledger_mutations"]) if "ledger_mutations" in streams and "ledger_mutations" in observed_streams else []
     execution_diagnostics = tuple(getattr(context, "execution_diagnostics", ()))
     payload: dict[str, Any] = {
         "artifact_type": "orderflow_state_machine_trace",
@@ -122,21 +132,19 @@ def build_replay_payload(
         "source_bar_count": len(rows),
         "records": _json_safe(records),
         "replay_records": _json_safe(replay_records),
-        "parity_phase_facts": {
-            **phase_facts,
-            **build_phase7_projection(phase7_input),
-        },
-        "execution_fills": _json_safe(execution_fills),
-        "execution_transitions": _json_safe(execution_transitions),
-        "ledger_mutations": _json_safe(ledger_mutations),
+        "scope": {"timezone": "Asia/Kolkata"},
+        "parity_phase_facts": phase_facts,
+        "parity_layers": parity_layers,
+        "parity_coverage": coverage,
         "execution_diagnostics": _json_safe(execution_diagnostics),
         "execution_diagnostic_summary": _execution_diagnostic_summary(execution_diagnostics),
     }
     # Validate the producer-owned shape without manufacturing missing streams.
-    if phase_facts or execution_states:
-        payload["phase7_projection"] = build_phase7_projection(
-            phase7_input
-        )
+    for name, values in (("execution_fills", execution_fills),
+                         ("execution_transitions", execution_transitions),
+                         ("ledger_mutations", ledger_mutations)):
+        if name in streams and name in observed_streams:
+            payload[name] = values
     return payload
 
 
