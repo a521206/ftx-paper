@@ -4,6 +4,10 @@ from pathlib import Path
 
 import pytest
 
+from scripts.orderflow.compare_canonical_replay import (
+    _normalize_unified_payload_for_compare,
+)
+
 from ftx_paper.strategies.orderflow.parity_artifacts import (
     ARTIFACT_TYPE,
     CONTRACT_ID,
@@ -255,6 +259,33 @@ def test_unified_comparison_reports_first_causal_record_field() -> None:
     assert result["stream"] == "run_scope"
     assert result["sequence"] == 0
     assert result["field"] == "values.gap_rows"
+
+
+def test_unified_comparison_normalizes_embedded_session_labels() -> None:
+    record = {
+        "kind": "interaction",
+        "occurred_at": "2026-10-01T09:20",
+        "observed_at": "2026-10-01T09:20",
+        "available_at": "2026-10-01T09:20",
+        "sequence": 0,
+        "identity": "interaction-1",
+        "causal_parent_id": None,
+        "values": {
+            "available_at": "2026-09-30T15:30",
+            "source": {"observed_at": "2026-09-30T20:00:00Z"},
+        },
+        "unavailable": [],
+    }
+
+    normalized = _normalize_unified_payload_for_compare(
+        {"parity_phase_facts": {"interaction_response": [record]}},
+        "2026-10-01",
+    )
+
+    result = normalized["parity_phase_facts"]["interaction_response"][0]
+    assert result["available_at"] == "2026-10-01T03:50:00.000000Z"
+    assert result["values"]["available_at"] == "2026-09-30T10:00:00.000000Z"
+    assert result["values"]["source"]["observed_at"] == "2026-09-30T20:00:00.000000Z"
 
 
 def test_parity_artifact_jsonl_round_trip_and_bounded_page(tmp_path: Path) -> None:

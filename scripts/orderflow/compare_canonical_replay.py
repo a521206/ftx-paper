@@ -62,7 +62,7 @@ PHASE6_PROVENANCE_FIELDS = (
     "response_observed_at", "response_available_at", "formation_at",
     "formation_available_at", "stage",
 )
-MIN_COMPARISON_DATE = date(2026, 9, 21)
+MIN_COMPARISON_DATE = date(2026, 9, 15)
 _CAUSAL_TIMESTAMP_KEYS = frozenset({
     "as_of", "available_at", "current_available_at", "end_time", "formation_at",
     "formation_available_at", "observed_at", "occurred_at", "response_available_at",
@@ -253,7 +253,11 @@ def _canonical_timestamp(value: Any, session_date: str) -> Any:
         text = f"{session_date}T{text}"
     if len(text) >= 10 and text[4] == "-" and text[7] == "-" and text[10] in {"T", " "}:
         try:
-            return serialize_utc(parse_session_timestamp(session_date, text))
+            if text.endswith("Z") or "+" in text[10:] or "-" in text[10:]:
+                return serialize_utc(parse_utc(text))
+            # Embedded causal values can reference a prior session, so use the
+            # value's own date rather than forcing it into the replay date.
+            return serialize_utc(parse_session_timestamp(text[:10], text))
         except ValueError:
             return value
     return value
@@ -330,6 +334,28 @@ def _normalize_phase_record_for_compare(record: dict[str, Any], session_date: st
         return value
 
     return remove_labels(normalized)
+
+
+def _normalize_unified_payload_for_compare(
+    payload: Mapping[str, Any], session_date: str,
+) -> dict[str, Any]:
+    """Normalize canonical local labels before unified artifact construction."""
+    normalized = dict(payload)
+    for group_name in ("parity_phase_facts", "parity_layers"):
+        raw_group = payload.get(group_name)
+        if not isinstance(raw_group, Mapping):
+            continue
+        normalized[group_name] = {
+            str(stream): [
+                _normalize_phase_record_for_compare(dict(record), session_date)
+                if isinstance(record, Mapping) else record
+                for record in records
+            ]
+            if isinstance(records, Sequence) and not isinstance(records, (str, bytes))
+            else records
+            for stream, records in raw_group.items()
+        }
+    return normalized
 
 
 def _phase45_semantic_projection(record: Mapping[str, Any], session_date: str) -> dict[str, Any]:
@@ -1708,6 +1734,10 @@ def _compare_unified_artifact(
         canonical_session = canonical_payload["sessions"][session_date]
         if not isinstance(canonical_session, Mapping):
             raise ValueError("canonical session payload is unavailable")
+        canonical_session = _normalize_unified_payload_for_compare(
+            canonical_session, session_date,
+        )
+        paper = _normalize_unified_payload_for_compare(paper, session_date)
         canonical_artifact = build_parity_artifact_from_payload(
             canonical_session, run_id=f"canonical-{session_date}",
             producer={"name": "NiftyZoning"},

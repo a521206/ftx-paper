@@ -1394,41 +1394,175 @@ the temporary Phase 8 harness.
 Only after the ported canonical layers and artifact checks pass, integrate them
 with Paper.
 
-Status: **Not complete; partial scaffolding exists.** The live strategy boundary,
+Status: **Planning only; blocked by the Phase 8 cross-repository timestamp
+normalization and replay rerun.** The live strategy boundary,
 shared transition owner, generic `RuntimeSession` dispatch, and generic
 `ReplayWorker` provide host seams, but the complete canonical orderflow state and
 execution path is not yet wired through Paper live/replay. The temporary
 `scripts/orderflow/orderflow_replay.py` harness remains the parity entry point
 until this phase's retirement gate passes.
 
+### Phase 9 Lessons From Phases 3-8
+
+The implementation and replay failures so far add these constraints to the host
+adapter:
+
+- A host coordinator must not become a second orderflow state machine. The
+  canonical transition and execution owners are created once per runtime and
+  shared by live and replay adapters.
+- Canonical timestamps and Paper UTC timestamps are normalized at the boundary.
+  Session labels remain metadata and are never compared as raw strings.
+- Missing ATR, prior-session value, context, location, or execution evidence
+  remains `UNAVAILABLE` or `INCOMPLETE`; it is never converted to an empty
+  successful stream.
+- Execution notifications return to the canonical transition owner. They do not
+  justify a second Paper coordinator, and conflict/ownership/fill ordering stays
+  canonical.
+- Replay receives a fresh owner and explicit bounded inputs. It cannot read live
+  runtime state, broker state, or the Paper account database implicitly.
+- Persistence and reporting observe canonical facts. They do not reconstruct
+  decisions from trades, counters, terminal snapshots, or summaries.
+- Recovery is a snapshot contract. Startup may mark an unrecoverable interrupted
+  session `STOPPED` with one audit event, but must not rebuild state from future
+  bars or create a second engine.
+
+### Phase 9 Delivery Sequence
+
+#### 9A - Close The Phase 8 Prerequisite
+
+- Normalize embedded `available_at`, `observed_at`, and parent timestamps in the
+  unified artifact comparison to UTC.
+- Rerun source-matched dates beginning with `2026-09-15` and `2026-10-01`; keep
+  `2026-10-29` excluded while its canonical source history is incomplete.
+- Record manifest-first comparison evidence before changing host wiring.
+
+Exit gate: the cross-repository Phase 8 comparison is `MATCHED` or an explicitly
+accepted bounded `INPUT_VARIANCE`; unit fixtures alone do not unblock Phase 9.
+
+Phase 9A verification record:
+
+- `scripts/orderflow/compare_canonical_replay.py` now normalizes top-level and
+  embedded causal timestamps in unified phase/layer records to UTC before
+  `build_parity_artifact_from_payload`; prior-session embedded dates use their
+  own session date. The comparison date floor is `2026-09-15`.
+- `tests/strategies/test_orderflow_phase8_contract.py`: 11 passed, including
+  canonical local-label versus Paper UTC normalization.
+- Replay report:
+  `data/output/orderflow/canonical-replay-comparison-20261102T115443Z-84918a42.json`.
+- `2026-09-15`: Phase 3 `MATCHED`; Phase 3.5/4 accepted bounded
+  `INPUT_VARIANCE`; Phase 4.5 `MATCHED`; Phase 6 remains `MISMATCHED` due a
+  lifecycle evidence difference; Phase 9A remains blocked.
+- `2026-10-01`: Phase 3 `MATCHED`; Phase 3.5/4/6 accepted bounded
+  `INPUT_VARIANCE`; Phase 4.5 `MATCHED`; Phase 7 and unified parity remain
+  downstream `MISMATCHED` execution consequences. Phase 9A remains blocked.
+- The rerun produced no remaining comparison-layer timestamp mismatch; the
+  remaining failures are causal/lifecycle and ATR-dependent evidence, not UTC
+  serialization differences. `2026-10-29` was not included.
+
+#### 9B - Define The Host Adapter Contracts
+
+- Define one versioned input adapter from completed broker/stored-bar evidence to
+  the canonical observation contract. Live emits one available observation at a
+  time; replay emits the same shape from bounded ordered input.
+- Define one versioned output adapter for events, proposals, snapshots, and
+  artifacts. Paper transport/runtime metadata stays outside canonical values.
+- Make UTC conversion, source identity, availability, lineage, and unavailable
+  reasons explicit in the adapter schema.
+
+Exit gate: live-style and bounded-replay fixtures produce identical canonical
+input envelopes and no adapter performs policy or gap repair.
+
+#### 9C - Compose One Canonical Runtime Owner
+
+- Extend `RuntimeSession` to own the orderflow transition state directly, or add
+  a narrowly scoped `PaperOrderflowRuntime` only if direct composition is not
+  possible.
+- Construct observation, context, opportunity, and execution owners once per
+  live session and route them through the existing transition boundary.
+- Keep subscriptions, lifecycle, clock, notifications, and snapshots in Paper;
+  keep all policy and lifecycle decisions canonical.
+
+Exit gate: a fixed prefix produces the same state, event, decision, and execution
+prefix through live and bounded replay.
+
+#### 9D - Replace The Temporary Replay Path
+
+- Make `ReplayWorker` own only bounded loading, scope, cancellation, clock,
+  capture, and fresh runtime composition.
+- Route every replay observation through the live transition owner; do not call
+  live feed callbacks from replay.
+- Move artifact persistence behind the production runtime/store boundary.
+
+Exit gate: replay retry is idempotent and isolated from live/account state.
+
+#### 9E - Connect Paper Execution Without Policy Duplication
+
+- Map only admitted/triggered canonical proposals through
+  `OrderflowExecutionAdapter` to the existing Paper execution owner.
+- Preserve canonical reservation, authorization, conflict, ownership-transfer,
+  entry-fill, exit-fill, cancellation, and settlement ordering.
+- Keep Paper account/equity mutations separate from the orderflow ledger.
+
+Exit gate: diagnostic mode has no account mutation, live remains paper-only, and
+execution-bearing replay matches canonical lifecycle ordering.
+
+#### 9F - Persist, Recover, And Serve Facts
+
+- Persist versioned canonical events, snapshots, notifications, and artifacts
+  through existing runtime/store boundaries.
+- Restore the canonical snapshot on recoverable restart; otherwise mark the
+  interrupted session `STOPPED` with one audit event.
+- Make duplicate observations, notifications, and recovery attempts idempotent.
+- Add API/CLI projections as read-only views; they must not recompute decisions.
+
+Exit gate: recovery preserves the canonical prefix and live/replay projections
+are equivalent for the same facts.
+
+#### 9G - Wire Context/Location Persistence And Run The Matrix
+
+- Persist `context_location` from the canonical context owner with source
+  observation IDs, causal parents, availability, and missing-evidence reasons.
+- Run the DB-backed matrix for `2026-09-15` and `2026-10-01`, comparing manifests
+  before records and stopping at the first deterministic mismatch.
+- Apply only the existing Phase 3.5 ATR/prior-value variance rule; add no Phase 9
+  fallback or tolerance.
+
+Exit gate: all four final layers persist and validate without Paper metadata in
+canonical hashes.
+
+#### 9H - Retire The Temporary Replay Harness
+
+Retire `scripts/orderflow/orderflow_replay.py` as a separate final step after
+the production Paper replay adapter has replaced every responsibility that was
+temporarily carried by the harness. This is removal work, not permission to
+promote the harness into a second replay engine or to preserve it as a
+compatibility path.
+
 Required work:
 
-- Connect the existing broker/feed and stored-bar inputs to one canonical input
-  adapter contract. The live adapter publishes completed evidence incrementally;
-  the replay adapter publishes the same contract from bounded stored input.
-- Replace the orderflow-specific replay-harness path with the existing
-  `ReplayWorker`/replay adapter path. The worker may own bounded file/database
-  loading, iteration, cancellation, and capture, but it must not become a second
-  orderflow state machine.
-- Add a live `PaperOrderflowRuntime` composition boundary only if the existing
-  `RuntimeSession` cannot host the canonical state directly. It may own feed
-  subscriptions, session lifecycle, snapshots, and notifications, but not policy
-  decisions or a second lifecycle state machine.
-- Route canonical execution proposals through the existing Paper paper-execution
-  owner. Do not route them through the deleted orderflow coordinator.
-- Persist canonical decisions and lifecycle facts through existing Paper runtime
-  event and store boundaries using an explicit versioned adapter schema.
-- Wire the persisted `context_location` phase stream at this boundary. It must
-  be produced from the canonical runtime context owner, include source
-  observation IDs and causal parents, and remain `INCOMPLETE` or `UNAVAILABLE`
-  when ATR, prior-session value, context, or location evidence is absent.
-- Run the DB-backed context/location parity matrix for source-matched dates
-  only, beginning with `2026-09-15` and `2026-10-01`. Compare manifests before
-  records and stop at the first mismatch. Do not include `2026-10-29`.
-- Add API and CLI projections only as views of canonical facts and Paper accounting
-  facts; they must not recompute decisions.
-- Define startup recovery so interrupted Paper sessions become `STOPPED` with an
-  audit event, without reconstructing a second canonical engine.
+- Confirm the production replay adapter loads bounded input, advances the shared
+  canonical transition boundary, captures the unified artifact, and exposes the
+  required evidence, replay facts, execution facts, and recovery snapshot.
+- Migrate or remove any scripts, tests, documentation, and commands that invoke
+  `scripts/orderflow/orderflow_replay.py`; production live and replay paths must
+  not import or shell out to it.
+- Delete `scripts/orderflow/orderflow_replay.py` and remove harness-only artifact
+  assumptions, raw-row loading, prefix iteration, and evidence projection from
+  the production acceptance path.
+- Re-run the bounded replay, live-prefix, recovery, artifact, and host-isolation
+  checks after deletion so the production adapter is the only replay entry
+  point.
+
+Retirement gate:
+
+- The production Paper replay adapter reproduces the required parity evidence
+  without the harness and passes the Phase 8/9 manifest-first comparison.
+- No live callback, replay worker, API, CLI, test, or documentation path refers
+  to the deleted script.
+- Replay retry remains idempotent and isolated from live runtime, broker, and
+  Paper account state.
+- The deleted harness is not replaced by another Paper strategy owner,
+  compatibility wrapper, or fallback implementation.
 
 Exit gate:
 
@@ -1442,6 +1576,10 @@ Exit gate:
 - Capture mode and persistence do not change canonical decisions.
 - Paper remains loopback by default and paper-only; no broker order submission is
   introduced.
+- Canonical snapshot recovery preserves the same state/event prefix, while an
+  unrecoverable interrupted session is stopped with one audit event.
+- Production replay emits the validated unified artifact through the Paper
+  runtime/store boundary and is isolated from live and account state.
 - `scripts/orderflow/orderflow_replay.py` is retired, together with any
   harness-only artifact assumptions. Its responsibilities are covered by the
   production Paper replay adapter and shared canonical transition boundary.
