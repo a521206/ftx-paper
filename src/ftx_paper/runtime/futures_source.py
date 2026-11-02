@@ -54,7 +54,7 @@ class FuturesSessionSource:
 
     def provenance(self) -> dict[str, Any]:
         minutes = [str(row.get("minute", ""))[11:16] for row in self.bars]
-        expected_minutes = SESSION_DATA_END_MINUTES - SESSION_OPEN_MINUTES
+        expected_minutes = SESSION_DATA_END_MINUTES - SESSION_OPEN_MINUTES + 1
         canonical_rows = [
             {
                 "time": str(row["minute"])[11:16],
@@ -209,8 +209,7 @@ class FuturesSessionSourceResolver:
             minute = timestamp.hour * 60 + timestamp.minute
         except (KeyError, ValueError):
             return False
-        # The data-end minute is the exclusive completion boundary.
-        return SESSION_OPEN_MINUTES <= minute < SESSION_DATA_END_MINUTES
+        return SESSION_OPEN_MINUTES <= minute <= SESSION_DATA_END_MINUTES
 
 
 def virtual_continuous_bar(bar: MarketBar) -> MarketBar:

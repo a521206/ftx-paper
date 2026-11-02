@@ -20,6 +20,7 @@ from ftx_paper.strategies.research.policy import SetupPolicy
 from ftx_paper.strategies.research.adaptive_stop import adaptive_stop_bp
 from ftx_paper.domain import PortfolioState
 from ftx_paper.runtime.engine import PaperEngine
+from ftx_paper.runtime.futures_source import FuturesSessionSourceResolver
 from ftx_paper.execution import PaperExecutionCoordinator
 from ftx_paper.strategies.research.location import Cell, Location, LocationFeatures, LocationSnapshot
 from ftx_paper.strategies.research.decision import _configured_policies_for_cell
@@ -607,6 +608,12 @@ def test_session_boundaries_keep_exit_deadline_before_data_end() -> None:
     assert SESSION_DATA_END_MINUTES == 15 * 60 + 30
     assert SESSION_EXIT_DEADLINE_TIME.hour * 60 + SESSION_EXIT_DEADLINE_TIME.minute < SESSION_DATA_END_MINUTES
     assert ExitStateMachine().close_time == SESSION_EXIT_DEADLINE_TIME
+
+
+def test_futures_source_includes_data_end_minute() -> None:
+    assert FuturesSessionSourceResolver._in_session({
+        "minute": "2026-09-29T15:30:00+05:30",
+    })
 
 
 def test_exit_state_machine_forces_exit_at_canonical_1510_close() -> None:
