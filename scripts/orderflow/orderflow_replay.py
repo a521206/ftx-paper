@@ -6,6 +6,7 @@ import argparse
 from datetime import datetime
 import json
 from pathlib import Path
+from typing import Any
 
 from ftx_paper.config import PaperConfig
 from ftx_paper.strategies.orderflow.replay_pipeline import OrderflowReplayEngine
@@ -34,22 +35,7 @@ def main(argv: list[str] | None = None) -> int:
                 include_interactions=args.include_interactions,
             )
         else:
-            payload = json.loads(args.source_artifact.read_text(encoding="utf-8"))
-            if not isinstance(payload, dict):
-                raise ValueError("source artifact must be an object")
-            sessions = payload.get("sessions", payload)
-            if not isinstance(sessions, dict) or not all(isinstance(value, list) for value in sessions.values()):
-                raise ValueError("source artifact must map session dates to bar lists")
-            rows_by_date = {
-                str(session_date): tuple(row for row in rows if isinstance(row, dict))
-                for session_date, rows in sessions.items()
-            }
-            rows = [
-                row for row in rows_by_date.get(args.date, ())
-                if _before_close(row.get("time"), args.date)
-            ]
-            if not rows:
-                raise ValueError(f"source artifact has no rows for {args.date}")
+            rows, rows_by_date = _load_source_artifact(args.source_artifact, args.date)
             result = engine.replay(
                 rows,
                 rows_by_date,
@@ -65,6 +51,36 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(rendered)
     return 0 if result.get("status") != "INCOMPLETE" else 1
+
+
+def _load_source_artifact(
+    path: Path, session_date: str,
+) -> tuple[list[dict[str, Any]], dict[str, tuple[dict[str, Any], ...]]]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("source artifact must be an object")
+    sessions = payload.get("sessions", payload)
+    if not isinstance(sessions, dict):
+        raise ValueError("source artifact must map session dates to bar lists")
+
+    rows: list[dict[str, Any]] = []
+    rows_by_date: dict[str, tuple[dict[str, Any], ...]] = {}
+    for raw_session_date, raw_rows in sessions.items():
+        if not isinstance(raw_rows, list):
+            raise ValueError("source artifact must map session dates to bar lists")
+        normalized_date = str(raw_session_date)
+        normalized_rows: list[dict[str, Any]] = []
+        for row in raw_rows:
+            if not isinstance(row, dict):
+                continue
+            normalized_rows.append(row)
+            if normalized_date == session_date and _before_close(row.get("time"), session_date):
+                rows.append(row)
+        rows_by_date[normalized_date] = tuple(normalized_rows)
+
+    if not rows:
+        raise ValueError(f"source artifact has no rows for {session_date}")
+    return rows, rows_by_date
 
 
 def _before_close(value: object, session_date: str) -> bool:
