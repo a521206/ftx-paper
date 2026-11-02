@@ -84,7 +84,7 @@ _ENVELOPE_DUPLICATE_KEYS = frozenset({
 })
 _PRODUCER_DERIVED_KEYS = frozenset({"parity_stream", "source_fingerprint"})
 _PHASE45_NON_SEMANTIC_KEYS = frozenset({
-    "band_low", "band_high", "source_aggregate_id", "terminal_candle_id", "terminal_close_side",
+    "terminal_candle_id", "terminal_close_side",
 })
 
 
@@ -626,9 +626,14 @@ def _normalize_phase35_locations(
     locations: list[Any], session_date: str,
 ) -> list[dict[str, Any]]:
     """Normalize Paper location records to the canonical causal projection."""
+    # Canonical registration publishes the high side before the low side for
+    # each paired location.  Paper evidence is accumulated through helpers
+    # that naturally append the low side first, so use the producer-neutral
+    # semantic order here rather than retaining publication insertion order.
     priority = {
-        "OR_HIGH": 0, "OR_LOW": 0, "SESSION_HIGH": 1, "SESSION_LOW": 1,
-        "PD_HIGH": 2, "PD_LOW": 2,
+        "PD_HIGH": 0, "PD_LOW": 1,
+        "OR_HIGH": 2, "OR_LOW": 3,
+        "SESSION_HIGH": 4, "SESSION_LOW": 5,
     }
     normalized: list[dict[str, Any]] = []
     for item in locations:

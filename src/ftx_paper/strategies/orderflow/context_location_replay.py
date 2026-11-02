@@ -328,6 +328,12 @@ def _replay_market(
             if aggregate.timeframe != "5m" or len(children) == 5
             else ()
         )
+        # A malformed or misaligned 5m aggregate is not valid evidence even
+        # when the context and location registry are available.  Keep the
+        # fact explicit so consumers cannot mistake an empty observation set
+        # for a successfully observed bar.
+        if not location_values:
+            unavailable.append("missing_context")
         facts.append(_context_fact(aggregate, context, location_values, unavailable))
     lineage_by_identity = {item.identity: list(item.lineage) for item in observations}
     source_facts = []

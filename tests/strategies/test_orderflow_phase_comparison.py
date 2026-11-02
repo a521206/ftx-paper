@@ -8,11 +8,12 @@ from scripts.orderflow.compare_canonical_replay import (
     _exit_diagnostics,
     _first_exit_diagnostic_difference,
     _first_execution_trace_difference,
+    _normalize_phase35_locations,
     _resolve_canonical_artifact,
     _timeout_before_canonical_trigger,
     _execution_trace_diagnostics,
 )
-from ftx_paper.strategies.orderflow.execution import ExecutionEngine
+from ftx_paper.strategies.orderflow.execution import ExecutionEngine, validate_exit_plan
 from ftx_paper.strategies.orderflow import interaction_replay as interaction_replay_module
 from ftx_paper.strategies.orderflow.context_location_replay import ContextLocationReplay
 from ftx_paper.strategies.orderflow.interaction_replay import (
@@ -40,6 +41,41 @@ from ftx_paper.strategies.orderflow.templates import (
     TRADE_TEMPLATES,
 )
 from ftx_paper.strategies.orderflow.timestamps import parse_session_timestamp, serialize_utc
+
+
+def test_conditional_exit_is_required_at_entry_like_canonical() -> None:
+    class ConditionalRule:
+        mode = "conditional"
+        required = False
+
+        @staticmethod
+        def validation_reason(*, direction: str, fill_price: float) -> str:
+            del direction, fill_price
+            return "optional_exit_level_unavailable"
+
+    rule = ConditionalRule()
+    accepted, rejected, required_rejections = validate_exit_plan(
+        (rule,), direction="long", fill_price=100.0,
+    )
+
+    assert accepted == ()
+    assert rejected == (rule,)
+    assert required_rejections == (rule,)
+
+
+def test_phase35_location_order_matches_canonical_high_before_low() -> None:
+    locations = [
+        {"alias": "OR_LOW", "available_at": "2026-10-05T03:50:00Z"},
+        {"alias": "OR_HIGH", "available_at": "2026-10-05T03:50:00Z"},
+        {"alias": "PD_LOW", "available_at": "2026-10-05T03:45:00Z"},
+        {"alias": "PD_HIGH", "available_at": "2026-10-05T03:45:00Z"},
+    ]
+
+    normalized = _normalize_phase35_locations(locations, "2026-10-05")
+
+    assert [item["alias"] for item in normalized] == [
+        "PD_HIGH", "PD_LOW", "OR_HIGH", "OR_LOW",
+    ]
 
 
 def test_resolve_canonical_artifact_reuses_retained_canonical_file(tmp_path) -> None:

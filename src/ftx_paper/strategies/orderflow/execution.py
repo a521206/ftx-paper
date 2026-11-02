@@ -1092,7 +1092,9 @@ def validate_exit_plan(
         if rule.validation_reason(direction=direction, fill_price=fill_price) is None
     )
     rejected = tuple(rule for rule in rules if rule not in accepted)
-    return accepted, rejected, tuple(rule for rule in rejected if rule.required)
+    return accepted, rejected, tuple(
+        rule for rule in rejected if rule.required or rule.mode == "conditional"
+    )
 
 
 def resolve_setup_exit_plan(
