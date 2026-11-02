@@ -265,8 +265,10 @@ class LocationInteraction:
     score_history: list[SyntheticScoreSnapshot] = field(default_factory=list)
     source_cursors: dict[str, str] = field(default_factory=dict, repr=False)
     pd_role: str | None = None
+    pd_role_context_available_at: datetime | None = None
     pd_role_transition_candle_id: str | None = None
     pd_role_transition_available_at: datetime | None = None
+    pd_role_transition_processed_at: datetime | None = None
 
     @property
     def band_low(self) -> float:

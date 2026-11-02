@@ -6,7 +6,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
-from typing import Any, Mapping
+from typing import Any, Mapping, TypedDict
 from datetime import datetime
 
 from .hierarchy import ContextVersionRef
@@ -20,6 +20,18 @@ class OpportunityStatus(StrEnum):
     INVALIDATED = "INVALIDATED"
     EXPIRED = "EXPIRED"
     SUPERSEDED = "SUPERSEDED"
+
+
+class OpeningInteractionEvidence(TypedDict):
+    time: str
+    observed_at: str
+    available_at: str
+    open: float
+    high: float
+    low: float
+    close: float
+    reference_level: float
+    kind: str
 
 
 class LifecycleStage(StrEnum):

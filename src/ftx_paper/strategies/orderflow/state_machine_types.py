@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from enum import StrEnum
 import hashlib
 import json
 from typing import Any, Iterable, Mapping, Sequence
 from datetime import datetime
 
-from .hierarchy import ContextVersionRef, MarketContext
+from .hierarchy import ContextVersionRef, MarketContext, ContextObservation
+from .parity_artifacts import PHASE_STREAMS
 from .location_geometry import BAND_ATR_FRACTION, LocationBand
 from .orderflow_common import Aggregate
 from .timestamps import coerce_timestamp, nifty_label, serialize_utc
@@ -18,6 +19,25 @@ from .lifecycle import EvidenceRef, LifecycleEvent, LifecycleStage, OpportunityS
 from .opportunity import DirectionalResponse, OpportunityOutcome, OpportunityOutcomeStatus  # noqa: F401
 from .templates import Direction
 from .hierarchy import TriggerObservation
+
+_EXECUTION_DIAGNOSTIC_KINDS = frozenset({
+    "intent_armed", "trigger_observation", "execution_proposal_created",
+    "execution_proposal_selected", "execution_proposal_suppressed",
+    "admission_decided", "entry_pending", "filled", "position_closed",
+    "intent_cancelled", "entry_cancelled", "entry_blocked_risk",
+    "entry_blocked_rr", "entry_blocked_exit_plan", "trigger_denied_portfolio",
+    "exit_signal", "exit_order", "exit_trigger_observed", "exit_decision",
+    "stop_updated",
+    "position_reversal_requested",
+})
+
+_INTERACTION_RESPONSE_KINDS = frozenset({
+    "interaction_created", "location_interaction_observed",
+    "interaction_departure", "interaction_ended", "interaction_closed",
+    "response_confirmed", "response_invalidated", "response_expired",
+    "role_context_available", "role_transition", "hypothesis_arbitrated",
+    "opportunity_outcome",
+})
 
 _EXECUTION_TRANSITION_KINDS = frozenset({
     "entry_pending", "admission_decided", "intent_effective",
@@ -35,17 +55,6 @@ def _parity_safe(value: Any) -> Any:
         return [_parity_safe(item) for item in value]
     return value
 
-
-_EXECUTION_DIAGNOSTIC_KINDS = frozenset({
-    "intent_armed", "trigger_observation", "execution_proposal_created",
-    "execution_proposal_selected", "execution_proposal_suppressed",
-    "admission_decided", "entry_pending", "filled", "position_closed",
-    "intent_cancelled", "entry_cancelled", "entry_blocked_risk",
-    "entry_blocked_rr", "entry_blocked_exit_plan", "trigger_denied_portfolio",
-    "exit_signal", "exit_order", "exit_trigger_observed", "exit_decision",
-    "stop_updated",
-    "position_reversal_requested",
-})
 
 ORDERFLOW_TRAIL_ACTIVATE_BP = 20.0
 ORDERFLOW_TRAIL_BP = 20.0
@@ -240,6 +249,7 @@ class LocationRegistry:
 class MarketContextStore:
     versions: dict[str, list[MarketContext]] = field(default_factory=dict)
     ordinary_context: ContextVersionRef | None = None
+    interaction_contexts: dict[str, ContextVersionRef] = field(default_factory=dict)
 
     def publish(self, context: MarketContext) -> ContextVersionRef:
         versions = self.versions.setdefault(context.context_id, [])
@@ -278,7 +288,7 @@ class ReplayContext:
     continuous: Any = None
     session: Any = None
     opening_context: dict[str, Any] = field(default_factory=dict)
-    last_confirmation_context_time: str | None = None
+    last_confirmation_context_time: datetime | None = None
     interactions: dict[str, Any] = field(default_factory=dict)
     regime_gate: Any = None
     regime_gate_blocked_lifecycles: set[str] = field(default_factory=set)
@@ -291,6 +301,105 @@ class ReplayContext:
     decision_context_evidence: list[dict[str, Any]] = field(default_factory=list)
     opportunity_identities: dict[str, str] = field(default_factory=dict)
     published_resolved_responses: set[tuple[str, str]] = field(default_factory=set)
+    opportunity_outcomes: dict[tuple[str, str], list[Any]] = field(default_factory=dict)
+    or_seed_candles: set[datetime] = field(default_factory=set)
+    setup_number: int = 0
+    child_observation: ContextObservation | None = None
+    market_state: str | None = None
+    neutral_keys_by_causal_id: dict[tuple[str, str], str] = field(default_factory=dict, repr=False)
+
+    def record_opportunity_outcome(
+        self, interaction_id: str, template_id: str, outcome: OpportunityOutcome,
+    ) -> None:
+        self.opportunity_outcomes.setdefault((interaction_id, template_id), []).append(outcome)
+
+    def record_resolved_response(
+        self, interaction_id: str, template_id: str,
+    ) -> bool:
+        key = (interaction_id, template_id)
+        if key in self.published_resolved_responses:
+            return False
+        self.published_resolved_responses.add(key)
+        return True
+
+    def emit(
+        self,
+        event: Mapping[str, Any],
+        bar_events: list[Any],
+        lifecycle: SetupOpportunity | None = None,
+        *,
+        record_lifecycle: bool = True,
+    ) -> None:
+        event_data = dict(event)
+        if event_data.get("kind") in _INTERACTION_RESPONSE_KINDS:
+            event_data.setdefault("parity_stream", "interaction_response")
+        session_date = str(
+            event_data.get("session_date")
+            or (lifecycle.session_date if lifecycle is not None else "")
+            or self.current_session_date
+            or ""
+        )
+        event_data.setdefault("session_date", session_date)
+        if lifecycle is not None and record_lifecycle:
+            event_data = lifecycle.record(event_data)
+        elif lifecycle is not None:
+            event_data.setdefault("lifecycle_id", lifecycle.lifecycle_id)
+            event_data.setdefault("direction", lifecycle.direction.value)
+            event_data.setdefault("lifecycle_stage", lifecycle.stage.value)
+        observed_at = event_data.get("observed_at", event_data.get("time"))
+        available_at = event_data.get("available_at", observed_at)
+        event_data.setdefault("observed_at", observed_at)
+        event_data.setdefault("available_at", available_at)
+        if isinstance(observed_at, str):
+            event_data.setdefault("causal_observed_at", observed_at)
+        if isinstance(available_at, str):
+            event_data.setdefault("causal_available_at", available_at)
+        event_data.setdefault("event_id", f"replay:{len(self.events)}")
+        event_data.setdefault("sequence", len(self.events))
+        event_data.setdefault("policy_version", "orderflow-v1")
+        event_data.setdefault("provenance", "causal_replay")
+        if event_data.get("kind") in _EXECUTION_DIAGNOSTIC_KINDS:
+            self.execution_diagnostics.append({
+                "sequence": len(self.execution_diagnostics),
+                **dict(event_data),
+            })
+        self.events.append(dict(event_data))
+        bar_events.append(dict(event_data))
+        stream = event_data.get("parity_stream")
+        if stream is not None:
+            parent = (
+                event_data.get("causal_parent_id")
+                or event_data.get("interaction_id")
+                or (lifecycle.lifecycle_id if lifecycle is not None else None)
+            )
+            self.record_parity_fact(str(stream), {
+                "kind": str(event_data.get("kind", "")),
+                "occurred_at": _parity_safe(observed_at),
+                "observed_at": _parity_safe(observed_at),
+                "available_at": _parity_safe(available_at),
+                "sequence": len(self.parity_streams.get(str(stream), [])),
+                "identity": str(event_data.get("neutral_event_key", event_data.get("event_id", ""))),
+                "causal_parent_id": parent,
+                "values": _parity_safe(event_data),
+                "unavailable": [],
+            })
+
+    def emit_market_event(
+        self,
+        event: dict[str, Any],
+        market_state: str,
+        bar_events: list[Any],
+        lifecycle: SetupOpportunity | None = None,
+        *,
+        record_lifecycle: bool = True,
+    ) -> None:
+        self.emit(
+            {**event, "market_state": market_state},
+            bar_events,
+            lifecycle,
+            record_lifecycle=record_lifecycle,
+        )
+        self.market_state = market_state
 
     def __post_init__(self) -> None:
         if self.execution_engine is None:
@@ -439,10 +548,10 @@ class ReplayContext:
         return state.position is not None and state.position.status.value == "open"
 
     def record_parity_fact(self, stream: str, fact: dict[str, Any]) -> None:
-        if stream not in {
-            "intent_admission", "trigger_exit", "execution_fills",
-            "execution_transitions", "ledger_mutations",
-        }:
+        allowed = set(PHASE_STREAMS) | {
+            "execution_fills", "execution_transitions", "ledger_mutations",
+        }
+        if stream not in allowed:
             raise ValueError(f"unknown parity stream: {stream}")
         self.parity_observed.add(stream)
         self.parity_streams.setdefault(stream, []).append(dict(fact))
@@ -459,6 +568,17 @@ class ReplayContext:
 
     def context(self, reference: ContextVersionRef) -> MarketContext | None:
         return self.market_contexts.resolve(reference)
+
+    @staticmethod
+    def snapshot(value: Any) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        if hasattr(value, "to_dict"):
+            return value.to_dict()
+        return {
+            item.name: _parity_safe(getattr(value, item.name))
+            for item in fields(value)
+        }
 
 
 @dataclass(frozen=True, slots=True)

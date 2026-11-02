@@ -1,8 +1,11 @@
 from types import SimpleNamespace
 
-from ftx_paper.strategies.orderflow.opportunity_coordinator import OpportunityCoordinator
+from ftx_paper.strategies.orderflow.opportunity_replay_host import build_opportunity_coordinator
 from ftx_paper.strategies.orderflow.orderflow_common import Aggregate
+from ftx_paper.strategies.orderflow.interaction_detector import InteractionDetector
+from ftx_paper.strategies.orderflow.coordinator import OrderflowClockInput
 from ftx_paper.strategies.orderflow.state_machine_evidence import acceptance_trigger_evidence
+from ftx_paper.strategies.orderflow.state_machine_types import ExecutionConstraints, LocationRegistry
 from ftx_paper.strategies.orderflow.templates import Direction, TRADE_TEMPLATES
 from ftx_paper.strategies.orderflow.transition import OrderflowTransitionOwner
 
@@ -51,24 +54,83 @@ def test_opening_seed_remains_provisional(monkeypatch) -> None:
     from ftx_paper.strategies.orderflow import opportunity_coordinator as module
 
     monkeypatch.setattr(module, "build_context_scores", lambda *args, **kwargs: (1.0, 0.0))
-    coordinator = OpportunityCoordinator(fill_permission_margin=None)
-    from ftx_paper.strategies.orderflow.state_machine_types import LocationRegistry
-
     registry = LocationRegistry("test")
     registry.register_opening_range(99.0, 101.0, candle.available_at, atr=1.0)
-
-    result = coordinator.form_opening_seed(
-        candle=candle,
-        registry=registry,
+    transition = OrderflowTransitionOwner(registry)
+    transition.context.execution_constraints = ExecutionConstraints(
+        fill_permission_margin=None,
+    )
+    transition.context.aggregates = {"1m": [], "5m": [candle]}
+    transition.context.rows = [
+        _row(open_=100.0, high=102.0, low=99.0, close=101.0),
+    ]
+    transition.context.rows_by_date = {
+        "2026-10-01": transition.context.rows,
+    }
+    coordinator = build_opportunity_coordinator(
+        transition,
+        detector=InteractionDetector(registry),
         templates=TRADE_TEMPLATES,
-        aggregates={"1m": [], "5m": [candle]},
-        raw_rows=[_row(open_=100.0, high=102.0, low=99.0, close=101.0)],
-        rows_by_date={"2026-10-01": [_row(open_=100.0, high=102.0, low=99.0, close=101.0)]},
+    )
+    events: list[dict[str, object]] = []
+    coordinator.handle_structure(
+        "2026-10-01T09:20:00Z",
+        "2026-10-01T09:21:00Z",
+        candle.to_dict(),
+        [candle],
+        events,
     )
 
-    assert result is not None
-    assert result[1].lifecycle is not None
-    assert result[1].lifecycle.episode_confirmed is False
+    assert any(item["kind"] == "or_directional_seed" for item in events)
+    assert len(transition.context.opportunities) == 1
+    assert next(iter(transition.context.opportunities.values())).episode_confirmed is False
+
+
+def test_transition_formats_clock_values_as_session_local_labels(monkeypatch) -> None:
+    registry = LocationRegistry("test")
+    transition = OrderflowTransitionOwner(registry)
+    candle = Aggregate(
+        "2026-10-01T09:20", "2026-10-01T09:20", "2026-10-01T09:21",
+        "1m", 1, 100.0, 101.0, 99.0, 100.5, 100,
+        "NIFTY", "", "FUT", "2026-10-01", "clock",
+    )
+    captured: dict[str, object] = {}
+    formation = object()
+
+    monkeypatch.setattr(
+        OrderflowTransitionOwner,
+        "advance_opportunity_timeouts",
+        lambda _self, timestamp, *_args: captured.update(timeout=timestamp),
+    )
+    monkeypatch.setattr(
+        OrderflowTransitionOwner,
+        "_accept_formations",
+        lambda _self, formations: tuple(formations),
+    )
+    monkeypatch.setattr(
+        type(transition.execution_owner),
+        "advance",
+        lambda _self, _formations, **kwargs: captured.update(
+            decision_at=kwargs["decision_at"],
+        ),
+    )
+    monkeypatch.setattr(
+        OrderflowTransitionOwner,
+        "process_execution_bar",
+        lambda _self, _formations, **kwargs: captured.update(
+            execution_timestamp=kwargs["timestamp"],
+            next_time=kwargs["next_time"],
+        ),
+    )
+
+    transition.advance(OrderflowClockInput(one_minute=candle), formations=(formation,))
+
+    assert captured == {
+        "timeout": "2026-10-01T09:20",
+        "decision_at": "2026-10-01T09:21",
+        "execution_timestamp": "2026-10-01T09:20",
+        "next_time": "2026-10-01T09:21",
+    }
 
 
 def test_episode_promotion_is_idempotent_and_invalidates_competitor() -> None:

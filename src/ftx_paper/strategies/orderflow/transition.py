@@ -18,7 +18,7 @@ from .hierarchy import ContextVersionRef, TriggerObservation
 from .opportunity_coordinator import LifecycleFormation
 from .opportunity_timeout import advance_opportunity_timeout
 from .state_machine_types import ExecutionConstraints, LocationRegistry, ReplayContext
-from .timestamps import coerce_timestamp
+from .timestamps import coerce_timestamp, nifty_label
 
 
 def _execution_trace_state(state: Any) -> dict[str, Any]:
@@ -201,6 +201,14 @@ class OrderflowTransitionOwner:
             self.context.regime = regime
         if constraints is not None:
             self.context.execution_constraints = constraints
+        timestamp = nifty_label(item.one_minute.time)
+        next_time = nifty_label(item.one_minute.available_at)
+        row = item.one_minute.to_dict()
+        available5 = list(self.observation_owner.five_minute_aggregates)
+        self.context.aggregates["5m"] = available5
+        timeout_events: list[dict[str, Any]] = []
+        self.advance_opportunity_timeouts(timestamp, available5, timeout_events)
+        self.context.pending_bar_events.extend(timeout_events)
         accepted_formations = self._accept_formations(formations)
         if accepted_formations:
             self.execution_owner.advance(
@@ -211,13 +219,8 @@ class OrderflowTransitionOwner:
                 bar_opens=bar_opens,
                 decision_scores=decision_scores,
                 constraints=constraints,
-                decision_at=str(item.one_minute.available_at),
+                decision_at=next_time,
             )
-        timestamp = str(item.one_minute.time)
-        next_time = str(item.one_minute.available_at)
-        row = item.one_minute.to_dict()
-        available5 = list(self.observation_owner.five_minute_aggregates)
-        self.context.aggregates["5m"] = available5
         self.process_execution_bar(
             tuple(accepted_formations),
             index=0,
@@ -296,6 +299,41 @@ class OrderflowTransitionOwner:
         self._clock = available_at
         return result
 
+    def advance_opportunity_timeouts(
+        self,
+        timestamp: str,
+        available5: Sequence[Any],
+        bar_events: list[dict[str, Any]],
+    ) -> None:
+        """Expire existing opportunities before current-bar structure admission."""
+        for life in tuple(self.context.opportunities.values()):
+            if not life.active or self.context.position_is_open(life):
+                continue
+            interaction = (
+                self.context.interactions.get(life.location_interaction_id)
+                if life.location_interaction_id is not None else None
+            )
+            timeout = advance_opportunity_timeout(
+                life,
+                interaction=interaction,
+                evidence=available5,
+                as_of=timestamp,
+            )
+            if life.timeout_count >= life.timeout_limit:
+                self.execution_owner.expire_opportunity(
+                    life,
+                    timestamp=timeout.expiry_at or timestamp,
+                    bar_events=bar_events,
+                    reason="evidence_timeout",
+                    timeout_event={
+                        "timeout_count": life.timeout_count,
+                        "timeout_limit": life.timeout_limit,
+                        "evidence_timeframe": life.timeout_evidence_timeframe,
+                        "counted_source_ids": list(life.timeout_counted_source_ids),
+                        "counted_snapshot_ids": list(life.timeout_counted_snapshot_ids),
+                    },
+                )
+
     def process_execution_bar(
         self,
         formations: Sequence[LifecycleFormation],
@@ -350,33 +388,6 @@ class OrderflowTransitionOwner:
             for life in self.context.opportunities.values()
             if life.lifecycle_id not in formation_ids
         )
-        for life in tuple(self.context.opportunities.values()):
-            if not life.active or self.context.position_is_open(life):
-                continue
-            interaction = (
-                self.context.interactions.get(life.location_interaction_id)
-                if life.location_interaction_id is not None else None
-            )
-            timeout = advance_opportunity_timeout(
-                life,
-                interaction=interaction,
-                evidence=available5,
-                as_of=timestamp,
-            )
-            if life.timeout_count >= life.timeout_limit:
-                self.execution_owner.expire_opportunity(
-                    life,
-                    timestamp=timeout.expiry_at or timestamp,
-                    bar_events=events,
-                    reason="evidence_timeout",
-                    timeout_event={
-                        "timeout_count": life.timeout_count,
-                        "timeout_limit": life.timeout_limit,
-                        "evidence_timeframe": life.timeout_evidence_timeframe,
-                        "counted_source_ids": list(life.timeout_counted_source_ids),
-                        "counted_snapshot_ids": list(life.timeout_counted_snapshot_ids),
-                    },
-                )
         for formation in managed:
             life = formation.lifecycle
             if life is None:

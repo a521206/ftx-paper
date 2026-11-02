@@ -52,7 +52,7 @@ class MarketContext:
     timestamp: datetime
     available_at: datetime
     location: str | None
-    market_state: str
+    market_state: str | None
     long_score: float | None = None
     short_score: float | None = None
     evidence: tuple[Mapping[str, Any], ...] = ()
@@ -68,6 +68,45 @@ class MarketContext:
             raise ValueError("context availability cannot precede observation")
         object.__setattr__(self, "evidence", _freeze(self.evidence))
         object.__setattr__(self, "source_provenance", _freeze(self.source_provenance))
+
+
+@dataclass(frozen=True, slots=True)
+class ContextObservation:
+    """Child observation linked to its causal parent context."""
+
+    context_id: str
+    context_version: str
+    observed_at: datetime | str
+    available_at: datetime | str
+    relation: ContextRelation
+    source_timeframe: str
+    evidence: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        if coerce_timestamp(self.available_at) < coerce_timestamp(self.observed_at):
+            raise ValueError("context evidence must be causally available")
+        object.__setattr__(self, "evidence", _freeze(self.evidence))
+
+
+def classify_context_relation(
+    *,
+    parent: MarketContext,
+    location: str | None,
+    direction: str | None,
+    evidence: Mapping[str, Any],
+) -> ContextRelation:
+    """Classify child evidence without allowing a wick to rewrite context."""
+    if location is None or direction not in {"long", "short"}:
+        return ContextRelation.NEUTRAL
+    expected = {"OR_LOW": "long", "OR_HIGH": "short"}.get(location)
+    if expected is None:
+        return ContextRelation.NEUTRAL
+    strong = bool(evidence.get("displacement") or evidence.get("acceptance"))
+    if direction == expected and strong:
+        return ContextRelation.CONFIRMED
+    if direction != expected and strong:
+        return ContextRelation.CONFLICTED
+    return ContextRelation.NEUTRAL
 
 
 @dataclass(frozen=True, slots=True)

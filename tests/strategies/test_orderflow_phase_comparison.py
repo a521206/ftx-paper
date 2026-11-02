@@ -1,16 +1,31 @@
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any
+
+import pytest
 
 from scripts.orderflow.compare_canonical_replay import (
     _exit_diagnostics,
     _first_exit_diagnostic_difference,
+    _first_execution_trace_difference,
     _timeout_before_canonical_trigger,
+    _execution_trace_diagnostics,
 )
-from ftx_paper.strategies.orderflow.interaction_replay import _handle_opening_interaction
-from ftx_paper.strategies.orderflow.interaction_replay import InteractionResponseReplay
+from ftx_paper.strategies.orderflow.execution import ExecutionEngine
+from ftx_paper.strategies.orderflow import interaction_replay as interaction_replay_module
+from ftx_paper.strategies.orderflow.context_location_replay import ContextLocationReplay
+from ftx_paper.strategies.orderflow.interaction_replay import (
+    InteractionResponseReplay,
+    replay_interaction_response,
+)
+from ftx_paper.strategies.orderflow.interactions import ProjectionSnapshot
+from ftx_paper.strategies.orderflow.lifecycle import SetupOpportunity
+from ftx_paper.strategies.orderflow.orderflow_common import Aggregate
+from ftx_paper.strategies.orderflow.opportunity_coordinator import OpportunityCoordinator
 from ftx_paper.strategies.orderflow.phase7_projection import build_phase7_projection
 from ftx_paper.strategies.orderflow.state_machine_reporting import build_replay_payload
-from ftx_paper.strategies.orderflow.templates import OpeningInteractionKind
+from ftx_paper.strategies.orderflow.state_machine_types import LocationRegistry, ReplayContext
+from ftx_paper.strategies.orderflow.templates import DEFAULT_TEMPLATES, Direction, OpeningInteractionKind
 from ftx_paper.strategies.orderflow.timestamps import parse_session_timestamp, serialize_utc
 
 
@@ -237,6 +252,28 @@ def test_phase7_exit_diagnostics_normalize_utc_and_preserve_missing_exit_event()
     assert difference["paper"] is None
 
 
+def test_execution_trace_difference_preserves_duplicate_causal_clocks() -> None:
+    canonical = [
+        {"kind": "execution_lifecycle_tick", "observed_at": "09:30", "available_at": "09:31", "after": {"n": 1}},
+        {"kind": "execution_lifecycle_tick", "observed_at": "09:30", "available_at": "09:31", "after": {"n": 2}},
+    ]
+    paper = [canonical[0]]
+
+    difference = _first_execution_trace_difference(canonical, paper)
+
+    assert difference is not None
+    assert difference["occurrence"] == 1
+    assert difference["canonical"] == canonical[1]
+    assert difference["paper"] is None
+
+
+def test_execution_trace_diagnostics_fails_closed_when_stream_is_unavailable() -> None:
+    with pytest.raises(ValueError, match="canonical execution diagnostics unavailable"):
+        _execution_trace_diagnostics(
+            {"diagnostic": {}}, "life-1", canonical=True, session_date="2026-10-01",
+        )
+
+
 def test_phase6_projection_preserves_only_canonical_lifecycle_kinds() -> None:
     replay = InteractionResponseReplay(
         facts=(),
@@ -259,39 +296,273 @@ def test_phase6_projection_preserves_only_canonical_lifecycle_kinds() -> None:
 
 
 def test_opening_interaction_is_published_as_a_lifecycle_event_only() -> None:
-    class Context:
-        opportunities: dict[str, object]
+    registry = LocationRegistry("test")
+    context = ReplayContext(
+        location_registry=registry,
+        execution_engine=ExecutionEngine(),
+    )
+    formation_at = datetime.fromisoformat("2026-10-01T03:50:00+00:00")
+    life = SetupOpportunity(
+        lifecycle_id="life-1",
+        direction=Direction.LONG,
+        session_date="2026-10-01",
+        instrument="NIFTY",
+        strategy="orderflow",
+        formation_at=formation_at,
+        formation_available_at=formation_at,
+        candidate_id="life-1",
+        parent_context=None,
+        location=None,
+        reference_level=100.0,
+        context_candle=Aggregate(
+            "2026-10-01T09:15",
+            "2026-10-01T09:20",
+            "2026-10-01T09:20",
+            "1m",
+            1,
+            100.0,
+            101.0,
+            99.0,
+            100.5,
+            100,
+            "NIFTY",
+            "",
+            "FUT",
+            "2026-10-01",
+            "opening",
+        ),
+        breakout_level=101.0,
+        failure_boundary=99.0,
+        opening_policy_version=f"{OpeningInteractionKind.OPENING_BREAKOUT.value}-1m-v1",
+    )
+    context.opportunities["life-1"] = life
 
-        def __init__(self, life: object) -> None:
-            self.opportunities = {"life-1": life}
-            self.events: list[dict[str, Any]] = []
+    class Host:
+        def __init__(self) -> None:
+            self.context = context
+            self.execution = None
+            self.location_registry = registry
+            self.templates = dict(DEFAULT_TEMPLATES)
+            self.interaction_detector = None
 
-        def record_event(self, event: dict[str, Any]) -> None:
-            self.events.append(event)
+        def structure_interactions(self):
+            return ()
 
-    class Life:
-        active = True
-        opening_policy_version = f"{OpeningInteractionKind.OPENING_BREAKOUT.value}-1m-v1"
-        opening_interaction_kind = None
-        opening_interaction_evidence: list[dict[str, object]] = []
-        formation_available_at = datetime.fromisoformat("2026-10-01T09:20:00+00:00")
-        reference_level = 100.0
-        context_candle = object()
-        direction = "long"
-        lifecycle_id = "life-1"
+        def selected_interaction_context(self, interaction_id: str, *, as_of: str):
+            return None
 
-    context = Context(Life())
-    facts: list[dict[str, Any]] = []
-    _handle_opening_interaction(
-        context,
+    coordinator = OpportunityCoordinator(Host())
+    bar_events: list[dict[str, Any]] = []
+    coordinator.handle_opening_interaction(
         {"time": "09:21", "open": 100.0, "high": 101.0, "low": 99.5, "close": 100.5},
-        facts,
-        timestamp="2026-10-01T09:21:00Z",
-        next_time="2026-10-01T09:22:00Z",
+        "2026-10-01T09:21",
+        "2026-10-01T09:22",
+        bar_events,
     )
 
-    assert facts == []
+    assert bar_events[0]["kind"] == "opening_interaction"
     assert context.events[0]["kind"] == "opening_interaction"
+    event = bar_events[0]
+    assert event["observed_at"] == "2026-10-01T09:21"
+    assert event["available_at"] == "2026-10-01T09:22"
+    assert isinstance(event["observed_at"], str)
+    evidence = event["evidence"][0]
+    assert evidence["observed_at"] == "2026-10-01T09:21"
+    assert evidence["available_at"] == "2026-10-01T09:22"
+
+
+def _aggregate(
+    timeframe: str, time: str, end_time: str, available_at: str,
+) -> Aggregate:
+    return Aggregate(
+        time,
+        end_time,
+        available_at,
+        timeframe,
+        1,
+        100.0,
+        101.0,
+        99.0,
+        100.5,
+        100,
+        "NIFTY",
+        "",
+        "FUT",
+        "2026-10-01",
+        "replay",
+    )
+
+
+def test_opening_interaction_dispatches_without_a_completed_5m_aggregate(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+
+    class Coordinator:
+        def publish_interaction_context(self, *_args: Any) -> None:
+            pass
+
+        def handle_structure(self, *_args: Any) -> None:
+            calls.append("structure")
+
+        def handle_opening_interaction(self, *_args: Any) -> None:
+            calls.append("opening")
+
+    monkeypatch.setattr(
+        interaction_replay_module,
+        "build_opportunity_coordinator",
+        lambda *_args, **_kwargs: Coordinator(),
+    )
+    one_minute = _aggregate(
+        "1m",
+        "2026-10-01T03:50:00+00:00",
+        "2026-10-01T03:51:00+00:00",
+        "2026-10-01T03:51:00+00:00",
+    )
+
+    replay_interaction_response(
+        {"1m": (one_minute,), "5m": ()},
+        ContextLocationReplay((), ()),
+        LocationRegistry("test"),
+        atr=1.0,
+    )
+
+    assert calls == ["opening"]
+
+
+def test_timeout_expires_before_structure_admission(monkeypatch) -> None:
+    structure_saw_active: list[bool] = []
+    life = SetupOpportunity(
+        lifecycle_id="life-timeout",
+        direction=Direction.LONG,
+        session_date="2026-10-01",
+        instrument="NIFTY",
+        strategy="orderflow",
+        formation_at=datetime.fromisoformat("2026-10-01T03:44:00+00:00"),
+        formation_available_at=datetime.fromisoformat("2026-10-01T03:44:00+00:00"),
+        candidate_id="life-timeout",
+        parent_context=None,
+        location=None,
+        reference_level=100.0,
+        context_candle=None,
+        breakout_level=101.0,
+        failure_boundary=99.0,
+        timeout_limit=1,
+    )
+
+    class Coordinator:
+        def publish_interaction_context(self, *_args: Any) -> None:
+            pass
+
+        def handle_structure(self, *_args: Any) -> None:
+            structure_saw_active.append(life.active)
+
+        def handle_opening_interaction(self, *_args: Any) -> None:
+            pass
+
+    def build_coordinator(transition: Any, **_kwargs: Any) -> Coordinator:
+        assert transition.context.register_opportunity(life)
+        return Coordinator()
+
+    monkeypatch.setattr(
+        interaction_replay_module,
+        "build_opportunity_coordinator",
+        build_coordinator,
+    )
+    one_minute = _aggregate(
+        "1m",
+        "2026-10-01T03:50:00+00:00",
+        "2026-10-01T03:51:00+00:00",
+        "2026-10-01T03:51:00+00:00",
+    )
+    five_minute = _aggregate(
+        "5m",
+        "2026-10-01T03:45:00+00:00",
+        "2026-10-01T03:50:00+00:00",
+        "2026-10-01T03:50:00+00:00",
+    )
+
+    replay = replay_interaction_response(
+        {"1m": (one_minute,), "5m": (five_minute,)},
+        ContextLocationReplay((), ()),
+        LocationRegistry("test"),
+        atr=1.0,
+    )
+
+    assert structure_saw_active == [False]
+    assert any(item["kind"] == "setup_expired" for item in replay.opportunity_facts)
+
+
+def test_pd_role_context_uses_post_contact_evidence_and_has_context_identity() -> None:
+    context = ReplayContext(execution_engine=ExecutionEngine())
+    creation = _aggregate(
+        "5m",
+        "2026-10-01T03:45:00+00:00",
+        "2026-10-01T03:50:00+00:00",
+        "2026-10-01T03:50:00+00:00",
+    )
+    evidence = _aggregate(
+        "5m",
+        "2026-10-01T03:50:00+00:00",
+        "2026-10-01T03:55:00+00:00",
+        "2026-10-01T03:55:00+00:00",
+    )
+    evidence = Aggregate(
+        evidence.time,
+        evidence.end_time,
+        evidence.available_at,
+        evidence.timeframe,
+        evidence.source_bar_count,
+        evidence.open,
+        evidence.high,
+        102.0,
+        evidence.close,
+        evidence.volume,
+        evidence.symbol,
+        evidence.expiry,
+        evidence.contract_type,
+        evidence.session_date,
+        evidence.source_fingerprint,
+    )
+    snapshot = ProjectionSnapshot(
+        "5m",
+        100.0,
+        103.0,
+        102.0,
+        102.5,
+        200.0,
+        ("2026-10-01T03:45:00+00:00", "2026-10-01T03:50:00+00:00"),
+        creation.time,
+        evidence.end_time,
+        evidence.available_at,
+    )
+    interaction = SimpleNamespace(
+        interaction_id="NIFTY:2026-10-01:PD_HIGH:5m:09:15",
+        timeframe="5m",
+        location="PD_HIGH",
+        creation_candle=creation,
+        template_version="v1",
+        synthetic_snapshots=(("5m", (snapshot,)),),
+        pd_role=None,
+        band_low=100.0,
+        band_high=101.0,
+    )
+    context.aggregates["5m"] = [creation, evidence]
+
+    class Host:
+        def __init__(self) -> None:
+            self.context = context
+            self.interaction_detector = None
+
+    events: list[dict[str, Any]] = []
+    OpportunityCoordinator(Host()).publish_interaction_context(interaction, events)
+
+    role_event = next(item for item in events if item["kind"] == "role_context_available")
+    assert role_event["role"] == "SUPPORT"
+    assert role_event["context_id"] == f"interaction:{interaction.interaction_id}"
+    assert role_event["context_version"] == "v1"
+    role_facts = context.parity_snapshot()["interaction_response"]
+    assert any(item["kind"] == "role_context_available" for item in role_facts)
 
 
 def test_session_timestamp_normalizes_local_seconds_and_offsets() -> None:

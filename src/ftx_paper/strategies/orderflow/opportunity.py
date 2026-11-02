@@ -11,6 +11,7 @@ from typing import Any, Sequence
 from .hierarchy import StructuralSetup
 from .interactions import candle_identity
 from .lifecycle import EvidenceRef as LifecycleEvidenceRef, SetupOpportunity
+from .orderflow_common import Aggregate
 from .timestamps import coerce_timestamp, nifty_label, parse_nifty_label, serialize_utc
 from .response import ResponseCandle, ResponseOutcomeStatus, build_response_spec, evaluate_response_window
 from .templates import Direction, LocationTemplate, ResponseType, TradeTemplate
@@ -58,6 +59,9 @@ class OpportunityOutcome:
     policy_version: str | None = None
     template: TradeTemplate | None = None
     as_of: datetime | None = None
+    confirmation_available_at: datetime | str | None = None
+    confirmation_context: Aggregate | None = None
+    confirmation_evidence: tuple[Aggregate, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,7 +197,7 @@ def identify_opportunity(template: TradeTemplate, interaction: Any, bars: Sequen
     return outcome, opportunity_identity(session_date=str(_value(interaction, "session_date")), instrument=str(_value(interaction, "instrument")), direction=response.direction, interaction_id=str(_value(interaction, "interaction_id")), reference_generation=int(_value(interaction, "reference_generation")), template_id=template.template_id, response_evidence_ids=response.evidence_ids, formation_at=response.observed_at, formation_available_at=response.available_at)
 
 
-def form_opportunity(response: DirectionalResponse, context: OpportunityContext, template: TradeTemplate, *, formation_available_at: str | None = None, decision_context_required: bool = True) -> tuple[SetupOpportunity, StructuralSetup]:
+def form_opportunity(response: DirectionalResponse, context: OpportunityContext, template: TradeTemplate, *, formation_available_at: datetime | str | None = None, decision_context_required: bool = True) -> tuple[SetupOpportunity, StructuralSetup]:
     if template.direction is not response.direction:
         raise ValueError("trade template direction does not match response direction")
     available = coerce_timestamp(formation_available_at or response.available_at)

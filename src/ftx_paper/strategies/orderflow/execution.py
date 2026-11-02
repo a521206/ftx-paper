@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
 from copy import copy
+from datetime import datetime
 from enum import StrEnum
 from collections.abc import Mapping
 from typing import Any, Protocol
@@ -53,6 +54,24 @@ from ftx_paper.risk.trail_stop import TrailConfig, TrailTracker
 SESSION_EXIT_DEADLINE = "15:10"
 STRUCTURE_TIMEFRAME = "5m"
 EXHAUSTION_RISK = "exhaustion_risk"
+
+
+def _diagnostic_value(value: Any) -> Any:
+    """Convert immutable canonical values without deepcopying mapping proxies."""
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            item.name: _diagnostic_value(getattr(value, item.name))
+            for item in fields(value)
+        }
+    if isinstance(value, Mapping):
+        return {str(key): _diagnostic_value(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_diagnostic_value(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return [_diagnostic_value(item) for item in value]
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return getattr(value, "value", value)
 
 
 def _opposite_open_exposure(
@@ -2328,6 +2347,11 @@ class ExecutionCoordinator:
             }
         ):
             return
+        if (
+            not getattr(life, "episode_confirmed", True)
+            and coerce_timestamp(timestamp) <= coerce_timestamp(life.formation_available_at)
+        ):
+            return
         decision_context = self.machine.decision_context_for_life(life, next_time)
         decision_relation = (
             self.machine.context_relation_for_life(life, decision_context)
@@ -2445,7 +2469,8 @@ class ExecutionCoordinator:
                 "intent_id": state.intent.intent_id,
                 "observed_at": timestamp,
                 "available_at": next_time,
-                "context": asdict(decision_context) if decision_context is not None else None,
+                "context": _diagnostic_value(decision_context)
+                if decision_context is not None else None,
                 "relation": getattr(decision_relation, "value", decision_relation),
             })
             proposal_event = {
@@ -2455,7 +2480,7 @@ class ExecutionCoordinator:
                 "observed_at": timestamp,
                 "available_at": next_time,
                 "decision_context": (
-                    asdict(decision_context)
+                    _diagnostic_value(decision_context)
                     if decision_context is not None else None
                 ),
                 "context_relation": getattr(
@@ -3081,32 +3106,29 @@ class ExecutionCoordinator:
                 ),
                 synthetic=synthetic_snapshots,
             )
-            if life.lifecycle_id.endswith("short-candidate-1") and (
-                continuation is not None or len(synthetic_snapshots or ()) >= 2
-            ):
-                context.execution_diagnostics.append({
-                    "kind": "failed_continuation_evaluated",
-                    "lifecycle_id": life.lifecycle_id,
-                    "observed_at": timestamp,
-                    "available_at": next_time,
-                    "location_interaction_id": life.location_interaction_id,
-                    "entry_at": state.entry_at,
-                    "completed_1m_count": len(context.aggregates.get("1m", ())),
-                    "completed_5m_count": len(available5),
-                    "synthetic_snapshot_count": len(synthetic_snapshots or ()),
-                    "synthetic_snapshots": [
-                        {
-                            "available_at": item.available_at,
-                            "last_source_end": item.last_source_end,
-                            "source_candle_ids": list(item.source_candle_ids),
-                            "high": item.high,
-                            "low": item.low,
-                            "close": item.close,
-                        }
-                        for item in (synthetic_snapshots or ())[-3:]
-                    ],
-                    "continuation": continuation,
-                })
+            context.execution_diagnostics.append({
+                "kind": "failed_continuation_evaluated",
+                "lifecycle_id": life.lifecycle_id,
+                "observed_at": timestamp,
+                "available_at": next_time,
+                "location_interaction_id": life.location_interaction_id,
+                "entry_at": state.entry_at,
+                "completed_1m_count": len(context.aggregates.get("1m", ())),
+                "completed_5m_count": len(available5),
+                "synthetic_snapshot_count": len(synthetic_snapshots or ()),
+                "synthetic_snapshots": [
+                    {
+                        "available_at": item.available_at,
+                        "last_source_end": item.last_source_end,
+                        "source_candle_ids": list(item.source_candle_ids),
+                        "high": item.high,
+                        "low": item.low,
+                        "close": item.close,
+                    }
+                    for item in (synthetic_snapshots or ())[-3:]
+                ],
+                "continuation": continuation,
+            })
             if continuation is not None:
                 self._queue_exit("failed_continuation", next_time, life)
                 event = {

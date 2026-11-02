@@ -986,12 +986,13 @@ def _execution_trace_diagnostics(
 ) -> list[dict[str, Any]]:
     diagnostic = payload.get("diagnostic")
     source: Any = (
-        diagnostic.get("execution_diagnostics", [])
+        diagnostic.get("execution_diagnostics")
         if canonical and isinstance(diagnostic, Mapping)
-        else payload.get("execution_diagnostics", [])
+        else payload.get("execution_diagnostics")
     )
     if not isinstance(source, list):
-        return []
+        producer = "canonical" if canonical else "paper"
+        raise ValueError(f"{producer} execution diagnostics unavailable")
 
     def normalize(value: Any, key: str | None = None) -> Any:
         if isinstance(value, Mapping):
@@ -1020,16 +1021,29 @@ def _first_execution_trace_difference(
     def key(item: Mapping[str, Any]) -> tuple[Any, Any]:
         return item.get("observed_at"), item.get("available_at")
 
-    canonical_by_clock = {key(item): item for item in canonical}
-    paper_by_clock = {key(item): item for item in paper}
+    def indexed(
+        values: list[dict[str, Any]],
+    ) -> dict[tuple[tuple[Any, Any], int], dict[str, Any]]:
+        occurrences: dict[tuple[Any, Any], int] = {}
+        result: dict[tuple[tuple[Any, Any], int], dict[str, Any]] = {}
+        for item in values:
+            clock = key(item)
+            occurrence = occurrences.get(clock, 0)
+            occurrences[clock] = occurrence + 1
+            result[(clock, occurrence)] = item
+        return result
+
+    canonical_by_clock = indexed(canonical)
+    paper_by_clock = indexed(paper)
     clocks = sorted(set(canonical_by_clock) | set(paper_by_clock), key=str)
-    for index, clock in enumerate(clocks):
-        left = canonical_by_clock.get(clock)
-        right = paper_by_clock.get(clock)
+    for index, (clock, occurrence) in enumerate(clocks):
+        left = canonical_by_clock.get((clock, occurrence))
+        right = paper_by_clock.get((clock, occurrence))
         if left != right:
             return {
                 "index": index,
                 "clock": {"observed_at": clock[0], "available_at": clock[1]},
+                "occurrence": occurrence,
                 "canonical": left,
                 "paper": right,
             }
