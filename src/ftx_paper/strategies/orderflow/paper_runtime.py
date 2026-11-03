@@ -185,10 +185,7 @@ class PaperOrderflowRuntime:
                 vwap_measurements=_published_vwap_measurements(locations),
                 prior_value=latest.prior_value,
                 contexts=tuple(
-                    {
-                        "context_id": context.context_id,
-                        "version": context.version,
-                    }
+                    context
                     for versions in self.transition_owner.context.market_contexts.versions.values()
                     for context in versions
                 ),

@@ -75,14 +75,36 @@ def test_phase35_location_order_matches_canonical_high_before_low() -> None:
     ]
 
 
-def test_phase35_projection_excludes_full_replay_context_references() -> None:
+def test_phase35_projection_uses_ordinary_context_references() -> None:
     projected = _paper_phase35_projection({
         "session_date": "2026-10-05",
-        "evidence": {"atr": None, "locations": [], "contexts": []},
+        "evidence": {
+            "atr": None,
+            "locations": [],
+            "contexts": [
+                {
+                    "context_id": "5m-context-NIFTY-2026-10-05-1m_5m",
+                    "version": "v1",
+                    "timestamp": "2026-10-05T03:45:00Z",
+                    "available_at": "2026-10-05T03:45:00Z",
+                    "source_timeframe": "5m",
+                },
+                {
+                    "context_id": "interaction:pd-low",
+                    "version": "v1",
+                    "timestamp": "2026-10-05T03:46:00Z",
+                    "available_at": "2026-10-05T03:46:00Z",
+                    "source_timeframe": "5m",
+                },
+            ],
+        },
         "replay_records": [{"ordinary_context_ref": {"context_id": "ctx", "version": "v1"}}],
     })
 
-    assert projected["contexts"] == []
+    assert projected["contexts"] == [{
+        "context_id": "5m-context-NIFTY-2026-10-05-1m_5m",
+        "version": "v1",
+    }]
 
 
 def test_paper_api_payload_reads_orderflow_report_extension() -> None:

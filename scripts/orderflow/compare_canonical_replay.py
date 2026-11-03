@@ -579,12 +579,26 @@ def _paper_phase35_projection(session_result: dict[str, Any]) -> dict[str, Any]:
             if isinstance(item, dict) and item.get("frozen_atr") is not None
         ],
     } if isinstance(raw_atr, dict) else raw_atr
-    # Full replay records contain state-machine context references published
-    # during Phase 4. They are not Phase 3.5 evidence publications and must
-    # not be projected into the evidence comparison.
-    contexts = raw.get("contexts", [])
-    if not isinstance(contexts, list):
-        contexts = []
+    # The causal publication carries full MarketContext objects. Canonical
+    # Phase 3.5 compares only ordinary-context references; interaction context
+    # publications belong to later lifecycle evidence.
+    contexts: list[dict[str, Any]] = []
+    raw_contexts = raw.get("contexts", [])
+    if isinstance(raw_contexts, list):
+        seen_contexts: set[tuple[str, str]] = set()
+        for item in raw_contexts:
+            if not isinstance(item, dict):
+                continue
+            context_id = item.get("context_id")
+            version = item.get("version")
+            if not isinstance(context_id, str) or not isinstance(version, str):
+                continue
+            if context_id.startswith("interaction:"):
+                continue
+            identity = (context_id, version)
+            if identity not in seen_contexts:
+                seen_contexts.add(identity)
+                contexts.append({"context_id": context_id, "version": version})
     raw_prior = raw.get("prior_value")
     prior_value = raw_prior
     if isinstance(raw_prior, dict) and isinstance(raw_prior.get("reference"), dict):
