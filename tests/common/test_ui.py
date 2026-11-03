@@ -12,3 +12,4 @@ def test_orderflow_replay_page_has_structured_report_mount() -> None:
     assert "Entries filled" in body
     assert "View report" in body
     assert "Remove" in body
+    assert "confirm(" not in body
