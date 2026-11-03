@@ -103,10 +103,12 @@ def test_multi_strategy_engine_dispatches_and_attributes_orders():
     })
     bundle = type("Bundle", (), {"bars": {}, "bundle_id": "bundle", "minute": "04:00", "complete": True})()
 
-    with pytest.raises(RuntimeError, match="strategy 'second' failed"):
-        engine.on_bundle(cast(DecisionBundle, bundle))
+    result = engine.on_bundle(cast(DecisionBundle, bundle))
 
     assert first.calls == second.calls == 1
+    assert [order.strategy_id for order in result.orders] == ["first"]
+    assert result.events[-1]["event_type"] == "STRATEGY_ERROR"
+    assert engine.strategy_status()[1]["state"] == "disabled"
 
 
 def test_multi_strategy_engine_collects_attributed_orders_in_configured_order():

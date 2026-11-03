@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from dataclasses import replace
 from collections.abc import Mapping
@@ -14,19 +15,13 @@ from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.strategies.shared.exits import ExitAction
 
 
+logger = logging.getLogger(__name__)
+
+
 @dataclass(frozen=True, slots=True)
 class EngineResult:
     orders: tuple[OrderIntent, ...] = ()
     events: tuple[dict[str, object], ...] = ()
-
-
-class StrategyDispatchError(RuntimeError):
-    """A strategy failed while evaluating a shared market bundle."""
-
-    def __init__(self, strategy_id: str, cause: Exception) -> None:
-        self.strategy_id = strategy_id
-        self.cause = cause
-        super().__init__(f"strategy {strategy_id!r} failed: {cause}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,26 +189,60 @@ class MultiStrategyEngine:
     def set_account_context(self, portfolio: Any, capital_context: Any) -> None:
         """Bind and validate the runtime-owned account context for every instance."""
         for item in self.instances:
-            bind = getattr(item.strategy, "bind_account_context", None)
-            if callable(bind):
-                bind(portfolio, capital_context)
-            for name, value in (("portfolio", portfolio), ("capital_context", capital_context)):
-                if hasattr(item.strategy, name):
-                    setattr(item.strategy, name, value)
-                    if getattr(item.strategy, name) is not value:
-                        raise RuntimeError(
-                            f"strategy {item.strategy_id!r} rejected shared {name} context"
-                        )
+            if not item.enabled:
+                continue
+            try:
+                bind = getattr(item.strategy, "bind_account_context", None)
+                if callable(bind):
+                    bind(portfolio, capital_context)
+                for name, value in (("portfolio", portfolio), ("capital_context", capital_context)):
+                    if hasattr(item.strategy, name):
+                        setattr(item.strategy, name, value)
+                        if getattr(item.strategy, name) is not value:
+                            raise RuntimeError(
+                                f"strategy {item.strategy_id!r} rejected shared {name} context"
+                            )
+            except Exception as exc:
+                self._disable_strategy(item, exc, phase="account_context")
 
     def bind_execution_service(self, service: Any, *, diagnostic: bool = False) -> None:
         for item in self.instances:
+            if not item.enabled:
+                continue
             handler = getattr(item.strategy, "bind_execution_service", None)
             if callable(handler):
-                handler(service, diagnostic=diagnostic)
+                try:
+                    handler(service, diagnostic=diagnostic)
+                except Exception as exc:
+                    self._disable_strategy(item, exc, phase="execution_binding")
 
     def reset(self) -> None:
-        for engine in self._engines.values():
-            engine.reset()
+        for item in self.instances:
+            if not item.enabled:
+                continue
+            try:
+                self._engines[item.strategy_id].reset()
+            except Exception as exc:
+                self._disable_strategy(item, exc, phase="reset")
+
+    def _disable_strategy(self, item: StrategyInstance, exc: Exception, *, phase: str) -> dict[str, object]:
+        self.instances = tuple(
+            replace(current, enabled=False) if current.strategy_id == item.strategy_id else current
+            for current in self.instances
+        )
+        logger.warning(
+            "Strategy %s failed during %s; disabling strategy",
+            item.strategy_id,
+            phase,
+            exc_info=True,
+        )
+        return {
+            "event_type": "STRATEGY_ERROR",
+            "strategy_id": item.strategy_id,
+            "phase": phase,
+            "error_type": type(exc).__name__,
+            "reason": str(exc),
+        }
 
     def snapshot(self) -> Mapping[str, object]:
         """Return independently keyed snapshots for runtime persistence."""
@@ -271,7 +300,8 @@ class MultiStrategyEngine:
             try:
                 result = engine.on_bundle(bundle, context=context)
             except Exception as exc:
-                raise StrategyDispatchError(item.strategy_id, exc) from exc
+                events.append(self._disable_strategy(item, exc, phase="bundle"))
+                continue
             for event in result.events:
                 events.append({**event, "strategy_id": item.strategy_id})
             for order in result.orders:
@@ -289,21 +319,33 @@ class MultiStrategyEngine:
     def bind_feature_bars(self, bars: tuple[MarketBar, ...] | list[MarketBar]) -> None:
         for item in self.instances:
             if item.enabled:
-                self._engines[item.strategy_id].bind_feature_bars(bars)
+                try:
+                    self._engines[item.strategy_id].bind_feature_bars(bars)
+                except Exception as exc:
+                    self._disable_strategy(item, exc, phase="feature_binding")
 
     def append_feature_bar(self, bar: MarketBar) -> None:
         for item in self.instances:
             if item.enabled:
-                self._engines[item.strategy_id].append_feature_bar(bar)
+                try:
+                    self._engines[item.strategy_id].append_feature_bar(bar)
+                except Exception as exc:
+                    self._disable_strategy(item, exc, phase="feature_append")
 
     def on_execution_event(self, event: ExecutionNotification) -> None:
         if event.strategy_id is None:
             raise ValueError("execution event strategy_id is required")
         if event.strategy_id not in self._engines:
             raise KeyError(f"unknown strategy_id: {event.strategy_id}")
+        item = next(item for item in self.instances if item.strategy_id == event.strategy_id)
+        if not item.enabled:
+            return
         targets = (self._engines[event.strategy_id],)
         for engine in targets:
-            engine.on_execution_event(event)
+            try:
+                engine.on_execution_event(event)
+            except Exception as exc:
+                self._disable_strategy(item, exc, phase="execution_event")
 
     def on_tick(self, bar: MarketBar) -> tuple[ExitAction, ...]:
         actions: list[ExitAction] = []
@@ -312,7 +354,8 @@ class MultiStrategyEngine:
                 try:
                     result = self._engines[item.strategy_id].on_tick(bar)
                 except Exception as exc:
-                    raise StrategyDispatchError(item.strategy_id, exc) from exc
+                    self._disable_strategy(item, exc, phase="tick")
+                    continue
                 actions.extend(self._attributed_exits(item.strategy_id, result))
         return tuple(actions)
 
@@ -323,7 +366,8 @@ class MultiStrategyEngine:
                 try:
                     result = self._engines[item.strategy_id].on_closed_bar(bar)
                 except Exception as exc:
-                    raise StrategyDispatchError(item.strategy_id, exc) from exc
+                    self._disable_strategy(item, exc, phase="closed_bar")
+                    continue
                 actions.extend(self._attributed_exits(item.strategy_id, result))
         return tuple(actions)
 
@@ -339,26 +383,54 @@ class MultiStrategyEngine:
 
     def register_entry(self, order: OrderIntent, *, fill_price: float | None = None,
                        entry_fill_time: Any = None, reference_price: float | None = None) -> None:
-        engine = self._engines.get(order.strategy_id or "")
+        strategy_id = order.strategy_id or ""
+        engine = self._engines.get(strategy_id)
         if engine is None:
             raise KeyError(f"unknown strategy_id: {order.strategy_id}")
-        engine.register_entry(order, fill_price=fill_price, entry_fill_time=entry_fill_time,
-                              reference_price=reference_price)
+        item = next(item for item in self.instances if item.strategy_id == strategy_id)
+        if not item.enabled:
+            return
+        try:
+            engine.register_entry(order, fill_price=fill_price, entry_fill_time=entry_fill_time,
+                                  reference_price=reference_price)
+        except Exception as exc:
+            self._disable_strategy(item, exc, phase="register_entry")
 
     def record_exit(self, *, strategy_id: str | None = None, **kwargs: object) -> None:
-        engine = self._engines.get(strategy_id or "")
+        target_id = strategy_id or ""
+        engine = self._engines.get(target_id)
         if engine is None:
             raise KeyError(f"unknown strategy_id: {strategy_id}")
-        engine.record_exit(**kwargs)
+        item = next(item for item in self.instances if item.strategy_id == target_id)
+        if not item.enabled:
+            return
+        try:
+            engine.record_exit(**kwargs)
+        except Exception as exc:
+            self._disable_strategy(item, exc, phase="record_exit")
 
     def cancel_entry(self, *, strategy_id: str | None = None, **kwargs: object) -> None:
-        engine = self._engines.get(strategy_id or "")
+        target_id = strategy_id or ""
+        engine = self._engines.get(target_id)
         if engine is None:
             raise KeyError(f"unknown strategy_id: {strategy_id}")
-        engine.cancel_entry(**kwargs)
+        item = next(item for item in self.instances if item.strategy_id == target_id)
+        if not item.enabled:
+            return
+        try:
+            engine.cancel_entry(**kwargs)
+        except Exception as exc:
+            self._disable_strategy(item, exc, phase="cancel_entry")
 
     def settle_exit(self, exit_order_id: str, *, filled: bool, strategy_id: str | None = None) -> None:
-        engine = self._engines.get(strategy_id or "")
+        target_id = strategy_id or ""
+        engine = self._engines.get(target_id)
         if engine is None:
             raise KeyError(f"unknown strategy_id: {strategy_id}")
-        engine.settle_exit(exit_order_id, filled=filled)
+        item = next(item for item in self.instances if item.strategy_id == target_id)
+        if not item.enabled:
+            return
+        try:
+            engine.settle_exit(exit_order_id, filled=filled)
+        except Exception as exc:
+            self._disable_strategy(item, exc, phase="settle_exit")

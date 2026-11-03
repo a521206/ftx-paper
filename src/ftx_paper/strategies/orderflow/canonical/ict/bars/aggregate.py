@@ -64,7 +64,7 @@ def build_completed_bars(
     timeframe_minutes: int,
     session: SessionSpec | None = None,
 ) -> list[CompletedBar]:
-    """Build complete aggregates; reject in-session source gaps and omit partial edges."""
+    """Build complete aggregates; ignore source gaps and omit partial edges."""
     if timeframe_minutes < 1:
         raise ValueError("timeframe_minutes must be positive")
     session = session or SessionSpec()
@@ -74,7 +74,6 @@ def build_completed_bars(
         _validate_bar(bar)
 
     groups: dict[tuple[str, str, datetime], list[SourceBar]] = {}
-    previous_by_session: dict[tuple[str, str], datetime] = {}
     for bar in source:
         local_timestamp = bar.timestamp.astimezone(session_zone)
         if bar.session_date != local_timestamp.date().isoformat():
@@ -83,19 +82,6 @@ def build_completed_bars(
         session_end = datetime.combine(local_timestamp.date(), session.end, tzinfo=session_zone)
         if local_timestamp < session_start or local_timestamp >= session_end:
             continue
-        session_key = (bar.instrument, bar.session_date)
-        previous_timestamp = previous_by_session.get(session_key)
-        expected_timestamp = (
-            previous_timestamp + timedelta(minutes=1)
-            if previous_timestamp is not None else None
-        )
-        if expected_timestamp is not None and local_timestamp != expected_timestamp:
-            raise ValueError(
-                f"discontinuous source bars for {bar.instrument} on {bar.session_date}: "
-                f"expected {expected_timestamp.isoformat()}, "
-                f"got {local_timestamp.isoformat()}"
-            )
-        previous_by_session[session_key] = local_timestamp
         offset = int((local_timestamp - session_start).total_seconds() // 60)
         start = session_start + timedelta(minutes=(offset // timeframe_minutes) * timeframe_minutes)
         groups.setdefault((bar.instrument, local_timestamp.date().isoformat(), start), []).append(bar)

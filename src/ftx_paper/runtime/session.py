@@ -25,7 +25,7 @@ from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.strategies.shared.protocol import Strategy
 from ftx_paper.execution.cost import futures_cost
 from ftx_paper.execution.settlement import ExitValidationError, validate_exit_order
-from .engine import MultiStrategyEngine, PaperEngine, StrategyDispatchError
+from .engine import MultiStrategyEngine, PaperEngine
 from .decision_turn import DecisionTurn, evaluate_turn
 from .facades import FeedController, FeedManager, OrderManager, PnlManager, StrategyRunner
 from .event_bus import EventBus
@@ -220,43 +220,6 @@ class RuntimeSession:
     def strategy_status(self) -> tuple[dict[str, object], ...]:
         status = getattr(self.engine, "strategy_status", None)
         return cast(tuple[dict[str, object], ...], status()) if callable(status) else ()
-
-    def _record_strategy_failure(self, error: StrategyDispatchError, *, timestamp: str,
-                                 session_date: str | None = None) -> None:
-        self._halt_strategy_runtime()
-        self.store.append_event("STRATEGY_ERROR", {
-            "strategy_id": error.strategy_id,
-            "error_type": type(error.cause).__name__,
-            "reason": str(error.cause),
-            "decision_source": "live",
-            "session_date": session_date,
-            "execution_allowed": True,
-        }, f"strategy_error:live:{timestamp}:{error.strategy_id}", timestamp=timestamp)
-        self.store.patch_status({
-            "state": "ERROR", "health_state": "FAILED",
-            "error": str(error), "failed_strategy_id": error.strategy_id,
-        })
-
-    def _halt_strategy_runtime(self) -> None:
-        self._stopping = True
-        self._stop_event.set()
-        self._market_wait.set()
-        if self.feed is not None:
-            try:
-                self.feed.stop()
-            except Exception:
-                logger.exception("Runtime feed failed after strategy failure")
-        if self.broker is not None:
-            try:
-                self.broker.close()
-            except Exception:
-                logger.exception("Runtime broker failed after strategy failure")
-        worker = self._thread
-        if worker is not None and worker is not threading.current_thread():
-            worker.join(timeout=30.0)
-            if worker.is_alive():
-                logger.error("Runtime worker did not stop after strategy failure")
-        self._release_feed_lease()
 
     def start(self) -> None:
         with self._lock:
@@ -716,23 +679,7 @@ class RuntimeSession:
         orders: tuple[Any, ...] = ()
 
         def form_opportunity(_turn) -> Mapping[str, Any]:
-            try:
-                result_holder.append(evaluate_turn(active_engine, DecisionTurn(bundle, source, context)))
-            except StrategyDispatchError as exc:
-                self._halt_strategy_runtime()
-                self.store.append_event("STRATEGY_ERROR", {
-                    "strategy_id": exc.strategy_id,
-                    "error_type": type(exc.cause).__name__,
-                    "reason": str(exc.cause),
-                    "decision_source": source,
-                    "session_date": bundle.trading_date,
-                    "execution_allowed": source == "live",
-                }, f"strategy_error:{source}:{bundle.bundle_id}:{exc.strategy_id}", timestamp=timestamp)
-                self.store.patch_status({
-                    "state": "ERROR", "health_state": "FAILED",
-                    "error": str(exc), "failed_strategy_id": exc.strategy_id,
-                })
-                return {"failed": True}
+            result_holder.append(evaluate_turn(active_engine, DecisionTurn(bundle, source, context)))
             return {"proposal_count": len(result_holder[0].orders)}
 
         def arbitrate(_turn) -> Mapping[str, Any]:
@@ -1362,14 +1309,7 @@ class RuntimeSession:
             exit_events_holder: list[Mapping[str, object]] = []
 
             def manage_existing(_turn):
-                try:
-                    exit_actions = self.engine.on_closed_bar(bar)
-                except StrategyDispatchError as exc:
-                    self._record_strategy_failure(
-                        exc, timestamp=bar.timestamp.isoformat(),
-                        session_date=bar.timestamp.astimezone(IST).date().isoformat(),
-                    )
-                    return {"failed": True}
+                exit_actions = self.engine.on_closed_bar(bar)
                 for action in exit_actions:
                     result = execute_exit(action)
                     filled = bool(result)
@@ -1474,14 +1414,7 @@ class RuntimeSession:
             tick_events: list[Mapping[str, object]] = []
 
             def manage_tick(_turn) -> Mapping[str, object]:
-                try:
-                    actions = self.engine.on_tick(bar)
-                except StrategyDispatchError as exc:
-                    self._record_strategy_failure(
-                        exc, timestamp=bar.timestamp.isoformat(),
-                        session_date=bar.timestamp.astimezone(IST).date().isoformat(),
-                    )
-                    return {"failed": True}
+                actions = self.engine.on_tick(bar)
                 for action in actions:
                     filled = self._settle_live_order(
                         action.intent,
