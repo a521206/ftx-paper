@@ -31,7 +31,6 @@ from .execution import (
     IntentStatus,
     ReservationStatus,
 )
-from .features import daily_atr_cache
 from .contextual import build_context_scores
 from .hierarchy import (
     ContextObservation,
@@ -688,11 +687,7 @@ class OrderflowTransitionOwner:
         self.observation_owner = OrderflowCoordinator(self.location_registry)
         self.context = ReplayContext(
             rows_by_date=self.rows_by_date,
-            atr_by_session=(
-                self.atr_by_session
-                if self.atr_by_session is not None
-                else daily_atr_cache(self.rows_by_date)
-            ),
+            atr_by_session=self.atr_by_session or {},
             location_registry=self.location_registry,
             execution_engine=ExecutionEngine(),
         )

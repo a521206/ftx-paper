@@ -11,21 +11,11 @@ from typing import Any
 from ftx_paper.runtime import RuntimeStore
 from ftx_paper.runtime.futures_source import FuturesSessionSourceResolver
 from ftx_paper.strategies.orderflow import observe_market
-from ftx_paper.strategies.orderflow.canonical.ict.value_profile.records import DailyProfileRecord
-from ftx_paper.strategies.orderflow.canonical.ict.value_profile.store import DailyProfileStore
-from ftx_paper.strategies.orderflow.canonical.orderflow.value_publication import (
-    prior_profile_is_complete,
-    publish_value_references,
-)
 from ftx_paper.strategies.orderflow.orderflow_common import Aggregate
 from ftx_paper.strategies.orderflow.timestamps import (
     coerce_timestamp,
     nifty_label,
     session_minute,
-)
-from ftx_paper.strategies.orderflow.value_publication import (
-    PriorSessionValueReference,
-    ValuePublication,
 )
 
 
@@ -155,72 +145,8 @@ def build_observation_artifact(
     )
 
 
-def build_prior_values(
-    rows_by_date: dict[str, tuple[dict[str, Any], ...]],
-) -> dict[str, ValuePublication]:
-    class _ReplayDailyProfileStore:
-        def __init__(self) -> None:
-            self._records: dict[tuple[str, int, str, str], DailyProfileRecord] = {}
-
-        def load(
-            self,
-            *,
-            instrument: str,
-            timeframe_minutes: int,
-            config_fingerprint: str,
-            session_date: str,
-        ) -> DailyProfileRecord | None:
-            return self._records.get((instrument, timeframe_minutes, config_fingerprint, session_date))
-
-        def save(self, record: DailyProfileRecord) -> None:
-            self._records[
-                (record.instrument, record.timeframe_minutes, record.config_fingerprint, record.session_date)
-            ] = record
-
-    publications: dict[str, ValuePublication] = {}
-    dates = sorted(rows_by_date)
-    trading_session_dates = tuple(dates)
-    store: DailyProfileStore = _ReplayDailyProfileStore()
-    prior_date: str | None = None
-    for current_date in dates:
-        if prior_date is None:
-            prior_date = current_date
-            continue
-        prior_rows = list(rows_by_date[prior_date])
-        rows = list(rows_by_date[current_date])
-        prior_date = current_date
-        references = publish_value_references(
-            prior_rows,
-            rows,
-            current_date,
-            prior_profile_complete=prior_profile_is_complete(prior_rows),
-            daily_profile_store=store,
-            trading_session_dates=trading_session_dates,
-        )
-        reference = next((item for item in references if item.scope == "prior_session"), None)
-        if reference is None:
-            continue
-        value_reference = PriorSessionValueReference(
-            reference.source_sessions[0],
-            reference.val,
-            reference.poc,
-            reference.vah,
-            coerce_timestamp(reference.available_at),
-            coerce_timestamp(reference.available_at),
-            (reference.reference_id, reference.fingerprint),
-        )
-        publications[current_date] = ValuePublication(
-            value_reference,
-            value_reference.observed_at,
-            value_reference.available_at,
-            value_reference.lineage,
-        )
-    return publications
-
-
 __all__ = [
     "_aggregate",
     "_load_session_rows",
     "build_observation_artifact",
-    "build_prior_values",
 ]

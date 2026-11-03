@@ -8,7 +8,17 @@ setup materialization design in
 
 The task removes recursive ATR history reconstruction from replay while
 preserving the canonical NiftyZoning calculation and causal publication rules.
-It is a design contract, not a claim that the task is implemented.
+This document records the implementation contract and current acceptance status.
+
+## Status
+
+Implemented in the Paper runtime. The `daily-atr` task produces immutable,
+validated artifacts with chronological Wilder state, source provenance, target
+availability, and downstream invalidation on source correction. Replay consumes
+the artifact and no longer reconstructs ATR from historical warmup bars.
+
+Focused strategy/infrastructure validation passes. Remaining acceptance work is
+canonical cross-repository parity and production operational readiness.
 
 ## Canonical Contract
 
@@ -44,6 +54,14 @@ instrument:        NIFTY
 The task is strategy-owned, while source reads, artifact persistence, job
 lifecycle, scheduling, and catalog lookup remain owned by the shared setup
 worker and its ports.
+
+## Ownership Boundary
+
+The shared worker owns scheduling, artifact lifecycle, persistence, and lookup.
+The orderflow task owns ATR normalization, the canonical Wilder recurrence,
+provenance, and invalidation. Replay only consumes validated target-session
+publications. A source correction invalidates the affected session and all later
+ATR values that depend on its recursive state.
 
 ## Materialization Scope
 
@@ -168,29 +186,17 @@ history differences only when the difference is documented, numeric, and within
 the configured tolerance. A different Wilder seed caused by a truncated replay
 warmup is not input variance; it is an implementation mismatch.
 
-## Validation Plan
+## Validation Status
 
-Before replay cutover:
+Focused coverage includes recurrence seeding, recursive updates, source
+correction invalidation, missing-history unavailability, artifact round trips,
+replay integration, and cross-repository comparison fixtures. The remaining
+gate is acceptance against the canonical NiftyZoning output for representative
+no-trade and execution-bearing sessions.
 
-1. Compare the materializer's daily OHLC and true-range rows with the canonical
-   continuous-futures source.
-2. Compare the full ATR series, including the first available value and several
-   recursive updates after it.
-3. Compare target-session publications and causal timestamps.
-4. Run no-trade and execution-bearing canonical/Paper replay dates.
-5. Assert that replay does not invoke the truncated `daily_atr()` path.
-6. Remove the 14-session warmup fallback only after parity passes.
+## Migration Status
 
-Required focused coverage includes recurrence seeding, recursive updates,
-source correction invalidation, missing-history unavailability, artifact
-round-trips, and cross-repository comparison.
-
-## Migration Order
-
-1. Complete the shared setup worker and immutable artifact reader/writer.
-2. Add and validate the `daily-atr` task declaration and materializer.
-3. Perform a historical catch-up and dual-read comparison against NiftyZoning.
-4. Inject validated ATR publications into replay while retaining diagnostics.
-5. Switch parity comparison to the artifact-backed path.
-6. Remove truncated ATR warmup from accepted replay and delete obsolete fallback
-   logic.
+The shared worker and artifact contract are complete, the task is registered, and
+artifact-backed replay is the normal path. Historical warmup reconstruction and
+its fallback have been removed. Production acceptance depends on canonical parity
+and operational scheduling rather than additional replay implementation.

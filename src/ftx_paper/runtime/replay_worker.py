@@ -29,6 +29,7 @@ from ftx_paper.runtime.replay_runners import (
     ResearchReplayRunner,
     StrategyReplayRunner,
 )
+from ftx_paper.infrastructure.artifacts import SetupArtifactStore, deserialize_atr_publication, deserialize_value_publication
 from ftx_paper.execution.lifecycle import (
     ExecutionLifecycleCoordinator,
     ExecutionPhase,
@@ -129,11 +130,13 @@ class ReplayWorker:
 
     def __init__(self, store: Any, *, capital_profile: ResearchCapitalProfile = RESEARCH_CAPITAL_PROFILE,
                  max_queue_size: int = 1024, strategy_selector: StrategySelector | None = None,
-                 futures_source_resolver: Any | None = None, parity_projector: Any | None = None) -> None:
+                 futures_source_resolver: Any | None = None, parity_projector: Any | None = None,
+                 artifact_store: SetupArtifactStore | None = None) -> None:
         self.store = store
         self.capital_profile = capital_profile
         self.strategy_selector = strategy_selector
         self.parity_projector = parity_projector
+        self.artifact_store = artifact_store or SetupArtifactStore(store.root.parent)
         self.inputs = ReplayInput(store, futures_source_resolver)
         self.runners: dict[str, StrategyReplayRunner] = {
             "ftx-paper-orderflow": OrderflowReplayRunner(self),
@@ -1060,29 +1063,54 @@ class ReplayWorker:
             bar for bar in bars
             if str(bar.instrument.instrument_type).upper() in {"FUT", "FUTURES"}
         )
-        warmup_bars: list[Any] = []
-        warmup_dates = [date for date in self.store.read_dates() if date < session_date]
-        # Wilder ATR is recursively materialized; retaining only the lookback
-        # window would reseed it from a different history than canonical replay.
-        for warmup_date in sorted(warmup_dates):
-            warmup_rows = self.store.read_market_bars(warmup_date)
-            warmup_source = self.inputs.resolve_source(warmup_date, rows=warmup_rows)
-            warmup_rows = [
-                row for row in warmup_rows
-                if str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
-            ]
-            normalized_warmup = self.inputs.bars(
-                warmup_date,
-                rows=warmup_rows,
-                futures_source=warmup_source,
-            )
-            # CanonicalInputProvider derives orderflow features from futures
-            # only. Avoid retaining the potentially massive option surface for
-            # every historical session while preserving the full ATR history.
-            warmup_bars.extend(
-                bar for bar in normalized_warmup
-                if str(bar.instrument.instrument_type).upper() in {"FUT", "FUTURES"}
-            )
+        prior_values: dict[str, Any] = {}
+        atr_values: dict[str, Any] = {}
+        artifact_store = self.artifact_store
+        artifact_identity = {
+            "strategy_id": "ftx-paper-orderflow", "task_id": "prior-session-value",
+            "algorithm_version": "orderflow.prior-session-value.v1",
+            "config_fingerprint": "value-profile-default", "instrument": "NIFTY",
+        }
+        try:
+            artifact = artifact_store.read(artifact_identity, session_date)
+            if artifact is not None:
+                source_sessions = artifact.get("source", {}).get("sessions", [])
+                prior_provenance = self.inputs.prior_source_provenance(session_date)
+                source_fingerprints = artifact.get("source", {}).get("source_fingerprints", [])
+                if (
+                    not isinstance(source_sessions, list)
+                    or not source_sessions
+                    or not isinstance(source_fingerprints, list)
+                    or not source_fingerprints
+                    or prior_provenance is None
+                    or source_fingerprints[-1] != prior_provenance.get("source_fingerprint")
+                ):
+                    raise ValueError("setup artifact source coverage is unavailable")
+                expected_prior = sorted(str(item) for item in self.store.read_dates() if str(item) < session_date)
+                if not expected_prior or str(source_sessions[-1]) != expected_prior[-1]:
+                    raise ValueError("setup artifact source session is stale")
+                prior_values[session_date] = deserialize_value_publication(artifact["payload"])
+        except (OSError, ValueError):
+            from ftx_paper.strategies.orderflow.value_publication import ValuePublication
+            prior_values[session_date] = ValuePublication(None, None, None, (), "derived_artifact_unavailable")
+        if session_date not in prior_values:
+            from ftx_paper.strategies.orderflow.value_publication import ValuePublication
+            prior_values[session_date] = ValuePublication(None, None, None, (), "derived_artifact_unavailable")
+        try:
+            atr_identity = {
+                "strategy_id": "ftx-paper-orderflow", "task_id": "daily-atr",
+                "algorithm_version": "orderflow.daily-atr.wilder.v1",
+                "config_fingerprint": "daily-atr-NIFTY-14", "instrument": "NIFTY",
+            }
+            atr_artifact = artifact_store.read(atr_identity, session_date)
+            if atr_artifact is None or atr_artifact.get("status") != "available":
+                from ftx_paper.strategies.orderflow.evidence_publication import AtrPublication
+                atr_values[session_date] = AtrPublication.unavailable("derived_artifact_unavailable")
+            else:
+                atr_values[session_date] = deserialize_atr_publication(atr_artifact["payload"])
+        except (OSError, KeyError, TypeError, ValueError):
+            from ftx_paper.strategies.orderflow.evidence_publication import AtrPublication
+            atr_values[session_date] = AtrPublication.unavailable("derived_artifact_unavailable")
         aggregator = ReplayInput.aggregator(bars)
         runtime = self.strategy_selector.create(
             "ftx-paper-orderflow",
@@ -1090,7 +1118,7 @@ class ReplayWorker:
         )
         bind_replay_bars = getattr(runtime, "bind_replay_bars", None)
         if callable(bind_replay_bars):
-            bind_replay_bars(bars, historical_bars=tuple(warmup_bars))
+            bind_replay_bars(bars, prior_values=prior_values, atr_values=atr_values)
         # The selector composes the same PaperOrderflowRuntime used by live
         # hosting.  Replay owns only the bounded clock and capture loop.
         engine = PaperEngine(runtime)

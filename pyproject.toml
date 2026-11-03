@@ -21,6 +21,7 @@ ftx-paper-api = "ftx_paper.cli:api_main"
 ftx-web = "ftx_paper.cli:api_main"
 ftx-paper-ui = "ftx_paper.cli:ui_main"
 ftx-paper-replay = "ftx_paper.replay_cli:main"
+ftx-paper-setup = "ftx_paper.setup_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

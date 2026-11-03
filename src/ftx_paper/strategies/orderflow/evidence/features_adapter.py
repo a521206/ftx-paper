@@ -3,10 +3,8 @@
 from __future__ import annotations
 # pyright: reportArgumentType=false
 
-import hashlib
 from collections.abc import Mapping, Sequence
 
-from ..features import daily_atr
 from ..market_observation import MarketObservation, observe_market
 from ..state_machine_types import SessionLevels
 from ..value_publication import ValuePublication
@@ -22,9 +20,11 @@ class PaperFeatureAdapter(EvidenceAdapter):
         rows_by_date: Mapping[str, Sequence[Mapping[str, object]]],
         *,
         prior_values: Mapping[str, ValuePublication] | None = None,
+        atr_values: Mapping[str, AtrPublication] | None = None,
     ) -> None:
         self._rows = {str(date): tuple(dict(row) for row in rows) for date, rows in rows_by_date.items()}
         self._prior_values = dict(prior_values or {})
+        self._atr_values = None if atr_values is None else dict(atr_values)
         self._observations: dict[str, MarketObservation] = {}
         self._atr_cache: dict[tuple[str, str], AtrPublication] = {}
         self._levels_cache: dict[str, SessionLevels | None] = {}
@@ -40,22 +40,11 @@ class PaperFeatureAdapter(EvidenceAdapter):
 
     def atr(self, session_date: str, symbol: str) -> AtrPublication:
         key = (session_date, symbol)
+        if self._atr_values is not None and session_date in self._atr_values:
+            return self._atr_values[session_date]
         if key not in self._atr_cache:
-            value = daily_atr(session_date, self._rows)
-            if value is None:
-                result = AtrPublication.unavailable("insufficient_daily_atr_history")
-            else:
-                prior_dates = sorted(date for date in self._rows if date < session_date)
-                observed_at = f"{prior_dates[-1]}T15:30" if prior_dates else None
-                if observed_at is None:
-                    result = AtrPublication.unavailable("insufficient_daily_atr_history")
-                else:
-                    lineage = f"daily_atr:{symbol}:{session_date}:{value:.12g}"
-                    result = AtrPublication(
-                        value, observed_at, f"{session_date}T09:15",
-                        hashlib.sha256(lineage.encode()).hexdigest(), (lineage,),
-                    )
-            self._atr_cache[key] = result
+            reason = "derived_artifact_unavailable" if self._atr_values is not None else "insufficient_daily_atr_history"
+            self._atr_cache[key] = AtrPublication.unavailable(reason)
         return self._atr_cache[key]
 
     def session_levels(self, session_date: str) -> SessionLevels | None:

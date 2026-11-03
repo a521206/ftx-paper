@@ -56,6 +56,10 @@ def openapi_document() -> dict[str, Any]:
         "info": {"title": "FTX Paper API", "version": "1.0.0"},
         "paths": {
             "/api/v1/health": {"get": {"responses": {"200": {"description": "Healthy"}}}},
+            "/api/v1/setup-runs": {"post": {"responses": {"202": {"description": "Setup run queued"}}}},
+            "/api/v1/setup-runs/{job_id}": {"get": {"responses": {"200": {"description": "Setup run status"}, "404": {"description": "Not found"}}}},
+            "/api/v1/setup-runs/{job_id}/cancel": {"post": {"responses": {"200": {"description": "Setup run cancelled"}}}},
+            "/api/v1/strategies/{strategy_id}/setup-artifacts/{task_id}/{instrument}/{session_date}": {"get": {"responses": {"200": {"description": "Validated setup artifact"}, "404": {"description": "Unavailable"}}}},
             "/api/v1/runtime": {"get": {"responses": {"200": {"description": "Runtime status with configured strategies; interrupted sessions recover to STOPPED"}}}},
             "/api/v1/diagnostics": {"get": {"parameters": [{"name": "strategy_id", "in": "query", "schema": {"type": "string"}}], "responses": {"200": {"description": "Runtime event and rejection counts, optionally filtered by strategy"}}}},
             "/api/v1/strategies/{strategy_id}/activity": {"get": {"parameters": [{"name": "strategy_id", "in": "path", "required": True, "schema": {"type": "string"}}, {"name": "date", "in": "query", "schema": {"type": "string", "format": "date"}}, {"name": "event_type", "in": "query", "schema": {"type": "string"}}, {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100}}, {"name": "before", "in": "query", "schema": {"type": "integer", "minimum": 1}}], "responses": {"200": {"description": "Operational activity for one strategy"}}}},

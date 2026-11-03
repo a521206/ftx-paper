@@ -50,6 +50,9 @@ def api_main() -> None:
     from ftx_paper.runtime.engine import MultiStrategyEngine
     from ftx_paper.runtime.replay_worker import ReplayWorker
     from ftx_paper.runtime.store import RuntimeStore
+    from ftx_paper.infrastructure.artifacts import SetupArtifactStore
+    from ftx_paper.application.setup_worker import SetupTaskRegistry, SetupWorker
+    from ftx_paper.strategies.orderflow.setup import build_daily_atr_task, build_prior_session_task
     from ftx_paper.strategies.research.parity_artifacts import build_parity_artifact
     from ftx_paper.strategies.shared.factory import StrategyContext
 
@@ -65,6 +68,7 @@ def api_main() -> None:
     except ProcessAlreadyRunningError as exc:
         raise SystemExit(str(exc)) from exc
     session = None
+    setup_worker = None
     try:
         broker_name = config.broker.lower()
         if broker_name == "xts":
@@ -128,7 +132,12 @@ def api_main() -> None:
         replay_worker = ReplayWorker(
             store, capital_profile=capital_profile, strategy_selector=strategy_catalog,
             parity_projector=build_parity_artifact,
+            artifact_store=SetupArtifactStore(config.home),
         )
+        setup_worker = SetupWorker(SetupTaskRegistry((
+            build_prior_session_task(store, SetupArtifactStore(config.home)),
+            build_daily_atr_task(store, SetupArtifactStore(config.home)),
+        )))
         operations = RuntimeOperations(session, replay_worker)
         if auth is not None and auth.access_token() is not None:
             try:
@@ -143,9 +152,12 @@ def api_main() -> None:
             capital_profile=capital_profile,
             replay_worker=replay_worker,
             runtime_operations=operations,
+            setup_worker=setup_worker,
         ).run(host=config.host, port=config.port, debug=False, use_reloader=False)
     finally:
         try:
+            if setup_worker is not None:
+                setup_worker.shutdown()
             if session is not None:
                 session.stop()
         finally:

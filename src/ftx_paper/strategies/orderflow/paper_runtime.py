@@ -114,11 +114,11 @@ class PaperOrderflowRuntime:
         self.strategy.bind_execution_service(service, diagnostic=diagnostic)
 
     def bind_replay_bars(
-        self, bars: Sequence[Any], *, historical_bars: Sequence[Any] = (),
+        self, bars: Sequence[Any], *, prior_values: Mapping[str, Any] | None = None, atr_values: Mapping[str, Any] | None = None,
     ) -> None:
-        """Install canonical input with explicit warmup and target bars."""
+        """Install target-session input with validated setup publications."""
         self.strategy.bind_input_provider(
-            CanonicalInputProvider.from_market_bars((*historical_bars, *bars))
+            CanonicalInputProvider.from_market_bars(bars, prior_values=prior_values, atr_values=atr_values)
         )
 
     def bind_live_bars(self, bars: Sequence[Any]) -> None:

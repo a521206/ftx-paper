@@ -8,6 +8,7 @@ from typing import Any, cast
 
 from ftx_paper.config import IST
 from ftx_paper.contracts import ReplayRequest, validate_decision_view
+from ftx_paper.infrastructure.artifacts import SetupArtifactStore
 from ftx_paper.infrastructure.sqlite.runtime_store import ProcessAlreadyRunningError
 from ftx_paper.runtime.session import RuntimeSession
 from ftx_paper.runtime.store import RuntimeStore
@@ -30,7 +31,8 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
                capital_profile: ResearchCapitalProfile | None = None,
                runtime_operations: RuntimeOperations | None = None,
                broker_auth: Any | None = None,
-               strategy_selector: Any | None = None) -> Flask:
+               strategy_selector: Any | None = None,
+               setup_worker: Any | None = None) -> Flask:
     app = Flask(__name__)
     store.recover_interrupted()
     effective_auth = broker_auth or zerodha_auth
@@ -124,6 +126,57 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
     @app.get("/api/v1/health")
     def health():
         return jsonify({"status": "pass", "service": "ftx-paper-api"})
+
+    @app.post("/api/v1/setup-runs")
+    def create_setup_run():
+        if setup_worker is None:
+            return jsonify(error_payload("setup_not_configured", "setup worker is not configured")), 503
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify(error_payload("invalid_request", "JSON object body required")), 400
+        try:
+            job_id = setup_worker.submit(payload)
+        except (TypeError, ValueError) as exc:
+            return jsonify(error_payload("invalid_request", str(exc))), 400
+        return jsonify(json_safe(setup_worker.read(job_id))), 202
+
+    @app.get("/api/v1/setup-runs/<job_id>")
+    def setup_run_detail(job_id: str):
+        if setup_worker is None:
+            return jsonify(error_payload("setup_not_configured", "setup worker is not configured")), 503
+        result = setup_worker.read(job_id)
+        if result is None:
+            return jsonify(error_payload("not_found", "setup run not found")), 404
+        return jsonify(json_safe(result))
+
+    @app.post("/api/v1/setup-runs/<job_id>/cancel")
+    def cancel_setup_run(job_id: str):
+        if setup_worker is None:
+            return jsonify(error_payload("setup_not_configured", "setup worker is not configured")), 503
+        if not setup_worker.cancel(job_id):
+            return jsonify(error_payload("not_found", "setup run not found or already terminal")), 404
+        return jsonify(json_safe(setup_worker.read(job_id)))
+
+    @app.get("/api/v1/strategies/<strategy_id>/setup-artifacts/<task_id>/<instrument>/<session_date>")
+    def setup_artifact(strategy_id: str, task_id: str, instrument: str, session_date: str):
+        if setup_worker is None:
+            return jsonify(error_payload("setup_not_configured", "setup worker is not configured")), 503
+        config_fingerprint = request.args.get("config_fingerprint", "")
+        if not config_fingerprint:
+            return jsonify(error_payload("invalid_request", "config_fingerprint is required")), 400
+        try:
+            task = setup_worker.registry.resolve(strategy_id, task_id)
+            identity = {
+                "strategy_id": strategy_id, "task_id": task_id,
+                "algorithm_version": task.algorithm_version,
+                "config_fingerprint": config_fingerprint, "instrument": instrument,
+            }
+            artifact = SetupArtifactStore(store.root.parent).read(identity, session_date)
+        except (OSError, ValueError) as exc:
+            return jsonify(error_payload("derived_artifact_unavailable", str(exc))), 404
+        if artifact is None:
+            return jsonify(error_payload("derived_artifact_unavailable", "setup artifact is unavailable")), 404
+        return jsonify(json_safe(artifact))
 
     @app.post("/api/v1/strategies/<strategy_id>/replays")
     def create_replay(strategy_id: str | None = None):

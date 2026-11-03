@@ -5,10 +5,24 @@ materialization. It moves static, prior-session features out of replay and
 live decision hot paths while preserving the repository's runtime ownership,
 causal availability, and artifact provenance rules.
 
-The first consumer is orderflow prior-session value publication. The worker is
-strategy-neutral: each strategy declares the daily tasks it needs, and one
-application-owned worker executes those tasks after market data is finalized
-and before the next session.
+Initial consumers include orderflow prior-session value publication and daily
+ATR materialization. The worker is strategy-neutral: each strategy declares the
+daily tasks it needs, and one application-owned worker executes those tasks
+after market data is finalized and before the next session.
+
+## Status
+
+Implemented for the current Paper runtime. The shared setup worker, immutable
+artifact store, API/CLI surface, and orderflow `prior-session-value` and
+`daily-atr` task registrations are available. Replay consumes validated setup
+artifacts and no longer reconstructs those static features from historical
+rows.
+
+Validation currently covers artifact integrity, typed publication round trips,
+replay integration, and strategy/infrastructure regressions. Remaining work is
+operational: production scheduling, durable job recovery, source/calendar
+completeness checks, ATR dependency invalidation, and canonical cross-repository
+parity acceptance.
 
 ## Goals
 
@@ -28,35 +42,13 @@ and before the next session.
   values.
 - This design does not add a database materialized view.
 
-## Current State
+## Current Boundaries
 
-### Orderflow replay hot path
+The API remains the sole runtime owner. Setup tasks do not own market feeds,
+portfolio state, simulated execution, or decision clocks. Research rebuilds
+write to an isolated output root and do not promote production artifacts.
 
-The replay input pipeline constructs a `CanonicalInputProvider`. Its current
-`_build()` path constructs a `PaperFeatureAdapter` with
-`build_prior_values(rows_by_date)`. `build_prior_values()` walks every supplied
-session, finds each preceding trading session, rebuilds the canonical value
-profile, and converts the resulting reference into `ValuePublication`.
-
-This has three undesirable properties:
-
-1. Static prior-session data is recalculated for every replay.
-2. Replay latency grows with historical input scope.
-3. Replay depends on historical source availability even when only one
-   immutable prior-session publication is required.
-
-The current fallback is an explicit unavailable publication with reason
-`missing_prior_session_value_evidence`. That explicit unavailable behavior is
-preserved; it must not become a silent recomputation or guessed value.
-
-Replay has other historical dependencies that are not replaced by this task.
-Warmup bars remain available for recursive ATR and any other explicitly
-declared causal inputs. The prior-value artifact replaces only the historical
-profile/publication calculation. The replay provider must not call
-`build_prior_values()` or rebuild daily value profiles when the artifact is
-available or when it is missing.
-
-### Existing canonical contracts
+## Existing Canonical Contracts
 
 The canonical value-profile implementation provides the domain contracts and
 provenance primitives used by the task:
@@ -171,9 +163,27 @@ not a mode: it is an isolated output profile selected by `output_root` and may
 only be used with `rebuild`. CLI and API spellings use the same underscore
 values.
 
+### Parallel implementation boundary
+
+The shared setup infrastructure and an orderflow task may be developed in
+parallel, provided the task and artifact interfaces are treated as the contract
+boundary. Shared work may implement the registry, worker lifecycle, source and
+artifact ports, envelope/catalog handling, atomic writes, validation, and
+focused infrastructure tests. Orderflow work may independently implement task
+algorithms, source normalization, fingerprints, and canonical parity fixtures.
+
+Integration is sequenced: freeze the shared contracts before wiring a task into
+the worker, validate the task's materialized output against the canonical
+implementation, then enable artifact-backed replay and remove the legacy
+reconstruction path. The worker must remain task-neutral. `prior-session-value`
+and `daily-atr` are separate orderflow consumers of the same worker; generic
+code must not assume a single-session source or a non-recursive calculation.
+Recursive invalidation, including ATR invalidation of all later dependent
+values after a source correction, belongs to the task/materializer contract.
+
 ## Orderflow Materializer
 
-The initial task is:
+One initial task is:
 
 ```text
 strategy_id:       ftx-paper-orderflow
@@ -430,20 +440,10 @@ previous artifact in place.
 
 ## Atomic Writes and Recovery
 
-The writer performs these steps:
-
-1. Compute and validate the complete payload in memory.
-2. Serialize canonical JSON.
-3. Write a uniquely named temporary file in the target directory.
-4. Flush and `fsync` the file.
-5. Re-read and validate the temporary artifact and digest.
-6. Atomically rename it to the immutable artifact path.
-7. Write, flush, and validate a temporary catalog.
-8. Atomically replace `catalog.json`.
-
-The catalog is published last. A crash can leave an unreferenced immutable
-artifact or a temporary file, but cannot expose a partially written artifact.
-Temporary files are ignored during reads and cleaned during worker startup.
+Artifacts and catalogs are validated before publication and replaced atomically;
+the catalog is published last. A crash may leave an unreferenced artifact or
+temporary file, but cannot expose a partial catalog entry. Temporary files are
+ignored during reads and cleaned during worker startup.
 
 On startup:
 
@@ -624,41 +624,6 @@ ftx-paper-setup --mode rebuild \
 Research output is isolated by root and algorithm/configuration identity. It is
 never silently promoted to production artifacts.
 
-## Migration from `build_prior_values()`
-
-### Phase 1: Generic infrastructure
-
-Add setup task contracts, registry, worker lifecycle, source reader, artifact
-reader/writer ports, canonical serialization, validation, catalog handling,
-quarantine, and atomic replacement.
-
-### Phase 2: Orderflow task
-
-Implement `prior-session-value` using canonical daily profile records and
-preserve completeness, identity, fingerprints, scope, lineage, availability,
-and unavailable reasons.
-
-### Phase 3: Initial catch-up
-
-Run one explicit historical catch-up and compare materialized publications
-against the current `build_prior_values()` output and canonical replay artifacts.
-
-### Phase 4: Dual-read validation
-
-In non-production validation, read both paths and compare reconstructed
-`ValuePublication` values. Differences are failures unless explained by an
-approved canonical algorithm/version change.
-
-### Phase 5: Replay cutover
-
-Change replay to read artifacts and remove `build_prior_values()` from the normal
-path. Keep it only behind an explicit migration/rebuild command temporarily.
-
-### Phase 6: Remove legacy path
-
-After coverage and parity are established, delete `build_prior_values()` and any
-replay-only static value-profile reconstruction.
-
 ## Testing and Validation
 
 Tests should cover:
@@ -694,72 +659,12 @@ Relevant existing coverage includes:
 - `tests/strategies/test_orderflow_features.py`;
 - `tests/strategies/test_orderflow_phase_comparison.py`.
 
-## Replay Performance Design
+## Replay Performance
 
-Daily setup materialization removes static prior-session profile work from the
-replay path, but it does not by itself solve the full
-`CanonicalInputProvider.from_market_bars()` cost. The provider must also avoid
-rebuilding canonical evidence independently for every decision-clock prefix.
-
-The clean runtime split is:
-
-```text
-setup materializer
-    -> immutable daily setup artifacts
-
-target session bars + validated setup artifact
-    -> one-pass canonical session evidence stream
-        -> orderflow replay
-```
-
-### Static setup artifacts
-
-The setup worker owns features that are finalized once per session, including
-prior-session value publication. Replay loads and validates these artifacts,
-then injects reconstructed domain objects into the strategy feature adapter.
-Replay must not call `build_prior_values()` or rebuild daily value profiles.
-
-### Incremental session evidence
-
-`CanonicalInputProvider` remains responsible for causal target-session input,
-but its build operation must be incremental rather than prefix-rebuilding:
-
-- initialize recursive state from validated setup artifacts and the explicitly
-  required ATR warmup state;
-- consume the selected target-session futures bars in chronological order;
-- update ATR, VWAP, session extrema, location publications, and causal
-  observations once per completed bar;
-- emit one `CanonicalInputEnvelope` per decision clock;
-- retain the same availability cutoffs, lineage, unavailable reasons, and
-  source identities as the canonical producer.
-
-The provider must not call `produce_evidence()` once for every growing prefix
-of the session. If a producer cannot be advanced incrementally without
-changing causal behavior, that producer should expose an explicit streaming
-boundary or materialize a versioned session-evidence artifact; replay must not
-silently approximate it by using the final snapshot.
-
-### Ownership and validation
-
-The setup worker owns static artifact production and persistence. The replay
-input provider owns only target-session chronological evidence assembly. The
-strategy transition owner remains the sole policy owner. Both paths use the
-same domain contracts and provenance rules.
-
-Performance changes are valid only when they preserve:
-
-- the exact decision-clock publication order;
-- as-of availability and observation timestamps;
-- source and causal lineage;
-- explicit unavailable evidence;
-- normalized source and configuration fingerprints;
-- parity with the canonical replay output.
-
-The migration therefore has two independent cutovers: first replace historical
-profile reconstruction with validated setup artifacts, then replace repeated
-prefix evidence construction with the incremental session provider. Measuring
-only the first cutover must not be treated as completion of replay
-optimization.
+Setup owns finalized session artifacts. Replay consumes those artifacts and
+assembles only causal target-session evidence in chronological order. It must
+preserve publication order, as-of availability, timestamps, lineage,
+unavailable evidence, source identity, and canonical parity.
 
 ## Remaining Decisions
 

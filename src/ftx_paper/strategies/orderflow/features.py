@@ -44,28 +44,6 @@ def _daily_features(rows_by_date: Mapping[str, Sequence[Mapping[str, object]]]) 
     return tuple(days)
 
 
-def daily_atr(
-    session_date: str,
-    rows_by_date: Mapping[str, Sequence[Mapping[str, object]]],
-) -> float | None:
-    """Return the Wilder ATR(14) from completed prior sessions."""
-    period = 14
-    days = _daily_features(rows_by_date)
-    prior = [day for day in days if day.session_date < session_date]
-    if len(prior) < period:
-        return None
-    true_ranges = [
-        day.high - day.low
-        if index == 0
-        else _true_range(day, prior[index - 1].close)
-        for index, day in enumerate(prior)
-    ]
-    atr = sum(true_ranges[:period]) / period
-    for true_range in true_ranges[period:]:
-        atr = ((atr * (period - 1)) + true_range) / period
-    return atr
-
-
 def daily_atr_cache(
     rows_by_date: Mapping[str, Sequence[Mapping[str, object]]],
 ) -> dict[str, float | None]:

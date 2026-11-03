@@ -61,11 +61,15 @@ class CanonicalInputProvider:
         *,
         rows_by_date: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
         feature_store: FeatureStore | None = None,
+        prior_values: Mapping[str, Any] | None = None,
+        atr_values: Mapping[str, Any] | None = None,
     ) -> None:
         dates = dict(rows_by_date or {})
         if rows and not dates:
             dates[str(rows[0]["session_date"])] = rows
         self._feature_store = feature_store or FeatureStore(dates)
+        self._prior_values = dict(prior_values or {})
+        self._atr_values = None if atr_values is None else dict(atr_values)
         self._rows = tuple(dict(row) for row in rows)
         if not self._rows and dates:
             target = max(str(key) for key in dates)
@@ -77,7 +81,7 @@ class CanonicalInputProvider:
         self._by_identity = {}
         if not self._rows:
             return
-        from .feature_input import build_observation_artifact, build_prior_values
+        from .feature_input import build_observation_artifact
 
         session_date = str(self._rows[0]["session_date"])
         if any(str(row.get("session_date")) != session_date for row in self._rows):
@@ -88,7 +92,7 @@ class CanonicalInputProvider:
             for timeframe in ("1m", "5m")
         }
         rows_by_date = self._feature_store.rows_by_date
-        adapter = PaperFeatureAdapter(rows_by_date, prior_values=build_prior_values(rows_by_date))
+        adapter = PaperFeatureAdapter(rows_by_date, prior_values=self._prior_values, atr_values=self._atr_values)
         vwap = {
             timeframe: causal_vwap_prefix(values, session_date=session_date)
             for timeframe, values in parsed.items()
@@ -211,11 +215,13 @@ class CanonicalInputProvider:
         rows: Sequence[Mapping[str, Any]],
         *,
         rows_by_date: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+        prior_values: Mapping[str, Any] | None = None,
+        atr_values: Mapping[str, Any] | None = None,
     ) -> "CanonicalInputProvider":
-        return cls(rows, rows_by_date=rows_by_date)
+        return cls(rows, rows_by_date=rows_by_date, prior_values=prior_values, atr_values=atr_values)
 
     @classmethod
-    def from_market_bars(cls, bars: Sequence[Any]) -> "CanonicalInputProvider":
+    def from_market_bars(cls, bars: Sequence[Any], *, prior_values: Mapping[str, Any] | None = None, atr_values: Mapping[str, Any] | None = None) -> "CanonicalInputProvider":
         """Adapt Paper completed futures bars into the canonical source shape."""
         rows = cls._rows_from_market_bars(bars)
         rows_by_date: dict[str, list[dict[str, Any]]] = {}
@@ -225,6 +231,8 @@ class CanonicalInputProvider:
         return cls(
             rows_by_date.get(target, ()) if target is not None else (),
             rows_by_date=rows_by_date,
+            prior_values=prior_values,
+            atr_values=atr_values,
         )
 
     def append_market_bars(self, bars: Sequence[Any]) -> None:

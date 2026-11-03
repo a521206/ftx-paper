@@ -36,3 +36,6 @@ __all__ = [
     "FuturesContract", "ROLLOVER_RULE", "RolloverSelection", "SELECTION_POLICY_VERSION",
     "futures_contract_from_row", "parse_expiry", "select_front_futures_contract",
 ]
+from .setup import SetupArtifactIdentity, SetupJobResult, SetupRunRequest
+
+__all__ += ["SetupArtifactIdentity", "SetupJobResult", "SetupRunRequest"]
