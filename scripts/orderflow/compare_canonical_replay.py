@@ -579,12 +579,12 @@ def _paper_phase35_projection(session_result: dict[str, Any]) -> dict[str, Any]:
             if isinstance(item, dict) and item.get("frozen_atr") is not None
         ],
     } if isinstance(raw_atr, dict) else raw_atr
-    replay = session_result.get("replay_records", [])
-    contexts = [
-        item.get("ordinary_context_ref")
-        for item in replay
-        if isinstance(item, dict) and item.get("ordinary_context_ref") is not None
-    ] if isinstance(replay, list) else []
+    # Full replay records contain state-machine context references published
+    # during Phase 4. They are not Phase 3.5 evidence publications and must
+    # not be projected into the evidence comparison.
+    contexts = raw.get("contexts", [])
+    if not isinstance(contexts, list):
+        contexts = []
     raw_prior = raw.get("prior_value")
     prior_value = raw_prior
     if isinstance(raw_prior, dict) and isinstance(raw_prior.get("reference"), dict):

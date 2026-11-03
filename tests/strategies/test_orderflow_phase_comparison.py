@@ -9,6 +9,7 @@ from scripts.orderflow.compare_canonical_replay import (
     _first_exit_diagnostic_difference,
     _first_execution_trace_difference,
     _normalize_phase35_locations,
+    _paper_phase35_projection,
     _resolve_canonical_artifact,
     _timeout_before_canonical_trigger,
     _execution_trace_diagnostics,
@@ -76,6 +77,16 @@ def test_phase35_location_order_matches_canonical_high_before_low() -> None:
     assert [item["alias"] for item in normalized] == [
         "PD_HIGH", "PD_LOW", "OR_HIGH", "OR_LOW",
     ]
+
+
+def test_phase35_projection_excludes_full_replay_context_references() -> None:
+    projected = _paper_phase35_projection({
+        "session_date": "2026-10-05",
+        "evidence": {"atr": None, "locations": [], "contexts": []},
+        "replay_records": [{"ordinary_context_ref": {"context_id": "ctx", "version": "v1"}}],
+    })
+
+    assert projected["contexts"] == []
 
 
 def test_resolve_canonical_artifact_reuses_retained_canonical_file(tmp_path) -> None:
