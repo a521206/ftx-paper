@@ -12,6 +12,7 @@ from typing import Any
 
 from .context_location_replay import (
     ContextLocationReplay,
+    attach_context_publications,
     replay_context_location_artifact,
 )
 from .interaction_detector import InteractionDetector
@@ -38,6 +39,7 @@ class InteractionResponseReplay:
     parity_layers: dict[str, tuple[dict[str, Any], ...]] = field(default_factory=dict)
     execution_diagnostics: tuple[dict[str, Any], ...] = ()
     replay_records: tuple[dict[str, Any], ...] = ()
+    context_location: ContextLocationReplay | None = None
 
     def parity_phase_facts(self) -> dict[str, list[dict[str, Any]]]:
         return {
@@ -406,7 +408,7 @@ def replay_interaction_response(
                 source_timeframe="5m",
                 definition_version="1m_5m",
                 source_provenance=({
-                    "source_candle_id": latest5.time,
+                    "source_candle_id": nifty_label(latest5.time),
                     "available_at": latest5.available_at,
                 },),
             )
@@ -700,6 +702,7 @@ def replay_interaction_response(
         },
         execution_diagnostics=tuple(transition_owner.context.execution_diagnostics),
         replay_records=tuple(replay_records),
+        context_location=attach_context_publications(context, context_publications),
     )
 
 
@@ -734,7 +737,7 @@ def replay_canonical_owner(
     # strategy context is published once by the chronological interaction
     # owner below; feeding evidence contexts into a second replay would create
     # two competing strategy producers.
-    context = replay_context_location_artifact(
+    location_context = replay_context_location_artifact(
         phase3_artifact,
         session_date=session_date,
         evidence=replace(evidence, contexts=(), context_stream_id=None),
@@ -742,7 +745,7 @@ def replay_canonical_owner(
     )
     interaction = replay_interaction_response(
         aggregates,
-        context,
+        location_context,
         registry,
         fill_permission_margin=fill_permission_margin,
         prior_value=prior_value,
@@ -750,7 +753,7 @@ def replay_canonical_owner(
         rows_by_date=rows_by_date,
         atr_by_session=atr_by_session,
     )
-    return context, interaction
+    return interaction.context_location or location_context, interaction
 
 
 __all__ = [

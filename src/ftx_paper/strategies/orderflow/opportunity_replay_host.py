@@ -108,7 +108,7 @@ def bar_events_to_facts(
         )
         identity = str(event.get("neutral_event_key", event.get("event_id", "")))
         values = {
-            key: value
+            key: session_date if key == "session_date" and not value else value
             for key, value in event.items()
             if key not in {
                 "kind", "observed_at", "available_at", "causal_observed_at",

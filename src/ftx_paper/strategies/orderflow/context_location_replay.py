@@ -154,6 +154,64 @@ class ContextLocationReplay:
         }
 
 
+def attach_context_publications(
+    replay: ContextLocationReplay,
+    publications: Sequence[Mapping[str, Any]],
+) -> ContextLocationReplay:
+    """Attach owner-published contexts without replaying market aggregates."""
+    store = MarketContextStore()
+    context_ids: set[str] = set()
+    for publication in publications:
+        value = publication.get("context")
+        if isinstance(value, MarketContext):
+            context = value
+        elif isinstance(value, Mapping):
+            context = MarketContext(
+                context_id=str(value["context_id"]), version=str(value["version"]),
+                timestamp=coerce_timestamp(value["timestamp"]),
+                available_at=coerce_timestamp(value["available_at"]),
+                location=value.get("location"), market_state=value.get("market_state"),
+                long_score=value.get("long_score"), short_score=value.get("short_score"),
+                evidence=tuple(value.get("evidence", ())),
+                source_timeframe=str(value.get("source_timeframe", "5m")),
+                parent_context_id=value.get("parent_context_id"),
+                definition_version=str(value.get("definition_version", "1")),
+                source_provenance=tuple(value.get("source_provenance", ())),
+            )
+        else:
+            continue
+        store.publish(context)
+        context_ids.add(context.context_id)
+    stream_id = next(iter(context_ids), None) if len(context_ids) == 1 else None
+    facts: list[dict[str, Any]] = []
+    for raw in replay.context_location:
+        fact = {**raw, "values": dict(raw.get("values", {}))}
+        context = _context_as_of(store, coerce_timestamp(str(fact["available_at"])), stream_id)
+        if context is None:
+            facts.append(fact)
+            continue
+        fact["values"]["context"] = {
+            "context_id": context.context_id, "version": context.version,
+            "location": context.location, "market_state": context.market_state,
+            "available_at": serialize_utc(coerce_timestamp(context.available_at)),
+            "parent_context_id": context.parent_context_id,
+            "definition_version": context.definition_version,
+            "source_provenance": [
+                {
+                    key: serialize_utc(value) if isinstance(value, datetime) else value
+                    for key, value in item.items()
+                }
+                for item in context.source_provenance
+            ],
+        }
+        fact["unavailable"] = [
+            reason for reason in fact.get("unavailable", ())
+            if reason != "missing_context"
+        ]
+        facts.append(fact)
+    return ContextLocationReplay(replay.source_observations, tuple(facts))
+
+
 def replay_context_location(
     rows: list[dict[str, Any]],
     *,
@@ -178,7 +236,6 @@ def replay_context_location_artifact(
     *,
     session_date: str,
     evidence: EvidencePublication,
-    context_publications: Sequence[Mapping[str, Any]] = (),
     replay_clock: str | None = None,
 ) -> ContextLocationReplay:
     """Replay the completed aggregate sections emitted by Phase 3."""
@@ -220,7 +277,6 @@ def replay_context_location_artifact(
     market = MarketObservation(aggregates, (), {}, source_fingerprint)
     return _replay_market(
         market, session_date=session_date, evidence=evidence,
-        context_publications=context_publications,
         replay_clock=replay_clock,
     )
 
@@ -230,7 +286,6 @@ def _replay_market(
     *,
     session_date: str,
     evidence: EvidencePublication,
-    context_publications: Sequence[Mapping[str, Any]] = (),
     replay_clock: str | None,
 ) -> ContextLocationReplay:
     observations = _completed_observations(
@@ -241,35 +296,7 @@ def _replay_market(
     store = MarketContextStore()
     for context in evidence.contexts:
         store.publish(context)
-    for publication in context_publications:
-        value = publication.get("context")
-        if isinstance(value, MarketContext):
-            store.publish(value)
-        elif isinstance(value, Mapping):
-            store.publish(MarketContext(
-                context_id=str(value["context_id"]), version=str(value["version"]),
-                timestamp=coerce_timestamp(value["timestamp"]),
-                available_at=coerce_timestamp(value["available_at"]),
-                location=value.get("location"), market_state=value.get("market_state"),
-                long_score=value.get("long_score"), short_score=value.get("short_score"),
-                evidence=tuple(value.get("evidence", ())),
-                source_timeframe=str(value.get("source_timeframe", "5m")),
-                parent_context_id=value.get("parent_context_id"),
-                definition_version=str(value.get("definition_version", "1")),
-                source_provenance=tuple(value.get("source_provenance", ())),
-            ))
     context_stream_id = evidence.context_stream_id
-    if context_stream_id is None and context_publications:
-        context_ids = {
-            str(value.context_id if isinstance(value, MarketContext) else value["context_id"])
-            for publication in context_publications
-            for value in (publication.get("context"),)
-            if (
-                isinstance(value, MarketContext)
-                or isinstance(value, Mapping) and value.get("context_id") is not None
-            )
-        }
-        context_stream_id = next(iter(context_ids), None) if len(context_ids) == 1 else None
     registry = LocationRegistry(evidence.location_stream_id or f"orderflow:{session_date}")
     for location in evidence.locations:
         registry.register(location)
@@ -444,4 +471,9 @@ def _causal_children(
     return children if tuple(nifty_label(item.time) for item in children) == expected else ()
 
 
-__all__ = ["ContextLocationReplay", "replay_context_location", "replay_context_location_artifact"]
+__all__ = [
+    "ContextLocationReplay",
+    "attach_context_publications",
+    "replay_context_location",
+    "replay_context_location_artifact",
+]

@@ -10,7 +10,6 @@ from ftx_paper.strategies.orderflow.evidence_publication import (
 from ftx_paper.strategies.orderflow.location_geometry import LocationBand
 from ftx_paper.strategies.orderflow.market_observation import MarketObservation
 from ftx_paper.strategies.orderflow.market_observation import rows_available_for_observation
-from ftx_paper.strategies.orderflow.hierarchy import MarketContext
 from ftx_paper.strategies.orderflow.orderflow_common import Aggregate
 from ftx_paper.strategies.orderflow.state_machine_types import LocationRecord
 from ftx_paper.strategies.orderflow.timestamps import serialize_utc
@@ -137,32 +136,3 @@ def test_misaligned_5m_records_unavailable_context_location_fact() -> None:
     assert fact["values"]["timeframe"] == "5m"
     assert fact["values"]["locations"] == []
     assert "missing_context" in fact["unavailable"]
-
-
-def test_context_publication_is_visible_to_phase4_replay() -> None:
-    children = tuple(_aggregate("1m", minute, count=1) for minute in range(15, 20))
-    five = _aggregate("5m", 15, count=5)
-    context = MarketContext(
-        context_id="5m-context-NIFTY-2026-10-05-1m_5m",
-        version="v1",
-        timestamp=five.time,
-        available_at=five.available_at,
-        location=None,
-        market_state="BALANCE",
-        source_timeframe="5m",
-        definition_version="1m_5m",
-        source_provenance=({"source_candle_id": five.time},),
-    )
-    replay = _replay_market(
-        MarketObservation({"1m": children, "5m": (five,)}, (), {}, "source"),
-        session_date=SESSION,
-        evidence=_evidence(),
-        context_publications=({"context": context},),
-        replay_clock=None,
-    )
-
-    fact = replay.context_location[-1]
-    assert fact["values"]["context"]["context_id"] == context.context_id
-    assert fact["values"]["context"]["source_provenance"][0]["source_candle_id"] == (
-        serialize_utc(five.time)
-    )
