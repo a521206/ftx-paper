@@ -61,13 +61,15 @@ def run(
         raise RuntimeError("API response did not include run_id")
 
     deadline = time.monotonic() + timeout
+    poll_interval = max(0.05, interval)
     while True:
         result = _request(f"{root}/api/v1/strategies/{strategy_id}/replays/{run_id}")
         if result.get("status") in TERMINAL_STATUSES:
             return result
         if time.monotonic() >= deadline:
             raise RuntimeError(f"replay {run_id} did not complete within {timeout:g}s")
-        time.sleep(interval)
+        time.sleep(poll_interval)
+        poll_interval = min(poll_interval * 1.5, 2.0)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -21,6 +21,28 @@ from .state_machine_types import LocationRegistry
 from .transition import OrderflowTransitionOwner
 from .providers import CanonicalInputProvider, CanonicalFormationProvider
 from .state_machine_reporting import build_replay_payload
+from .vwap_location import VwapMeasurement
+
+
+def _published_vwap_measurements(locations: Iterable[Any]) -> tuple[VwapMeasurement, ...]:
+    """Project VWAP measurements from the canonical registered locations."""
+    return tuple(
+        VwapMeasurement(
+            timeframe=location.timeframe,
+            session_date=location.source_session,
+            source_aggregate_id=str(location.source_aggregate_id),
+            observed_at=location.created_at,
+            available_at=location.available_at,
+            value=float(location.price),
+            source_observation_id=str(location.source_observation_id),
+            calculation_version=location.source_method or "vwap_typical_price_volume_v1",
+        )
+        for location in locations
+        if location.alias == "VWAP"
+        and location.timeframe in {"1m", "5m"}
+        and location.source_aggregate_id
+        and location.source_observation_id
+    )
 
 
 class PaperOrderflowRuntime:
@@ -156,10 +178,11 @@ class PaperOrderflowRuntime:
         envelopes = getattr(provider, "envelopes", ())
         if envelopes:
             latest = envelopes[-1].input
+            locations = tuple(self.transition_owner.location_registry.records.values())
             publication = publish_phase4a_evidence(
                 atr=latest.atr,
-                locations=self.transition_owner.location_registry.records.values(),
-                vwap_measurements=latest.vwap_measurements,
+                locations=locations,
+                vwap_measurements=_published_vwap_measurements(locations),
                 prior_value=latest.prior_value,
                 unavailable=envelopes[-1].unavailable,
                 location_stream_id=self.transition_owner.location_registry.stream_id,

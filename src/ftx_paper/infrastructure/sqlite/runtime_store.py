@@ -958,6 +958,9 @@ class SqliteRuntimeStore:
                           error: str | None = None) -> None:
         updated_at = self._now()
         with self._connect() as connection:
+            request_row = connection.execute(
+                "SELECT request FROM replay_runs WHERE run_id=?", (run_id,),
+            ).fetchone()
             encoded_result = None
             chunks: list[bytes] = []
             if result is not None:
@@ -972,8 +975,7 @@ class SqliteRuntimeStore:
                     "INSERT INTO replay_result_chunks(run_id, chunk_index, payload) VALUES (?, ?, ?)",
                     ((run_id, index, payload) for index, payload in enumerate(chunks)),
                 )
-        run = self.read_replay_run(run_id)
-        request = run.get("request", {}) if run else {}
+        request = json.loads(request_row[0]) if request_row else {}
         self.append_event(
             "REPLAY_STATUS",
             {"run_id": run_id, "status": status, "strategy_id": request.get("strategy_id"),
@@ -984,12 +986,15 @@ class SqliteRuntimeStore:
 
     def write_replay_artifact(self, run_id: str, artifact: dict[str, Any]) -> None:
         """Persist a completed artifact without exposing SQLite to replay code."""
-        run = self.read_replay_run(run_id)
-        if run is None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT status FROM replay_runs WHERE run_id=?", (run_id,),
+            ).fetchone()
+        if row is None:
             raise KeyError(f"unknown replay run: {run_id}")
         self.update_replay_run(
             run_id,
-            status=str(run.get("status") or "running"),
+            status=str(row[0] or "running"),
             result=artifact,
         )
 

@@ -155,6 +155,93 @@ def test_coordinator_limits_1m_observations_to_current_clock(monkeypatch) -> Non
     assert captured == [(observations[1],)]
 
 
+def test_coordinator_limits_5m_observations_to_current_aggregate(monkeypatch) -> None:
+    current = Aggregate(
+        "2026-10-01T09:20", "2026-10-01T09:24", "2026-10-01T09:25",
+        "5m", 5, 100.0, 101.0, 99.0, 100.5, 500,
+        "NIFTY", "", "FUT", "2026-10-01", "clock",
+    )
+    one = Aggregate(
+        "2026-10-01T09:20", "2026-10-01T09:20", "2026-10-01T09:21",
+        "1m", 1, 100.0, 101.0, 99.0, 100.5, 100,
+        "NIFTY", "", "FUT", "2026-10-01", "clock",
+    )
+    observations = (
+        SimpleNamespace(timeframe="5m", source_aggregate_id="2026-10-01T09:15", location_id=None, reference_generation=0),
+        SimpleNamespace(timeframe="5m", source_aggregate_id="2026-10-01T09:20", location_id=None, reference_generation=0),
+    )
+    captured: list[tuple[object, ...]] = []
+
+    monkeypatch.setattr(
+        InteractionDetector,
+        "observe",
+        lambda _self, **kwargs: captured.append(kwargs["observations5"]) or [],
+    )
+    coordinator = OrderflowCoordinator(LocationRegistry("test"))
+
+    coordinator.advance(OrderflowClockInput(
+        one_minute=one, five_minute=current, observations_5m=observations,
+    ))
+
+    assert captured == [(observations[1],)]
+
+
+def test_coordinator_evaluates_each_new_5m_aggregate_once(monkeypatch) -> None:
+    five = Aggregate(
+        "2026-10-01T09:20", "2026-10-01T09:24", "2026-10-01T09:25",
+        "5m", 5, 100.0, 101.0, 99.0, 100.5, 500,
+        "NIFTY", "", "FUT", "2026-10-01", "clock",
+    )
+    captured: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        InteractionDetector,
+        "observe",
+        lambda _self, **kwargs: captured.append(kwargs["observations5"]) or [],
+    )
+    coordinator = OrderflowCoordinator(LocationRegistry("test"))
+
+    for minute in (20, 21):
+        one = Aggregate(
+            f"2026-10-01T09:{minute:02d}", f"2026-10-01T09:{minute:02d}",
+            f"2026-10-01T09:{minute + 1:02d}", "1m", 1, 100.0, 101.0, 99.0,
+            100.5, 100, "NIFTY", "", "FUT", "2026-10-01", "clock",
+        )
+        coordinator.advance(OrderflowClockInput(
+            one_minute=one, five_minute=five,
+            observations_5m=(SimpleNamespace(
+                timeframe="5m", source_aggregate_id="2026-10-01T09:20",
+                location_id=None, reference_generation=0,
+            ),),
+        ))
+
+    assert len(captured) == 1
+
+
+def test_coordinator_emits_gap_for_missing_5m_location_observation() -> None:
+    registry = LocationRegistry("test")
+    registry.register_opening_range(
+        99.0, 101.0, datetime(2026, 10, 1, 3, 45, tzinfo=UTC), atr=1.0,
+    )
+    five = Aggregate(
+        "2026-10-01T09:20", "2026-10-01T09:24", "2026-10-01T09:25",
+        "5m", 5, 100.0, 101.0, 99.0, 100.5, 500,
+        "NIFTY", "", "FUT", "2026-10-01", "clock",
+    )
+    one = Aggregate(
+        "2026-10-01T09:20", "2026-10-01T09:20", "2026-10-01T09:21",
+        "1m", 1, 100.0, 101.0, 99.0, 100.5, 100,
+        "NIFTY", "", "FUT", "2026-10-01", "clock",
+    )
+
+    result = OrderflowCoordinator(registry).advance(OrderflowClockInput(
+        one_minute=one, five_minute=five,
+    ))
+
+    gaps = [event for event in result.events if event["kind"] == "location_observation_gap"]
+    assert {event["location"] for event in gaps} == {"OR_LOW", "OR_HIGH"}
+    assert all(event["reason"] == "incomplete_or_misaligned_1m_references" for event in gaps)
+
+
 def test_live_provider_rejects_malformed_explicit_input_without_bar_fallback() -> None:
     provider = CanonicalInputProvider()
     evidence = MarketEvidence(

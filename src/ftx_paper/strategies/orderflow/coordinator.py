@@ -103,10 +103,12 @@ class OrderflowCoordinator:
                     atr=atr,
                 )
                 self._levels_published.add(key)
+        new_five_minute = False
         if item.five_minute is not None:
             five = item.five_minute
             five_id = f"aggregate:{five.timeframe}:{nifty_label(five.time)}"
             if five_id not in {f"aggregate:5m:{nifty_label(bar.time)}" for bar in self._five_minute}:
+                new_five_minute = True
                 self._five_minute.append(five)
                 self.causal_events.publish_source_observation(
                     source_id=five_id,
@@ -148,15 +150,48 @@ class OrderflowCoordinator:
             atr=atr,
             observations=current_observations_1m,
         )
-        if item.five_minute is not None and item.observations_5m:
-            transitions += tuple(self.detector.observe(
-                current=item.five_minute,
-                available5=list(self._five_minute),
-                available1=list(self._one_minute),
-                atr=atr,
-                observations5=item.observations_5m,
-                observations1=item.observations_1m,
-            ))
+        if new_five_minute:
+            assert item.five_minute is not None
+            five = item.five_minute
+            current_observations_5m = tuple(
+                observation
+                for observation in item.observations_5m
+                if observation.timeframe == "5m"
+                and observation.source_aggregate_id == nifty_label(five.time)
+            )
+            valid_5m_keys = {
+                (observation.location_id, observation.reference_generation)
+                for observation in current_observations_5m
+                if observation.timeframe == "5m"
+            }
+            for location in self.location_registry.available_as_of(five.available_at):
+                if location.timeframe and location.timeframe != "5m":
+                    continue
+                key = (location.location_id, location.generation)
+                if key in valid_5m_keys:
+                    continue
+                events.append({
+                    "kind": "location_observation_gap",
+                    "identity": f"location_observation_gap:{nifty_label(five.time)}:{location.location_id or location.alias}:{location.generation}",
+                    "causal_parent_id": f"aggregate:5m:{nifty_label(five.time)}",
+                    "location": location.alias,
+                    "location_id": location.location_id,
+                    "reference_generation": location.generation,
+                    "timeframe": "5m",
+                    "source_aggregate_id": nifty_label(five.time),
+                    "observed_at": five.end_time,
+                    "available_at": five.available_at,
+                    "reason": "incomplete_or_misaligned_1m_references",
+                })
+            if current_observations_5m:
+                transitions += tuple(self.detector.observe(
+                    current=five,
+                    available5=list(self._five_minute),
+                    available1=list(self._one_minute),
+                    atr=atr,
+                    observations5=current_observations_5m,
+                    observations1=item.observations_1m,
+                ))
         for transition in transitions:
             events.extend(self._transition_events(transition, one))
         return OrderflowAdvance(tuple(events), source_event)

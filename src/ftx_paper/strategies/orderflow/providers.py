@@ -153,6 +153,11 @@ class CanonicalInputProvider:
                 )
                 if source is None:
                     continue
+                # The detector evaluates one completed 5m aggregate at a
+                # time. Older observations remain causally available but must
+                # not be replayed with the current aggregate.
+                if source.timeframe == "5m" and (latest5 is None or source.time != latest5.time):
+                    continue
                 children = _causal_children(source, aggregates_by_timeframe["1m"])
                 if source.timeframe == "5m" and len(children) != 5:
                     continue
