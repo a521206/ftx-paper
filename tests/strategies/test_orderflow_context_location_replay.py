@@ -26,7 +26,7 @@ def _aggregate(timeframe: str, minute: int, *, count: int) -> Aggregate:
     available = end.replace(minute=end.minute + 1)
     return Aggregate(
         start, end, available, timeframe, count, 100.0, 101.0, 99.0, 100.5,
-        100, "NIFTY", "", "CONTINUOUS", SESSION, "source",
+        100, "NIFTY", "", SESSION, "source",
     )
 
 
@@ -75,7 +75,7 @@ def test_vwap_same_timestamp_uses_completed_5m_availability() -> None:
     five = Aggregate(
         five.time, five.end_time, children[-1].available_at, five.timeframe,
         five.source_bar_count, five.open, five.high, five.low, five.close,
-        five.volume, five.symbol, five.expiry, five.contract_type,
+        five.volume, five.symbol, five.expiry,
         five.session_date, five.source_fingerprint,
     )
     replay = _replay_market(
