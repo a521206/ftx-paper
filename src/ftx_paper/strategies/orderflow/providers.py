@@ -17,7 +17,7 @@ from .evidence.features_adapter import PaperFeatureAdapter
 from .evidence.producer import produce_evidence
 from .orderflow_common import Aggregate
 from .evidence_publication import EvidencePublication
-from .context_location_replay import _location_observation
+from .context_location_replay import _causal_children, _location_observation
 from .timestamps import coerce_timestamp, nifty_label
 from .vwap_location import causal_vwap_prefix
 from .opportunity_coordinator import LifecycleFormation
@@ -153,10 +153,29 @@ class CanonicalInputProvider:
                 )
                 if source is None:
                     continue
-                observation = _location_observation(
-                    source, record, source_fingerprint=source.source_fingerprint,
-                )
-                (observations_5m if source.timeframe == "5m" else observations_1m).append(observation)
+                children = _causal_children(source, aggregates_by_timeframe["1m"])
+                if source.timeframe == "5m" and len(children) != 5:
+                    continue
+                if source.timeframe == "5m":
+                    child_observations = tuple(
+                        _location_observation(
+                            item, record, source_fingerprint=source.source_fingerprint,
+                            available_at=max(
+                                coerce_timestamp(item.available_at),
+                                coerce_timestamp(record.available_at),
+                            ),
+                        )
+                        for item in children
+                    )
+                    observations_1m.extend(child_observations)
+                    observations_5m.append(_location_observation(
+                        source, record, source_fingerprint=source.source_fingerprint,
+                        child_observation_ids=tuple(item.observation_id for item in child_observations),
+                    ))
+                else:
+                    observations_1m.append(_location_observation(
+                        source, record, source_fingerprint=source.source_fingerprint,
+                    ))
             self._by_identity[source_id] = CanonicalInputEnvelope(
                 OrderflowClockInput(
                     one_minute=one,
