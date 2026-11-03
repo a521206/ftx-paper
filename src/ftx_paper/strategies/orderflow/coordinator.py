@@ -8,6 +8,7 @@ levels, ATR, VWAP, locations, or child observations.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
 from typing import Any
 
 from .evidence_publication import AtrPublication
@@ -201,39 +202,58 @@ class OrderflowCoordinator:
         ):
             events.append({
                 "kind": "location_interaction_observed",
-                "identity": f"location_interaction_observed:{interaction_id}:{observation.observation_id}",
-                "causal_parent_id": f"aggregate:{clock.timeframe}:{nifty_label(clock.time)}",
+                "reason": "location_interaction_observed",
+                "decision_stage": "opportunity",
+                "outcome": "observed",
+                "decision_id": hashlib.sha256(
+                    f"opportunity|{interaction_id}|{observation.observation_id}".encode()
+                ).hexdigest()[:24],
+                "interaction_id": interaction_id,
+                "interaction_key": (
+                    f"{observation.location.upper()}:{observation.timeframe}:"
+                    f"{observation.reference_generation}"
+                ),
+                "location": observation.location,
+                "timeframe": observation.timeframe,
+                "reference_generation": observation.reference_generation,
+                "source_observation_ids": [observation.observation_id],
                 "observed_at": observation.observed_at,
                 "available_at": observation.available_at,
-                "values": {
-                    "interaction_id": interaction_id, "decision_stage": "opportunity",
-                    "location": observation.location, "timeframe": observation.timeframe,
-                    "reference_generation": observation.reference_generation,
-                    "source_observation_ids": [observation.observation_id],
-                    "interaction_key": f"{observation.location.upper()}:{observation.timeframe}:{observation.reference_generation}",
-                    "feature_values": {"open": observation.open, "high": observation.high, "low": observation.low, "close": observation.close},
+                "feature_values": {
+                    "open": observation.open,
+                    "high": observation.high,
+                    "low": observation.low,
+                    "close": observation.close,
                 },
             })
         if transition.created:
             events.append({
-                "kind": "interaction_created", "identity": f"interaction_created:{interaction_id}:{nifty_label(clock.time)}",
-                "causal_parent_id": f"aggregate:{clock.timeframe}:{nifty_label(clock.time)}",
-                "observed_at": clock.end_time, "available_at": clock.available_at,
-                "values": {"interaction_id": interaction_id, "location": str(transition.interaction.location),
-                            "timeframe": transition.interaction.timeframe, "reference_generation": transition.interaction.reference_generation,
-                            "reference_level": transition.interaction.reference_level, "band_low": transition.interaction.band_low,
-                            "band_high": transition.interaction.band_high, "source_aggregate_id": provenance.source_aggregate_id if provenance else None,
-                            "source_observation_id": provenance.source_observation_id if provenance else None,
-                            "stage": "OBSERVING_LOCATION", "evidence": [clock.to_dict()]},
+                "kind": "interaction_created",
+                "interaction_id": interaction_id,
+                "location": str(transition.interaction.location),
+                "timeframe": transition.interaction.timeframe,
+                "reference_generation": transition.interaction.reference_generation,
+                "reference_level": transition.interaction.reference_level,
+                "band_low": transition.interaction.band_low,
+                "band_high": transition.interaction.band_high,
+                "source_aggregate_id": provenance.source_aggregate_id if provenance else None,
+                "source_observation_id": provenance.source_observation_id if provenance else None,
+                "stage": "OBSERVING_LOCATION",
+                "evidence": [clock.to_dict()],
+                "observed_at": clock.end_time,
+                "available_at": clock.available_at,
             })
         if transition.departed:
             events.append({
-                "kind": "interaction_ended", "identity": f"interaction_ended:{interaction_id}:{nifty_label(clock.time)}",
-                "causal_parent_id": interaction_id, "observed_at": clock.end_time, "available_at": clock.available_at,
-                "values": {"interaction_id": interaction_id, "location": str(transition.interaction.location),
-                            "timeframe": transition.interaction.timeframe, "reference_generation": transition.interaction.reference_generation,
-                            "reason": snapshot.get("close_reason"), "source_observation_id": provenance.source_observation_id if provenance else None,
-                            "terminal_candle_id": snapshot.get("terminal_candle_id")},
+                "kind": "interaction_ended",
+                "interaction_id": interaction_id,
+                "location": str(transition.interaction.location),
+                "timeframe": transition.interaction.timeframe,
+                "reference_generation": transition.interaction.reference_generation,
+                "reason": snapshot.get("close_reason"),
+                "source_observation_id": provenance.source_observation_id if provenance else None,
+                "observed_at": clock.end_time,
+                "available_at": clock.available_at,
             })
         return tuple(events)
 

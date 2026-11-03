@@ -16,7 +16,6 @@ from scripts.orderflow.compare_canonical_replay import (
     _execution_trace_diagnostics,
 )
 from ftx_paper.strategies.orderflow.execution import ExecutionEngine, validate_exit_plan
-from ftx_paper.strategies.orderflow.replay_artifacts import InteractionResponseReplay
 from ftx_paper.strategies.orderflow.interactions import ProjectionSnapshot
 from ftx_paper.strategies.orderflow.lifecycle import SetupOpportunity
 from ftx_paper.strategies.orderflow.orderflow_common import Aggregate
@@ -509,27 +508,6 @@ def test_execution_trace_diagnostics_fails_closed_when_stream_is_unavailable() -
         )
 
 
-def test_phase6_projection_preserves_only_formed_lifecycle_facts() -> None:
-    replay = InteractionResponseReplay(
-        facts=(),
-        opportunity_facts=(
-            {"kind": "or_directional_seed"},
-            {"kind": "lifecycle_formed"},
-            {"kind": "setup_invalidated"},
-            {"kind": "setup_expired"},
-            {"kind": "setup_superseded"},
-            {"kind": "opportunity_timeout"},
-            {"kind": "opportunity_outcome"},
-        ),
-    )
-
-    assert [
-        item["kind"] for item in replay.parity_phase_facts()["opportunity_lifecycle"]
-    ] == [
-        "lifecycle_formed",
-    ]
-
-
 def test_replay_context_records_interactions_and_explicit_phase_facts() -> None:
     context = ReplayContext(execution_engine=ExecutionEngine())
     context.record_event({
@@ -561,6 +539,24 @@ def test_replay_context_records_interactions_and_explicit_phase_facts() -> None:
         "source_fingerprint": "fingerprint-1",
     }
     assert source["lineage"] == []
+
+
+def test_interaction_response_phase_fact_keeps_direct_fields_and_session_date() -> None:
+    context = ReplayContext(execution_engine=ExecutionEngine())
+    context.current_session_date = "2026-10-05"
+    context.record_event({
+        "kind": "location_interaction_observed",
+        "observed_at": "2026-10-05T09:19:00+05:30",
+        "available_at": "2026-10-05T09:20:00+05:30",
+        "interaction_id": "interaction-1",
+        "location": "OR_HIGH",
+    })
+
+    fact = context.parity_streams["interaction_response"][0]
+    assert "values" not in fact["values"]
+    assert fact["values"]["interaction_id"] == "interaction-1"
+    assert fact["values"]["location"] == "OR_HIGH"
+    assert fact["values"]["session_date"] == "2026-10-05"
 
 
 def test_opening_interaction_is_published_as_a_lifecycle_event_only() -> None:

@@ -111,6 +111,7 @@ class CanonicalInputProvider:
             for timeframe, values in parsed_values.items()
         }
         available: dict[str, list[dict[str, Any]]] = {"1m": [], "5m": []}
+        skipped_vwap_sources: set[str] = set()
         for event in events:
             available[event.timeframe].append(event.value)
             if event.timeframe != "1m":
@@ -153,6 +154,19 @@ class CanonicalInputProvider:
             atr = evidence.atr
             levels = adapter.session_levels(session_date)
             prior = adapter.prior_value(session_date)
+            vwap_measurements = tuple(
+                measurement
+                for timeframe in ("1m", "5m")
+                for measurement in vwap[timeframe]
+                if measurement.available_at <= available_at
+                and measurement.source_observation_id not in skipped_vwap_sources
+            )
+            if latest5 is not None and atr.value is None:
+                skipped_vwap_sources.update(
+                    measurement.source_observation_id
+                    for measurement in vwap_measurements
+                )
+                vwap_measurements = ()
             source_id = f"aggregate:1m:{nifty_label(one.time)}"
             unavailable = tuple(evidence.unavailable)
             observations_1m = []
@@ -171,6 +185,12 @@ class CanonicalInputProvider:
             }
             for record in evidence.locations:
                 if record.available_at > one.available_at:
+                    continue
+                if record.alias == "VWAP" and (
+                    latest5 is None
+                    or atr.value is None
+                    or record.source_observation_id in skipped_vwap_sources
+                ):
                     continue
                 if not record.timeframe or record.timeframe == "1m":
                     one_observation = _location_observation(
@@ -211,7 +231,7 @@ class CanonicalInputProvider:
                     session_levels=levels,
                     prior_session=adapter.prior_session(session_date),
                     prior_value=prior,
-                    vwap_measurements=tuple(evidence.vwap_measurements),
+                    vwap_measurements=vwap_measurements,
                     observations_1m=tuple(observations_1m),
                     observations_5m=tuple(observations_5m),
                 ),

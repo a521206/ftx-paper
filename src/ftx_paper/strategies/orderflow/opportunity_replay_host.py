@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Any
 
 from .hierarchy import MarketContext
 from .interaction_detector import InteractionDetector
@@ -12,7 +11,7 @@ from .interactions import InteractionSnapshot
 from .opportunity_coordinator import OpportunityCoordinator, OpportunityReplayHost
 from .state_machine_types import LocationRegistry
 from .templates import DEFAULT_TEMPLATES, TradeTemplate
-from .timestamps import coerce_timestamp, serialize_utc
+from .timestamps import coerce_timestamp
 from .transition import OrderflowTransitionOwner
 
 
@@ -85,56 +84,7 @@ def build_opportunity_coordinator(
     return OpportunityCoordinator(host)
 
 
-def bar_events_to_facts(
-    events: list[dict[str, Any]],
-    *,
-    session_date: str,
-) -> list[dict[str, Any]]:
-    """Project canonical bar events onto parity fact envelopes."""
-    facts: list[dict[str, Any]] = []
-    for event in events:
-        if not isinstance(event, Mapping):
-            continue
-        if event.get("parity_stream") != "interaction_response":
-            continue
-        observed = event.get("observed_at", event.get("time"))
-        available = event.get("available_at", observed)
-        if observed is None or available is None:
-            continue
-        parent = (
-            event.get("interaction_id")
-            or event.get("causal_parent_id")
-            or event.get("lifecycle_id")
-        )
-        identity = str(event.get("neutral_event_key", event.get("event_id", "")))
-        values = {
-            key: session_date if key == "session_date" and not value else value
-            for key, value in event.items()
-            if key not in {
-                "kind", "observed_at", "available_at", "causal_observed_at",
-                "causal_available_at", "event_id", "sequence", "neutral_event_key",
-            }
-        }
-        facts.append({
-            "kind": str(event.get("kind", "")),
-            "occurred_at": serialize_utc(observed) if not isinstance(observed, str) else observed,
-            "observed_at": serialize_utc(observed) if not isinstance(observed, str) else observed,
-            "available_at": serialize_utc(available) if not isinstance(available, str) else available,
-            "causal_observed_at": event.get("causal_observed_at", observed),
-            "causal_available_at": event.get("causal_available_at", available),
-            "policy_version": event.get("policy_version", "orderflow-v1"),
-            "provenance": event.get("provenance", "causal_replay"),
-            "session_date": event.get("session_date") or session_date,
-            "identity": identity,
-            "causal_parent_id": parent,
-            "values": values,
-            "unavailable": [],
-        })
-    return facts
-
-
 __all__ = [
     "OrderflowOpportunityHost",
     "build_opportunity_coordinator",
-    "bar_events_to_facts",
 ]

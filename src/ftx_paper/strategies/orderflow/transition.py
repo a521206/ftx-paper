@@ -1064,6 +1064,17 @@ class OrderflowTransitionOwner:
         available_at = coerce_timestamp(item.one_minute.available_at)
         if self._clock is not None and available_at < self._clock:
             raise ValueError("orderflow transition clock cannot move backwards")
+        self.context.current_session_date = item.one_minute.session_date
+        if (
+            item.atr is not None
+            and item.atr.value is not None
+            and item.atr.available_at is not None
+            and coerce_timestamp(item.atr.available_at) <= available_at
+        ):
+            self.context.atr_by_session = {
+                **self.context.atr_by_session,
+                item.one_minute.session_date: item.atr.value,
+            }
         observation = self.observation_owner.advance(item)
         row = item.one_minute.to_dict()
         if not any(
