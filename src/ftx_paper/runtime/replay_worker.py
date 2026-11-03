@@ -41,6 +41,7 @@ from ftx_paper.execution.settlement import ExitValidationError, validate_exit_or
 from ftx_paper.strategies.shared.exits import ExitAction
 from ftx_paper.strategies.shared.factory import StrategyContext, StrategySelector
 from ftx_paper.config import NIFTY_LOT_SIZE
+from ftx_paper.strategies.orderflow.timestamps import nifty_label
 
 _EXECUTION_EVENT_TYPES = frozenset({
     "ORDER_INTENT", "ORDER_AUTHORIZED", "ORDER_ACK", "FILL",
@@ -50,6 +51,32 @@ _EXECUTION_EVENT_TYPES = frozenset({
     "RESERVATION", "AUTHORIZATION", "SUBMISSION", "PENDING_EXIT",
     "EXIT_FILL", "CANCELLATION", "SETTLEMENT",
 })
+
+
+def _source_replay_records(
+    bars: tuple[MarketBar, ...], session_date: str,
+) -> list[dict[str, Any]]:
+    """Project selected futures bars into the canonical replay input shape."""
+    return [
+        {
+            "bar": {
+                "time": nifty_label(bar.timestamp)[-5:],
+                "open": bar.open,
+                "high": bar.high,
+                "low": bar.low,
+                "close": bar.close,
+                "volume": int(bar.volume or 0),
+                "oi": int(bar.open_interest or 0),
+                "symbol": "NIFTY",
+                "expiry": "",
+                "contract_type": "CONTINUOUS",
+                "session_date": session_date,
+            },
+        }
+        for bar in bars
+    ]
+
+
 class _ScopedEvents(list[dict[str, Any]]):
     """Attach replay ownership when an event enters the replay stream."""
 
@@ -1033,6 +1060,10 @@ class ReplayWorker:
         rows = self.store.read_market_bars(session_date)
         futures_source = self.inputs.resolve_source(session_date)
         bars = self.inputs.bars(session_date, rows=rows, futures_source=futures_source)
+        source_futures_bars = tuple(
+            bar for bar in bars
+            if str(bar.instrument.instrument_type).upper() in {"FUT", "FUTURES"}
+        )
         aggregator = ReplayInput.aggregator(bars)
         runtime = self.strategy_selector.create(
             "ftx-paper-orderflow",
@@ -1111,8 +1142,11 @@ class ReplayWorker:
             raise RuntimeError("orderflow runtime does not expose canonical parity facts")
         orderflow_payload = dict(cast(dict[str, Any], parity_payload(rows)))
         orderflow_payload["records"] = list(events)
+        orderflow_payload["replay_records"] = _source_replay_records(
+            source_futures_bars, session_date,
+        )
         orderflow_payload["session_date"] = session_date
-        orderflow_payload["source_bar_count"] = len(rows)
+        orderflow_payload["source_bar_count"] = len(source_futures_bars)
         report["extensions"]["ftx-paper-orderflow"] = {
             "orderflow_payload": orderflow_payload,
             "facts": orderflow_payload.get("records", []),
