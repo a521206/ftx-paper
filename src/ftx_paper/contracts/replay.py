@@ -14,6 +14,10 @@ REPLAY_SCHEMA_VERSION = 1
 REPLAY_REPORT_SCHEMA_VERSION = 1
 REPLAY_MODES = frozenset({"replay"})
 REPLAY_VEHICLES = frozenset({"futures", "synthetic"})
+REPLAY_REPORT_FIELDS = frozenset({
+    "schema_version", "report_type", "strategy_id", "session_date",
+    "summary", "metrics", "extensions",
+})
 _RESULT_FIELDS = frozenset({
     "run_id", "schema_version", "execution_scope", "ledger_scope", "summary", "events",
     "shadow_trades", "shadow_ledger", "parity_artifact", "report",
@@ -55,12 +59,75 @@ def detach_replay_value(value: Any) -> Any:
     return value
 
 
+def _detach_extension_value(value: Any) -> Any:
+    """Normalize runner-owned extension data without imposing common fields."""
+    if isinstance(value, Mapping):
+        return {str(key): _detach_extension_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_detach_extension_value(item) for item in value]
+    return value
+
+
 def _validate_report(value: Mapping[str, Any]) -> dict[str, Any]:
-    if value.get("schema_version") != REPLAY_REPORT_SCHEMA_VERSION:
-        raise ValueError("unsupported replay report schema version")
-    if value.get("report_type") != "paper_replay":
-        raise ValueError("unsupported replay report type")
-    return detach_replay_value(value)
+    return ReplayReport.from_mapping(value).to_dict()
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayReport:
+    """Typed common report envelope with namespaced runner extensions."""
+
+    schema_version: int
+    report_type: str
+    strategy_id: str
+    session_date: str
+    summary: Mapping[str, Any]
+    metrics: Mapping[str, Any]
+    extensions: Mapping[str, Mapping[str, Any]]
+
+    def __post_init__(self) -> None:
+        if self.schema_version != REPLAY_REPORT_SCHEMA_VERSION:
+            raise ValueError("unsupported replay report schema version")
+        if self.report_type != "paper_replay":
+            raise ValueError("unsupported replay report type")
+        if not self.strategy_id or len(self.session_date) != 10:
+            raise ValueError("report strategy_id and session_date are required")
+        if not isinstance(self.summary, Mapping) or not isinstance(self.metrics, Mapping):
+            raise ValueError("report summary and metrics must be objects")
+        if not isinstance(self.extensions, Mapping):
+            raise ValueError("report extensions must be an object")
+        for name, extension in self.extensions.items():
+            if not isinstance(name, str) or not isinstance(extension, Mapping):
+                raise ValueError("report extensions must map names to objects")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "report_type": self.report_type,
+            "strategy_id": self.strategy_id,
+            "session_date": self.session_date,
+            "summary": detach_replay_value(self.summary),
+            "metrics": detach_replay_value(self.metrics),
+            "extensions": _detach_extension_value(self.extensions),
+        }
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "ReplayReport":
+        unexpected = set(value) - REPLAY_REPORT_FIELDS
+        if unexpected:
+            raise ValueError("unsupported replay report fields: " + ", ".join(sorted(unexpected)))
+        extensions = value.get("extensions", {})
+        if not isinstance(extensions, Mapping):
+            raise ValueError("report extensions must be an object")
+        return cls(
+            int(value.get("schema_version", 0)),
+            str(value.get("report_type", "")),
+            str(value.get("strategy_id", "")),
+            str(value.get("session_date", "")),
+            _mapping(value.get("summary", {}), "report summary"),
+            _mapping(value.get("metrics", {}), "report metrics"),
+            {str(name): _mapping(extension, f"report extension {name}")
+             for name, extension in extensions.items()},
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,7 +305,7 @@ class ReplayResult:
                   "shadow_ledger": [item.to_dict() for item in self.shadow_ledger],
                  "parity_artifact": dict(self.parity_artifact) if self.parity_artifact is not None else None}
         if self.report is not None:
-            payload["report"] = detach_replay_value(self.report)
+            payload["report"] = _validate_report(self.report)
         return payload
 
     @classmethod
@@ -274,4 +341,4 @@ class ReplayResult:
 
 __all__ = ["ExecutionScope", "LedgerScope", "REPLAY_SCHEMA_VERSION", "ReplayEvent", "ReplayLedgerEntry",
            "ReplayRequest", "ReplayResult", "ReplayScope", "ReplaySummary", "ReplayTrade",
-           "LEGACY_REPLAY_FIELDS", "REPLAY_REPORT_SCHEMA_VERSION", "detach_replay_value"]
+            "LEGACY_REPLAY_FIELDS", "REPLAY_REPORT_FIELDS", "REPLAY_REPORT_SCHEMA_VERSION", "ReplayReport", "detach_replay_value"]

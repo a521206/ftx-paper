@@ -983,8 +983,12 @@ class ReplayWorker:
             "session_date": session_date,
             "summary": summary,
             "metrics": summary,
-            "trades": normalized_trades,
-            "ledger": ledger_records,
+            "extensions": {
+                "ftx-paper-research": {
+                    "trades": normalized_trades,
+                    "ledger": ledger_records,
+                },
+            },
         }
         parity_artifact = None
         if include_parity_layers and self.parity_projector is not None:
@@ -1065,6 +1069,12 @@ class ReplayWorker:
             session_date, rows=rows, bars=bars, futures_source=futures_source,
         )
         summary = dict(build_summary(list(events), []))
+        current_source = input_manifest["provenance"].get("current")
+        storage_identity = (current_source or {}).get("storage_identity") or {}
+        source_symbol = str(storage_identity.get("symbol") or "")
+        source_expiry = str(storage_identity.get("expiry") or "")
+        if source_symbol and source_expiry:
+            summary["source"] = f"{source_symbol} FUT {source_expiry}"
         summary.update({
             "bars_seen": bundles_seen,
             "accepted_decisions": sum(1 for event in events if event.get("outcome") == "accepted"),
@@ -1094,8 +1104,7 @@ class ReplayWorker:
             "session_date": session_date,
             "summary": summary,
             "metrics": summary,
-            "trades": [],
-            "ledger": [],
+            "extensions": {},
         }
         parity_payload = getattr(runtime, "parity_payload", None)
         if not callable(parity_payload):
@@ -1104,8 +1113,10 @@ class ReplayWorker:
         orderflow_payload["records"] = list(events)
         orderflow_payload["session_date"] = session_date
         orderflow_payload["source_bar_count"] = len(rows)
-        report["orderflow_payload"] = orderflow_payload
-        report["facts"] = orderflow_payload.get("records", [])
+        report["extensions"]["ftx-paper-orderflow"] = {
+            "orderflow_payload": orderflow_payload,
+            "facts": orderflow_payload.get("records", []),
+        }
         parity_artifact = None
         if include_parity_layers:
             from ftx_paper.strategies.orderflow.parity_artifacts import build_parity_artifact_from_payload
@@ -1119,7 +1130,7 @@ class ReplayWorker:
             except ValueError as exc:
                 # The replay payload remains useful for phase diagnostics even
                 # when final parity layers cannot be published yet.
-                report["parity_artifact_unavailable"] = str(exc)
+                report["extensions"]["ftx-paper-orderflow"]["parity_artifact_unavailable"] = str(exc)
         canonical = ReplayResult(
             run_id=run_id,
             schema_version=REPLAY_SCHEMA_VERSION,
@@ -1130,7 +1141,17 @@ class ReplayWorker:
             shadow_trades=(),
             shadow_ledger=(),
             parity_artifact=parity_artifact,
-            report={**report, "metadata": metadata, "strategy_snapshot": snapshot},
+            report={
+                **report,
+                "extensions": {
+                    **report["extensions"],
+                    "ftx-paper-orderflow": {
+                        **report["extensions"]["ftx-paper-orderflow"],
+                        "metadata": metadata,
+                        "strategy_snapshot": snapshot,
+                    },
+                },
+            },
         )
         return canonical.to_dict()
 

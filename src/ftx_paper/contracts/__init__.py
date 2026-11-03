@@ -14,8 +14,8 @@ from .trades import TradePayload
 from .decision_view import DECISION_VIEW_SCHEMA_VERSION, build_decision_view, validate_decision_view
 from .events import RuntimeEvent
 from .replay import (
-    ExecutionScope, LedgerScope, REPLAY_SCHEMA_VERSION, ReplayEvent, ReplayLedgerEntry,
-    ReplayRequest, ReplayResult, ReplayScope, ReplaySummary, ReplayTrade,
+    ExecutionScope, LedgerScope, REPLAY_REPORT_FIELDS, REPLAY_SCHEMA_VERSION, ReplayEvent, ReplayLedgerEntry,
+    ReplayReport, ReplayRequest, ReplayResult, ReplayScope, ReplaySummary, ReplayTrade,
 )
 from .futures_rollover import (
     FuturesContract, ROLLOVER_RULE, RolloverSelection, SELECTION_POLICY_VERSION,
@@ -31,8 +31,8 @@ __all__ = [
     "TradePlan", "FuturesExecutionPlan", "SyntheticSettlement", "DecisionTrace", "TradePayload",
     "DECISION_VIEW_SCHEMA_VERSION", "build_decision_view", "validate_decision_view",
     "RuntimeEvent",
-    "ExecutionScope", "LedgerScope", "REPLAY_SCHEMA_VERSION", "ReplayEvent", "ReplayLedgerEntry",
-    "ReplayRequest", "ReplayResult", "ReplayScope", "ReplaySummary", "ReplayTrade",
+    "ExecutionScope", "LedgerScope", "REPLAY_REPORT_FIELDS", "REPLAY_SCHEMA_VERSION", "ReplayEvent", "ReplayLedgerEntry",
+    "ReplayReport", "ReplayRequest", "ReplayResult", "ReplayScope", "ReplaySummary", "ReplayTrade",
     "FuturesContract", "ROLLOVER_RULE", "RolloverSelection", "SELECTION_POLICY_VERSION",
     "futures_contract_from_row", "parse_expiry", "select_front_futures_contract",
 ]

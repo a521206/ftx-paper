@@ -1883,8 +1883,9 @@
 
     function performanceStats(run) {
       const report = run?.result?.report;
-      if (!report || !report.metrics || !Array.isArray(report.trades)) throw new Error('replay result report is required');
-      const trades = report.trades;
+      const extension = report?.extensions?.[report?.strategy_id] || {};
+      if (!report || !report.metrics || !Array.isArray(extension.trades)) throw new Error('replay result report is required');
+      const trades = extension.trades;
       const closed = trades.filter(
         (trade) => trade.status === 'closed' && (trade.realized_pnl != null || trade.net_pnl_rs != null),
       );
