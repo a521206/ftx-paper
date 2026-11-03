@@ -22,7 +22,7 @@ def test_paper_runtime_constructs_one_shared_transition_owner() -> None:
 def test_orderflow_factory_uses_paper_runtime_owner() -> None:
     strategy = OrderflowStrategyFactory().create(StrategyContext())
 
-    assert strategy.transition_owner.location_registry.stream_id == "orderflow:paper"
+    assert strategy.transition_owner.location_registry.stream_id == "NIFTY::1m"
 
 
 def test_bounded_replay_uses_fresh_owner_and_is_idempotent() -> None:

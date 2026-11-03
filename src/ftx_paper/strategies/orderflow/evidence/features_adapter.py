@@ -35,7 +35,7 @@ class PaperFeatureAdapter(EvidenceAdapter):
         else:
             self.location_stream_id = (
                 f"{first.get('symbol', 'NIFTY')}:{first.get('expiry', '')}:"
-                f"{first.get('contract_type', 'CONTINUOUS')}:1m"
+                "1m"
             )
 
     def atr(self, session_date: str, symbol: str) -> AtrPublication:

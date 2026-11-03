@@ -32,6 +32,7 @@ from .execution import (
     ReservationStatus,
 )
 from .features import daily_atr_cache
+from .contextual import build_context_scores
 from .hierarchy import (
     ContextObservation,
     ContextVersionRef,
@@ -1064,6 +1065,20 @@ class OrderflowTransitionOwner:
         if self._clock is not None and available_at < self._clock:
             raise ValueError("orderflow transition clock cannot move backwards")
         observation = self.observation_owner.advance(item)
+        if observation.source_event is not None and not any(
+            fact.get("identity") == observation.source_event.get("neutral_event_key")
+            or (
+                isinstance(fact.get("values"), Mapping)
+                and fact["values"].get("identity") == observation.source_event.get("identity")
+            )
+            for fact in self.context.parity_streams.get("source_observation", ())
+        ):
+            self.context.record_event({
+                **observation.source_event,
+                "parity_stream": "source_observation",
+            })
+        for event in observation.events:
+            self.context.record_event(event)
         if regime is not None:
             self.context.regime = regime
         if constraints is not None:
@@ -1073,6 +1088,10 @@ class OrderflowTransitionOwner:
         row = item.one_minute.to_dict()
         available5 = list(self.observation_owner.five_minute_aggregates)
         self.context.aggregates["5m"] = available5
+        if item.five_minute is not None:
+            latest = item.five_minute
+            if self.context.last_confirmation_context_time != latest.time:
+                self._publish_ordinary_context(latest)
         timeout_events: list[dict[str, Any]] = []
         self.advance_opportunity_timeouts(timestamp, available5, timeout_events)
         self.context.pending_bar_events.extend(timeout_events)
@@ -1105,6 +1124,50 @@ class OrderflowTransitionOwner:
                 for name, values in self.context.parity_snapshot().items()
             },
         )
+
+    def _publish_ordinary_context(self, latest: Aggregate) -> None:
+        """Publish the canonical 5m decision context at bar availability."""
+        context = self.context
+        scores = build_context_scores(
+            latest,
+            raw_rows=context.rows,
+            aggregates=context.aggregates,
+            atr=context.atr_by_session.get(latest.session_date),
+        )
+        long_score, short_score = scores if scores is not None else (None, None)
+        context_id = (
+            f"5m-context-{latest.symbol}-{latest.session_date}-1m_5m"
+        )
+        published = MarketContext(
+            context_id=context_id,
+            version=f"v{len(context.market_contexts.versions.get(context_id, ())) + 1}",
+            timestamp=latest.time,
+            available_at=latest.available_at,
+            location=None,
+            market_state=context.market_state,
+            definition_version="1m_5m",
+            source_timeframe="5m",
+            long_score=long_score,
+            short_score=short_score,
+            evidence=(
+                {
+                    "completed_bar": True,
+                    "open": latest.open,
+                    "high": latest.high,
+                    "low": latest.low,
+                    "close": latest.close,
+                },
+            ),
+            source_provenance=(
+                {
+                    "source_candle_id": nifty_label(latest.time),
+                    "available_at": latest.available_at,
+                },
+            ),
+        )
+        reference = context.publish_context(published)
+        context.market_contexts.ordinary_context = reference
+        context.last_confirmation_context_time = latest.time
 
     def advance_execution(
         self,

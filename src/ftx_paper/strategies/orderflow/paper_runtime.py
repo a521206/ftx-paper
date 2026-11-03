@@ -65,7 +65,7 @@ class PaperOrderflowRuntime:
     ) -> None:
         self.execution_adapter = execution_adapter or OrderflowExecutionAdapter()
         self.transition_owner = transition_owner or OrderflowTransitionOwner(
-            LocationRegistry("orderflow:paper"),
+            LocationRegistry("NIFTY::1m"),
             execution_owner=ExecutionCoordinator(),
             execution_adapter=self.execution_adapter,
         )
@@ -184,6 +184,14 @@ class PaperOrderflowRuntime:
                 locations=locations,
                 vwap_measurements=_published_vwap_measurements(locations),
                 prior_value=latest.prior_value,
+                contexts=tuple(
+                    {
+                        "context_id": context.context_id,
+                        "version": context.version,
+                    }
+                    for versions in self.transition_owner.context.market_contexts.versions.values()
+                    for context in versions
+                ),
                 unavailable=envelopes[-1].unavailable,
                 location_stream_id=self.transition_owner.location_registry.stream_id,
             )

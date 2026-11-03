@@ -129,7 +129,7 @@ def produce_evidence(
     if atr.value is None:
         unavailable.append(atr.unavailable_reason or "missing_atr")
 
-    registry = LocationRegistry(f"{first.symbol}:{first.expiry}:{first.contract_type}:1m")
+    registry = LocationRegistry(f"{first.symbol}:{first.expiry}:1m")
     levels = adapter.session_levels(session_date)
     prior_session = adapter.prior_session(session_date)
     if levels is None:
