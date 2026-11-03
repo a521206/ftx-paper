@@ -55,7 +55,7 @@ class OrderflowCoordinator:
     _five_minute: list[Aggregate] = field(default_factory=list, init=False)
     _seen: set[str] = field(default_factory=set, init=False)
     _levels_published: set[str] = field(default_factory=set, init=False)
-    _vwap_published: set[str] = field(default_factory=set, init=False)
+    _vwap_published: set[tuple[str, str]] = field(default_factory=set, init=False)
     latest_atr: AtrPublication | None = field(default=None, init=False)
     latest_prior_value: ValuePublication | None = field(default=None, init=False)
 
@@ -125,7 +125,11 @@ class OrderflowCoordinator:
             for measurement in item.vwap_measurements:
                 if measurement.available_at > one.available_at:
                     continue
-                if measurement.source_aggregate_id in self._vwap_published:
+                vwap_identity = (
+                    measurement.timeframe,
+                    measurement.source_aggregate_id,
+                )
+                if vwap_identity in self._vwap_published:
                     continue
                 self.location_registry.publish_vwap(
                     value=measurement.value,
@@ -136,7 +140,7 @@ class OrderflowCoordinator:
                     timeframe=measurement.timeframe,
                     atr=atr,
                 )
-                self._vwap_published.add(measurement.source_aggregate_id)
+                self._vwap_published.add(vwap_identity)
         events: list[dict[str, Any]] = []
         current_observations_1m = tuple(
             observation
