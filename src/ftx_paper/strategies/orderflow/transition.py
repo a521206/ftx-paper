@@ -50,7 +50,7 @@ from .hierarchy import (
     TriggerObservation,
 )
 from .lifecycle import EvidenceRef, LifecycleEvent, SetupOpportunity
-from .opportunity_coordinator import LifecycleFormation
+from .opportunity_coordinator import LifecycleFormation, OpportunityCoordinator
 from .opportunity_timeout import advance_opportunity_timeout
 from .state_machine_types import (
     ExecutionConstraints,
@@ -657,6 +657,7 @@ class OrderflowTransitionOwner:
 
     location_registry: LocationRegistry
     observation_owner: OrderflowCoordinator = field(init=False)
+    opportunity_owner: OpportunityCoordinator = field(init=False)
     execution_owner: ExecutionCoordinator = field(default_factory=ExecutionCoordinator)
     execution_adapter: Any | None = None
     rows_by_date: Mapping[str, Sequence[Mapping[str, object]]] = field(default_factory=dict, repr=False)
@@ -695,6 +696,11 @@ class OrderflowTransitionOwner:
         # coordinator is only a service facade over that same instance.
         self.execution_owner.engine = self.context.execution_engine
         self.execution_owner.machine = self
+        from .opportunity_replay_host import build_opportunity_coordinator
+        self.opportunity_owner = build_opportunity_coordinator(
+            self,
+            detector=self.observation_owner.detector,
+        )
 
     def promote_episode(
         self,
@@ -1060,6 +1066,13 @@ class OrderflowTransitionOwner:
         if self._clock is not None and available_at < self._clock:
             raise ValueError("orderflow transition clock cannot move backwards")
         observation = self.observation_owner.advance(item)
+        row = item.one_minute.to_dict()
+        source_id = observation.source_event.get("identity") if observation.source_event else None
+        if source_id is not None and not any(
+            str(existing.get("time")) == str(item.one_minute.time)
+            for existing in self.context.rows
+        ):
+            self.context.rows.append(row)
         if observation.source_event is not None and not any(
             fact.get("identity") == observation.source_event.get("neutral_event_key")
             or (
@@ -1080,7 +1093,6 @@ class OrderflowTransitionOwner:
             self.context.execution_constraints = constraints
         timestamp = nifty_label(item.one_minute.time)
         next_time = nifty_label(item.one_minute.available_at)
-        row = item.one_minute.to_dict()
         available5 = list(self.observation_owner.five_minute_aggregates)
         self.context.aggregates["5m"] = available5
         if item.five_minute is not None:
@@ -1090,7 +1102,17 @@ class OrderflowTransitionOwner:
         timeout_events: list[dict[str, Any]] = []
         self.advance_opportunity_timeouts(timestamp, available5, timeout_events)
         self.context.pending_bar_events.extend(timeout_events)
-        accepted_formations = self._accept_formations(formations)
+        bar_events = list(observation.events)
+        self.opportunity_owner.handle_opening_interaction(
+            row, timestamp, next_time, bar_events,
+        )
+        self.opportunity_owner.handle_structure(
+            timestamp, next_time, row, available5, bar_events,
+        )
+        generated_formations = self.opportunity_owner.formations_for(next_time)
+        accepted_formations = self._accept_formations(
+            (*formations, *generated_formations),
+        )
         if accepted_formations:
             self.execution_owner.advance(
                 tuple(accepted_formations),

@@ -113,6 +113,22 @@ class OpportunityCoordinator:
 
     def formations_for(self, clock: datetime | str) -> tuple[LifecycleFormation, ...]:
         """Return owner-published formations causally available at ``clock``."""
+        known = {item.lifecycle_id for item in self._formations}
+        for life in self.host.context.opportunities.values():
+            if life.lifecycle_id in known:
+                continue
+            setup = self.host.execution.engine.setup_for(life.lifecycle_id)
+            if setup is None:
+                continue
+            self._formations.append(LifecycleFormation(
+                identity=life.causal_identity or life.lifecycle_id,
+                lifecycle_id=life.lifecycle_id,
+                values={},
+                observed_at=life.formation_at,
+                available_at=life.formation_available_at,
+                lifecycle=life,
+                setup=setup,
+            ))
         available = coerce_timestamp(clock)
         return tuple(
             item for item in self._formations

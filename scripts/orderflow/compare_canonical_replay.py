@@ -2028,44 +2028,78 @@ def main(argv: list[str] | None = None) -> int:
         canonical_python_path if canonical_python_path.exists() else sys.executable
     )
     output_dir = paper_root / "data" / "output" / "orderflow"
-    generated_at = datetime.now(timezone.utc)
-    run_id = f"{generated_at:%Y%m%dT%H%M%SZ}-{uuid4().hex[:8]}"
-    artifact_dir = output_dir / "artifacts"
-    debug_dir = artifact_dir / "debug"
-    debug_dir.mkdir(parents=True, exist_ok=True)
-    results = [compare_date(
-        session_date,
-        canonical_root=canonical_root,
-        paper_root=paper_root,
-        canonical_python=canonical_python,
-        paper_python=sys.executable,
-        canonical_artifact=args.canonical_artifact,
-        debug_dir=debug_dir,
-        artifact_dir=artifact_dir,
-        run_id=run_id,
-        paper_api_url=args.paper_api_url,
-    ) for session_date in args.dates]
-    overall = "PASSED" if all(
-        _gate_result(item)["status"] == "PASSED" for item in results
-    ) else "FAILED"
-    report_path = _write_comparison_output(results, output_dir, status=overall, run_id=run_id)
-    print(f"Comparison report: {report_path}")
-    print(f"Artifact directory: {artifact_dir}")
-    for result in results:
-        gate = result["gate"]
-        phase_statuses = ", ".join(
-            f"{phase}={result.get(phase, {}).get('status', 'MISSING')}"
-            for phase in ("phase3", "phase3_5", "phase4", "phase4_5", "phase6", "phase7", "parity")
+    lock_path = output_dir / ".canonical-replay-comparison.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        try:
+            owner = int(lock_path.read_text(encoding="ascii").strip())
+            os.kill(owner, 0)
+        except (OSError, ValueError):
+            lock_path.unlink(missing_ok=True)
+            try:
+                lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                print(
+                    "A canonical replay comparison started while recovering a stale lock.",
+                    file=sys.stderr,
+                )
+                return 2
+        else:
+            print(
+                f"A canonical replay comparison is already running (PID {owner}).",
+                file=sys.stderr,
+            )
+            return 2
+    try:
+        os.write(lock_fd, str(os.getpid()).encode("ascii"))
+    finally:
+        os.close(lock_fd)
+    try:
+        generated_at = datetime.now(timezone.utc)
+        run_id = f"{generated_at:%Y%m%dT%H%M%SZ}-{uuid4().hex[:8]}"
+        artifact_dir = output_dir / "artifacts"
+        debug_dir = artifact_dir / "debug"
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        results = [compare_date(
+            session_date,
+            canonical_root=canonical_root,
+            paper_root=paper_root,
+            canonical_python=canonical_python,
+            paper_python=sys.executable,
+            canonical_artifact=args.canonical_artifact,
+            debug_dir=debug_dir,
+            artifact_dir=artifact_dir,
+            run_id=run_id,
+            paper_api_url=args.paper_api_url,
+        ) for session_date in args.dates]
+        overall = "PASSED" if all(
+            _gate_result(item)["status"] == "PASSED" for item in results
+        ) else "FAILED"
+        report_path = _write_comparison_output(results, output_dir, status=overall, run_id=run_id)
+        print(f"Comparison report: {report_path}")
+        print(f"Artifact directory: {artifact_dir}")
+        for result in results:
+            gate = result["gate"]
+            phase_statuses = ", ".join(
+                f"{phase}={result.get(phase, {}).get('status', 'MISSING')}"
+                for phase in ("phase3", "phase3_5", "phase4", "phase4_5", "phase6", "phase7", "parity")
+            )
+            print(f"{result['date']}: gate={gate['status']} ({phase_statuses})")
+            if gate["failed_phases"]:
+                print(f"  failed phases: {', '.join(gate['failed_phases'])}")
+        print(
+            "Comparison completed with parity failures; see the report for first differences."
+            if overall == "FAILED"
+            else "Comparison passed for all requested dates."
         )
-        print(f"{result['date']}: gate={gate['status']} ({phase_statuses})")
-        if gate["failed_phases"]:
-            print(f"  failed phases: {', '.join(gate['failed_phases'])}")
-    print(
-        "Comparison completed with parity failures; see the report for first differences."
-        if overall == "FAILED"
-        else "Comparison passed for all requested dates."
-    )
-    return 0 if overall == "PASSED" else 1
+        return 0 if overall == "PASSED" else 1
+    finally:
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 if __name__ == "__main__":
