@@ -24,8 +24,11 @@ DECISION_STAGES = frozenset({"interaction", "candidate", "admission", "trigger",
 DECISION_OUTCOMES = frozenset({"accepted", "rejected", "cancelled", "invalidated", "expired", "observed", "unavailable"})
 EXECUTION_KINDS = frozenset({"reservation", "authorization", "submission", "order_intent", "fill", "pending_exit", "exit", "exit_fill", "cancellation", "settlement", "synthetic_settlement"})
 LEDGER_KINDS = frozenset({"reservation", "reservation_release", "authorization", "fill", "partial_fill", "cancellation", "exit_settlement", "daily_reset", "closeout"})
-
-
+_CONTRACT_METADATA_FIELDS = frozenset({
+    "instrument", "instrument_type", "symbol", "tradingsymbol", "exchange",
+    "expiry", "contract_type", "series", "strike", "option_type",
+    "token", "instrument_token", "security_id",
+})
 def _jsonable(value: Any) -> Any:
     if isinstance(value, datetime):
         if value.tzinfo is None:
@@ -40,6 +43,18 @@ def _jsonable(value: Any) -> Any:
 
 def _canonical_json(value: Any) -> str:
     return json.dumps(_jsonable(value), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _comparison_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            key: _comparison_value(item)
+            for key, item in value.items()
+            if key not in _CONTRACT_METADATA_FIELDS and key != "producer_extensions"
+        }
+    if isinstance(value, list):
+        return [_comparison_value(item) for item in value]
+    return value
 
 
 def _decision_value(record: Mapping[str, Any], name: str) -> Any:
@@ -683,7 +698,9 @@ def build_parity_artifact(
         "execution_settlement": [issue for issue in projection_issues if ":execution:" in issue],
         "portfolio_ledger": [issue for issue in projection_issues if ":ledger:" in issue],
     }
-    run_scope_identity = hashlib.sha256(_canonical_json({"kind": "run_scope", "scope": scope}).encode("utf-8")).hexdigest()
+    run_scope_identity = hashlib.sha256(_canonical_json({
+        "kind": "run_scope", "scope": _comparison_value(scope),
+    }).encode("utf-8")).hexdigest()
     layers = {
         "run_scope": [{"kind": "run_scope", "occurred_at": f"{session_date}T00:00:00Z", "sequence": 0,
                        "identity": run_scope_identity, "comparison_identity": run_scope_identity,
@@ -724,10 +741,7 @@ def parity_layer_records(artifact: Mapping[str, Any], layer: str) -> list[dict[s
 
 def build_parity_manifest(artifact: Mapping[str, Any]) -> dict[str, Any]:
     def canonical_records(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-        return [
-            {key: value for key, value in record.items() if key != "producer_extensions"}
-            for record in records
-        ]
+        return [_comparison_value(record) for record in records]
 
     layers: dict[str, dict[str, Any]] = {}
     for layer in PARITY_LAYERS:
@@ -819,7 +833,7 @@ def read_parity_artifact(artifact: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def compare_parity_manifests(left: Mapping[str, Any], right: Mapping[str, Any], *, max_context: int = 3) -> dict[str, Any]:
-    if left.get("contract") != right.get("contract") or left.get("scope") != right.get("scope"):
+    if left.get("contract") != right.get("contract") or _comparison_value(left.get("scope")) != _comparison_value(right.get("scope")):
         return {"status": "MISMATCHED", "layer": "run_scope"}
     for layer in PARITY_LAYERS:
         left_layer = left.get("layers", {}).get(layer, {})

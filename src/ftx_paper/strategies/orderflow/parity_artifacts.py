@@ -40,8 +40,24 @@ PARITY_PAYLOAD_KEYS = ("parity_phase_facts", "parity_layers", "parity_coverage")
 _EXECUTION_GROUP_ID = re.compile(
     r"^(execution-group:(?P<session_date>\d{4}-\d{2}-\d{2}:[^:]+:[^:]+:)(?P<timestamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?))$"
 )
+_CONTRACT_METADATA_FIELDS = frozenset({
+    "instrument", "instrument_type", "symbol", "tradingsymbol", "exchange",
+    "expiry", "contract_type", "series", "strike", "option_type",
+    "token", "instrument_token", "security_id",
+})
 
 
+def _comparison_value(value: Any) -> Any:
+    """Remove market-contract provenance from a parity comparison projection."""
+    if isinstance(value, Mapping):
+        return {
+            key: _comparison_value(item)
+            for key, item in value.items()
+            if key not in _CONTRACT_METADATA_FIELDS and key != "producer_extensions"
+        }
+    if isinstance(value, list):
+        return [_comparison_value(item) for item in value]
+    return value
 def validate_contract_declarations(
     phase_streams: Mapping[str, Any], layers: Mapping[str, Any]
 ) -> None:
@@ -61,10 +77,7 @@ def canonical_hash(value: object) -> str:
 
 
 def _records_hash(records: Sequence[Mapping[str, Any]]) -> str:
-    return canonical_hash([
-        {key: value for key, value in record.items() if key != "producer_extensions"}
-        for record in records
-    ])
+    return canonical_hash([_comparison_value(record) for record in records])
 
 
 def _coverage(status: str, observed: bool, count: int, coverage: str | None = None) -> dict[str, Any]:
@@ -282,8 +295,16 @@ def validate_parity_artifact(payload: Mapping[str, Any]) -> None:
         raise ValueError("invalid producer parity artifact envelope")
     if payload["artifact_type"] != ARTIFACT_TYPE or payload["schema_version"] != SCHEMA_VERSION:
         raise ValueError("invalid producer parity artifact version")
-    if payload["contract"] != {"id": CONTRACT_ID, "version": CONTRACT_VERSION}:
-        raise ValueError("invalid producer parity contract")
+    contract = payload["contract"]
+    if (
+        not isinstance(contract, Mapping)
+        or not isinstance(contract.get("id"), str)
+        or not contract["id"]
+        or not isinstance(contract.get("version"), int)
+        or isinstance(contract.get("version"), bool)
+        or contract["version"] < 1
+    ):
+        raise ValueError("invalid producer parity contract metadata")
     scope, producer = payload["scope"], payload["producer"]
     if not isinstance(scope, Mapping) or not isinstance(scope.get("timezone"), str):
         raise ValueError("parity scope timezone is required")
@@ -410,7 +431,7 @@ def compare_phase4_manifests(canonical: Mapping[str, Any], paper: Mapping[str, A
         canonical_values = canonical_records(stream)
         paper_values = paper_records(stream)
         for index, (canonical_value, paper_value) in enumerate(zip(canonical_values, paper_values)):
-            if canonical_value != paper_value:
+            if _comparison_value(canonical_value) != _comparison_value(paper_value):
                 path, left_value, right_value = _first_mismatch(canonical_value, paper_value)
                 return {
                     "status": "MISMATCHED", "stream": stream, "index": index,
@@ -469,8 +490,8 @@ def compare_chronological_streams(
     canonical: Sequence[Mapping[str, Any]], paper: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     """Compare causal facts in timestamp/sequence order and report the first gap."""
-    left = [normalize_phase_record(item, sequence=index) for index, item in enumerate(canonical)]
-    right = [normalize_phase_record(item, sequence=index) for index, item in enumerate(paper)]
+    left = [_comparison_value(normalize_phase_record(item, sequence=index)) for index, item in enumerate(canonical)]
+    right = [_comparison_value(normalize_phase_record(item, sequence=index)) for index, item in enumerate(paper)]
     for index, (left_item, right_item) in enumerate(zip(left, right)):
         if left_item != right_item:
             field, left_value, right_value = _first_mismatch(left_item, right_item)
@@ -524,7 +545,7 @@ def compare_parity_artifacts(
             for sequence, (canonical_value, paper_value) in enumerate(
                 zip(canonical_values, paper_values)
             ):
-                if canonical_value != paper_value:
+                if _comparison_value(canonical_value) != _comparison_value(paper_value):
                     field, left_value, right_value = _first_mismatch(
                         canonical_value, paper_value,
                     )

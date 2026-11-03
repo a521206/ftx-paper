@@ -230,6 +230,78 @@ def test_unified_comparison_reports_first_causal_record_field() -> None:
     assert result["field"] == "values.gap_rows"
 
 
+def test_unified_comparison_ignores_contract_metadata() -> None:
+    coverage = {"phase_streams": _empty_coverage(PHASE_STREAMS), "layers": _empty_coverage(LAYERS)}
+    payload = {
+        "parity_phase_facts": {name: [] for name in PHASE_STREAMS},
+        "parity_layers": {name: [] for name in LAYERS},
+        "parity_coverage": coverage,
+        "scope": {"timezone": "Asia/Kolkata"},
+    }
+    left = build_parity_artifact_from_payload(payload, run_id="left", producer={"name": "canonical"})
+    right = build_parity_artifact_from_payload(payload, run_id="right", producer={"name": "paper"})
+    right["contract"] = {"id": "other-producer-contract", "version": 2}
+
+    assert compare_parity_artifacts(left, right) == {"status": "MATCHED"}
+
+
+def test_unified_comparison_ignores_record_contract_metadata() -> None:
+    coverage = {"phase_streams": _empty_coverage(PHASE_STREAMS), "layers": _empty_coverage(LAYERS)}
+    record = {
+        "kind": "decision", "stage": "candidate",
+        "occurred_at": "2026-10-01T09:20:00Z",
+        "observed_at": "2026-10-01T09:20:00Z",
+        "available_at": "2026-10-01T09:20:00Z", "sequence": 0,
+        "identity": "candidate-1", "causal_parent_id": None,
+        "values": {"direction": "long", "instrument": "NIFTY-I", "expiry": "2026-01", "series": "I"},
+        "unavailable": [],
+    }
+    other = {**record, "values": {**record["values"], "instrument": "NIFTY", "expiry": "2026-02", "series": "II"}}
+    common = {
+        "parity_phase_facts": {name: [] for name in PHASE_STREAMS},
+        "parity_coverage": {**coverage, "layers": {**coverage["layers"], "decision": {
+            "status": "MATCHED", "observed": True, "coverage": "observed",
+        }}},
+        "scope": {"timezone": "Asia/Kolkata"},
+    }
+    left_payload = {**common, "parity_layers": {**{name: [] for name in LAYERS}, "decision": [record]}}
+    right_payload = {**common, "parity_layers": {**{name: [] for name in LAYERS}, "decision": [other]}}
+    left = build_parity_artifact_from_payload(left_payload, run_id="left", producer={"name": "canonical"})
+    right = build_parity_artifact_from_payload(right_payload, run_id="right", producer={"name": "paper"})
+
+    assert compare_parity_artifacts(left, right) == {"status": "MATCHED"}
+
+
+def test_unified_comparison_ignores_producer_extensions() -> None:
+    coverage = {"phase_streams": _empty_coverage(PHASE_STREAMS), "layers": _empty_coverage(LAYERS)}
+    record = {
+        "kind": "decision", "stage": "candidate",
+        "occurred_at": "2026-10-01T09:20:00Z",
+        "observed_at": "2026-10-01T09:20:00Z",
+        "available_at": "2026-10-01T09:20:00Z", "sequence": 0,
+        "identity": "candidate-1", "causal_parent_id": None,
+        "values": {"direction": "long"}, "unavailable": [],
+    }
+    other = {**record, "producer_extensions": {"producer": "paper"}}
+    common = {
+        "parity_phase_facts": {name: [] for name in PHASE_STREAMS},
+        "parity_coverage": {**coverage, "layers": {**coverage["layers"], "decision": {
+            "status": "MATCHED", "observed": True, "coverage": "observed",
+        }}},
+        "scope": {"timezone": "Asia/Kolkata"},
+    }
+    left = build_parity_artifact_from_payload(
+        {**common, "parity_layers": {**{name: [] for name in LAYERS}, "decision": [record]}},
+        run_id="left", producer={"name": "canonical"},
+    )
+    right = build_parity_artifact_from_payload(
+        {**common, "parity_layers": {**{name: [] for name in LAYERS}, "decision": [other]}},
+        run_id="right", producer={"name": "paper"},
+    )
+
+    assert compare_parity_artifacts(left, right) == {"status": "MATCHED"}
+
+
 def test_unified_comparison_normalizes_embedded_session_labels() -> None:
     record = {
         "kind": "interaction",
