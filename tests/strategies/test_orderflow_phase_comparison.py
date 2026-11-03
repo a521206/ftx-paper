@@ -9,6 +9,7 @@ from scripts.orderflow.compare_canonical_replay import (
     _first_exit_diagnostic_difference,
     _first_execution_trace_difference,
     _normalize_phase35_locations,
+    _paper_api_payload,
     _paper_phase35_projection,
     _resolve_canonical_artifact,
     _timeout_before_canonical_trigger,
@@ -82,6 +83,22 @@ def test_phase35_projection_excludes_full_replay_context_references() -> None:
     })
 
     assert projected["contexts"] == []
+
+
+def test_paper_api_payload_reads_orderflow_report_extension() -> None:
+    payload = {"session_date": "2026-10-05", "records": []}
+
+    result = _paper_api_payload({
+        "result": {
+            "report": {
+                "extensions": {
+                    "ftx-paper-orderflow": {"orderflow_payload": payload},
+                },
+            },
+        },
+    })
+
+    assert result == payload
 
 
 def test_resolve_canonical_artifact_reuses_retained_canonical_file(tmp_path) -> None:

@@ -1635,7 +1635,19 @@ def _paper_api_payload(result: Any) -> dict[str, Any] | None:
     if not isinstance(replay_result, Mapping):
         return None
     report = replay_result.get("report")
-    payload = report.get("orderflow_payload") if isinstance(report, Mapping) else None
+    if not isinstance(report, Mapping):
+        return None
+    extensions = report.get("extensions")
+    orderflow_extension = (
+        extensions.get("ftx-paper-orderflow")
+        if isinstance(extensions, Mapping)
+        else None
+    )
+    payload = (
+        orderflow_extension.get("orderflow_payload")
+        if isinstance(orderflow_extension, Mapping)
+        else None
+    )
     return dict(payload) if isinstance(payload, Mapping) else None
 
 
