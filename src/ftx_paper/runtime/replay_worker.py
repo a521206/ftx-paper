@@ -24,6 +24,11 @@ from ftx_paper.runtime.replay_projection import (
     build_summary, canonical_events, is_parity_decision_event, normalize_decision, normalize_trade,
 )
 from ftx_paper.runtime.state import ReplayRuntimeState
+from ftx_paper.runtime.replay_runners import (
+    OrderflowReplayRunner,
+    ResearchReplayRunner,
+    StrategyReplayRunner,
+)
 from ftx_paper.execution.lifecycle import (
     ExecutionLifecycleCoordinator,
     ExecutionPhase,
@@ -103,6 +108,10 @@ class ReplayWorker:
         self.strategy_selector = strategy_selector
         self.parity_projector = parity_projector
         self.inputs = ReplayInput(store, futures_source_resolver)
+        self.runners: dict[str, StrategyReplayRunner] = {
+            "ftx-paper-orderflow": OrderflowReplayRunner(self),
+            "ftx-paper-research": ResearchReplayRunner(self),
+        }
         self._queue: Queue[tuple[str, dict[str, Any], Event]] = Queue(maxsize=max_queue_size)
         self._lock = Lock()
         self._cancel: dict[str, Event] = {}
@@ -207,6 +216,13 @@ class ReplayWorker:
                 self._queue.task_done()
 
     def _execute(self, request: dict[str, Any], cancel: Event) -> dict[str, Any]:
+        strategy_id = request.get("strategy_id")
+        runner = self.runners.get(str(strategy_id))
+        if runner is not None:
+            return runner.run(request, cancel)
+        return self._execute_research(request, cancel)
+
+    def _execute_research(self, request: dict[str, Any], cancel: Event) -> dict[str, Any]:
         lifecycle = ExecutionLifecycleCoordinator()
         session_date_value = request.get("session_date")
         if not isinstance(session_date_value, str):
@@ -296,14 +312,6 @@ class ReplayWorker:
                 raise ValueError("strategy_id is required")
             if self.strategy_selector is None:
                 raise RuntimeError("replay strategy selector was not configured")
-            if strategy_id == "ftx-paper-orderflow":
-                return self._execute_orderflow(
-                    request,
-                    cancel,
-                    session_date=session_date,
-                    vehicles=vehicles,
-                    include_parity_layers=include_parity_layers,
-                )
             strategy = self.strategy_selector.create(
                 strategy_id,
                 StrategyContext(
@@ -836,6 +844,34 @@ class ReplayWorker:
             "bars_seen": bars_seen,
             "decisions_scored": len(scores),
         }
+        summary = {
+            **summary,
+            "accepted_decisions": sum(
+                1 for event in all_events
+                if str(event.get("event_type", "")).upper() == "CANDIDATEDECISION"
+                and event.get("outcome") == "accepted"
+            ),
+            "rejected_decisions": sum(
+                1 for event in all_events
+                if str(event.get("event_type", "")).upper() == "CANDIDATEDECISION"
+                and event.get("outcome") == "rejected"
+            ),
+            "risk_blocks": sum(
+                1 for event in all_events
+                if str(event.get("event_type", "")).upper() in {"ORDER_SUPPRESSED", "ENTRY_BLOCKED_RISK"}
+            ),
+            "closed_trades": sum(1 for trade in normalized_trades if trade.get("status") == "closed"),
+        }
+        closed_pnls = [float(trade.get("net_pnl_rs") or 0.0) for trade in normalized_trades
+                       if trade.get("status") == "closed"]
+        summary.update({
+            "net_pnl": round(sum(closed_pnls), 4),
+            "win_count": sum(1 for pnl in closed_pnls if pnl > 0),
+            "loss_count": sum(1 for pnl in closed_pnls if pnl < 0),
+            "win_rate": (round(sum(1 for pnl in closed_pnls if pnl > 0) / len(closed_pnls), 4)
+                         if closed_pnls else None),
+            "pnl_series": closed_pnls,
+        })
         ledger_by_date: dict[str, dict[str, Any]] = {}
         for trade in normalized_trades:
             if trade.get("vehicle") != "futures":
@@ -943,9 +979,12 @@ class ReplayWorker:
         report = {
             "schema_version": 1,
             "report_type": "paper_replay",
+            "strategy_id": str(request.get("strategy_id") or ""),
             "session_date": session_date,
             "summary": summary,
             "metrics": summary,
+            "trades": normalized_trades,
+            "ledger": ledger_records,
         }
         parity_artifact = None
         if include_parity_layers and self.parity_projector is not None:
@@ -969,7 +1008,7 @@ class ReplayWorker:
         )
         return canonical.to_dict()
 
-    def _execute_orderflow(
+    def _execute_orderflow_impl(
         self,
         request: dict[str, Any],
         cancel: Event,
@@ -1026,7 +1065,13 @@ class ReplayWorker:
             session_date, rows=rows, bars=bars, futures_source=futures_source,
         )
         summary = dict(build_summary(list(events), []))
-        summary["bars_seen"] = bundles_seen
+        summary.update({
+            "bars_seen": bundles_seen,
+            "accepted_decisions": sum(1 for event in events if event.get("outcome") == "accepted"),
+            "rejected_decisions": sum(1 for event in events if event.get("outcome") == "rejected"),
+            "risk_blocks": sum(1 for event in events if str(event.get("event_type", "")).upper() in {"ORDER_SUPPRESSED", "ENTRY_BLOCKED_RISK"}),
+            "closed_trades": 0,
+        })
         metadata = {
             "api_version": "1.1",
             "strategy_version": runtime.metadata.version,
@@ -1045,22 +1090,36 @@ class ReplayWorker:
         report = {
             "schema_version": 1,
             "report_type": "paper_replay",
+            "strategy_id": "ftx-paper-orderflow",
             "session_date": session_date,
             "summary": summary,
             "metrics": summary,
+            "trades": [],
+            "ledger": [],
         }
+        parity_payload = getattr(runtime, "parity_payload", None)
+        if not callable(parity_payload):
+            raise RuntimeError("orderflow runtime does not expose canonical parity facts")
+        orderflow_payload = dict(cast(dict[str, Any], parity_payload(rows)))
+        orderflow_payload["records"] = list(events)
+        orderflow_payload["session_date"] = session_date
+        orderflow_payload["source_bar_count"] = len(rows)
+        report["orderflow_payload"] = orderflow_payload
+        report["facts"] = orderflow_payload.get("records", [])
         parity_artifact = None
         if include_parity_layers:
-            parity_payload = getattr(runtime, "parity_payload", None)
-            if not callable(parity_payload):
-                raise RuntimeError("orderflow runtime does not expose canonical parity facts")
             from ftx_paper.strategies.orderflow.parity_artifacts import build_parity_artifact_from_payload
 
-            parity_artifact = build_parity_artifact_from_payload(
-                cast(dict[str, Any], parity_payload(rows)),
-                run_id=run_id,
-                producer={"name": runtime.metadata.name, "version": runtime.metadata.version},
-            )
+            try:
+                parity_artifact = build_parity_artifact_from_payload(
+                    orderflow_payload,
+                    run_id=run_id,
+                    producer={"name": runtime.metadata.name, "version": runtime.metadata.version},
+                )
+            except ValueError as exc:
+                # The replay payload remains useful for phase diagnostics even
+                # when final parity layers cannot be published yet.
+                report["parity_artifact_unavailable"] = str(exc)
         canonical = ReplayResult(
             run_id=run_id,
             schema_version=REPLAY_SCHEMA_VERSION,

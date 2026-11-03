@@ -1882,20 +1882,19 @@
     }
 
     function performanceStats(run) {
-      if (!Array.isArray(run?.result?.shadow_trades)) throw new Error('replay result shadow_trades are required');
-      const trades = run.result.shadow_trades;
+      const report = run?.result?.report;
+      if (!report || !report.metrics || !Array.isArray(report.trades)) throw new Error('replay result report is required');
+      const trades = report.trades;
       const closed = trades.filter(
         (trade) => trade.status === 'closed' && (trade.realized_pnl != null || trade.net_pnl_rs != null),
       );
-      const pnls = closed.map((trade) => Number(trade.realized_pnl ?? trade.net_pnl_rs));
-      const net = pnls.reduce((sum, value) => sum + value, 0);
-      const wins = pnls.filter((value) => value > 0);
-      const losses = pnls.filter((value) => value < 0);
-      let running = 0;
-      let peak = 0;
-      let drawdown = 0;
-      pnls.forEach((value) => { running += value; peak = Math.max(peak, running); drawdown = Math.min(drawdown, running - peak); });
-      return { trades, closed, pnls, net, wins, losses, drawdown, winRate: closed.length ? wins.length / closed.length : null };
+      const pnls = Array.isArray(report.metrics.pnl_series) ? report.metrics.pnl_series.map(Number) : [];
+      const net = Number(report.metrics.net_pnl ?? 0);
+      const wins = Array.from({length: Number(report.metrics.win_count || 0)}, () => 1);
+      const losses = Array.from({length: Number(report.metrics.loss_count || 0)}, () => -1);
+      const drawdown = Number(report.metrics.drawdown ?? 0);
+      const winRate = report.metrics.win_rate ?? (closed.length ? wins.length / closed.length : null);
+      return { trades, closed, pnls, net, wins, losses, drawdown, winRate };
     }
 
     function performancePage(runs, runtime = {}, broker = {}, marketDates = []) {
@@ -1913,10 +1912,11 @@
       const result = run.result || {};
       const requestDate = run.request?.session_date || 'All available dates';
       const events = replayEvents(run);
-      const accepted = events.filter((event) => String(event.event_type || '').toUpperCase() === 'CANDIDATEDECISION' && event.outcome === 'accepted').length;
-      const rejected = events.filter((event) => String(event.event_type || '').toUpperCase() === 'CANDIDATEDECISION' && event.outcome === 'rejected').length;
+      const reportMetrics = result.report?.metrics || {};
+      const accepted = Number(reportMetrics.accepted_decisions || 0);
+      const rejected = Number(reportMetrics.rejected_decisions || 0);
       const candidates = accepted + rejected;
-      const suppressed = replayEventCount(events, 'ORDER_SUPPRESSED');
+      const suppressed = Number(reportMetrics.risk_blocks || 0);
       const noTrades = stats.closed.length === 0;
       const bars = stats.pnls.length ? stats.pnls.map((pnl) => `<span class="performance-bar ${pnl < 0 ? 'negative' : ''}" style="height:${Math.max(8, Math.min(100, Math.abs(pnl) / Math.max(...stats.pnls.map((value) => Math.abs(value)), 1) * 100))}%" title="${esc(money(pnl))}"></span>`).join('') : '<div class="empty">No closed trades to chart yet.</div>';
       const tradeRows = stats.trades.length
