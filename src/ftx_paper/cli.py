@@ -135,16 +135,18 @@ def api_main() -> None:
                 for strategy_id in strategy_catalog.strategy_ids
             }),
         )
+        artifact_store = SetupArtifactStore(config.home)
+        setup_worker = SetupWorker(SetupTaskRegistry((
+            build_prior_session_task(store, artifact_store),
+            build_prior_session_levels_task(store, artifact_store),
+            build_daily_atr_task(store, artifact_store),
+        )))
         replay_worker = ReplayWorker(
             store, capital_profile=capital_profile, strategy_selector=strategy_catalog,
             parity_projector=build_parity_artifact,
-            artifact_store=SetupArtifactStore(config.home),
+            artifact_store=artifact_store,
+            setup_worker=setup_worker,
         )
-        setup_worker = SetupWorker(SetupTaskRegistry((
-            build_prior_session_task(store, SetupArtifactStore(config.home)),
-            build_prior_session_levels_task(store, SetupArtifactStore(config.home)),
-            build_daily_atr_task(store, SetupArtifactStore(config.home)),
-        )))
         operations = RuntimeOperations(session, replay_worker)
         if auth is not None and auth.access_token() is not None:
             try:

@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from ftx_paper.strategies.orderflow.canonical.ict.bars import SourceBar, build_completed_bars
+from ftx_paper.strategies.orderflow.market_observation import observe_market
 from ftx_paper.strategies.orderflow.orderflow_common import build_aggregate_result
 
 
@@ -46,3 +48,25 @@ def test_aggregate_defaults_to_continuous_contract() -> None:
     )
 
     assert result.aggregates[0].contract_type == "CONTINUOUS"
+
+
+def test_market_observation_excludes_bar_at_exclusive_session_close() -> None:
+    rows = [
+        {
+            "time": f"2026-10-12T15:{minute:02d}",
+            "session_date": "2026-10-12",
+            "open": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+            "close": 100.5,
+            "volume": 10,
+        }
+        for minute in (29, 30)
+    ]
+
+    observed = observe_market(rows)
+
+    assert [
+        item.time.astimezone(ZoneInfo("Asia/Kolkata")).strftime("%H:%M")
+        for item in observed.aggregates["1m"]
+    ] == ["15:29"]

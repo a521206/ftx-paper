@@ -131,12 +131,14 @@ class ReplayWorker:
     def __init__(self, store: Any, *, capital_profile: ResearchCapitalProfile = RESEARCH_CAPITAL_PROFILE,
                  max_queue_size: int = 1024, strategy_selector: StrategySelector | None = None,
                  futures_source_resolver: Any | None = None, parity_projector: Any | None = None,
-                 artifact_store: SetupArtifactStore | None = None) -> None:
+                 artifact_store: SetupArtifactStore | None = None,
+                 setup_worker: Any | None = None) -> None:
         self.store = store
         self.capital_profile = capital_profile
         self.strategy_selector = strategy_selector
         self.parity_projector = parity_projector
         self.artifact_store = artifact_store or SetupArtifactStore(store.root.parent)
+        self.setup_worker = setup_worker
         self.inputs = ReplayInput(store, futures_source_resolver)
         self.runners: dict[str, StrategyReplayRunner] = {
             "ftx-paper-orderflow": OrderflowReplayRunner(self),
@@ -245,6 +247,10 @@ class ReplayWorker:
         strategy_id = request.get("strategy_id")
         runner = self.runners.get(str(strategy_id))
         if runner is not None:
+            if self.setup_worker is not None:
+                self.setup_worker.ensure(str(strategy_id), str(request["session_date"]))
+            if cancel.is_set():
+                raise RuntimeError("replay cancelled during setup prerequisites")
             return runner.run(request, cancel)
         return self._execute_research(request, cancel)
 
