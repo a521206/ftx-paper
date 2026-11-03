@@ -25,6 +25,31 @@ def test_daily_atr_cache_matches_point_lookup() -> None:
     }
 
 
+def test_daily_atr_requires_history_before_the_fourteen_day_seed() -> None:
+    rows_by_date = {}
+    start = date(2026, 1, 1)
+    for offset in range(21):
+        session_date = (start + timedelta(days=offset)).isoformat()
+        width = 100.0 if offset == 0 else 10.0
+        rows_by_date[session_date] = ({
+            "time": f"{session_date}T09:15",
+            "high": 100.0 + width,
+            "low": 100.0,
+            "close": 100.0,
+        },)
+
+    target = (start + timedelta(days=21)).isoformat()
+    full_history = daily_atr(target, rows_by_date)
+    truncated_history = daily_atr(target, {
+        session_date: rows_by_date[session_date]
+        for session_date in sorted(rows_by_date)[-14:]
+    })
+
+    assert full_history is not None
+    assert truncated_history is not None
+    assert full_history != truncated_history
+
+
 def test_transition_uses_injected_atr_materialization() -> None:
     transition = OrderflowTransitionOwner(
         LocationRegistry("test"),

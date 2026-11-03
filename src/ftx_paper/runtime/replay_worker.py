@@ -1062,7 +1062,9 @@ class ReplayWorker:
         )
         warmup_bars: list[Any] = []
         warmup_dates = [date for date in self.store.read_dates() if date < session_date]
-        for warmup_date in sorted(warmup_dates)[-14:]:
+        # Wilder ATR is recursively materialized; retaining only the lookback
+        # window would reseed it from a different history than canonical replay.
+        for warmup_date in sorted(warmup_dates):
             warmup_rows = self.store.read_market_bars(warmup_date)
             warmup_bars.extend(self.inputs.bars(
                 warmup_date,
