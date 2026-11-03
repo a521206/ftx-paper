@@ -305,15 +305,18 @@ class SqliteRuntimeStore:
             )
             connection.execute(
                 "UPDATE market_bars SET instrument_type = 'INDEX' "
-                "WHERE upper(symbol) IN ('NIFTY', 'NIFTY 50', 'INDIA VIX')"
+                "WHERE upper(symbol) IN ('NIFTY', 'NIFTY 50', 'INDIA VIX') "
+                "AND upper(instrument_type) <> 'INDEX'"
             )
             connection.execute(
                 "UPDATE market_bars SET expiry = '', strike = NULL, option_type = NULL "
-                "WHERE upper(instrument_type) = 'INDEX'"
+                "WHERE upper(instrument_type) = 'INDEX' "
+                "AND (expiry <> '' OR strike IS NOT NULL OR option_type IS NOT NULL)"
             )
             connection.execute(
                 "UPDATE market_bars SET strike = NULL, option_type = NULL "
-                "WHERE upper(instrument_type) IN ('FUT', 'FUTURES')"
+                "WHERE upper(instrument_type) IN ('FUT', 'FUTURES') "
+                "AND (strike IS NOT NULL OR option_type IS NOT NULL)"
             )
             connection.execute(
                 "UPDATE market_bars SET open_interest = 0.0 "

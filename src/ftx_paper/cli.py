@@ -5,23 +5,6 @@ import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from ftx_paper.api import create_app
-from ftx_paper.application import RuntimeOperations, build_strategy_catalog, build_runtime_session
-from ftx_paper.config import PaperConfig
-from ftx_paper.domain.capital import CapitalRuntimeContext, RESEARCH_CAPITAL_PROFILE
-from ftx_paper.domain.portfolio import PortfolioState
-from ftx_paper.infrastructure.sqlite.runtime_store import ProcessAlreadyRunningError
-from ftx_paper.runtime.store import RuntimeStore
-from ftx_paper.strategies.research.parity_artifacts import build_parity_artifact
-from ftx_paper.runtime.replay_worker import ReplayWorker
-from ftx_paper.strategies.shared.factory import StrategyContext
-from ftx_paper.runtime.engine import MultiStrategyEngine
-from ftx_paper.ui import create_ui_app
-from ftx_paper.broker.shoonya import ShoonyaAuth
-from ftx_paper.broker.xts import XTSAuth
-from ftx_paper.broker.zerodha import ZerodhaAuth
-
-
 def configure_logging(runtime_dir: Path) -> None:
     """Send durable diagnostics to a rotating file; mirror only problems to stderr."""
     runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -55,6 +38,21 @@ def configure_logging(runtime_dir: Path) -> None:
 
 
 def api_main() -> None:
+    from ftx_paper.api import create_app
+    from ftx_paper.application import RuntimeOperations, build_strategy_catalog, build_runtime_session
+    from ftx_paper.broker.shoonya import ShoonyaAuth
+    from ftx_paper.broker.xts import XTSAuth
+    from ftx_paper.broker.zerodha import ZerodhaAuth
+    from ftx_paper.config import PaperConfig
+    from ftx_paper.domain.capital import CapitalRuntimeContext, RESEARCH_CAPITAL_PROFILE
+    from ftx_paper.domain.portfolio import PortfolioState
+    from ftx_paper.infrastructure.sqlite.runtime_store import ProcessAlreadyRunningError
+    from ftx_paper.runtime.engine import MultiStrategyEngine
+    from ftx_paper.runtime.replay_worker import ReplayWorker
+    from ftx_paper.runtime.store import RuntimeStore
+    from ftx_paper.strategies.research.parity_artifacts import build_parity_artifact
+    from ftx_paper.strategies.shared.factory import StrategyContext
+
     config = PaperConfig.from_env()
     configure_logging(config.runtime_dir)
     capital_profile = RESEARCH_CAPITAL_PROFILE
@@ -155,6 +153,11 @@ def api_main() -> None:
 
 
 def ui_main() -> None:
+    from ftx_paper.config import PaperConfig
+    from ftx_paper.infrastructure.sqlite.runtime_store import ProcessAlreadyRunningError
+    from ftx_paper.runtime.store import RuntimeStore
+    from ftx_paper.ui import create_ui_app
+
     config = PaperConfig.from_env()
     store = RuntimeStore(config.runtime_dir)
     try:

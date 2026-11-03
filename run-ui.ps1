@@ -13,22 +13,11 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
 }
 
 function Stop-ExistingUiProcess {
-    param(
-        [Parameter(Mandatory)]
-        [string]$PythonPath
-    )
-
     # Match only this project's UI entry point. In particular, do not stop the
     # API process or unrelated Python processes that may be using another port.
     $uiProcesses = @(
-        Get-CimInstance -ClassName Win32_Process |
-            Where-Object {
-                $_.CommandLine -and
-                (
-                    $_.CommandLine -like "*from ftx_paper.cli import ui_main*" -or
-                    $_.CommandLine -like "*ftx_paper.cli:ui_main*"
-                )
-            }
+        Get-CimInstance -ClassName Win32_Process `
+            -Filter "CommandLine LIKE '%ftx_paper.cli%ui_main%'"
     )
 
     foreach ($uiProcess in $uiProcesses) {
@@ -41,7 +30,7 @@ function Stop-ExistingUiProcess {
     }
 }
 
-Stop-ExistingUiProcess -PythonPath $venvPython
+Stop-ExistingUiProcess
 
 $env:PYTHONPATH = Join-Path $packageRoot "src"
 $paperHome = if ($env:FTX_PAPER_HOME) { $env:FTX_PAPER_HOME } else { Join-Path $env:LOCALAPPDATA "ftx-paper" }

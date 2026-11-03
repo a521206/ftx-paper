@@ -84,6 +84,31 @@ def test_runtime_store_canonicalizes_index_exchange_and_rejects_bad_vix(tmp_path
         ), source="fixture")
 
 
+def test_runtime_store_initialization_does_not_rewrite_canonical_market_bars(tmp_path):
+    store = RuntimeStore(tmp_path)
+    timestamp = datetime(2026, 10, 6, 4, 0, tzinfo=ZoneInfo("UTC"))
+    store.append_market_bars((
+        MarketBar(Instrument("NIFTY", "NSE_INDEX", "INDEX"), timestamp, 1, 2, 0, 1),
+        MarketBar(Instrument("NIFTY26OCTFUT", "NFO", "FUTURES", "2026-10-27"), timestamp, 1, 2, 0, 1),
+    ), source="fixture")
+
+    with store._connect() as connection:
+        connection.execute("CREATE TABLE normalization_updates (count INTEGER NOT NULL)")
+        connection.execute("INSERT INTO normalization_updates VALUES (0)")
+        connection.execute("""
+            CREATE TRIGGER count_normalization_updates
+            AFTER UPDATE ON market_bars
+            BEGIN
+                UPDATE normalization_updates SET count = count + 1;
+            END
+        """)
+
+    store.initialize()
+
+    with store._connect() as connection:
+        assert connection.execute("SELECT count FROM normalization_updates").fetchone()[0] == 0
+
+
 def test_runtime_store_canonicalizes_nifty_symbol_aliases(tmp_path):
     store = RuntimeStore(tmp_path)
     timestamp = datetime(2026, 10, 6, 4, 0, tzinfo=ZoneInfo("UTC"))
