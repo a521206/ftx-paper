@@ -616,6 +616,23 @@ def test_futures_source_includes_data_end_minute() -> None:
     })
 
 
+def test_futures_source_resolver_reuses_loaded_rows() -> None:
+    class Store:
+        def read_market_bars(self, _session_date: str):
+            raise AssertionError("resolver should use supplied rows")
+
+    rows = [{
+        "symbol": "NIFTY26OCTFUT", "exchange": "NFO", "instrument_type": "FUTURES",
+        "expiry": "2026-10-29", "minute": "2026-10-05T09:15:00+05:30",
+        "open": 1, "high": 2, "low": 1, "close": 2, "volume": 1,
+    }]
+
+    source = FuturesSessionSourceResolver(Store()).resolve("2026-10-05", rows=rows)
+
+    assert source is not None
+    assert source.symbol == "NIFTY26OCTFUT"
+
+
 def test_exit_state_machine_forces_exit_at_canonical_1510_close() -> None:
     instrument = Instrument("NIFTYFUT", "NFO", "FUTURES")
     position = PositionState(instrument, 100, 95, 1, OrderSide.BUY)

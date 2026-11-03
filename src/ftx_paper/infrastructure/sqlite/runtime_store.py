@@ -1052,6 +1052,21 @@ class SqliteRuntimeStore:
             value["result"] = _decode_replay_result(connection, run_id, value["result"])
             return value
 
+    def read_replay_status(self, run_id: str) -> dict[str, Any] | None:
+        """Read replay bookkeeping without decoding the potentially large result."""
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                "SELECT run_id, status, request, error, created_at, updated_at "
+                "FROM replay_runs WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            value = dict(row)
+            value["request"] = json.loads(value["request"])
+            return value
+
     def read_replay_runs(self, limit: int = 100) -> list[dict[str, Any]]:
         with self._connect() as connection:
             ids = connection.execute("SELECT run_id FROM replay_runs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()

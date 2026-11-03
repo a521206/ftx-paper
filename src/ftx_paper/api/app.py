@@ -4,7 +4,7 @@ import os
 from datetime import datetime
 
 from flask import Flask, jsonify, redirect, request
-from typing import Any
+from typing import Any, cast
 
 from ftx_paper.config import IST
 from ftx_paper.contracts import ReplayRequest, validate_decision_view
@@ -179,11 +179,19 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
 
     @app.get("/api/v1/strategies/<strategy_id>/replays/<run_id>")
     def replay_detail(strategy_id: str, run_id: str):
-        run = store.read_replay_run(run_id)
+        status_only = request.args.get("view") == "status"
+        read_status = getattr(store, "read_replay_status", None)
+        run: dict[str, Any] | None
+        if status_only and callable(read_status):
+            run = cast(dict[str, Any] | None, read_status(run_id))
+        else:
+            run = store.read_replay_run(run_id)
         if run is None:
             return jsonify(error_payload("not_found", "replay not found")), 404
         if run.get("request", {}).get("strategy_id") != strategy_id:
             return jsonify(error_payload("not_found", "replay not found")), 404
+        if status_only:
+            return jsonify(json_safe(run))
         if run.get("status") not in {"completed", "failed", "cancelled"}:
             return incomplete_replay_response(run)
         return jsonify(json_safe(run))

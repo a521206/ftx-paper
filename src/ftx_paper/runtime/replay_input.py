@@ -27,9 +27,11 @@ class ReplayInput:
     def reset(self) -> None:
         self._source_cache.clear()
 
-    def resolve_source(self, session_date: str) -> Any | None:
+    def resolve_source(
+        self, session_date: str, *, rows: list[dict[str, Any]] | None = None,
+    ) -> Any | None:
         if session_date not in self._source_cache:
-            self._source_cache[session_date] = self._sources.resolve(session_date)
+            self._source_cache[session_date] = self._sources.resolve(session_date, rows=rows)
         return self._source_cache[session_date]
 
     def prior_source_provenance(self, session_date: str) -> dict[str, Any] | None:
@@ -44,7 +46,9 @@ class ReplayInput:
         futures_source: Any | None = None,
     ) -> tuple[MarketBar, ...]:
         loaded_rows = rows if rows is not None else self.store.read_market_bars(session_date)
-        source = futures_source if futures_source is not None else self.resolve_source(session_date)
+        source = futures_source if futures_source is not None else self.resolve_source(
+            session_date, rows=loaded_rows,
+        )
         if any(str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"} for row in loaded_rows):
             loaded_rows = [
                 row for row in loaded_rows

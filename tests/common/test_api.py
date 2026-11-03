@@ -23,3 +23,25 @@ def test_api_cors_allows_replay_delete_from_ui_origin(tmp_path):
 
     assert response.status_code == 200
     assert "DELETE" in response.headers["Access-Control-Allow-Methods"]
+
+
+def test_replay_status_view_does_not_return_result(tmp_path):
+    store = RuntimeStore(tmp_path)
+    store.create_replay_run(
+        "status-run",
+        {"session_date": "2026-01-05", "strategy_id": "ftx-paper-orderflow"},
+    )
+    store.update_replay_run("status-run", status="completed", result={"events": [1]})
+    app = create_app(
+        store,
+        session=SimpleNamespace(strategy_status=lambda: []),
+        replay_worker=SimpleNamespace(),
+    )
+
+    response = app.test_client().get(
+        "/api/v1/strategies/ftx-paper-orderflow/replays/status-run?view=status",
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["status"] == "completed"
+    assert "result" not in response.get_json()

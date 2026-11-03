@@ -320,7 +320,7 @@ class ReplayWorker:
                 "settled_orders": [],
             })
             rows = self.store.read_market_bars(date)
-            futures_source = self.inputs.resolve_source(date)
+            futures_source = self.inputs.resolve_source(date, rows=rows)
             bars = self.inputs.bars(date, rows=rows, futures_source=futures_source)
             futures_bars = tuple(
                 bar for bar in bars
@@ -1054,7 +1054,7 @@ class ReplayWorker:
         if self.strategy_selector is None:
             raise RuntimeError("replay strategy selector was not configured")
         rows = self.store.read_market_bars(session_date)
-        futures_source = self.inputs.resolve_source(session_date)
+        futures_source = self.inputs.resolve_source(session_date, rows=rows)
         bars = self.inputs.bars(session_date, rows=rows, futures_source=futures_source)
         source_futures_bars = tuple(
             bar for bar in bars
@@ -1069,7 +1069,7 @@ class ReplayWorker:
             warmup_bars.extend(self.inputs.bars(
                 warmup_date,
                 rows=warmup_rows,
-                futures_source=self.inputs.resolve_source(warmup_date),
+                futures_source=self.inputs.resolve_source(warmup_date, rows=warmup_rows),
             ))
         aggregator = ReplayInput.aggregator(bars)
         runtime = self.strategy_selector.create(

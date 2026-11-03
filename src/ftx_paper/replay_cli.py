@@ -63,9 +63,11 @@ def run(
     deadline = time.monotonic() + timeout
     poll_interval = max(0.05, interval)
     while True:
-        result = _request(f"{root}/api/v1/strategies/{strategy_id}/replays/{run_id}")
+        result = _request(
+            f"{root}/api/v1/strategies/{strategy_id}/replays/{run_id}?view=status",
+        )
         if result.get("status") in TERMINAL_STATUSES:
-            return result
+            return _request(f"{root}/api/v1/strategies/{strategy_id}/replays/{run_id}")
         if time.monotonic() >= deadline:
             raise RuntimeError(f"replay {run_id} did not complete within {timeout:g}s")
         time.sleep(poll_interval)

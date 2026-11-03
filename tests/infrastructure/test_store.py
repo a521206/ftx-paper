@@ -258,6 +258,19 @@ def test_runtime_store_replay_summaries_omit_event_payloads(tmp_path):
     assert summaries[0]["result"] is None
 
 
+def test_runtime_store_replay_status_omits_large_result(tmp_path):
+    store = RuntimeStore(tmp_path)
+    store.create_replay_run("status-run", {"session_date": "2026-01-05"})
+    store.update_replay_run("status-run", status="completed", result={"events": [1, 2, 3]})
+
+    status = store.read_replay_status("status-run")
+
+    assert status is not None
+    assert status["run_id"] == "status-run"
+    assert status["status"] == "completed"
+    assert "result" not in status
+
+
 def test_runtime_store_replay_summaries_keep_latest_run_per_day(tmp_path):
     store = RuntimeStore(tmp_path)
     store.create_replay_run("old-run", {"session_date": "2026-01-05"})
