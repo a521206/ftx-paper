@@ -32,7 +32,7 @@ and before the next session.
 
 ### Orderflow replay hot path
 
-`OrderflowReplayEngine.replay()` currently constructs a `PaperFeatureAdapter`
+The replay input pipeline constructs a `PaperFeatureAdapter`
 with `_prior_values(rows_by_date)`. `_prior_values()` walks every available
 session, finds the preceding session, rebuilds the canonical value profile, and
 converts the resulting reference into `ValuePublication`.
@@ -485,7 +485,7 @@ configuration identity.
 
 ## Replay Integration
 
-`OrderflowReplayEngine` should receive a derived-artifact reader. The normal
+The replay input pipeline should receive a derived-artifact reader. The normal
 replay sequence becomes:
 
 1. Load the requested market session.

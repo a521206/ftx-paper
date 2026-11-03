@@ -10,10 +10,11 @@ import sys
 from typing import Any
 
 from ftx_paper.config import PaperConfig
-from ftx_paper.strategies.orderflow.replay_pipeline import OrderflowReplayEngine
+from ftx_paper.strategies.orderflow.replay_pipeline import _load_session_rows
+from ftx_paper.strategies.orderflow.replay_runtime import replay_rows
 from ftx_paper.strategies.orderflow.timestamps import session_minute
 
-__all__ = ["OrderflowReplayEngine", "main"]
+__all__ = ["main"]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -28,21 +29,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     try:
-        engine = OrderflowReplayEngine()
         if args.source_artifact is None:
-            result = engine.replay_session(
-                args.date,
-                runtime_dir=args.runtime_dir or PaperConfig.from_env().runtime_dir,
-                include_interactions=args.include_interactions,
+            rows, rows_by_date = _load_session_rows(
+                args.date, args.runtime_dir or PaperConfig.from_env().runtime_dir,
             )
         else:
             rows, rows_by_date = _load_source_artifact(args.source_artifact, args.date)
-            result = engine.replay(
-                rows,
-                rows_by_date,
-                session_date=args.date,
-                include_interactions=args.include_interactions,
-            )
+        # The flag is retained for CLI compatibility; the shared runtime always
+        # emits the canonical owner-owned interaction/execution streams.
+        result = replay_rows(rows, rows_by_date=rows_by_date)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"orderflow replay failed: {exc}", file=sys.stderr)
         result = {"status": "INCOMPLETE", "reason": str(exc)}

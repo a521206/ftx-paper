@@ -1332,6 +1332,9 @@ def _compare_phase6(canonical_path: Path, paper: dict[str, Any], session_date: s
                 "causal_parent_key", "causal_identity", "event_id", "lifecycle_sequence", "sequence",
                 "neutral_event_key", "provenance", "confirmation_evidence",
                 "long_score", "short_score", "stage_before", "stage_after", "events",
+                # Session identity is transport metadata added by Paper's
+                # normalized event envelope, not lifecycle semantics.
+                "session_date",
             }
             values = projected.get("values")
             if isinstance(values, Mapping):

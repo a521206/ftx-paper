@@ -15,12 +15,7 @@ from scripts.orderflow.compare_canonical_replay import (
     _execution_trace_diagnostics,
 )
 from ftx_paper.strategies.orderflow.execution import ExecutionEngine, validate_exit_plan
-from ftx_paper.strategies.orderflow import interaction_replay as interaction_replay_module
-from ftx_paper.strategies.orderflow.context_location_replay import ContextLocationReplay
-from ftx_paper.strategies.orderflow.interaction_replay import (
-    InteractionResponseReplay,
-    replay_interaction_response,
-)
+from ftx_paper.strategies.orderflow.replay_artifacts import InteractionResponseReplay
 from ftx_paper.strategies.orderflow.interactions import ProjectionSnapshot
 from ftx_paper.strategies.orderflow.lifecycle import SetupOpportunity
 from ftx_paper.strategies.orderflow.orderflow_common import Aggregate
@@ -538,106 +533,6 @@ def _aggregate(
         "2026-10-01",
         "replay",
     )
-
-
-def test_opening_interaction_dispatches_without_a_completed_5m_aggregate(
-    monkeypatch,
-) -> None:
-    calls: list[str] = []
-
-    class Coordinator:
-        def publish_interaction_context(self, *_args: Any) -> None:
-            pass
-
-        def handle_structure(self, *_args: Any) -> None:
-            calls.append("structure")
-
-        def handle_opening_interaction(self, *_args: Any) -> None:
-            calls.append("opening")
-
-    monkeypatch.setattr(
-        interaction_replay_module,
-        "build_opportunity_coordinator",
-        lambda *_args, **_kwargs: Coordinator(),
-    )
-    one_minute = _aggregate(
-        "1m",
-        "2026-10-01T03:50:00+00:00",
-        "2026-10-01T03:51:00+00:00",
-        "2026-10-01T03:51:00+00:00",
-    )
-
-    replay_interaction_response(
-        {"1m": (one_minute,), "5m": ()},
-        ContextLocationReplay((), ()),
-        LocationRegistry("test"),
-        atr_by_session={"2026-10-01": 1.0},
-    )
-
-    assert calls == ["opening"]
-
-
-def test_timeout_expires_before_structure_admission(monkeypatch) -> None:
-    structure_saw_active: list[bool] = []
-    life = SetupOpportunity(
-        lifecycle_id="life-timeout",
-        direction=Direction.LONG,
-        session_date="2026-10-01",
-        instrument="NIFTY",
-        strategy="orderflow",
-        formation_at=datetime.fromisoformat("2026-10-01T03:44:00+00:00"),
-        formation_available_at=datetime.fromisoformat("2026-10-01T03:44:00+00:00"),
-        candidate_id="life-timeout",
-        parent_context=None,
-        location=None,
-        reference_level=100.0,
-        context_candle=None,
-        breakout_level=101.0,
-        failure_boundary=99.0,
-        timeout_limit=1,
-    )
-
-    class Coordinator:
-        def publish_interaction_context(self, *_args: Any) -> None:
-            pass
-
-        def handle_structure(self, *_args: Any) -> None:
-            structure_saw_active.append(life.active)
-
-        def handle_opening_interaction(self, *_args: Any) -> None:
-            pass
-
-    def build_coordinator(transition: Any, **_kwargs: Any) -> Coordinator:
-        assert transition.context.register_opportunity(life)
-        return Coordinator()
-
-    monkeypatch.setattr(
-        interaction_replay_module,
-        "build_opportunity_coordinator",
-        build_coordinator,
-    )
-    one_minute = _aggregate(
-        "1m",
-        "2026-10-01T03:50:00+00:00",
-        "2026-10-01T03:51:00+00:00",
-        "2026-10-01T03:51:00+00:00",
-    )
-    five_minute = _aggregate(
-        "5m",
-        "2026-10-01T03:45:00+00:00",
-        "2026-10-01T03:50:00+00:00",
-        "2026-10-01T03:50:00+00:00",
-    )
-
-    replay = replay_interaction_response(
-        {"1m": (one_minute,), "5m": (five_minute,)},
-        ContextLocationReplay((), ()),
-        LocationRegistry("test"),
-        atr_by_session={"2026-10-01": 1.0},
-    )
-
-    assert structure_saw_active == [False]
-    assert any(item["kind"] == "setup_expired" for item in replay.opportunity_facts)
 
 
 def test_pd_role_context_uses_post_contact_evidence_and_has_context_identity() -> None:

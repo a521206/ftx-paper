@@ -151,7 +151,7 @@ implementation and live is not a separate strategy implementation.
 - Replay input is bounded: the replay adapter feeds the same canonical decision
   boundary in timestamp order from stored bars. It may control the clock and
   capture mode, but it may not change policy calculations.
-- `ReplayMachine`-style orchestration, file loading, batch iteration, and replay
+- canonical replay orchestration, file loading, batch iteration, and replay
   capture must not be inserted into the live callback path.
 - Temporary phase/parity harnesses may load bounded Paper inputs and emit
   intermediate artifacts while the port is being verified, but they are not
@@ -316,7 +316,7 @@ Contract gate:
 ### Runtime Boundary Work
 
 The current canonical engine is replay-centered and is coordinated by
-`ReplayMachine`. Paper already has separate live and replay modes; this work
+the canonical replay pipeline. Paper already has separate live and replay modes; this work
 connects both modes to one ported canonical transition boundary.
 
 Required work:
@@ -340,7 +340,7 @@ Runtime boundary gate:
   canonical transition boundary.
 - Replaying a fixed prefix and feeding that prefix incrementally produce the same
   canonical state and event prefix.
-- No live callback calls `ReplayMachine` batch/file orchestration, and no replay
+- No live callback calls replay batch/file orchestration, and no replay
   path calls the live feed adapter.
 - Snapshot and recovery contracts are defined before policy-layer porting begins.
 
@@ -359,7 +359,7 @@ Phase 2 verification record:
   Phase 2 evidence.
 - The Paper adapters do not invoke each other, and no policy or Paper-native
   orderflow state machine was added. Later behavioral parity remains blocked
-  until the pinned `ReplayMachine` layers are ported and compared.
+  until the pinned canonical replay layers are ported and compared.
 
 This gate proves that the port is implementable; it does not prove behavioral
 parity. Behavioral parity remains blocked until the layer gates below pass against
@@ -509,7 +509,7 @@ source of truth for this phase. Paths are relative to
   measurement with source aggregate identity, availability, lineage, and a
   versioned calculation method.
 - `src/orderflow/state_machine.py`: canonical composition and chronological
-  ownership. Trace `ReplayMachine.__init__`, opening-reference resolution,
+  ownership. Trace canonical replay initialization, opening-reference resolution,
   `OpeningGapPolicy.transition`/`regime_for` calls, VWAP publication through
   `causal_vwap_prefix`, context publication through `ReplayContext.publish_context`,
   `publish_session_extrema`, and location resolution through
@@ -570,7 +570,7 @@ canonical evidence parity established on valid replay sessions. The pinned canon
 `C:\Users\agraw\Python\NiftyZoning` at commit
 `8114f553392ad01dd032aecfed0031a3bc08e2f8`. NiftyZoning does not expose a
 separate `EvidencePublication` or `AtrPublication` producer API. Its
-`ReplayMachine` is the orchestration owner, and its published evidence is the
+The canonical replay pipeline is the orchestration owner, and its published evidence is the
 source contract to port. Paper Phase 3.5 must therefore implement one reusable
 Paper-side boundary that reproduces the canonical publication sequence; it must
 not invent a second canonical producer API or claim that both repositories call
@@ -581,7 +581,7 @@ the same runtime function.
 Trace every ported symbol to the pinned canonical commit and preserve this
 ordering:
 
-1. `ReplayMachine.from_session_inputs` calls `observe_market`, derives
+1. The canonical replay input path calls `observe_market`, derives
    `SessionLevels`, creates a `LocationRegistry`, and publishes opening-range
    and prior-day levels with `daily_atr`.
 2. `value_publication.publish_value_references` supplies prior-session value
@@ -641,7 +641,7 @@ ordering:
   Phase 3 aggregate shape for the eligible parity dates `2026-10-01` and
   `2026-10-05`. Both sessions have matching Phase 3 manifests; Phase 3.5
   reports accepted `INPUT_VARIANCE` only where ATR source histories differ.
-- Canonical reference output is captured from `ReplayMachine` and
+- Canonical reference output is captured from the canonical replay pipeline and
   `state_machine_reporting`; Paper output is produced by the ported boundary.
   Parity is established against canonical output, not by importing NiftyZoning or
   requiring a shared runtime producer implementation.
@@ -665,7 +665,8 @@ ordering:
 - The producer validates the Phase 3 aggregate envelope, preserves explicit
   unavailable evidence, and invokes the ported ATR, session-level, extrema,
   VWAP, value, and context contracts through `EvidenceAdapter`.
-- `scripts/orderflow/orderflow_replay.py` runs an `OrderflowReplayEngine`
+- `scripts/orderflow/orderflow_replay.py` feeds canonical bundles into
+  `PaperOrderflowRuntime`
   against raw session rows selected through the Paper futures source resolver.
   It prepares prior-session inputs, derives observations, and emits one
   canonical-shaped replay record per source row with Phase 3.5 evidence as of
@@ -1441,9 +1442,9 @@ strategy architecture:
 
 - `context_location_replay.py` may compare explicit Phase 4 publications, but
   must not become the runtime context owner.
-- `interaction_replay.py` may exercise the ported interaction closure, but must
-  not independently publish Paper-derived strategy context or replace the
-  canonical chronological owner.
+- Comparison-only interaction harnesses may exercise the ported interaction
+  closure, but must not independently publish Paper-derived strategy context or
+  replace the canonical chronological owner.
 - `replay_pipeline.py` may run bounded comparison harnesses, but the production
   path must not replay Phase 4, then interaction policy, then Phase 4 again to
   reconstruct one canonical sequence.
@@ -1549,9 +1550,9 @@ canonical transition graph remains open.**
 - Replace the current split production sequence with one ported canonical owner.
   Context publication, interaction processing, Phase 4 capture, lifecycle
   advancement, and execution must occur in the same causal transition.
-- Treat `context_location_replay.py`, `interaction_replay.py`, and the replay
-  pipeline's Phase 4 rerun as temporary comparison tools until this owner is
-  complete. Do not add a host `ContextProvider` that computes strategy context.
+- Treat context/location comparison harnesses and the replay pipeline's Phase 4
+  rerun as temporary comparison tools until this owner is complete. Do not add
+  a host `ContextProvider` that computes strategy context.
 
 Exit gate: a fixed prefix produces the same canonical state, event, decision,
 execution, and parity prefix through live and bounded replay, without a second
@@ -1710,7 +1711,7 @@ Exit gate:
 
 The layer ports and host seams above do not by themselves establish the
 canonical ownership model. The current Paper implementation still has a split
-production path: `replay_pipeline.py` runs `ReplayMachine`, then the context /
+production path: `replay_pipeline.py` prepares input, then the shared runtime owns context /
 location replay, then interaction replay, and may run the context replay again
 from interaction-produced publications. `OrderflowTransitionOwner.snapshot()`
 also stores projections and emitted facts without the complete mutable state
@@ -1729,8 +1730,8 @@ the split replay modules as an acceptable production orchestration path.
   clock, cancellation, persistence, API, and paper-account adapters only.
 - Live and bounded replay call one observation transition. Replay may bound
   input and capture artifacts, but it may not add a second policy pass.
-- `context_location_replay.py`, `interaction_replay.py`, and the current
-  `replay_pipeline.py` sequence are comparison harnesses until their behavior
+- Context/location comparison harnesses and the current `replay_pipeline.py`
+  sequence are comparison harnesses until their behavior
   is absorbed by the canonical owner; they are not production policy engines.
 - A missing producer stream is `UNAVAILABLE` or `INCOMPLETE`, never an observed
   empty stream. Reports and terminal projections cannot recreate producer facts.
@@ -1776,8 +1777,8 @@ either removed or explicitly classified as a comparison-only harness.
 Replace the strategy logic in `OrderflowTransitionOwner` with construction,
 input normalization, clock/cancellation handling, notification routing, and
 Paper adapter calls around the ported canonical owner. Live and bounded replay
-must invoke the same one-observation method. Remove production imports and
-calls to `context_location_replay.py` and `interaction_replay.py`; retain them
+  must invoke the same one-observation method. Remove production imports and
+  calls to context/location comparison harnesses; retain them
 only behind explicitly named comparison commands/tests. Remove the Phase 4
 rerun and any replay path that feeds interaction-generated context back into a
 second strategy pass.
@@ -1843,8 +1844,8 @@ recompute strategy state.
 ### Phase H - Retire Transitional Engines And Integrate Production
 
 After all preceding gates pass, remove duplicate Paper policy helpers and
-production dependencies on `context_location_replay.py`, `interaction_replay.py`,
-the split `replay_pipeline.py` orchestration, and any `ReplayMachine` wrapper
+production dependencies on context/location comparison harnesses, the split
+`replay_pipeline.py` orchestration, and any replay-machine wrapper
 that remains a second owner. Retain only the smallest host adapter and
 comparison tooling needed for regression diagnosis. Run the complete focused
 canonical parity matrix, Paper tests, Ruff, Pyright, and diff review before
