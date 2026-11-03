@@ -417,6 +417,13 @@ class ReplayContext:
                 if stream == "opportunity_lifecycle" else
                 (str(event_data.get("neutral_event_key", event_data.get("event_id", ""))), _parity_safe(event_data))
             )
+            if stream == "interaction_response" and isinstance(event_data.get("values"), Mapping):
+                values.pop("values", None)
+                values.update(_parity_safe(event_data["values"]))
+                if not values.get("session_date"):
+                    values["session_date"] = self.current_session_date or str(
+                        _parity_safe(observed_at)
+                    )[:10]
             self.record_parity_fact(str(stream), {
                 "kind": str(event_data.get("kind", "")),
                 "occurred_at": _parity_safe(observed_at),

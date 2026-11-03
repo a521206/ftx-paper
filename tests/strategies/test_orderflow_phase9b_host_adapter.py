@@ -410,6 +410,28 @@ def test_transition_owner_records_5m_source_fact_with_1m_lineage() -> None:
     ]
 
 
+def test_interaction_response_fact_flattens_nested_event_values() -> None:
+    context = OrderflowTransitionOwner(LocationRegistry("test")).context
+    context.current_session_date = "2026-10-05"
+    events: list[dict] = []
+
+    context.emit({
+        "kind": "location_interaction_observed",
+        "parity_stream": "interaction_response",
+        "observed_at": "2026-10-05T09:19",
+        "available_at": "2026-10-05T09:20",
+        "values": {"interaction_id": "interaction-1", "location": "OR_HIGH"},
+    }, events)
+
+    fact = context.parity_streams["interaction_response"][0]
+    assert fact["values"]["interaction_id"] == "interaction-1"
+    assert fact["values"]["location"] == "OR_HIGH"
+    assert fact["values"]["causal_available_at"] == "2026-10-05T09:20"
+    assert fact["values"]["session_date"] == "2026-10-05"
+    assert "values" not in fact["values"]
+    assert events[0]["values"] == {"interaction_id": "interaction-1", "location": "OR_HIGH"}
+
+
 def test_coordinator_emits_gap_for_missing_5m_location_observation() -> None:
     registry = LocationRegistry("test")
     registry.register_opening_range(
