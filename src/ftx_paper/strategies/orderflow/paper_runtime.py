@@ -14,6 +14,8 @@ from .boundary.orderflow_config import OrderflowConfig
 from .coordinator import OrderflowClockInput
 from .execution import ExecutionCoordinator
 from .execution_adapter import OrderflowExecutionAdapter
+from .evidence.serialization import evidence_payload
+from .evidence_publication import publish_phase4a_evidence
 from .opportunity_coordinator import LifecycleFormation
 from .state_machine_types import LocationRegistry
 from .transition import OrderflowTransitionOwner
@@ -144,7 +146,27 @@ class PaperOrderflowRuntime:
 
     def parity_payload(self, rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
         """Project only producer-owned facts emitted by the canonical owner."""
-        return build_replay_payload(self.transition_owner, [], [], [dict(row) for row in rows], capture_mode="replay")
+        payload = build_replay_payload(
+            self.transition_owner, [], [], [dict(row) for row in rows], capture_mode="replay",
+        )
+        provider = self.strategy._clock_input_provider
+        envelopes = getattr(provider, "envelopes", ())
+        if envelopes:
+            latest = envelopes[-1].input
+            publication = publish_phase4a_evidence(
+                atr=latest.atr,
+                locations=self.transition_owner.location_registry.records.values(),
+                vwap_measurements=latest.vwap_measurements,
+                prior_value=latest.prior_value,
+                unavailable=envelopes[-1].unavailable,
+                location_stream_id=self.transition_owner.location_registry.stream_id,
+            )
+            payload["evidence"] = evidence_payload({
+                "session_date": rows[0].get("session_date") if rows else None,
+                "source_fingerprint": None,
+                "publication": publication,
+            })["evidence"]
+        return payload
 
 
 __all__ = ["PaperOrderflowRuntime"]

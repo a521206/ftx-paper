@@ -74,3 +74,27 @@ def test_execution_notifications_are_recorded_by_canonical_owner_once() -> None:
     streams = runtime.transition_owner.parity_streams
     assert len(streams["execution_transitions"]) == 1
     assert streams["execution_transitions"][0]["kind"] == "filled"
+
+
+def test_parity_payload_publishes_phase35_evidence_shape() -> None:
+    rows = [
+        {
+            "time": f"2026-10-01T09:{15 + index:02d}",
+            "open": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+            "close": 100.0,
+            "volume": 1,
+            "oi": 0,
+            "symbol": "NIFTY",
+            "expiry": "",
+            "contract_type": "FUT",
+            "session_date": "2026-10-01",
+        }
+        for index in range(5)
+    ]
+
+    payload = PaperOrderflowRuntime.from_rows(rows).parity_payload(rows)
+
+    assert isinstance(payload["evidence"], dict)
+    assert isinstance(payload["evidence"]["atr"], dict)
