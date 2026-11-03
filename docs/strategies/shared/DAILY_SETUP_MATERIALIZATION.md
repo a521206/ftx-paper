@@ -32,10 +32,11 @@ and before the next session.
 
 ### Orderflow replay hot path
 
-The replay input pipeline constructs a `PaperFeatureAdapter`
-with `_prior_values(rows_by_date)`. `_prior_values()` walks every available
-session, finds the preceding session, rebuilds the canonical value profile, and
-converts the resulting reference into `ValuePublication`.
+The replay input pipeline constructs a `CanonicalInputProvider`. Its current
+`_build()` path constructs a `PaperFeatureAdapter` with
+`build_prior_values(rows_by_date)`. `build_prior_values()` walks every supplied
+session, finds each preceding trading session, rebuilds the canonical value
+profile, and converts the resulting reference into `ValuePublication`.
 
 This has three undesirable properties:
 
@@ -48,10 +49,17 @@ The current fallback is an explicit unavailable publication with reason
 `missing_prior_session_value_evidence`. That explicit unavailable behavior is
 preserved; it must not become a silent recomputation or guessed value.
 
+Replay has other historical dependencies that are not replaced by this task.
+Warmup bars remain available for recursive ATR and any other explicitly
+declared causal inputs. The prior-value artifact replaces only the historical
+profile/publication calculation. The replay provider must not call
+`build_prior_values()` or rebuild daily value profiles when the artifact is
+available or when it is missing.
+
 ### Existing canonical contracts
 
-The canonical value-profile implementation already provides the required
-domain and provenance contracts:
+The canonical value-profile implementation provides the domain contracts and
+provenance primitives used by the task:
 
 - `DailyProfileRecord`
 - `ValueProfileSnapshot`
@@ -61,7 +69,8 @@ domain and provenance contracts:
 
 The existing profile code also provides:
 
-- aggregate source fingerprints;
+- aggregate source fingerprints (the artifact adds normalized-bar and selected
+  contract identity);
 - profile configuration/session-window fingerprints;
 - profile algorithm versions;
 - deterministic daily snapshot identities;
@@ -138,6 +147,12 @@ DailySetupTask(
 The task implementation remains under `ftx_paper.strategies`. Source access,
 artifact I/O, job lifecycle, and scheduling remain outside the strategy.
 
+The registry is an explicit composition-time mapping of `(strategy_id, task_id)`
+to a trusted task object. Requests never import or execute a task by module
+path. Unknown strategy/task pairs are rejected before a job is queued. Task
+execution is single-owner within the API process; concurrent jobs for the same
+task, configuration identity, and overlapping session scope are serialized.
+
 ### Worker execution modes
 
 The worker supports three operational modes:
@@ -150,6 +165,11 @@ The worker supports three operational modes:
 The first deployment runs one large `catch_up`. Normal scheduling runs
 `incremental`, which first verifies historical coverage and then processes the
 latest finalized session. Processing is idempotent and chronological.
+
+`catch_up`, `incremental`, and `rebuild` are the only mode values. `research` is
+not a mode: it is an isolated output profile selected by `output_root` and may
+only be used with `rebuild`. CLI and API spellings use the same underscore
+values.
 
 ## Orderflow Materializer
 
@@ -165,6 +185,22 @@ For finalized session `D`, the materializer creates the daily profile record
 for `D`. It then creates the publication artifact consumed by target session
 `D+1`.
 
+`D+1` means the next date in the authoritative trading-session calendar, not
+the next calendar date. A source session is eligible only when its selected
+source reaches the configured finalization boundary: the last completed bar
+ends at the session close, the expected bar timestamps are present, and the
+source contains no gaps. Missing or late data leaves the session pending; it
+does not create an available profile. An explicitly incomplete profile may be
+written only when the task policy declares unavailable output valid.
+
+A session remains pending while its source may still be finalized. Once the
+configured finalization deadline has passed, the source reader evaluates the
+same completeness rules again. If the source is still missing, late, or gapped,
+the task writes an explicit unavailable artifact when its policy permits that
+output; otherwise the session is recorded as failed and no available catalog
+entry is published. A later source correction invalidates that unavailable
+artifact and may replace it through the normal immutable rebuild path.
+
 The implementation must use the canonical daily-profile/value-publication
 contracts. It must not copy policy into the generic worker or recreate a
 second value-profile algorithm.
@@ -173,6 +209,13 @@ The target publication should be derived from the finalized daily profile of
 the immediately preceding trading session. If exact canonical behavior still
 requires active-session input, the canonical producer boundary must be
 adapted explicitly; the materializer must not approximate it.
+
+The parity criterion is that a publication produced from the finalized `D`
+record is equivalent in domain values, lineage, observed time, and target-
+session availability to the current canonical `publish_value_references()`
+result. Until that criterion is demonstrated, the orderflow task remains in
+validation mode and replay may use the legacy path only in an explicit
+comparison command.
 
 ## Artifact Model
 
@@ -196,9 +239,21 @@ Every derived artifact uses a versioned JSON envelope:
   "created_at": "2026-11-02T03:45:00Z",
   "source": {
     "sessions": ["2026-11-01"],
+    "selected_source": {
+      "exchange": "NFO",
+      "symbol": "NIFTY",
+      "expiry": "2026-11-26",
+      "contract_type": "FUTURES",
+      "rollover_policy_version": "dated-front.v1"
+    },
     "source_fingerprints": ["..."],
     "source_fingerprint_recipe": "ordered-canonical-bars-v1",
-    "source_bar_count": 375
+    "source_bar_count": 375,
+    "session_finalization": {
+      "timezone": "Asia/Kolkata",
+      "close": "15:30",
+      "finalized_at": "2026-11-01T10:00:00Z"
+    }
   },
   "configuration": {
     "config_fingerprint": "...",
@@ -220,6 +275,20 @@ Every derived artifact uses a versioned JSON envelope:
 Timestamps are UTC ISO-8601 values. JSON uses sorted keys, stable ordering,
 compact canonical serialization for hashing, and readable indentation only for
 the stored representation if desired.
+
+The payload digest is the SHA-256 of the canonical compact serialization of
+`payload` only. `artifact_sha256` is the SHA-256 of the canonical compact
+serialization of the complete envelope with the `manifest` member omitted.
+`manifest.payload_sha256` and `manifest.artifact_sha256` are then inserted into
+the stored envelope. Readers recreate these two preimages exactly; neither
+digest includes its own manifest member or formatting whitespace.
+
+`source.sessions` contains the exact trading sessions contributing to the
+payload. `target_session` is the session that consumes the artifact. The
+profile's `observed_at` is the last source observation used to finalize `D`;
+the publication's `available_at` is the earliest target-session clock at which
+the reference is allowed to be consumed. Materialization `created_at` is
+operational metadata and is not substituted for either domain timestamp.
 
 ### Available and unavailable output
 
@@ -255,7 +324,7 @@ An available orderflow payload is serialized as:
       "..."
     ]
   },
-  "observed_at": "2026-11-02T03:45:00Z",
+  "observed_at": "2026-11-01T10:00:00Z",
   "available_at": "2026-11-02T03:45:00Z",
   "lineage": [
     "vp:daily:2026-11-01:...",
@@ -267,6 +336,10 @@ An available orderflow payload is serialized as:
 
 An unavailable publication has `reference: null`, no timestamps, an empty
 lineage, and a required reason.
+
+The artifact reader must reject an unavailable payload if `reference` is not
+null, either timestamp is present, lineage is non-empty, or the reason is
+missing. These are payload invariants, not advisory serialization conventions.
 
 Replay reconstructs domain objects in this order:
 
@@ -287,6 +360,8 @@ Artifacts are immutable. A small catalog is the only mutable pointer:
   "strategy_id": "ftx-paper-orderflow",
   "task_id": "prior-session-value",
   "algorithm_version": "orderflow.prior-session-value.v1",
+  "config_fingerprint": "...",
+  "instrument": "NIFTY",
   "entries": {
     "2026-11-02": {
       "status": "available",
@@ -297,7 +372,12 @@ Artifacts are immutable. A small catalog is the only mutable pointer:
 }
 ```
 
-The catalog must never point to a partially written artifact.
+The catalog identity is `(strategy_id, task_id, algorithm_version,
+config_fingerprint, instrument)`. Each catalog entry is additionally keyed by
+target session and selected source-contract identity. The catalog must never
+point to a partially written artifact. API artifact lookup must provide the
+instrument and configuration identity (or resolve them from an unambiguous
+task declaration); target session alone is not a sufficient key.
 
 ### Directory layout
 
@@ -330,6 +410,7 @@ An artifact is valid only when all identity inputs match:
 - source fingerprint;
 - source fingerprint recipe;
 - source session set and bar count;
+- selected exchange, symbol, expiry, contract type, and rollover-policy version;
 - profile configuration fingerprint;
 - session specification;
 - profile version;
@@ -338,9 +419,10 @@ An artifact is valid only when all identity inputs match:
 - task contract version;
 - artifact and payload digests.
 
-The source fingerprint must be computed over normalized, ordered source bars.
-Source identity such as symbol, expiry, contract type, and rollover policy is
-stored separately from the virtual continuous identity.
+The source fingerprint must be computed over normalized, ordered source bars,
+including normalized OHLCV/open-interest values and source timestamps. The
+selected storage contract identity is stored separately from the virtual
+continuous identity, and both identities participate in validation.
 
 Any mismatch makes the artifact stale. A rebuild writes a new immutable
 artifact and atomically changes the catalog pointer. It never overwrites the
@@ -377,8 +459,12 @@ On startup:
 ### Missing
 
 Normal replay does not rebuild a missing artifact. It returns an explicit
-`derived_artifact_unavailable` result. A production strategy that requires the
-artifact must fail closed or remain unavailable according to its task policy.
+`derived_artifact_unavailable` result. This is an intentional behavior change
+from the current path, which recomputes from historical rows. A production
+strategy that requires the artifact must fail closed or remain unavailable
+according to its task policy. The replay run remains `completed` when the
+strategy contract permits explicit unavailable evidence; it is `failed` when
+the task policy marks the artifact as required.
 
 ### Stale
 
@@ -410,7 +496,9 @@ record the failure, and require explicit rebuild or repair.
 ```
 
 Supported modes are `catch_up`, `incremental`, and `rebuild`. Research rebuilds
-also use an isolated output root and must not replace production pointers.
+use `mode: "rebuild"` with an isolated `output_root`; they must not replace
+production pointers. `--mode catch-up` and `--mode research` are not accepted
+spellings.
 
 ### Result
 
@@ -444,7 +532,7 @@ The API should expose generic setup operations:
 POST /api/v1/setup-runs
 GET  /api/v1/setup-runs/{job_id}
 POST /api/v1/setup-runs/{job_id}/cancel
-GET  /api/v1/strategies/{strategy_id}/setup-artifacts/{task_id}/{session_date}
+GET  /api/v1/strategies/{strategy_id}/setup-artifacts/{task_id}/{instrument}/{session_date}?config_fingerprint=...
 ```
 
 ### CLI
@@ -454,7 +542,7 @@ The CLI is a thin loopback API client, analogous to `ftx-paper-replay`:
 ```text
 ftx-paper-setup --strategy-id ftx-paper-orderflow \
   --task-id prior-session-value \
-  --mode catch-up \
+  --mode catch_up \
   --through 2026-11-01
 ```
 
@@ -466,6 +554,13 @@ ftx-paper-setup --mode incremental
 
 The CLI must not instantiate `RuntimeSession`, a broker, or a second replay
 engine.
+
+The worker persists job state transitions before and after each session. An
+artifact publish is idempotent: an immutable artifact is validated before the
+catalog pointer changes. If artifact publication succeeds but job persistence
+fails, the next run re-reads and validates the artifact, then repairs the job
+state without recomputing it. Cancellation stops between sessions and never
+removes a previously valid catalog entry.
 
 ## Scheduling and Ownership
 
@@ -489,14 +584,20 @@ The replay input pipeline should receive a derived-artifact reader. The normal
 replay sequence becomes:
 
 1. Load the requested market session.
-2. Load the target session's setup artifact from the catalog.
-3. Validate schema, contract, algorithm version, source/config fingerprints,
-   and digest.
-4. Reconstruct `ValuePublication`.
-5. Inject the publication into `PaperFeatureAdapter`.
-6. Run chronological evidence and decision replay.
+2. Load the target session's setup artifact from the catalog using the task's
+   instrument and configuration identity.
+3. Use the artifact's declared source session set and selected contract
+   identity to derive the expected normalized source-bar fingerprint, source
+   session set, and bar count through the `SourceReader` port. The target
+   session's replay bars alone are not sufficient when the source is the prior
+   trading session.
+4. Validate schema, contract, algorithm version, source/configuration identity,
+   the derived source identity, and digest.
+5. Reconstruct `ValuePublication`.
+6. Inject the publication into `PaperFeatureAdapter`.
+7. Run chronological evidence and decision replay.
 
-Replay must not call `_prior_values()` in the normal path and must not rebuild
+Replay must not call `build_prior_values()` in the normal path and must not rebuild
 static value profiles from historical rows.
 
 The existing as-of rule remains active: if a publication's `available_at` is
@@ -511,7 +612,7 @@ contract. If an artifact is absent or stale, research replay fails explicitly.
 An operator may request an explicit rebuild:
 
 ```text
-ftx-paper-setup --mode research \
+ftx-paper-setup --mode rebuild \
   --strategy-id ftx-paper-orderflow \
   --task-id prior-session-value \
   --from 2024-01-01 \
@@ -523,7 +624,7 @@ ftx-paper-setup --mode research \
 Research output is isolated by root and algorithm/configuration identity. It is
 never silently promoted to production artifacts.
 
-## Migration from `_prior_values()`
+## Migration from `build_prior_values()`
 
 ### Phase 1: Generic infrastructure
 
@@ -540,7 +641,7 @@ and unavailable reasons.
 ### Phase 3: Initial catch-up
 
 Run one explicit historical catch-up and compare materialized publications
-against the current `_prior_values()` output and canonical replay artifacts.
+against the current `build_prior_values()` output and canonical replay artifacts.
 
 ### Phase 4: Dual-read validation
 
@@ -550,12 +651,12 @@ approved canonical algorithm/version change.
 
 ### Phase 5: Replay cutover
 
-Change replay to read artifacts and remove `_prior_values()` from the normal
+Change replay to read artifacts and remove `build_prior_values()` from the normal
 path. Keep it only behind an explicit migration/rebuild command temporarily.
 
 ### Phase 6: Remove legacy path
 
-After coverage and parity are established, delete `_prior_values()` and any
+After coverage and parity are established, delete `build_prior_values()` and any
 replay-only static value-profile reconstruction.
 
 ## Testing and Validation
@@ -573,7 +674,7 @@ Tests should cover:
 - catch-up ordering and latest-session reconciliation;
 - idempotent reruns;
 - interrupted job recovery;
-- replay not invoking `_prior_values()`;
+- replay not invoking `build_prior_values()`;
 - explicit research rebuild isolation;
 - canonical parity for prior-session publication.
 
@@ -593,17 +694,15 @@ Relevant existing coverage includes:
 - `tests/strategies/test_orderflow_features.py`;
 - `tests/strategies/test_orderflow_phase_comparison.py`.
 
-## Risks and Decisions Required
+## Remaining Decisions
 
-- Confirm the market-data finalization cutoff.
-- Confirm the authoritative publication availability timestamp.
-- Confirm that a finalized daily profile alone preserves exact canonical
-  `publish_value_references()` semantics.
 - Define retention and garbage collection for old source/config/version
   artifacts.
 - Decide whether missing required setup evidence blocks runtime startup or only
   the affected strategy.
 - Decide whether setup job lifecycle rows belong in the existing runtime store
-  or a separate operational store.
-- Define task dependency DAG support or begin with a deterministic ordered list.
+  or a separate operational store. The first implementation should use the
+  existing operational store unless isolation is required by deployment.
+- Begin with a deterministic ordered task list; add a dependency DAG only when
+  a task requires it.
 - Test Windows rename and flush behavior explicitly before production use.
