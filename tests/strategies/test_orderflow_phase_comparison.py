@@ -101,9 +101,44 @@ def test_phase35_projection_uses_ordinary_context_references() -> None:
     })
 
     assert projected["contexts"] == [{
-        "context_id": "5m-context-NIFTY-2026-10-05-1m_5m",
+        "context_id": "ctx",
         "version": "v1",
     }]
+
+
+def test_phase35_projection_repeats_context_refs_at_replay_bar_times() -> None:
+    context_id = "5m-context-NIFTY-2026-10-05-1m_5m"
+    projected = _paper_phase35_projection({
+        "session_date": "2026-10-05",
+        "evidence": {
+            "atr": None,
+            "locations": [],
+            "contexts": [
+                {
+                    "context_id": context_id,
+                    "version": "v1",
+                    "available_at": "2026-10-05T03:50:00Z",
+                },
+                {
+                    "context_id": context_id,
+                    "version": "v2",
+                    "available_at": "2026-10-05T03:55:00Z",
+                },
+            ],
+        },
+        "replay_records": [
+            {"bar": {"time": "09:19"}},
+            {"bar": {"time": "09:20"}},
+            {"bar": {"time": "09:21"}},
+            {"bar": {"time": "09:25"}},
+        ],
+    })
+
+    assert projected["contexts"] == [
+        {"context_id": context_id, "version": "v1"},
+        {"context_id": context_id, "version": "v1"},
+        {"context_id": context_id, "version": "v2"},
+    ]
 
 
 def test_phase35_comparison_ignores_atr_lineage_when_values_match() -> None:

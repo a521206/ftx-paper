@@ -604,26 +604,55 @@ def _paper_phase35_projection(session_result: dict[str, Any]) -> dict[str, Any]:
             if isinstance(item, dict) and item.get("frozen_atr") is not None
         ],
     } if isinstance(raw_atr, dict) else raw_atr
-    # The causal publication carries full MarketContext objects. Canonical
-    # Phase 3.5 compares only ordinary-context references; interaction context
-    # publications belong to later lifecycle evidence.
+    # Canonical Phase 3.5 emits the current ordinary-context reference on each
+    # replay record. Resolve Paper publications at those same causal bar times.
     contexts: list[dict[str, Any]] = []
     raw_contexts = raw.get("contexts", [])
+    ordinary_contexts = []
     if isinstance(raw_contexts, list):
-        seen_contexts: set[tuple[str, str]] = set()
         for item in raw_contexts:
             if not isinstance(item, dict):
                 continue
             context_id = item.get("context_id")
             version = item.get("version")
-            if not isinstance(context_id, str) or not isinstance(version, str):
+            available_at = item.get("available_at")
+            if (
+                isinstance(context_id, str)
+                and not context_id.startswith("interaction:")
+                and isinstance(version, str)
+                and isinstance(available_at, str)
+            ):
+                ordinary_contexts.append((
+                    parse_utc(available_at),
+                    {"context_id": context_id, "version": version},
+                ))
+    replay_records = session_result.get("replay_records", [])
+    if isinstance(replay_records, list):
+        ordinary_contexts.sort(key=lambda item: item[0])
+        for record in replay_records:
+            if not isinstance(record, dict):
                 continue
-            if context_id.startswith("interaction:"):
+            explicit_reference = record.get("ordinary_context_ref")
+            if isinstance(explicit_reference, dict):
+                if isinstance(explicit_reference.get("context_id"), str) and isinstance(explicit_reference.get("version"), str):
+                    contexts.append({
+                        "context_id": explicit_reference["context_id"],
+                        "version": explicit_reference["version"],
+                    })
                 continue
-            identity = (context_id, version)
-            if identity not in seen_contexts:
-                seen_contexts.add(identity)
-                contexts.append({"context_id": context_id, "version": version})
+            bar = record.get("bar")
+            if not isinstance(bar, dict) or not isinstance(bar.get("time"), str):
+                continue
+            available = parse_session_timestamp(
+                str(session_result.get("session_date", "")), bar["time"],
+            )
+            current = None
+            for published_at, reference in ordinary_contexts:
+                if published_at > available:
+                    break
+                current = reference
+            if current is not None:
+                contexts.append(current)
     raw_prior = raw.get("prior_value")
     prior_value = raw_prior
     if isinstance(raw_prior, dict) and isinstance(raw_prior.get("reference"), dict):
