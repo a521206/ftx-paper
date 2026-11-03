@@ -42,7 +42,7 @@ _EXECUTION_GROUP_ID = re.compile(
 )
 _CONTRACT_METADATA_FIELDS = frozenset({
     "instrument", "instrument_type", "symbol", "tradingsymbol", "exchange",
-    "expiry", "contract_type", "series", "strike", "option_type",
+    "expiry", "series", "strike", "option_type",
     "token", "instrument_token", "security_id",
 })
 
@@ -58,6 +58,20 @@ def _comparison_value(value: Any) -> Any:
     if isinstance(value, list):
         return [_comparison_value(item) for item in value]
     return value
+
+
+def _without_contract_type(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _without_contract_type(item)
+            for key, item in value.items()
+            if key != "contract_type"
+        }
+    if isinstance(value, list):
+        return [_without_contract_type(item) for item in value]
+    return value
+
+
 def validate_contract_declarations(
     phase_streams: Mapping[str, Any], layers: Mapping[str, Any]
 ) -> None:
@@ -140,7 +154,7 @@ def normalize_phase_record(record: Mapping[str, Any], *, sequence: int) -> dict[
     missing = required - set(record)
     if missing:
         raise ValueError(f"phase record missing {sorted(missing)}")
-    result = _normalize_embedded_ids(_copy(record))
+    result = _normalize_embedded_ids(_without_contract_type(_copy(record)))
     result["occurred_at"] = _timestamp(result["occurred_at"])
     result["observed_at"] = _timestamp(result["observed_at"])
     result["available_at"] = _timestamp(result["available_at"])
@@ -169,7 +183,7 @@ def _normalize_record(
     missing = required - set(record)
     if missing:
         raise ValueError(f"{stream} record missing {sorted(missing)}")
-    result = _normalize_embedded_ids(_copy(record))
+    result = _normalize_embedded_ids(_without_contract_type(_copy(record)))
     result["occurred_at"] = _timestamp(result["occurred_at"])
     result["observed_at"] = _timestamp(result["observed_at"])
     result["available_at"] = _timestamp(result["available_at"])

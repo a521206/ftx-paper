@@ -48,7 +48,7 @@ def test_opening_seed_remains_provisional(monkeypatch) -> None:
     candle = Aggregate(
         "2026-10-01T09:15", "2026-10-01T09:19", "2026-10-01T09:20",
         "5m", 5, 100.0, 102.0, 99.0, 101.0, 100,
-        "NIFTY", "", "FUT", "2026-10-01", "opening",
+        "NIFTY", "", "2026-10-01", "opening",
     )
     from ftx_paper.strategies.orderflow import opportunity_coordinator as module
 

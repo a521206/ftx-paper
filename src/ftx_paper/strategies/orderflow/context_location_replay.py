@@ -254,7 +254,7 @@ def replay_context_location_artifact(
                 coerce_timestamp(str(item["time"])), coerce_timestamp(str(item["end_time"])), coerce_timestamp(str(item["available_at"])),
                 timeframe, int(item["source_bar_count"]), numbers["open"], numbers["high"],
                 numbers["low"], numbers["close"], int(item["volume"]), str(item["symbol"]),
-                str(item["expiry"]), str(item["contract_type"]), str(item["session_date"]),
+                str(item["expiry"]), str(item["session_date"]),
                 str(item["source_fingerprint"]),
             )
             if coerce_timestamp(aggregate.available_at) < coerce_timestamp(aggregate.end_time):

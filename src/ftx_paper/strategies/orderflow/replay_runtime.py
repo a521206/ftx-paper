@@ -46,7 +46,7 @@ def _bundles(rows: Sequence[Mapping[str, Any]]) -> tuple[DecisionBundle, ...]:
             instrument=Instrument(
                 symbol=str(row.get("symbol", "NIFTY")),
                 exchange=str(row.get("exchange", "NFO")),
-                instrument_type=str(row.get("contract_type", "FUTURES")),
+                instrument_type="FUTURES",
                 expiry=str(row.get("expiry", "")) or None,
             ),
             timestamp=timestamp,

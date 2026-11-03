@@ -38,7 +38,7 @@ def _rows(source: Any, session_date: str) -> list[dict[str, Any]]:
             "time": str(row["minute"]), "open": float(row["open"]), "high": float(row["high"]),
             "low": float(row["low"]), "close": float(row["close"]), "volume": int(row.get("volume") or 0),
             "oi": int(row.get("open_interest") or 0), "symbol": "NIFTY", "exchange": str(row.get("exchange", "NFO")), "expiry": "",
-            "contract_type": "CONTINUOUS", "session_date": session_date,
+            "session_date": session_date,
         })
     return result
 
@@ -49,7 +49,6 @@ def _selected_source(source: Any) -> dict[str, Any]:
         "exchange": source.identity.exchange,
         "symbol": "NIFTY",
         "expiry": "",
-        "contract_type": "CONTINUOUS",
         "storage_identity": {
             "symbol": source.identity.symbol,
             "exchange": source.identity.exchange,
@@ -203,7 +202,7 @@ def build_prior_session_levels_task(store: RuntimeStore, artifact_store: SetupAr
                 unavailable += 1
             source = {
                 "sessions": [prior] if prior is not None and available else [],
-                "selected_source": _selected_source(prior_source) if prior_source is not None else {"symbol": "NIFTY", "expiry": "", "contract_type": "CONTINUOUS"},
+                "selected_source": _selected_source(prior_source) if prior_source is not None else {"symbol": "NIFTY", "expiry": ""},
                 "source_fingerprints": [source_fp], "source_fingerprint_recipe": "normalized-continuous-bars-v1",
                 "source_bar_count": len(prior_rows),
                 "ordered_unique_minutes": provenance.get("ordered_unique_minutes", False),
@@ -276,7 +275,7 @@ def build_daily_atr_task(store: RuntimeStore, artifact_store: SetupArtifactStore
             if value is None or source_date is None:
                 envelope = build_payload_envelope(
                     strategy_id=STRATEGY_ID, task_id=ATR_TASK_ID, algorithm_version=ATR_ALGORITHM_VERSION,
-                    target_session=target, source={"sessions": completed_dates[:source_index] if source_index is not None else [], "selected_source": _selected_source(sources_by_date[completed_dates[source_index - 1]]) if source_index else {"symbol": "NIFTY", "expiry": "", "contract_type": "CONTINUOUS"}, "source_bar_count": len(source_rows)},
+                    target_session=target, source={"sessions": completed_dates[:source_index] if source_index is not None else [], "selected_source": _selected_source(sources_by_date[completed_dates[source_index - 1]]) if source_index else {"symbol": "NIFTY", "expiry": ""}, "source_bar_count": len(source_rows)},
                     configuration={"config_fingerprint": identity["config_fingerprint"], "symbol": "NIFTY", "period": 14, "method": "wilder"},
                     payload=None, status="unavailable", unavailable_reason="insufficient_daily_atr_history",
                 )
@@ -287,7 +286,7 @@ def build_daily_atr_task(store: RuntimeStore, artifact_store: SetupArtifactStore
                 available = parse_nifty_label(f"{target}T09:15")
                 envelope = build_payload_envelope(
                     strategy_id=STRATEGY_ID, task_id=ATR_TASK_ID, algorithm_version=ATR_ALGORITHM_VERSION,
-                    target_session=target, source={"sessions": completed_dates[:completed_source_count], "selected_source": _selected_source(sources_by_date[source_date]) if source_date else {"symbol": "NIFTY", "expiry": "", "contract_type": "CONTINUOUS"}, "source_fingerprints": [source_fingerprint], "source_fingerprint_recipe": "ordered-storage-sources-v1", "source_bar_count": len(source_rows), "completed_session_count": completed_source_count},
+                    target_session=target, source={"sessions": completed_dates[:completed_source_count], "selected_source": _selected_source(sources_by_date[source_date]) if source_date else {"symbol": "NIFTY", "expiry": ""}, "source_fingerprints": [source_fingerprint], "source_fingerprint_recipe": "ordered-storage-sources-v1", "source_bar_count": len(source_rows), "completed_session_count": completed_source_count},
                     configuration={"config_fingerprint": identity["config_fingerprint"], "symbol": "NIFTY", "period": 14, "method": "wilder"},
                     payload={"target_session": target, "source_session": source_date, "symbol": "NIFTY", "period": 14, "method": "wilder", "value": value,
                              "observed_at": serialize_utc(observed), "available_at": serialize_utc(available),

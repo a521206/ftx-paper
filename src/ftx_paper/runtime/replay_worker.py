@@ -71,7 +71,6 @@ def _source_replay_records(
                 "oi": int(bar.open_interest or 0),
                 "symbol": "NIFTY",
                 "expiry": "",
-                "contract_type": "CONTINUOUS",
                 "session_date": session_date,
             },
         }

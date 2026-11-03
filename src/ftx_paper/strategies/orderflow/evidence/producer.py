@@ -50,7 +50,7 @@ def _aggregate(value: object, *, timeframe: str) -> Aggregate:
     required = {
         "time", "end_time", "available_at", "timeframe", "source_bar_count",
         "open", "high", "low", "close", "volume", "symbol", "expiry",
-        "contract_type", "session_date", "source_fingerprint",
+        "session_date", "source_fingerprint",
     }
     if not required <= set(value):
         raise ValueError(f"Phase 3 {timeframe} aggregate is incomplete")
@@ -66,7 +66,6 @@ def _aggregate(value: object, *, timeframe: str) -> Aggregate:
         _number(value["high"], "high"), _number(value["low"], "low"),
         _number(value["close"], "close"), _integer(value["volume"], "volume"),
         _text(value["symbol"], "symbol"), _text(value["expiry"], "expiry"),
-        _text(value["contract_type"], "contract_type"),
         _text(value["session_date"], "session_date"), aggregate_fingerprint,
     )
 

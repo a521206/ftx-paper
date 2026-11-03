@@ -253,10 +253,10 @@ def test_unified_comparison_ignores_record_contract_metadata() -> None:
         "observed_at": "2026-10-01T09:20:00Z",
         "available_at": "2026-10-01T09:20:00Z", "sequence": 0,
         "identity": "candidate-1", "causal_parent_id": None,
-        "values": {"direction": "long", "instrument": "NIFTY-I", "expiry": "2026-01", "series": "I"},
+        "values": {"direction": "long", "instrument": "NIFTY-I", "expiry": "2026-01", "series": "I", "contract_type": "CONTINUOUS"},
         "unavailable": [],
     }
-    other = {**record, "values": {**record["values"], "instrument": "NIFTY", "expiry": "2026-02", "series": "II"}}
+    other = {**record, "values": {**record["values"], "instrument": "NIFTY", "expiry": "2026-02", "series": "II", "contract_type": "FUT"}}
     common = {
         "parity_phase_facts": {name: [] for name in PHASE_STREAMS},
         "parity_coverage": {**coverage, "layers": {**coverage["layers"], "decision": {
@@ -269,6 +269,8 @@ def test_unified_comparison_ignores_record_contract_metadata() -> None:
     left = build_parity_artifact_from_payload(left_payload, run_id="left", producer={"name": "canonical"})
     right = build_parity_artifact_from_payload(right_payload, run_id="right", producer={"name": "paper"})
 
+    assert "contract_type" not in left["layers"]["decision"][0]["values"]
+    assert "contract_type" not in right["layers"]["decision"][0]["values"]
     assert compare_parity_artifacts(left, right) == {"status": "MATCHED"}
 
 

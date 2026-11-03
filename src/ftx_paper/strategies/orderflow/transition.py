@@ -215,7 +215,6 @@ def _restore_aggregate(raw: Mapping[str, Any] | None) -> Aggregate | None:
         low=float(raw["low"]), close=float(raw["close"]),
         volume=int(raw["volume"]), symbol=str(raw["symbol"]),
         expiry=str(raw.get("expiry", "")),
-        contract_type=str(raw.get("contract_type", "CONTINUOUS")),
         session_date=str(raw["session_date"]),
         source_fingerprint=str(raw["source_fingerprint"]),
     )

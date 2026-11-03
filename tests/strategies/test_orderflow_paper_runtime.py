@@ -72,7 +72,6 @@ def test_parity_payload_publishes_phase35_evidence_shape() -> None:
             "oi": 0,
             "symbol": "NIFTY",
             "expiry": "",
-            "contract_type": "FUT",
             "session_date": "2026-10-01",
         }
         for index in range(5)

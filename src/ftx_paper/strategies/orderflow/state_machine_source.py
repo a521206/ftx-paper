@@ -31,7 +31,7 @@ def canonical_source_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "open": float(row["open"]), "high": float(row["high"]), "low": float(row["low"]),
             "close": float(row["close"]), "volume": _integer_or_zero(row.get("volume")),
             "oi": _integer_or_zero(row.get("oi", row.get("open_interest"))), "symbol": "NIFTY",
-            "expiry": "", "contract_type": "CONTINUOUS", "session_date": session_date,
+            "expiry": "", "session_date": session_date,
         })
     return normalized
 
@@ -52,7 +52,6 @@ def source_metadata(rows: list[dict[str, Any]]) -> dict[str, Any]:
     fingerprint = _fingerprint(canonical)
     return {
         "symbol": sorted({str(row.get("symbol", "")) for row in rows}),
-        "contract_type": sorted({str(row.get("contract_type", "")) for row in rows}),
         "expiry": sorted({str(row.get("expiry", "")) for row in rows}),
         "session_date": sorted({str(row.get("session_date", "")) for row in rows}),
         "source_bar_count": len(rows), "source_fingerprint": fingerprint, "fingerprint": fingerprint,

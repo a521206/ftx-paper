@@ -49,7 +49,6 @@ class Aggregate:
     volume: int
     symbol: str
     expiry: str
-    contract_type: str
     session_date: str
     source_fingerprint: str
 
@@ -63,7 +62,7 @@ class Aggregate:
         result = {name: getattr(self, name) for name in (
             "timeframe", "source_bar_count",
             "open", "high", "low", "close", "volume", "symbol", "expiry",
-            "contract_type", "session_date", "source_fingerprint",
+            "session_date", "source_fingerprint",
         )}
         result.update({
             "time": serialize_utc(self.time),
@@ -151,6 +150,6 @@ def build_aggregate_result(rows: Iterable[Mapping[str, Any]], timeframe: int) ->
             parse_nifty_label(f"{session_date}T{_clock(start + timeframe - 1)}"), parse_nifty_label(f"{session_date}T{_clock(start + timeframe)}"),
             f"{timeframe}m", len(items), float(first["open"]), max(float(item["high"]) for item in items),
             min(float(item["low"]) for item in items), float(last["close"]), sum(int(item["volume"]) for item in items),
-            str(first.get("symbol", "NIFTY")), str(first.get("expiry", "")), str(first.get("contract_type", "CONTINUOUS")),
+            str(first.get("symbol", "NIFTY")), str(first.get("expiry", "")),
             session_date, hashlib.sha256(raw.encode()).hexdigest()))
     return AggregateBuildResult(tuple(aggregates), tuple(issues))

@@ -36,7 +36,7 @@ def test_missing_in_session_minute_is_ignored() -> None:
     ]
 
 
-def test_aggregate_defaults_to_continuous_contract() -> None:
+def test_aggregate_omits_contract_type() -> None:
     result = build_aggregate_result(
         [{
             "time": "2026-10-12T09:15",
@@ -50,7 +50,7 @@ def test_aggregate_defaults_to_continuous_contract() -> None:
         1,
     )
 
-    assert result.aggregates[0].contract_type == "CONTINUOUS"
+    assert "contract_type" not in result.aggregates[0].to_dict()
 
 
 def test_market_observation_excludes_bar_at_exclusive_session_close() -> None:

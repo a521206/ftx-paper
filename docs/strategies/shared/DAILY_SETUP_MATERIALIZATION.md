@@ -253,7 +253,6 @@ Every derived artifact uses a versioned JSON envelope:
       "exchange": "NFO",
       "symbol": "NIFTY",
       "expiry": "2026-11-26",
-      "contract_type": "FUTURES",
       "rollover_policy_version": "dated-front.v1"
     },
     "source_fingerprints": ["..."],

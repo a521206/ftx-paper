@@ -26,7 +26,7 @@ EXECUTION_KINDS = frozenset({"reservation", "authorization", "submission", "orde
 LEDGER_KINDS = frozenset({"reservation", "reservation_release", "authorization", "fill", "partial_fill", "cancellation", "exit_settlement", "daily_reset", "closeout"})
 _CONTRACT_METADATA_FIELDS = frozenset({
     "instrument", "instrument_type", "symbol", "tradingsymbol", "exchange",
-    "expiry", "contract_type", "series", "strike", "option_type",
+    "expiry", "series", "strike", "option_type",
     "token", "instrument_token", "security_id",
 })
 def _jsonable(value: Any) -> Any:
@@ -102,23 +102,19 @@ def _replay_input(metadata: Mapping[str, Any]) -> dict[str, Any]:
     )
     symbol = str(current.get("selected_symbol") or current.get("symbol") or "NIFTY")
     expiry = str(current.get("selected_expiry") or current.get("expiry") or "")
-    instrument_type = str(current.get("instrument_type") or "FUT").upper()
     source_identity = {
         "symbol": symbol,
         "series": str(current.get("series") or "").upper(),
-        "contract_type": instrument_type,
         "expiry": expiry,
     }
     identity = {
         "symbol": symbol,
         "series": "I",
-        "contract_type": "CONTINUOUS",
         "expiry": "",
     }
     source = {
         "symbol": symbol,
         "series": "I",
-        "contract_type": "CONTINUOUS",
         "expiry": "",
         "bar_count": int(current.get("source_bar_count") or metadata.get("input_bar_count") or 0),
         "fingerprint": fingerprint,

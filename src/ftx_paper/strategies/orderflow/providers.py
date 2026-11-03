@@ -33,7 +33,7 @@ def _aggregate(value: Mapping[str, Any], timeframe: str) -> Aggregate:
         int(value["source_bar_count"]),
         float(value["open"]), float(value["high"]), float(value["low"]),
         float(value["close"]), int(value["volume"]), str(value["symbol"]),
-        str(value.get("expiry", "")), str(value.get("contract_type", "CONTINUOUS")),
+        str(value.get("expiry", "")),
         str(value["session_date"]), str(value["source_fingerprint"]),
     )
 
@@ -282,7 +282,7 @@ class CanonicalInputProvider:
                 "time": nifty_label(bar.timestamp), "open": bar.open, "high": bar.high,
                 "low": bar.low, "close": bar.close, "volume": int(bar.volume or 0),
                 "oi": int(bar.open_interest or 0), "symbol": bar.instrument.symbol,
-                "expiry": bar.instrument.expiry or "", "contract_type": bar.instrument.instrument_type,
+                "expiry": bar.instrument.expiry or "",
                 "session_date": nifty_label(bar.timestamp)[:10],
             }
             for bar in bars

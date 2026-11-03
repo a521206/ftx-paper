@@ -560,7 +560,6 @@ def test_opening_interaction_is_published_as_a_lifecycle_event_only() -> None:
             100,
             "NIFTY",
             "",
-            "FUT",
             "2026-10-01",
             "opening",
         ),
@@ -620,7 +619,6 @@ def _aggregate(
         100,
         "NIFTY",
         "",
-        "FUT",
         "2026-10-01",
         "replay",
     )
@@ -653,7 +651,6 @@ def test_pd_role_context_uses_post_contact_evidence_and_has_context_identity() -
         evidence.volume,
         evidence.symbol,
         evidence.expiry,
-        evidence.contract_type,
         evidence.session_date,
         evidence.source_fingerprint,
     )

@@ -114,7 +114,6 @@ def _rows() -> list[dict[str, object]]:
             "oi": 1,
             "symbol": "NIFTY",
             "expiry": "",
-            "contract_type": "CONTINUOUS",
             "session_date": "2026-10-01",
         }
         for index in range(5)
@@ -197,7 +196,7 @@ def test_coordinator_limits_1m_observations_to_current_clock(monkeypatch) -> Non
     current = Aggregate(
         "2026-10-01T09:20", "2026-10-01T09:20", "2026-10-01T09:21",
         "1m", 1, 100.0, 101.0, 99.0, 100.5, 100,
-        "NIFTY", "", "FUT", "2026-10-01", "clock",
+        "NIFTY", "", "2026-10-01", "clock",
     )
     observations = (
         SimpleNamespace(timeframe="1m", source_aggregate_id="2026-10-01T09:19"),
@@ -222,12 +221,12 @@ def test_coordinator_limits_5m_observations_to_current_aggregate(monkeypatch) ->
     current = Aggregate(
         "2026-10-01T09:20", "2026-10-01T09:24", "2026-10-01T09:25",
         "5m", 5, 100.0, 101.0, 99.0, 100.5, 500,
-        "NIFTY", "", "FUT", "2026-10-01", "clock",
+        "NIFTY", "", "2026-10-01", "clock",
     )
     one = Aggregate(
         "2026-10-01T09:20", "2026-10-01T09:20", "2026-10-01T09:21",
         "1m", 1, 100.0, 101.0, 99.0, 100.5, 100,
-        "NIFTY", "", "FUT", "2026-10-01", "clock",
+        "NIFTY", "", "2026-10-01", "clock",
     )
     observations = (
         SimpleNamespace(timeframe="5m", source_aggregate_id="2026-10-01T09:15", location_id=None, reference_generation=0),
@@ -253,7 +252,7 @@ def test_coordinator_evaluates_each_new_5m_aggregate_once(monkeypatch) -> None:
     five = Aggregate(
         "2026-10-01T09:20", "2026-10-01T09:24", "2026-10-01T09:25",
         "5m", 5, 100.0, 101.0, 99.0, 100.5, 500,
-        "NIFTY", "", "FUT", "2026-10-01", "clock",
+        "NIFTY", "", "2026-10-01", "clock",
     )
     captured: list[tuple[object, ...]] = []
     monkeypatch.setattr(
@@ -267,7 +266,7 @@ def test_coordinator_evaluates_each_new_5m_aggregate_once(monkeypatch) -> None:
         one = Aggregate(
             f"2026-10-01T09:{minute:02d}", f"2026-10-01T09:{minute:02d}",
             f"2026-10-01T09:{minute + 1:02d}", "1m", 1, 100.0, 101.0, 99.0,
-            100.5, 100, "NIFTY", "", "FUT", "2026-10-01", "clock",
+            100.5, 100, "NIFTY", "", "2026-10-01", "clock",
         )
         coordinator.advance(OrderflowClockInput(
             one_minute=one, five_minute=five,
@@ -299,7 +298,7 @@ def test_coordinator_defers_vwap_publication_until_first_completed_5m() -> None:
     opening = Aggregate(
         "2026-10-01T09:15", "2026-10-01T09:15", "2026-10-01T09:16",
         "1m", 1, 100.0, 101.0, 99.0, 100.0, 100,
-        "NIFTY", "", "CONTINUOUS", "2026-10-01", "one-15",
+        "NIFTY", "", "2026-10-01", "one-15",
     )
 
     result_before_5m = coordinator.advance(OrderflowClockInput(
@@ -318,12 +317,12 @@ def test_coordinator_defers_vwap_publication_until_first_completed_5m() -> None:
     last_minute = Aggregate(
         "2026-10-01T09:19", "2026-10-01T09:19", "2026-10-01T09:20",
         "1m", 1, 100.0, 101.0, 99.0, 100.0, 100,
-        "NIFTY", "", "CONTINUOUS", "2026-10-01", "one-19",
+        "NIFTY", "", "2026-10-01", "one-19",
     )
     first_five = Aggregate(
         "2026-10-01T09:15", "2026-10-01T09:19", "2026-10-01T09:20",
         "5m", 5, 100.0, 101.0, 99.0, 100.0, 500,
-        "NIFTY", "", "CONTINUOUS", "2026-10-01", "five-15",
+        "NIFTY", "", "2026-10-01", "five-15",
     )
     coordinator.advance(OrderflowClockInput(
         one_minute=last_minute, five_minute=first_five, atr=atr,
@@ -410,12 +409,12 @@ def test_coordinator_emits_gap_for_missing_5m_location_observation() -> None:
     five = Aggregate(
         "2026-10-01T09:20", "2026-10-01T09:24", "2026-10-01T09:25",
         "5m", 5, 100.0, 101.0, 99.0, 100.5, 500,
-        "NIFTY", "", "FUT", "2026-10-01", "clock",
+        "NIFTY", "", "2026-10-01", "clock",
     )
     one = Aggregate(
         "2026-10-01T09:20", "2026-10-01T09:20", "2026-10-01T09:21",
         "1m", 1, 100.0, 101.0, 99.0, 100.5, 100,
-        "NIFTY", "", "FUT", "2026-10-01", "clock",
+        "NIFTY", "", "2026-10-01", "clock",
     )
 
     result = OrderflowCoordinator(registry).advance(OrderflowClockInput(

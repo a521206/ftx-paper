@@ -66,7 +66,6 @@ class FuturesSessionSource:
                 "oi": int(row.get("open_interest") or 0),
                 "symbol": "NIFTY",
                 "expiry": "",
-                "contract_type": "CONTINUOUS",
                 "session_date": self.session_date,
             }
             for row in self.bars
@@ -87,8 +86,7 @@ class FuturesSessionSource:
                 "instrument_type": self.identity.instrument_type, "expiry": self.expiry,
             },
             "strategy_identity": {
-                "symbol": "NIFTY", "series": "I", "contract_type": "CONTINUOUS",
-                "expiry": "",
+                "symbol": "NIFTY", "series": "I", "expiry": "",
             },
             "rollover_policy_version": self.rollover_policy_version,
             "timestamp_convention": "1m label; completed at next minute; Asia/Kolkata",

@@ -38,7 +38,7 @@ def normalized_bar_fingerprint(rows: Sequence[Mapping[str, Any]]) -> str:
         session_timestamp = timestamp.astimezone(_SESSION_ZONE)
         normalized.append({
             "time": session_timestamp.strftime("%H:%M"), **values,
-            "symbol": "NIFTY", "expiry": "", "contract_type": "CONTINUOUS",
+            "symbol": "NIFTY", "expiry": "",
             "session_date": str(row.get("session_date") or session_timestamp.date().isoformat()),
         })
     return sha256(json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode()).hexdigest()

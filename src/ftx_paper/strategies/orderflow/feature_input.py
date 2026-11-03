@@ -41,7 +41,6 @@ def _aggregate(value: dict[str, Any], timeframe: str) -> Aggregate:
         int(value["volume"]),
         str(value["symbol"]),
         str(value.get("expiry", "")),
-        str(value.get("contract_type", "CONTINUOUS")),
         str(value["session_date"]),
         str(value["source_fingerprint"]),
     )
@@ -75,7 +74,6 @@ def _normalize_rows(source: Any, session_date: str) -> list[dict[str, Any]]:
             "oi": int(row["open_interest"]),
             "symbol": "NIFTY",
             "expiry": "",
-            "contract_type": "CONTINUOUS",
             "session_date": session_date,
         })
     return rows
