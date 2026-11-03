@@ -407,6 +407,9 @@ class RuntimeSession:
                 return
             _validate_required_backfill(cast(Sequence[Mapping[str, Any]], resolved), backfill)
             self.store.append_market_bars(backfill, source="historical_backfill")
+            bind_feature_bars = getattr(self.engine, "bind_feature_bars", None)
+            if callable(bind_feature_bars):
+                bind_feature_bars(backfill)
             access_token = self._wait_for_session_readiness(is_nse_market_open)
             if access_token is None:
                 self._release_feed_lease()
@@ -1284,6 +1287,9 @@ class RuntimeSession:
                 self.broker.update_price(bar.instrument.symbol, bar.close)
             now = datetime.now(timezone.utc).isoformat()
             self.store.append_market_bars((bar,), source="live")
+            append_feature_bar = getattr(self.engine, "append_feature_bar", None)
+            if callable(append_feature_bar):
+                append_feature_bar(bar)
             self.store.patch_status({"last_bar_at": bar.timestamp.isoformat(), "last_heartbeat_at": now,
                                      "bars_seen": self.engine.bars_seen + 1})
             bar_key = f"{bar.instrument.exchange}:{bar.instrument.symbol}:{bar.timestamp.isoformat()}"

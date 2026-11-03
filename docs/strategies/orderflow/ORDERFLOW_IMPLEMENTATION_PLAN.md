@@ -1445,7 +1445,7 @@ strategy architecture:
 - Comparison-only interaction harnesses may exercise the ported interaction
   closure, but must not independently publish Paper-derived strategy context or
   replace the canonical chronological owner.
-- `replay_pipeline.py` may run bounded comparison harnesses, but the production
+- `feature_input.py` may run bounded comparison harnesses, but the production
   path must not replay Phase 4, then interaction policy, then Phase 4 again to
   reconstruct one canonical sequence.
 - `transition.py` is a host seam until it delegates to the complete ported
@@ -1711,7 +1711,7 @@ Exit gate:
 
 The layer ports and host seams above do not by themselves establish the
 canonical ownership model. The current Paper implementation still has a split
-production path: `replay_pipeline.py` prepares input, then the shared runtime owns context /
+production path: `feature_input.py` prepares input, then the shared runtime owns context /
 location replay, then interaction replay, and may run the context replay again
 from interaction-produced publications. `OrderflowTransitionOwner.snapshot()`
 also stores projections and emitted facts without the complete mutable state
@@ -1730,7 +1730,7 @@ the split replay modules as an acceptable production orchestration path.
   clock, cancellation, persistence, API, and paper-account adapters only.
 - Live and bounded replay call one observation transition. Replay may bound
   input and capture artifacts, but it may not add a second policy pass.
-- Context/location comparison harnesses and the current `replay_pipeline.py`
+- Context/location comparison harnesses and the current `feature_input.py`
   sequence are comparison harnesses until their behavior
   is absorbed by the canonical owner; they are not production policy engines.
 - A missing producer stream is `UNAVAILABLE` or `INCOMPLETE`, never an observed
@@ -1845,7 +1845,7 @@ recompute strategy state.
 
 After all preceding gates pass, remove duplicate Paper policy helpers and
 production dependencies on context/location comparison harnesses, the split
-`replay_pipeline.py` orchestration, and any replay-machine wrapper
+`feature_input.py` orchestration, and any replay-machine wrapper
 that remains a second owner. Retain only the smallest host adapter and
 comparison tooling needed for regression diagnosis. Run the complete focused
 canonical parity matrix, Paper tests, Ruff, Pyright, and diff review before

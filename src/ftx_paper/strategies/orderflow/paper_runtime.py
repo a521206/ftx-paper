@@ -91,20 +91,23 @@ class PaperOrderflowRuntime:
     def bind_execution_service(self, service: ExecutionService, *, diagnostic: bool = False) -> None:
         self.strategy.bind_execution_service(service, diagnostic=diagnostic)
 
-    def bind_replay_rows(
-        self,
-        rows: Sequence[Mapping[str, Any]],
-        *,
-        rows_by_date: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+    def bind_replay_bars(
+        self, bars: Sequence[Any], *, historical_bars: Sequence[Any] = (),
     ) -> None:
-        """Install the bounded canonical provider before replay starts."""
+        """Install canonical input with explicit warmup and target bars."""
         self.strategy.bind_input_provider(
-            CanonicalInputProvider.from_rows(rows, rows_by_date=rows_by_date),
+            CanonicalInputProvider.from_market_bars((*historical_bars, *bars))
         )
 
-    def bind_replay_bars(self, bars: Sequence[Any]) -> None:
-        """Install canonical input from the bounded completed-bar scope."""
+    def bind_live_bars(self, bars: Sequence[Any]) -> None:
+        """Seed the shared provider with startup historical bars."""
         self.strategy.bind_input_provider(CanonicalInputProvider.from_market_bars(bars))
+
+    def append_feature_bar(self, bar: Any) -> None:
+        """Append one completed live bar to the shared canonical provider."""
+        provider = self.strategy._clock_input_provider
+        if isinstance(provider, CanonicalInputProvider):
+            provider.append_market_bars((bar,))
 
     def replay(
         self,

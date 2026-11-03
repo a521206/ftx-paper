@@ -23,7 +23,7 @@ class PaperFeatureAdapter(EvidenceAdapter):
         *,
         prior_values: Mapping[str, ValuePublication] | None = None,
     ) -> None:
-        self._rows = {date: tuple(rows) for date, rows in rows_by_date.items()}
+        self._rows = {str(date): tuple(dict(row) for row in rows) for date, rows in rows_by_date.items()}
         self._prior_values = dict(prior_values or {})
         self._observations: dict[str, MarketObservation] = {}
         self._atr_cache: dict[tuple[str, str], AtrPublication] = {}
@@ -77,15 +77,16 @@ class PaperFeatureAdapter(EvidenceAdapter):
                     None,
                 )
                 if first is None:
-                    raise ValueError(f"no completed 5m context available for {session_date}")
-                result = SessionLevels(
-                    opening_range_low=first.low,
-                    opening_range_high=first.high,
-                    prior_day_low=min((float(str(row["low"])) for row in prior_rows), default=None),
-                    prior_day_high=max((float(str(row["high"])) for row in prior_rows), default=None),
-                    opening_range_available_at=first.available_at,
-                    prior_day_available_at=f"{session_date}T09:15",
-                )
+                    result = None
+                else:
+                    result = SessionLevels(
+                        opening_range_low=first.low,
+                        opening_range_high=first.high,
+                        prior_day_low=min((float(str(row["low"])) for row in prior_rows), default=None),
+                        prior_day_high=max((float(str(row["high"])) for row in prior_rows), default=None),
+                        opening_range_available_at=first.available_at,
+                        prior_day_available_at=f"{session_date}T09:15",
+                    )
             self._levels_cache[session_date] = result
         return self._levels_cache[session_date]
 

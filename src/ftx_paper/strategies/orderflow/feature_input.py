@@ -1,4 +1,4 @@
-"""Causal orderflow replay preparation shared by runtime and replay tooling."""
+"""Canonical feature input preparation shared by replay and live publication."""
 
 from __future__ import annotations
 
@@ -137,7 +137,7 @@ def _observation_input_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
-def _observation_artifact(
+def build_observation_artifact(
     rows: list[dict[str, Any]],
 ) -> tuple[dict[str, Any], tuple[_AvailableAggregate, ...]]:
     observation = observe_market(_observation_input_rows(rows))
@@ -155,7 +155,7 @@ def _observation_artifact(
     )
 
 
-def _prior_values(
+def build_prior_values(
     rows_by_date: dict[str, tuple[dict[str, Any], ...]],
 ) -> dict[str, ValuePublication]:
     class _ReplayDailyProfileStore:
@@ -221,6 +221,6 @@ def _prior_values(
 __all__ = [
     "_aggregate",
     "_load_session_rows",
-    "_observation_artifact",
-    "_prior_values",
+    "build_observation_artifact",
+    "build_prior_values",
 ]

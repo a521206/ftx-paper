@@ -17,12 +17,11 @@ from .evidence.features_adapter import PaperFeatureAdapter
 from .evidence.producer import produce_evidence
 from .orderflow_common import Aggregate
 from .evidence_publication import EvidencePublication
-from .evidence_publication import AtrPublication
 from .context_location_replay import _location_observation
 from .timestamps import coerce_timestamp, nifty_label
 from .vwap_location import causal_vwap_prefix
-from .value_publication import ValuePublication
 from .opportunity_coordinator import LifecycleFormation
+from .feature_store import FeatureStore
 
 
 def _aggregate(value: Mapping[str, Any], timeframe: str) -> Aggregate:
@@ -61,32 +60,35 @@ class CanonicalInputProvider:
         rows: Sequence[Mapping[str, Any]] = (),
         *,
         rows_by_date: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+        feature_store: FeatureStore | None = None,
     ) -> None:
-        self._rows = tuple(dict(row) for row in rows)
         dates = dict(rows_by_date or {})
-        if self._rows and not dates:
-            dates[str(self._rows[0]["session_date"])] = self._rows
-        self._rows_by_date = {str(key): tuple(dict(row) for row in value) for key, value in dates.items()}
+        if rows and not dates:
+            dates[str(rows[0]["session_date"])] = rows
+        self._feature_store = feature_store or FeatureStore(dates)
+        self._rows = tuple(dict(row) for row in rows)
+        if not self._rows and dates:
+            target = max(str(key) for key in dates)
+            self._rows = tuple(self._feature_store.rows_by_date[target])
         self._by_identity: dict[str, CanonicalInputEnvelope] = {}
         self._build()
 
     def _build(self) -> None:
+        self._by_identity = {}
         if not self._rows:
             return
-        from .replay_pipeline import _observation_artifact, _prior_values
+        from .feature_input import build_observation_artifact, build_prior_values
 
         session_date = str(self._rows[0]["session_date"])
         if any(str(row.get("session_date")) != session_date for row in self._rows):
             raise ValueError("canonical input rows must belong to one session")
-        artifact, events = _observation_artifact([dict(row) for row in self._rows])
+        artifact, events = build_observation_artifact([dict(row) for row in self._rows])
         parsed = {
             timeframe: tuple(_aggregate(item, timeframe) for item in artifact["aggregates"][timeframe])
             for timeframe in ("1m", "5m")
         }
-        adapter = PaperFeatureAdapter(
-            self._rows_by_date,
-            prior_values=_prior_values({key: tuple(value) for key, value in self._rows_by_date.items()}),
-        )
+        rows_by_date = self._feature_store.rows_by_date
+        adapter = PaperFeatureAdapter(rows_by_date, prior_values=build_prior_values(rows_by_date))
         vwap = {
             timeframe: causal_vwap_prefix(values, session_date=session_date)
             for timeframe, values in parsed.items()
@@ -191,21 +193,38 @@ class CanonicalInputProvider:
     @classmethod
     def from_market_bars(cls, bars: Sequence[Any]) -> "CanonicalInputProvider":
         """Adapt Paper completed futures bars into the canonical source shape."""
-        rows = [
+        rows = cls._rows_from_market_bars(bars)
+        rows_by_date: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            rows_by_date.setdefault(str(row["session_date"]), []).append(row)
+        target = max(rows_by_date, default=None)
+        return cls(
+            rows_by_date.get(target, ()) if target is not None else (),
+            rows_by_date=rows_by_date,
+        )
+
+    def append_market_bars(self, bars: Sequence[Any]) -> None:
+        rows = self._rows_from_market_bars(bars)
+        if not rows:
+            return
+        self._feature_store.append(rows)
+        session_date = str(rows[-1]["session_date"])
+        self._rows = tuple(self._feature_store.rows_by_date[session_date])
+        self._build()
+
+    @staticmethod
+    def _rows_from_market_bars(bars: Sequence[Any]) -> list[dict[str, Any]]:
+        return [
             {
-                "time": nifty_label(bar.timestamp),
-                "open": bar.open, "high": bar.high, "low": bar.low,
-                "close": bar.close, "volume": int(bar.volume or 0),
-                "oi": int(bar.open_interest or 0),
-                "symbol": bar.instrument.symbol,
-                "expiry": bar.instrument.expiry or "",
-                "contract_type": bar.instrument.instrument_type,
+                "time": nifty_label(bar.timestamp), "open": bar.open, "high": bar.high,
+                "low": bar.low, "close": bar.close, "volume": int(bar.volume or 0),
+                "oi": int(bar.open_interest or 0), "symbol": bar.instrument.symbol,
+                "expiry": bar.instrument.expiry or "", "contract_type": bar.instrument.instrument_type,
                 "session_date": nifty_label(bar.timestamp)[:10],
             }
             for bar in bars
             if getattr(bar.instrument, "instrument_type", "") in {"FUT", "FUTURES"}
         ]
-        return cls(rows)
 
     def from_bundle(self, bundle: object) -> CanonicalInputEnvelope:
         if isinstance(bundle, Mapping):
@@ -241,20 +260,10 @@ class CanonicalInputProvider:
             identity = f"aggregate:1m:{nifty_label(timestamp)}"
             if identity in self._by_identity:
                 return self._by_identity[identity]
-            aggregate = Aggregate(
-                timestamp, timestamp, timestamp, "1m", 1,
-                float(bar.open), float(bar.high), float(bar.low), float(bar.close),
-                int(bar.volume or 0), bar.instrument.symbol,
-                bar.instrument.expiry or "", bar.instrument.instrument_type,
-                nifty_label(timestamp)[:10], f"live:{nifty_label(timestamp)}:{bar.instrument.symbol}",
-            )
-            atr = AtrPublication.unavailable("atr_not_published")
-            prior = ValuePublication(None, None, None, (), "prior_value_not_published")
-            return CanonicalInputEnvelope(
-                OrderflowClockInput(one_minute=aggregate, atr=atr, prior_value=prior),
-                (identity,),
-                (atr.unavailable_reason or "atr_not_published", prior.unavailable_reason or "prior_value_not_published"),
-            )
+            self.append_market_bars((bar,))
+            if identity in self._by_identity:
+                return self._by_identity[identity]
+            raise ValueError(f"completed futures bar was not published: {identity}")
         raise ValueError("bundle has no canonical orderflow clock input")
 
     def from_evidence(self, evidence: object) -> CanonicalInputEnvelope:

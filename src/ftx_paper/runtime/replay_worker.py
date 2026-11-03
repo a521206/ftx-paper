@@ -1064,6 +1064,15 @@ class ReplayWorker:
             bar for bar in bars
             if str(bar.instrument.instrument_type).upper() in {"FUT", "FUTURES"}
         )
+        warmup_bars: list[Any] = []
+        warmup_dates = [date for date in self.store.read_dates() if date < session_date]
+        for warmup_date in sorted(warmup_dates)[-14:]:
+            warmup_rows = self.store.read_market_bars(warmup_date)
+            warmup_bars.extend(self.inputs.bars(
+                warmup_date,
+                rows=warmup_rows,
+                futures_source=self.inputs.resolve_source(warmup_date),
+            ))
         aggregator = ReplayInput.aggregator(bars)
         runtime = self.strategy_selector.create(
             "ftx-paper-orderflow",
@@ -1071,7 +1080,7 @@ class ReplayWorker:
         )
         bind_replay_bars = getattr(runtime, "bind_replay_bars", None)
         if callable(bind_replay_bars):
-            bind_replay_bars(bars)
+            bind_replay_bars(bars, historical_bars=tuple(warmup_bars))
         # The selector composes the same PaperOrderflowRuntime used by live
         # hosting.  Replay owns only the bounded clock and capture loop.
         engine = PaperEngine(runtime)

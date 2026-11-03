@@ -87,6 +87,16 @@ class PaperEngine:
         if callable(handler):
             handler(service, diagnostic=diagnostic)
 
+    def bind_feature_bars(self, bars: tuple[MarketBar, ...] | list[MarketBar]) -> None:
+        handler = getattr(self.strategy, "bind_live_bars", None)
+        if callable(handler):
+            handler(bars)
+
+    def append_feature_bar(self, bar: MarketBar) -> None:
+        handler = getattr(self.strategy, "append_feature_bar", None)
+        if callable(handler):
+            handler(bar)
+
     def record_exit(self, **kwargs: object) -> None:
         """Forward a settled exit to strategies that maintain risk-gate state."""
         record_exit = getattr(self.strategy, "record_exit", None)
@@ -275,6 +285,16 @@ class MultiStrategyEngine:
                     account_id=order.account_id or item.account_id,
                 ))
         return EngineResult(tuple(orders), tuple(events))
+
+    def bind_feature_bars(self, bars: tuple[MarketBar, ...] | list[MarketBar]) -> None:
+        for item in self.instances:
+            if item.enabled:
+                self._engines[item.strategy_id].bind_feature_bars(bars)
+
+    def append_feature_bar(self, bar: MarketBar) -> None:
+        for item in self.instances:
+            if item.enabled:
+                self._engines[item.strategy_id].append_feature_bar(bar)
 
     def on_execution_event(self, event: ExecutionNotification) -> None:
         if event.strategy_id is None:
