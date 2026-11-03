@@ -1109,7 +1109,10 @@ class ReplayWorker:
                 from ftx_paper.strategies.orderflow.evidence_publication import AtrPublication
                 atr_values[session_date] = AtrPublication.unavailable("derived_artifact_unavailable")
             else:
-                atr_values[session_date] = deserialize_atr_publication(atr_artifact["payload"])
+                payload = self.inputs.validate_atr_artifact_source(
+                    atr_artifact, session_date,
+                )
+                atr_values[session_date] = deserialize_atr_publication(payload)
         except (OSError, KeyError, TypeError, ValueError):
             from ftx_paper.strategies.orderflow.evidence_publication import AtrPublication
             atr_values[session_date] = AtrPublication.unavailable("derived_artifact_unavailable")

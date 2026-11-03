@@ -99,7 +99,7 @@ def build_prior_session_task(store: RuntimeStore, artifact_store: SetupArtifactS
             if prior_source is None:
                 continue
             processed += 1
-            source_fp = prior_source.source_fingerprint
+            source_fp = prior_source.provenance()["source_fingerprint"]
             identity = {"strategy_id": STRATEGY_ID, "task_id": TASK_ID, "algorithm_version": ALGORITHM_VERSION,
                         "config_fingerprint": "value-profile-default", "instrument": "NIFTY"}
             if request.mode != "rebuild":
@@ -132,7 +132,7 @@ def build_prior_session_task(store: RuntimeStore, artifact_store: SetupArtifactS
                         observed_at, available_at, lineage,
                     )
                 source = {"sessions": [prior], "selected_source": _selected_source(prior_source),
-                          "source_fingerprints": [source_fp], "source_fingerprint_recipe": "resolver-storage-source-v1", "source_bar_count": len(prior_rows),
+                          "source_fingerprints": [source_fp], "source_fingerprint_recipe": "normalized-continuous-bars-v1", "source_bar_count": len(prior_rows),
                           "session_finalization": {"timezone": "Asia/Kolkata", "close": "15:30", "finalized_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}}
                 envelope = build_envelope(strategy_id=STRATEGY_ID, task_id=TASK_ID, algorithm_version=ALGORITHM_VERSION,
                                           target_session=target, source=source,

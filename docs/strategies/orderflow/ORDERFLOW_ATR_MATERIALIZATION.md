@@ -14,8 +14,9 @@ This document records the implementation contract and current acceptance status.
 
 Implemented in the Paper runtime. The `daily-atr` task produces immutable,
 validated artifacts with chronological Wilder state, source provenance, target
-availability, and downstream invalidation on source correction. Replay consumes
-the artifact and no longer reconstructs ATR from historical warmup bars.
+availability, and downstream invalidation on source correction. Replay validates
+the artifact's source lineage and causal session bounds before consuming it.
+Replay does not reconstruct ATR from historical warmup bars.
 
 Focused strategy/infrastructure validation passes. Remaining acceptance work is
 canonical cross-repository parity and production operational readiness.
@@ -141,13 +142,22 @@ The migration occurs after the shared setup worker and artifact reader are
 available:
 
 1. Load the target session's validated `daily-atr` artifact.
-2. Reconstruct a typed ATR publication/domain value.
-3. Inject the publication into the orderflow input provider or transition
+2. Verify its source-session lineage and causal timestamps against the target
+   session contract.
+3. Reconstruct a typed ATR publication/domain value.
+4. Inject the publication into the orderflow input provider or transition
    owner before the first target-session decision.
-4. Replay only target-session bars for ATR advancement that is explicitly
+5. Replay only target-session bars for ATR advancement that is explicitly
    required by the canonical contract; do not reseed from a bounded lookback.
-5. Preserve canonical decision-clock availability, timestamps, source identity,
+6. Preserve canonical decision-clock availability, timestamps, source identity,
    unavailable reasons, and lineage.
+
+Paper materializes ATR from its own resolved continuous-futures history. Matching
+the canonical value therefore also requires that the two repositories provide
+the same normalized daily OHLC history; replay must not substitute a canonical
+value to conceal source-history variance. Rebuild the setup artifact after source
+history corrections; replay validates artifact semantics without reloading and
+recomputing the full history.
 
 Normal replay must not call `daily_atr()` over a truncated `rows_by_date` map.
 It must not load the entire intraday history merely to reconstruct a value that

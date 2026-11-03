@@ -2,6 +2,7 @@ from datetime import date, timedelta
 
 from ftx_paper.contracts.setup import SetupRunRequest
 from ftx_paper.infrastructure.artifacts import SetupArtifactStore, deserialize_atr_publication
+from ftx_paper.runtime.futures_source import FuturesSessionSourceResolver
 from ftx_paper.strategies.orderflow.setup import build_daily_atr_task, build_prior_session_task
 
 
@@ -58,6 +59,10 @@ def test_daily_atr_materializes_typed_target_publication(tmp_path) -> None:
     payload = artifact["payload"]
     assert payload["source_session"] == "2026-01-14"
     assert payload["available_at"] == "2026-01-15T03:45:00.000000Z"
+    assert artifact["source"]["sessions"] == [
+        f"2026-01-{day:02d}" for day in range(1, 15)
+    ]
+    assert artifact["source"]["completed_session_count"] == 14
     publication = deserialize_atr_publication(payload)
     assert publication.value is not None
     assert publication.lineage[-1].startswith("source:")
@@ -121,8 +126,15 @@ def test_prior_value_from_session_keeps_preceding_source_history(tmp_path, monke
             from_session="2026-01-03",
         )
     )
+    repeated = task.materialize(
+        SetupRunRequest(
+            "ftx-paper-orderflow", "prior-session-value", "catch_up",
+            from_session="2026-01-03",
+        )
+    )
 
     assert result["processed_sessions"] == 1
+    assert repeated["reused"] == 1
     identity = {
         "strategy_id": "ftx-paper-orderflow",
         "task_id": "prior-session-value",
@@ -133,3 +145,9 @@ def test_prior_value_from_session_keeps_preceding_source_history(tmp_path, monke
     artifact = artifacts.read(identity, "2026-01-03")
     assert artifact is not None
     assert artifact["source"]["sessions"] == ["2026-01-02"]
+    expected_fingerprint = FuturesSessionSourceResolver(store).resolve("2026-01-02")
+    assert expected_fingerprint is not None
+    assert artifact["source"]["source_fingerprints"] == [
+        expected_fingerprint.provenance()["source_fingerprint"]
+    ]
+    assert artifact["source"]["source_fingerprint_recipe"] == "normalized-continuous-bars-v1"

@@ -198,11 +198,6 @@ class SetupArtifactStore:
 
     def __init__(self, home: str | Path):
         self.root = Path(home) / "derived" / "setup"
-        self._catalog_cache: dict[tuple[str, str | None], dict[str, Any] | None] = {}
-
-    @staticmethod
-    def _cache_key(identity: Mapping[str, str], output_root: str | Path | None) -> tuple[str, str | None]:
-        return ("/".join(str(identity[key]) for key in ("strategy_id", "task_id", "algorithm_version", "config_fingerprint", "instrument")), str(output_root) if output_root is not None else None)
 
     def _base(self, identity: Mapping[str, str], *, output_root: str | Path | None = None) -> Path:
         for key in ("strategy_id", "task_id", "algorithm_version", "config_fingerprint", "instrument"):
@@ -236,10 +231,7 @@ class SetupArtifactStore:
     def _publish_catalog(self, identity: Mapping[str, str], target_session: str, path: Path, envelope: Mapping[str, Any], *, output_root: str | Path | None = None) -> None:
         catalog_path = self.catalog_path(identity, output_root=output_root)
         catalog_path.parent.mkdir(parents=True, exist_ok=True)
-        key = self._cache_key(identity, output_root)
-        catalog = self._catalog_cache.get(key)
-        if catalog is None:
-            catalog = self.read_catalog(identity, output_root=output_root)
+        catalog = self.read_catalog(identity, output_root=output_root)
         catalog = catalog or {
             "schema_version": 1, "artifact_type": CATALOG_TYPE,
             **{key: identity[key] for key in ("strategy_id", "task_id", "algorithm_version", "config_fingerprint", "instrument")},
@@ -255,20 +247,14 @@ class SetupArtifactStore:
         with temporary.open("r+b") as handle:
             os.fsync(handle.fileno())
         os.replace(temporary, catalog_path)
-        self._catalog_cache[key] = catalog
 
     def read_catalog(self, identity: Mapping[str, str], *, output_root: str | Path | None = None) -> dict[str, Any] | None:
-        key = self._cache_key(identity, output_root)
-        if key in self._catalog_cache:
-            return self._catalog_cache[key]
         path = self.catalog_path(identity, output_root=output_root)
         if not path.is_file():
-            self._catalog_cache[key] = None
             return None
         value = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(value, dict) or value.get("artifact_type") != CATALOG_TYPE:
             raise ValueError("invalid setup artifact catalog")
-        self._catalog_cache[key] = value
         return value
 
     def read(self, identity: Mapping[str, str], target_session: str, *, output_root: str | Path | None = None) -> dict[str, Any] | None:

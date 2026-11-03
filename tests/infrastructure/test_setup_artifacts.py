@@ -48,6 +48,35 @@ def test_corrupt_artifact_is_rejected_and_quarantined(tmp_path):
     assert list(path.parent.glob("quarantine-*"))
 
 
+def test_setup_catalog_reads_updates_written_by_another_store_instance(tmp_path):
+    writer = SetupArtifactStore(tmp_path)
+    reader = SetupArtifactStore(tmp_path)
+    identity = {
+        "strategy_id": "ftx-paper-orderflow", "task_id": "prior-session-value",
+        "algorithm_version": "orderflow.prior-session-value.v1",
+        "config_fingerprint": "cfg", "instrument": "NIFTY",
+    }
+
+    def envelope(fingerprint):
+        return build_envelope(
+            strategy_id="ftx-paper-orderflow", task_id="prior-session-value",
+            algorithm_version="orderflow.prior-session-value.v1", target_session="2026-11-02",
+            source={"selected_source": {"symbol": "NIFTY"}, "source_fingerprints": [fingerprint]},
+            configuration={"config_fingerprint": "cfg"}, publication=_publication(),
+        )
+
+    writer.write(envelope("old-source"), source_fingerprint="old-source")
+    loaded = reader.read(identity, "2026-11-02")
+    assert loaded is not None
+    assert loaded["source"]["source_fingerprints"] == ["old-source"]
+
+    writer.write(envelope("new-source"), source_fingerprint="new-source")
+
+    loaded = reader.read(identity, "2026-11-02")
+    assert loaded is not None
+    assert loaded["source"]["source_fingerprints"] == ["new-source"]
+
+
 def test_setup_worker_rejects_unknown_tasks_and_records_result():
     worker = SetupWorker(SetupTaskRegistry((DailySetupTask("s", "t", "v", lambda _request, _cancelled: {"materialized": 1}),)))
     with pytest.raises(ValueError, match="unknown setup task"):
