@@ -1,9 +1,9 @@
 """Compare the Paper evidence replay with NiftyZoning for one session.
 
-The two repositories are executed in isolated subprocesses.  Phase 3
-observations are rebuilt from replay-engine bars before Phase 3.5 evidence
-projections are compared.  No NiftyZoning package is imported into the Paper
-process.
+The canonical repository and the Paper API client are executed in isolated
+subprocesses. Phase 3 observations are rebuilt from replay-engine bars before
+Phase 3.5 evidence projections are compared. No NiftyZoning package is
+imported into the Paper process.
 """
 
 from __future__ import annotations
@@ -1627,6 +1627,29 @@ def _run_command(
     return None
 
 
+def _paper_api_payload(result: Any) -> dict[str, Any] | None:
+    """Extract the orderflow replay payload from the API result envelope."""
+    if not isinstance(result, Mapping):
+        return None
+    replay_result = result.get("result")
+    if not isinstance(replay_result, Mapping):
+        return None
+    report = replay_result.get("report")
+    payload = report.get("orderflow_payload") if isinstance(report, Mapping) else None
+    return dict(payload) if isinstance(payload, Mapping) else None
+
+
+def _paper_api_command(
+    paper_python: str, session_date: str, *, base_url: str,
+) -> list[str]:
+    return [
+        paper_python, "-m", "ftx_paper.replay_cli", session_date,
+        "--base-url", base_url,
+        "--strategy-id", "ftx-paper-orderflow",
+        "--include-parity-layers", "--json",
+    ]
+
+
 def _artifact_contains_session(path: Path, session_date: str) -> bool:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -1756,6 +1779,7 @@ def compare_date(
     debug_dir: Path | None = None,
     artifact_dir: Path | None = None,
     run_id: str | None = None,
+    paper_api_url: str = "http://127.0.0.1:8501",
 ) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="orderflow-cross-repo-") as directory_name:
         directory = Path(directory_name)
@@ -1765,14 +1789,12 @@ def compare_date(
             if canonical_artifact else None
         )
         canonical_output_dir = directory / "canonical-replay"
-        paper_command = [
-            paper_python, "scripts/orderflow/orderflow_replay.py", "--date", session_date,
-            "--include-interactions",
-            "--output", str(paper_replay_path),
-        ]
+        paper_command = _paper_api_command(
+            paper_python, session_date, base_url=paper_api_url,
+        )
         with ThreadPoolExecutor(max_workers=2) as executor:
             paper_future = executor.submit(
-                _run_json, paper_command, cwd=paper_root, output=paper_replay_path,
+                _run_json, paper_command, cwd=paper_root,
                 debug_dir=debug_dir, label=f"{session_date}-paper-replay",
             )
             if canonical_path is None:
@@ -1796,7 +1818,15 @@ def compare_date(
             else:
                 canonical_error = None
 
-            paper_replay, replay_error = paper_future.result()
+            paper_api_result, replay_error = paper_future.result()
+            paper_replay = _paper_api_payload(paper_api_result)
+            if paper_replay is not None:
+                paper_replay_path.write_text(
+                    json.dumps(paper_replay, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            elif replay_error is None:
+                replay_error = "API result did not contain an orderflow replay payload"
             canonical_projection_future = (
                 executor.submit(
                     _run_json,
@@ -1954,6 +1984,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--date", action="append", dest="dates", required=True, type=_comparison_date)
     parser.add_argument("--canonical-python", default=None)
     parser.add_argument(
+        "--paper-api-url",
+        default=os.getenv("FTX_API_URL", "http://127.0.0.1:8501"),
+        help="Paper API base URL used for the orderflow replay",
+    )
+    parser.add_argument(
         "--canonical-artifact",
         type=Path,
         default=None,
@@ -1982,6 +2017,7 @@ def main(argv: list[str] | None = None) -> int:
         debug_dir=debug_dir,
         artifact_dir=artifact_dir,
         run_id=run_id,
+        paper_api_url=args.paper_api_url,
     ) for session_date in args.dates]
     overall = "PASSED" if all(
         _gate_result(item)["status"] == "PASSED" for item in results
