@@ -570,6 +570,23 @@ class SqliteRuntimeStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def read_market_futures_bars(self, session_date: str) -> list[dict[str, Any]]:
+        """Read only futures bars needed for dated source resolution."""
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                """
+                SELECT symbol, exchange, minute, open, high, low, close, volume,
+                       open_interest, instrument_type, expiry
+                FROM market_bars
+                WHERE substr(minute, 1, 10) = ?
+                  AND instrument_type IN ('FUT', 'FUTURES')
+                ORDER BY minute, exchange, symbol
+                """,
+                (session_date,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def read_dates(self) -> list[str]:
         with self._connect() as connection:
             rows = connection.execute(

@@ -96,7 +96,7 @@ def test_setup_worker_ensures_all_strategy_tasks_before_replay():
     calls: list[tuple[str, str, str | None]] = []
 
     def materialize(request, _cancelled):
-        calls.append((request.task_id, request.mode, request.through_session))
+        calls.append((request.task_id, request.mode, request.from_session, request.through_session))
         return {"materialized": 1, "target_available": 1}
 
     worker = SetupWorker(SetupTaskRegistry((
@@ -111,8 +111,8 @@ def test_setup_worker_ensures_all_strategy_tasks_before_replay():
 
     assert [item["task_id"] for item in results] == ["first", "second"]
     assert calls == [
-        ("first", "catch_up", "2026-10-05"),
-        ("second", "catch_up", "2026-10-05"),
+        ("first", "catch_up", "2026-10-05", "2026-10-05"),
+        ("second", "catch_up", "2026-10-05", "2026-10-05"),
     ]
 
 

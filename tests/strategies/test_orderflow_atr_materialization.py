@@ -16,6 +16,12 @@ class _Store:
     def read_market_bars(self, session_date):
         return list(self.rows_by_date[session_date])
 
+    def read_market_futures_bars(self, session_date):
+        return [
+            row for row in self.read_market_bars(session_date)
+            if str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
+        ]
+
 
 def _store(session_count: int = 18) -> _Store:
     start = date(2026, 1, 1)
@@ -81,6 +87,52 @@ def test_daily_atr_materializes_typed_target_publication(tmp_path) -> None:
     publication = deserialize_atr_publication(payload)
     assert publication.value is not None
     assert publication.lineage[-1].startswith("source:")
+
+
+def test_daily_atr_prerequisite_does_not_read_sessions_after_target(tmp_path, monkeypatch) -> None:
+    store = _store(session_count=4)
+    read_sessions = []
+    read_market_bars = store.read_market_bars
+
+    def record_read(session_date):
+        read_sessions.append(session_date)
+        return read_market_bars(session_date)
+
+    monkeypatch.setattr(store, "read_market_bars", record_read)
+
+    result = build_daily_atr_task(store, SetupArtifactStore(tmp_path)).materialize(
+        SetupRunRequest(
+            "ftx-paper-orderflow", "daily-atr", "catch_up",
+            from_session="2026-01-02", through_session="2026-01-02",
+        )
+    )
+
+    assert result["processed_sessions"] == 1
+    assert read_sessions == ["2026-01-01", "2026-01-02"]
+
+
+def test_daily_atr_reuses_current_target_without_recomputing_values(tmp_path, monkeypatch) -> None:
+    store = _store()
+    artifacts = SetupArtifactStore(tmp_path)
+    task = build_daily_atr_task(store, artifacts)
+    request = SetupRunRequest(
+        "ftx-paper-orderflow", "daily-atr", "catch_up",
+        from_session="2026-01-18", through_session="2026-01-18",
+    )
+    task.materialize(request)
+
+    def fail_calculation(_rows):
+        raise AssertionError("current ATR should be reused")
+
+    monkeypatch.setattr(
+        "ftx_paper.strategies.orderflow.setup.daily_atr_cache",
+        fail_calculation,
+    )
+
+    result = task.materialize(request)
+
+    assert result["reused"] == 1
+    assert result["materialized"] == 0
 
 
 def test_daily_atr_uses_selected_front_contract_only(tmp_path) -> None:

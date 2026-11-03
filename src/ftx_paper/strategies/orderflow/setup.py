@@ -70,14 +70,19 @@ def _observed_at(rows: list[dict[str, Any]]) -> datetime:
     return coerce_timestamp(str(rows[-1]["time"]))
 
 
+def _dates_through(store: RuntimeStore, through_session: str | None) -> list[str]:
+    dates = [str(item) for item in store.read_dates()]
+    if through_session is not None:
+        dates = [item for item in dates if item <= through_session]
+    return sorted(dates)
+
+
 def build_prior_session_task(store: RuntimeStore, artifact_store: SetupArtifactStore) -> DailySetupTask:
     def materialize(request: SetupRunRequest, cancelled: Callable[[], bool] = lambda: False) -> Mapping[str, int]:
-        all_dates = sorted(str(item) for item in store.read_dates())
-        dates = list(all_dates)
+        all_dates = _dates_through(store, request.through_session)
+        dates = all_dates
         if request.from_session:
             dates = [item for item in dates if item >= request.from_session]
-        if request.through_session:
-            dates = [item for item in dates if item <= request.through_session]
         processed = materialized = reused = unavailable = failed = 0
         target_available: int | None = None
         source_resolver = FuturesSessionSourceResolver(store)
@@ -152,8 +157,8 @@ def build_prior_session_task(store: RuntimeStore, artifact_store: SetupArtifactS
 
 def build_prior_session_levels_task(store: RuntimeStore, artifact_store: SetupArtifactStore) -> DailySetupTask:
     def materialize(request: SetupRunRequest, cancelled: Callable[[], bool] = lambda: False) -> Mapping[str, int]:
-        all_dates = sorted(str(item) for item in store.read_dates())
-        dates = [item for item in all_dates if (not request.from_session or item >= request.from_session) and (not request.through_session or item <= request.through_session)]
+        all_dates = _dates_through(store, request.through_session)
+        dates = [item for item in all_dates if not request.from_session or item >= request.from_session]
         sources_by_date = {session: FuturesSessionSourceResolver(store).resolve(session) for session in all_dates}
         rows_by_date = {
             session: _rows(sources_by_date[session], session) if sources_by_date[session] is not None else []
@@ -227,25 +232,24 @@ def build_prior_session_levels_task(store: RuntimeStore, artifact_store: SetupAr
 
 def build_daily_atr_task(store: RuntimeStore, artifact_store: SetupArtifactStore) -> DailySetupTask:
     def materialize(request: SetupRunRequest, cancelled: Callable[[], bool] = lambda: False) -> Mapping[str, int]:
-        all_dates = sorted(str(item) for item in store.read_dates())
+        all_dates = _dates_through(store, request.through_session)
         source_resolver = FuturesSessionSourceResolver(store)
         sources_by_date = {session: source_resolver.resolve(session) for session in all_dates}
         rows_by_date = {
             session: _rows(sources_by_date[session], session) if sources_by_date[session] is not None else []
             for session in all_dates
         }
-        values = daily_atr_cache(rows_by_date)
         completed_dates = [session for session in all_dates if rows_by_date[session]]
         processed = materialized = reused = unavailable = 0
         target_available: int | None = None
-        targets = [item for item in all_dates if (not request.from_session or item >= request.from_session) and (not request.through_session or item <= request.through_session)]
+        values: dict[str, float | None] | None = None
+        targets = [item for item in all_dates if not request.from_session or item >= request.from_session]
         for target in targets:
             if cancelled():
                 break
             processed += 1
             identity = {"strategy_id": STRATEGY_ID, "task_id": ATR_TASK_ID, "algorithm_version": ATR_ALGORITHM_VERSION,
                         "config_fingerprint": "daily-atr-NIFTY-14", "instrument": "NIFTY"}
-            value = values.get(target)
             source_index = completed_dates.index(target) if target in completed_dates else None
             if source_index is None:
                 source_date = None
@@ -272,6 +276,11 @@ def build_daily_atr_task(store: RuntimeStore, artifact_store: SetupArtifactStore
                         isinstance(existing, Mapping) and existing.get("status") == "available"
                     )
                     continue
+            value = None
+            if source_index is not None:
+                if values is None:
+                    values = daily_atr_cache(rows_by_date)
+                value = values.get(target)
             if value is None or source_date is None:
                 envelope = build_payload_envelope(
                     strategy_id=STRATEGY_ID, task_id=ATR_TASK_ID, algorithm_version=ATR_ALGORITHM_VERSION,

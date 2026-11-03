@@ -115,7 +115,7 @@ class SetupWorker:
             return dict(value) if value is not None else None
 
     def ensure(self, strategy_id: str, through_session: str) -> tuple[dict[str, Any], ...]:
-        """Materialize every registered setup task before a bounded replay."""
+        """Ensure setup artifacts for the replay's target session."""
         with self._ensure_lock:
             results: list[dict[str, Any]] = []
             for task in self.registry.for_strategy(strategy_id):
@@ -123,6 +123,7 @@ class SetupWorker:
                     "strategy_id": strategy_id,
                     "task_id": task.task_id,
                     "mode": "catch_up",
+                    "from_session": through_session,
                     "through_session": through_session,
                     "requested_by": "replay-prerequisite",
                 })

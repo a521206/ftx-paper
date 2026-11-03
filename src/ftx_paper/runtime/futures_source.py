@@ -112,11 +112,14 @@ class FuturesSessionSourceResolver:
         self, session_date: str, *, rows: list[dict[str, Any]] | None = None,
     ) -> FuturesSessionSource | None:
         session_day = date_type.fromisoformat(session_date)
-        loaded_rows = rows if rows is not None else self.store.read_market_bars(session_date)
-        futures = [
-            row for row in loaded_rows
-            if str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
-        ]
+        futures = (
+            self.store.read_market_futures_bars(session_date)
+            if rows is None
+            else [
+                row for row in rows
+                if str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
+            ]
+        )
         rejected: list[dict[str, Any]] = []
         contracts: dict[tuple[str, str], list[dict[str, Any]]] = {}
         for row in futures:

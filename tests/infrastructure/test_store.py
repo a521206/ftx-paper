@@ -11,6 +11,7 @@ import pytest
 
 from ftx_paper.contracts import Instrument, MarketBar, OptionType
 from ftx_paper.runtime import RuntimeStore
+from ftx_paper.runtime.futures_source import FuturesSessionSourceResolver
 
 
 def test_runtime_store_allows_reads_during_writer_transaction(tmp_path):
@@ -44,6 +45,31 @@ def test_runtime_store_round_trips_market_bars(tmp_path):
     }]
     assert store.read_dates() == ["2026-01-05"]
     assert store.read_market_dates() == ["2026-01-05"]
+
+
+def test_runtime_store_reads_only_futures_for_source_resolution(tmp_path, monkeypatch):
+    store = RuntimeStore(tmp_path)
+    timestamp = datetime(2026, 1, 5, 4, 0, tzinfo=ZoneInfo("UTC"))
+    store.append_market_bars((
+        MarketBar(Instrument("NIFTY26JANFUT", "NFO", "FUTURES", "2026-01-29"), timestamp, 100, 102, 99, 101),
+        MarketBar(Instrument("NIFTY26JAN18000CE", "NFO", "CE", "2026-01-29", 18000, OptionType.CALL), timestamp, 10, 12, 9, 11),
+    ), source="fixture")
+
+    rows = store.read_market_futures_bars("2026-01-05")
+
+    assert len(rows) == 1
+    assert rows[0]["instrument_type"] == "FUT"
+    assert rows[0]["symbol"] == "NIFTY26JANFUT"
+
+    def fail_read_all(_session_date):
+        raise AssertionError("source resolution should use the futures-only query")
+
+    monkeypatch.setattr(store, "read_market_bars", fail_read_all)
+
+    source = FuturesSessionSourceResolver(store).resolve("2026-01-05")
+
+    assert source is not None
+    assert source.symbol == "NIFTY26JANFUT"
 
 
 def test_runtime_store_round_trips_versioned_strategy_snapshots(tmp_path):
