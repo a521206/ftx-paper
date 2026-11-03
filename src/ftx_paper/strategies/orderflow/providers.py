@@ -17,11 +17,12 @@ from .evidence.features_adapter import PaperFeatureAdapter
 from .evidence.producer import produce_evidence
 from .orderflow_common import Aggregate
 from .evidence_publication import EvidencePublication
-from .context_location_replay import _causal_children, _location_observation
+from .location_observation import causal_children, location_observation
 from .timestamps import coerce_timestamp, nifty_label
 from .vwap_location import causal_vwap_prefix
 from .opportunity_coordinator import LifecycleFormation
 from .feature_store import FeatureStore
+from .state_machine_types import LocationRegistry
 
 
 def _aggregate(value: Mapping[str, Any], timeframe: str) -> Aggregate:
@@ -154,6 +155,11 @@ class CanonicalInputProvider:
             atr = evidence.atr
             levels = adapter.session_levels(session_date)
             prior = adapter.prior_value(session_date)
+            location_registry = LocationRegistry(
+                evidence.location_stream_id or f"orderflow:{session_date}"
+            )
+            for record in evidence.locations:
+                location_registry.register(record)
             vwap_measurements = tuple(
                 measurement
                 for timeframe in ("1m", "5m")
@@ -183,9 +189,7 @@ class CanonicalInputProvider:
                 timeframe: {nifty_label(item.time): item for item in values}
                 for timeframe, values in aggregates_by_timeframe.items()
             }
-            for record in evidence.locations:
-                if record.available_at > one.available_at:
-                    continue
+            for record in location_registry.available_as_of(one.available_at):
                 if record.alias == "VWAP" and (
                     latest5 is None
                     or atr.value is None
@@ -193,7 +197,7 @@ class CanonicalInputProvider:
                 ):
                     continue
                 if not record.timeframe or record.timeframe == "1m":
-                    one_observation = _location_observation(
+                    one_observation = location_observation(
                         one, record,
                     )
                     observations_1m.append(one_observation)
@@ -203,13 +207,13 @@ class CanonicalInputProvider:
                     source = aggregate_by_id["5m"].get(nifty_label(latest5.time))
                     if source is None or source.time != latest5.time:
                         continue
-                    children = _causal_children(
+                    children = causal_children(
                         source, aggregates_by_timeframe["1m"],
                     )
                     if len(children) != 5:
                         continue
                     child_observations = tuple(
-                        _location_observation(
+                        location_observation(
                             item, record,
                             available_at=max(
                                 coerce_timestamp(item.available_at),
@@ -219,10 +223,14 @@ class CanonicalInputProvider:
                         for item in children
                     )
                     observations_1m.extend(child_observations)
-                    observations_5m.append(_location_observation(
+                    observations_5m.append(location_observation(
                         source, record,
                         child_observation_ids=tuple(item.observation_id for item in child_observations),
                     ))
+            observations_1m = list({
+                observation.observation_id: observation
+                for observation in observations_1m
+            }.values())
             self._by_identity[source_id] = CanonicalInputEnvelope(
                 OrderflowClockInput(
                     one_minute=one,

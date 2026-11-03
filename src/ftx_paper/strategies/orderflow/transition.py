@@ -1103,11 +1103,11 @@ class OrderflowTransitionOwner:
         self.advance_opportunity_timeouts(timestamp, available5, timeout_events)
         self.context.pending_bar_events.extend(timeout_events)
         bar_events = list(observation.events)
-        self.opportunity_owner.handle_opening_interaction(
-            row, timestamp, next_time, bar_events,
-        )
         self.opportunity_owner.handle_structure(
             timestamp, next_time, row, available5, bar_events,
+        )
+        self.opportunity_owner.handle_opening_interaction(
+            row, timestamp, next_time, bar_events,
         )
         self._record_phase4_context_location(item)
         generated_formations = self.opportunity_owner.formations_for(next_time)

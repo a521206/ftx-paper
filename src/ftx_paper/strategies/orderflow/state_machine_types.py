@@ -388,10 +388,10 @@ class ReplayContext:
         available_at = event_data.get("available_at", observed_at)
         event_data.setdefault("observed_at", observed_at)
         event_data.setdefault("available_at", available_at)
-        if isinstance(observed_at, str):
-            event_data.setdefault("causal_observed_at", observed_at)
-        if isinstance(available_at, str):
-            event_data.setdefault("causal_available_at", available_at)
+        if isinstance(observed_at, (str, datetime)):
+            event_data.setdefault("causal_observed_at", _parity_safe(observed_at))
+        if isinstance(available_at, (str, datetime)):
+            event_data.setdefault("causal_available_at", _parity_safe(available_at))
         event_data.setdefault("event_id", f"replay:{len(self.events)}")
         event_data.setdefault("sequence", len(self.events))
         event_data.setdefault("policy_version", "orderflow-v1")
@@ -570,10 +570,10 @@ class ReplayContext:
         ))
         payload.setdefault("observed_at", observed_at)
         payload.setdefault("available_at", available_at)
-        if isinstance(observed_at, str):
-            payload.setdefault("causal_observed_at", observed_at)
-        if isinstance(available_at, str):
-            payload.setdefault("causal_available_at", available_at)
+        if isinstance(observed_at, (str, datetime)):
+            payload.setdefault("causal_observed_at", _parity_safe(observed_at))
+        if isinstance(available_at, (str, datetime)):
+            payload.setdefault("causal_available_at", _parity_safe(available_at))
         payload.setdefault("event_id", f"replay:{len(self.events)}")
         payload.setdefault("sequence", len(self.events))
         payload.setdefault("policy_version", "orderflow-v1")

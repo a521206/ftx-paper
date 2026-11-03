@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any
+from datetime import datetime, timedelta
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any
 
-from .timestamps import coerce_timestamp, serialize_utc
+from .orderflow_common import Aggregate
+from .timestamps import coerce_timestamp, nifty_label, serialize_utc
+
+if TYPE_CHECKING:
+    from .state_machine_types import LocationRecord
 
 
 
@@ -73,3 +78,62 @@ class LocationObservation:
             "reference_source_aggregate_id": self.reference_source_aggregate_id,
             "reference_source_timeframe": self.reference_source_timeframe,
         }
+
+
+def location_observation(
+    aggregate: Aggregate,
+    record: LocationRecord,
+    *,
+    child_observation_ids: tuple[str, ...] = (),
+    available_at: datetime | str | None = None,
+) -> LocationObservation:
+    close_relation = (
+        "ABOVE" if aggregate.close > record.band_high
+        else "BELOW" if aggregate.close < record.band_low
+        else "INSIDE_BAND"
+    )
+    location_key = record.location_id or f"{record.alias}:{record.generation}"
+    source_aggregate_id = nifty_label(aggregate.time)
+    observation_id = f"{source_aggregate_id}:{aggregate.timeframe}:{location_key}"
+    return LocationObservation(
+        location=record.alias,
+        location_id=record.location_id,
+        reference_generation=record.generation,
+        reference=record.price,
+        band_low=record.band_low,
+        band_high=record.band_high,
+        open=aggregate.open,
+        high=aggregate.high,
+        low=aggregate.low,
+        close=aggregate.close,
+        close_relation=close_relation,
+        band_contact=record.band.intersects(high=aggregate.high, low=aggregate.low),
+        source_aggregate_id=source_aggregate_id,
+        observed_at=coerce_timestamp(aggregate.end_time),
+        available_at=coerce_timestamp(available_at or aggregate.available_at),
+        method=record.source_method or "replay_location_band_intersection",
+        observation_id=observation_id,
+        timeframe=aggregate.timeframe,
+        child_observation_ids=child_observation_ids,
+        source_observation_id=record.source_observation_id,
+        reference_source_aggregate_id=record.source_aggregate_id,
+        reference_source_timeframe=record.timeframe or aggregate.timeframe,
+    )
+
+
+def causal_children(
+    aggregate: Aggregate,
+    one_minute: Sequence[Aggregate],
+) -> tuple[Aggregate, ...]:
+    if aggregate.timeframe != "5m":
+        return ()
+    children = tuple(
+        item for item in one_minute
+        if aggregate.time <= item.time <= aggregate.end_time
+        and coerce_timestamp(item.available_at) <= coerce_timestamp(aggregate.available_at)
+    )
+    expected = tuple(
+        nifty_label(aggregate.time + timedelta(minutes=offset))
+        for offset in range(5)
+    )
+    return children if tuple(nifty_label(item.time) for item in children) == expected else ()

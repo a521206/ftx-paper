@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
@@ -557,6 +557,22 @@ def test_interaction_response_phase_fact_keeps_direct_fields_and_session_date() 
     assert fact["values"]["interaction_id"] == "interaction-1"
     assert fact["values"]["location"] == "OR_HIGH"
     assert fact["values"]["session_date"] == "2026-10-05"
+
+
+def test_interaction_response_phase_fact_serializes_datetime_causal_times() -> None:
+    context = ReplayContext(execution_engine=ExecutionEngine())
+    observed_at = datetime(2026, 10, 5, 3, 49, tzinfo=timezone.utc)
+    available_at = datetime(2026, 10, 5, 3, 50, tzinfo=timezone.utc)
+    context.record_event({
+        "kind": "location_interaction_observed",
+        "observed_at": observed_at,
+        "available_at": available_at,
+        "interaction_id": "interaction-1",
+    })
+
+    values = context.parity_streams["interaction_response"][0]["values"]
+    assert values["causal_observed_at"] == "2026-10-05T03:49:00.000000Z"
+    assert values["causal_available_at"] == "2026-10-05T03:50:00.000000Z"
 
 
 def test_opening_interaction_is_published_as_a_lifecycle_event_only() -> None:
