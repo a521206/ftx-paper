@@ -130,7 +130,6 @@ class PaperOrderflowRuntime:
                 prior_values=prior_values,
                 atr_values=atr_values,
                 prior_session_levels=prior_session_levels,
-                derive_prior_session_levels=False,
             )
         )
 

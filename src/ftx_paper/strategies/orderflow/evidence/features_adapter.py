@@ -22,13 +22,11 @@ class PaperFeatureAdapter(EvidenceAdapter):
         prior_values: Mapping[str, ValuePublication] | None = None,
         atr_values: Mapping[str, AtrPublication] | None = None,
         prior_session_levels: Mapping[str, Mapping[str, object]] | None = None,
-        derive_prior_session_levels: bool = True,
     ) -> None:
         self._rows = {str(date): tuple(dict(row) for row in rows) for date, rows in rows_by_date.items()}
         self._prior_values = dict(prior_values or {})
         self._atr_values = None if atr_values is None else dict(atr_values)
         self._prior_session_levels = None if prior_session_levels is None else dict(prior_session_levels)
-        self._derive_prior_session_levels = derive_prior_session_levels
         self._observations: dict[str, MarketObservation] = {}
         self._atr_cache: dict[tuple[str, str], AtrPublication] = {}
         self._levels_cache: dict[str, SessionLevels | None] = {}
@@ -57,8 +55,6 @@ class PaperFeatureAdapter(EvidenceAdapter):
             if not rows:
                 result = None
             else:
-                prior_dates = sorted(date for date in self._rows if date < session_date)
-                prior_rows = self._rows[prior_dates[-1]] if prior_dates else ()
                 observation = self._observations.get(session_date)
                 if observation is None:
                     observation = observe_market([
@@ -77,15 +73,17 @@ class PaperFeatureAdapter(EvidenceAdapter):
                         opening_range_high=first.high,
                         prior_day_low=(
                             float(self._prior_session_levels[session_date]["low"])
-                            if self._prior_session_levels is not None and session_date in self._prior_session_levels and "low" in self._prior_session_levels[session_date]
-                            else None if self._prior_session_levels is not None
-                            else min((float(str(row["low"])) for row in prior_rows), default=None) if self._derive_prior_session_levels else None
+                            if self._prior_session_levels is not None
+                            and session_date in self._prior_session_levels
+                            and "low" in self._prior_session_levels[session_date]
+                            else None
                         ),
                         prior_day_high=(
                             float(self._prior_session_levels[session_date]["high"])
-                            if self._prior_session_levels is not None and session_date in self._prior_session_levels and "high" in self._prior_session_levels[session_date]
-                            else None if self._prior_session_levels is not None
-                            else max((float(str(row["high"])) for row in prior_rows), default=None) if self._derive_prior_session_levels else None
+                            if self._prior_session_levels is not None
+                            and session_date in self._prior_session_levels
+                            and "high" in self._prior_session_levels[session_date]
+                            else None
                         ),
                         opening_range_available_at=first.available_at,
                         prior_day_available_at=f"{session_date}T09:15",

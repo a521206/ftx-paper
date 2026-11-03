@@ -64,7 +64,6 @@ class CanonicalInputProvider:
         prior_values: Mapping[str, Any] | None = None,
         atr_values: Mapping[str, Any] | None = None,
         prior_session_levels: Mapping[str, Mapping[str, Any]] | None = None,
-        derive_prior_session_levels: bool = True,
     ) -> None:
         dates = dict(rows_by_date or {})
         if rows and not dates:
@@ -73,7 +72,6 @@ class CanonicalInputProvider:
         self._prior_values = dict(prior_values or {})
         self._atr_values = None if atr_values is None else dict(atr_values)
         self._prior_session_levels = None if prior_session_levels is None else dict(prior_session_levels)
-        self._derive_prior_session_levels = derive_prior_session_levels
         self._rows = tuple(dict(row) for row in rows)
         if not self._rows and dates:
             target = max(str(key) for key in dates)
@@ -99,7 +97,6 @@ class CanonicalInputProvider:
         adapter = PaperFeatureAdapter(
             rows_by_date, prior_values=self._prior_values, atr_values=self._atr_values,
             prior_session_levels=self._prior_session_levels,
-            derive_prior_session_levels=self._derive_prior_session_levels,
         )
         vwap = {
             timeframe: causal_vwap_prefix(values, session_date=session_date)
@@ -239,12 +236,10 @@ class CanonicalInputProvider:
         prior_values: Mapping[str, Any] | None = None,
         atr_values: Mapping[str, Any] | None = None,
         prior_session_levels: Mapping[str, Mapping[str, Any]] | None = None,
-        derive_prior_session_levels: bool = True,
     ) -> "CanonicalInputProvider":
         return cls(
             rows, rows_by_date=rows_by_date, prior_values=prior_values,
             atr_values=atr_values, prior_session_levels=prior_session_levels,
-            derive_prior_session_levels=derive_prior_session_levels,
         )
 
     @classmethod
@@ -256,7 +251,6 @@ class CanonicalInputProvider:
         prior_values: Mapping[str, Any] | None = None,
         atr_values: Mapping[str, Any] | None = None,
         prior_session_levels: Mapping[str, Mapping[str, Any]] | None = None,
-        derive_prior_session_levels: bool = True,
     ) -> "CanonicalInputProvider":
         """Adapt Paper completed futures bars into the canonical source shape."""
         rows = cls._rows_from_market_bars(bars)
@@ -270,7 +264,6 @@ class CanonicalInputProvider:
             prior_values=prior_values,
             atr_values=atr_values,
             prior_session_levels=prior_session_levels,
-            derive_prior_session_levels=derive_prior_session_levels,
         )
 
     def append_market_bars(self, bars: Sequence[Any]) -> None:

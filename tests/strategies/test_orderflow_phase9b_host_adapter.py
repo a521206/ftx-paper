@@ -170,7 +170,6 @@ def test_replay_provider_does_not_derive_pd_levels_from_prior_bars() -> None:
         current_day,
         feature_history_bars=prior_day,
         prior_session_levels={"2026-10-01": {}},
-        derive_prior_session_levels=False,
     )
 
     assert len(provider.envelopes) == len(current_day)
@@ -180,6 +179,18 @@ def test_replay_provider_does_not_derive_pd_levels_from_prior_bars() -> None:
     assert first_input.session_levels.prior_day_low is None
     assert first_input.session_levels.prior_day_high is None
     assert first_input.prior_session == "2026-09-30"
+
+    materialized_provider = CanonicalInputProvider.from_market_bars(
+        current_day,
+        feature_history_bars=prior_day,
+        prior_session_levels={
+            "2026-10-01": {"high": 114.0, "low": 86.0},
+        },
+    )
+    materialized_levels = materialized_provider.envelopes[0].input.session_levels
+    assert materialized_levels is not None
+    assert materialized_levels.prior_day_high == 114.0
+    assert materialized_levels.prior_day_low == 86.0
 
 
 def test_coordinator_limits_1m_observations_to_current_clock(monkeypatch) -> None:
