@@ -23,9 +23,11 @@ class ReplayInput:
         self.store = store
         self._sources = source_resolver or FuturesSessionSourceResolver(store)
         self._source_cache: dict[str, Any] = {}
+        self._prior_source_cache: dict[str, dict[str, Any] | None] = {}
 
     def reset(self) -> None:
         self._source_cache.clear()
+        self._prior_source_cache.clear()
 
     def resolve_source(
         self, session_date: str, *, rows: list[dict[str, Any]] | None = None,
@@ -35,11 +37,19 @@ class ReplayInput:
         return self._source_cache[session_date]
 
     def prior_source_provenance(self, session_date: str) -> dict[str, Any] | None:
-        dates = sorted(value for value in self.store.read_dates() if value < session_date)
-        if not dates:
-            return None
-        source = self.resolve_source(dates[-1])
-        return source.provenance() if source is not None else None
+        if session_date not in self._prior_source_cache:
+            prior_date = max(
+                (value for value in self.store.read_dates() if value < session_date),
+                default=None,
+            )
+            if prior_date is None:
+                self._prior_source_cache[session_date] = None
+            else:
+                source = self.resolve_source(prior_date)
+                self._prior_source_cache[session_date] = (
+                    source.provenance() if source is not None else None
+                )
+        return self._prior_source_cache[session_date]
 
     def bars(
         self, session_date: str, *, rows: list[dict[str, Any]] | None = None,
@@ -111,7 +121,9 @@ class ReplayInput:
         bars: tuple[MarketBar, ...] | None = None, futures_source: Any | None = None,
     ) -> Mapping[str, Any]:
         loaded = rows if rows is not None else self.store.read_market_bars(session_date)
-        source = futures_source if futures_source is not None else self.resolve_source(session_date)
+        source = futures_source if futures_source is not None else self.resolve_source(
+            session_date, rows=loaded,
+        )
         normalized = bars if bars is not None else self.bars(
             session_date, rows=loaded, futures_source=source,
         )

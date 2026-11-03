@@ -1148,7 +1148,20 @@ class ReplayWorker:
         input_manifest = self.input_manifest(
             session_date, rows=rows, bars=replay_bars, futures_source=futures_source,
         )
-        summary = dict(build_summary(list(events), []))
+        summary = dict(build_summary(events, []))
+        accepted_decisions = 0
+        rejected_decisions = 0
+        risk_blocks = 0
+        for event in events:
+            outcome = event.get("outcome")
+            if outcome == "accepted":
+                accepted_decisions += 1
+            elif outcome == "rejected":
+                rejected_decisions += 1
+            if str(event.get("event_type", "")).upper() in {
+                "ORDER_SUPPRESSED", "ENTRY_BLOCKED_RISK",
+            }:
+                risk_blocks += 1
         current_source = input_manifest["provenance"].get("current")
         storage_identity = (current_source or {}).get("storage_identity") or {}
         source_symbol = str(storage_identity.get("symbol") or "")
@@ -1157,9 +1170,9 @@ class ReplayWorker:
             summary["source"] = f"{source_symbol} FUT {source_expiry}"
         summary.update({
             "bars_seen": bundles_seen,
-            "accepted_decisions": sum(1 for event in events if event.get("outcome") == "accepted"),
-            "rejected_decisions": sum(1 for event in events if event.get("outcome") == "rejected"),
-            "risk_blocks": sum(1 for event in events if str(event.get("event_type", "")).upper() in {"ORDER_SUPPRESSED", "ENTRY_BLOCKED_RISK"}),
+            "accepted_decisions": accepted_decisions,
+            "rejected_decisions": rejected_decisions,
+            "risk_blocks": risk_blocks,
             "closed_trades": 0,
         })
         metadata = {
@@ -1220,7 +1233,7 @@ class ReplayWorker:
             execution_scope="replay",
             ledger_scope="replay",
             summary=ReplaySummary(summary),
-            events=tuple(canonical_events(list(events), run_id=run_id, execution_scope="replay")),
+            events=tuple(canonical_events(events, run_id=run_id, execution_scope="replay")),
             shadow_trades=(),
             shadow_ledger=(),
             parity_artifact=parity_artifact,

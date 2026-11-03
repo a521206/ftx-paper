@@ -97,6 +97,14 @@ class CanonicalInputProvider:
             timeframe: causal_vwap_prefix(values, session_date=session_date)
             for timeframe, values in parsed.items()
         }
+        parsed_values = {
+            timeframe: tuple(item.value for item in events if item.timeframe == timeframe)
+            for timeframe in ("1m", "5m")
+        }
+        parsed_available_at = {
+            timeframe: tuple(coerce_timestamp(str(item["available_at"])) for item in values)
+            for timeframe, values in parsed_values.items()
+        }
         available: dict[str, list[dict[str, Any]]] = {"1m": [], "5m": []}
         for event in events:
             available[event.timeframe].append(event.value)
@@ -104,12 +112,10 @@ class CanonicalInputProvider:
                 continue
             available_at = event.available_at
             available = {
-                timeframe: [item for item in values
-                            if coerce_timestamp(str(item["available_at"])) <= available_at]
-                for timeframe, values in {
-                    "1m": [item.value for item in events if item.timeframe == "1m"],
-                    "5m": [item.value for item in events if item.timeframe == "5m"],
-                }.items()
+                timeframe: [item for item, item_available_at in zip(
+                    values, parsed_available_at[timeframe], strict=True,
+                ) if item_available_at <= available_at]
+                for timeframe, values in parsed_values.items()
             }
             prefix = {
                 **artifact,
@@ -120,8 +126,10 @@ class CanonicalInputProvider:
                 session_date=session_date,
                 adapter=adapter,
                 parsed_aggregates={
-                    key: tuple(_aggregate(item, key) for item in value)
-                    for key, value in available.items()
+                    key: tuple(item for item, item_available_at in zip(
+                        parsed[key], parsed_available_at[key], strict=True,
+                    ) if item_available_at <= available_at)
+                    for key in parsed
                 },
                 precomputed_vwap_measurements=vwap,
             )["publication"]
@@ -131,7 +139,9 @@ class CanonicalInputProvider:
                 continue
             one = _aggregate(event.value, "1m")
             latest5 = max(
-                (_aggregate(item, "5m") for item in available["5m"]),
+                (item for item, item_available_at in zip(
+                    parsed["5m"], parsed_available_at["5m"], strict=True,
+                ) if item_available_at <= available_at),
                 key=lambda item: item.available_at,
                 default=None,
             )
@@ -143,17 +153,22 @@ class CanonicalInputProvider:
             observations_1m = []
             observations_5m = []
             aggregates_by_timeframe = {
-                "1m": tuple(_aggregate(item, "1m") for item in available["1m"]),
-                "5m": tuple(_aggregate(item, "5m") for item in available["5m"]),
+                "1m": tuple(item for item, item_available_at in zip(
+                    parsed["1m"], parsed_available_at["1m"], strict=True,
+                ) if item_available_at <= available_at),
+                "5m": tuple(item for item, item_available_at in zip(
+                    parsed["5m"], parsed_available_at["5m"], strict=True,
+                ) if item_available_at <= available_at),
+            }
+            aggregate_by_id = {
+                timeframe: {nifty_label(item.time): item for item in values}
+                for timeframe, values in aggregates_by_timeframe.items()
             }
             for record in evidence.locations:
                 if record.available_at > one.available_at:
                     continue
-                values = aggregates_by_timeframe.get(record.timeframe, ())
-                source = next(
-                    (item for item in values
-                     if nifty_label(item.time) == str(record.source_aggregate_id)),
-                    None,
+                source = aggregate_by_id.get(record.timeframe, {}).get(
+                    str(record.source_aggregate_id),
                 )
                 if source is None:
                     continue
