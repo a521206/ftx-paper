@@ -7,6 +7,7 @@ levels, ATR, VWAP, locations, or child observations.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 import hashlib
 from typing import Any
@@ -34,6 +35,7 @@ class OrderflowClockInput:
     vwap_measurements: tuple[VwapMeasurement, ...] = ()
     observations_1m: tuple[LocationObservation, ...] = ()
     observations_5m: tuple[LocationObservation, ...] = ()
+    input_diagnostic: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

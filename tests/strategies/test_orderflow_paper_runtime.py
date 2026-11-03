@@ -7,6 +7,7 @@ from ftx_paper.runtime.session import RuntimeSession
 from ftx_paper.runtime import RuntimeStore
 from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.strategies.orderflow import PaperOrderflowRuntime
+from ftx_paper.strategies.orderflow.providers import CanonicalInputProvider
 
 
 def test_bounded_replay_uses_fresh_owner_and_is_idempotent() -> None:
@@ -29,6 +30,35 @@ def test_bounded_replay_uses_fresh_owner_and_is_idempotent() -> None:
     assert first.transition_owner.parity_streams == retry.transition_owner.parity_streams
     assert first.transition_owner.clock == retry.transition_owner.clock
     assert PaperOrderflowRuntime().replay((bundle,), cancelled=lambda: True) == ()
+
+
+def test_input_provider_reports_selected_bundle_route_and_observation_counts() -> None:
+    bar = MarketBar(
+        instrument=Instrument("NIFTY", "NFO", "FUTURES"),
+        timestamp=datetime(2026, 10, 1, 4, 0, tzinfo=timezone.utc),
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        volume=10,
+    )
+
+    provider = CanonicalInputProvider()
+    bundle_input = provider(
+        SimpleNamespace(bars={MarketRole.FUTURES: bar}),
+    )
+
+    assert bundle_input.input_diagnostic["input_source"] == "provider_appended_bar"
+    assert bundle_input.input_diagnostic["observations_1m"] == 0
+    assert bundle_input.input_diagnostic["observations_5m"] == 0
+    assert "eligible_location_records" in bundle_input.input_diagnostic
+
+    explicit_input = provider(SimpleNamespace(
+        supporting_inputs={"orderflow_clock_input": provider.envelopes[0].input},
+    ))
+
+    assert explicit_input.input_diagnostic["input_source"] == "bundle_orderflow_clock_input"
+    assert explicit_input.input_diagnostic["observations_1m"] == 0
 
 
 def test_live_session_binds_existing_paper_execution_service(tmp_path) -> None:

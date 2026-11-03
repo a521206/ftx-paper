@@ -1065,6 +1065,12 @@ class OrderflowTransitionOwner:
         if self._clock is not None and available_at < self._clock:
             raise ValueError("orderflow transition clock cannot move backwards")
         self.context.current_session_date = item.one_minute.session_date
+        self.context.input_diagnostics.append({
+            "kind": "orderflow_clock_input",
+            "time": nifty_label(item.one_minute.time),
+            "available_at": nifty_label(item.one_minute.available_at),
+            **dict(item.input_diagnostic),
+        })
         if (
             item.atr is not None
             and item.atr.value is not None

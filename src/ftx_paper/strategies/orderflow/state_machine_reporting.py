@@ -138,6 +138,7 @@ def build_replay_payload(
         "parity_coverage": coverage,
         "execution_diagnostics": _json_safe(execution_diagnostics),
         "execution_diagnostic_summary": _execution_diagnostic_summary(execution_diagnostics),
+        "input_diagnostics": _json_safe(tuple(getattr(context, "input_diagnostics", ()))),
     }
     # Validate the producer-owned shape without manufacturing missing streams.
     for name, values in (("execution_fills", execution_fills),

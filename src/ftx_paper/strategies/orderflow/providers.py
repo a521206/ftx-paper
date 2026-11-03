@@ -7,7 +7,7 @@ repair gaps, or derive facts from terminal transition state.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, cast
 
 from ftx_paper.contracts import MarketRole
@@ -46,6 +46,7 @@ class CanonicalInputEnvelope:
     input: OrderflowClockInput
     source_ids: tuple[str, ...]
     unavailable: tuple[str, ...] = ()
+    input_source: str = "provider_envelope"
 
 
 class CanonicalInputProvider:
@@ -242,13 +243,27 @@ class CanonicalInputProvider:
                     vwap_measurements=vwap_measurements,
                     observations_1m=tuple(observations_1m),
                     observations_5m=tuple(observations_5m),
+                    input_diagnostic={
+                        "eligible_location_records": len(
+                            tuple(location_registry.available_as_of(one.available_at))
+                        ),
+                    },
                 ),
                 (source_id, *atr.lineage, *prior.lineage),
                 unavailable,
             )
 
     def __call__(self, bundle: object) -> OrderflowClockInput:
-        return self.from_bundle(bundle).input
+        envelope = self.from_bundle(bundle)
+        return replace(
+            envelope.input,
+            input_diagnostic={
+                **envelope.input.input_diagnostic,
+                "input_source": envelope.input_source,
+                "observations_1m": len(envelope.input.observations_1m),
+                "observations_5m": len(envelope.input.observations_5m),
+            },
+        )
 
     @property
     def envelopes(self) -> tuple[CanonicalInputEnvelope, ...]:
@@ -323,26 +338,26 @@ class CanonicalInputProvider:
             if isinstance(supporting, Mapping):
                 supplied = supporting.get("orderflow_clock_input")
                 if isinstance(supplied, OrderflowClockInput):
-                    return CanonicalInputEnvelope(supplied, (), ())
+                    return CanonicalInputEnvelope(supplied, (), (), "bundle_orderflow_clock_input")
                 envelope = supporting.get("canonical_input")
                 if isinstance(envelope, CanonicalInputEnvelope):
-                    return envelope
+                    return replace(envelope, input_source="bundle_canonical_input")
             supplied = bundle.get("orderflow_clock_input")
             if isinstance(supplied, OrderflowClockInput):
-                return CanonicalInputEnvelope(supplied, (), ())
+                return CanonicalInputEnvelope(supplied, (), (), "bundle_orderflow_clock_input")
             envelope = bundle.get("canonical_input")
             if isinstance(envelope, CanonicalInputEnvelope):
-                return envelope
+                return replace(envelope, input_source="bundle_canonical_input")
         if hasattr(bundle, "values"):
             return self.from_evidence(bundle)
         supporting = getattr(bundle, "supporting_inputs", None)
         if isinstance(supporting, Mapping):
             supplied = supporting.get("orderflow_clock_input")
             if isinstance(supplied, OrderflowClockInput):
-                return CanonicalInputEnvelope(supplied, (), ())
+                return CanonicalInputEnvelope(supplied, (), (), "bundle_orderflow_clock_input")
             envelope = supporting.get("canonical_input")
             if isinstance(envelope, CanonicalInputEnvelope):
-                return envelope
+                return replace(envelope, input_source="bundle_canonical_input")
         bars = getattr(bundle, "bars", {})
         bar = bars.get(MarketRole.FUTURES) if isinstance(bars, Mapping) else None
         timestamp = getattr(bar, "timestamp", None)
@@ -350,10 +365,10 @@ class CanonicalInputProvider:
             timestamp = coerce_timestamp(timestamp)
             identity = f"aggregate:1m:{nifty_label(timestamp)}"
             if identity in self._by_identity:
-                return self._by_identity[identity]
+                return replace(self._by_identity[identity], input_source="provider_envelope")
             self.append_market_bars((bar,))
             if identity in self._by_identity:
-                return self._by_identity[identity]
+                return replace(self._by_identity[identity], input_source="provider_appended_bar")
             raise ValueError(f"completed futures bar was not published: {identity}")
         raise ValueError("bundle has no canonical orderflow clock input")
 
@@ -365,9 +380,9 @@ class CanonicalInputProvider:
         if isinstance(values, Mapping):
             supplied = values.get("canonical_input", values.get("orderflow_clock_input"))
             if isinstance(supplied, CanonicalInputEnvelope):
-                return supplied
+                return replace(supplied, input_source="evidence_canonical_input")
             if isinstance(supplied, OrderflowClockInput):
-                return CanonicalInputEnvelope(supplied, (), ())
+                return CanonicalInputEnvelope(supplied, (), (), "evidence_orderflow_clock_input")
         raise ValueError("evidence has no explicit canonical orderflow input")
 
 

@@ -334,6 +334,7 @@ class ReplayContext:
     events: list[dict[str, Any]] = field(default_factory=list)
     pending_bar_events: list[dict[str, Any]] = field(default_factory=list, repr=False)
     execution_diagnostics: list[dict[str, Any]] = field(default_factory=list)
+    input_diagnostics: list[dict[str, Any]] = field(default_factory=list)
     neutral_event_ordinals: dict[tuple[str, ...], int] = field(default_factory=dict, repr=False)
     transitions: list[dict[str, Any]] = field(default_factory=list)
     decision_context_evidence: list[dict[str, Any]] = field(default_factory=list)
