@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from ftx_paper.strategies.orderflow.canonical.ict.bars import SourceBar, build_completed_bars
+from ftx_paper.strategies.orderflow.orderflow_common import build_aggregate_result
 
 
 def test_missing_in_session_minute_is_ignored() -> None:
@@ -28,3 +29,20 @@ def test_missing_in_session_minute_is_ignored() -> None:
         first.astimezone(timezone.utc),
         (first + timedelta(minutes=2)).astimezone(timezone.utc),
     ]
+
+
+def test_aggregate_defaults_to_continuous_contract() -> None:
+    result = build_aggregate_result(
+        [{
+            "time": "2026-10-12T09:15",
+            "session_date": "2026-10-12",
+            "open": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+            "close": 100.5,
+            "volume": 10,
+        }],
+        1,
+    )
+
+    assert result.aggregates[0].contract_type == "CONTINUOUS"

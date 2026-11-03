@@ -151,6 +151,6 @@ def build_aggregate_result(rows: Iterable[Mapping[str, Any]], timeframe: int) ->
             parse_nifty_label(f"{session_date}T{_clock(start + timeframe - 1)}"), parse_nifty_label(f"{session_date}T{_clock(start + timeframe)}"),
             f"{timeframe}m", len(items), float(first["open"]), max(float(item["high"]) for item in items),
             min(float(item["low"]) for item in items), float(last["close"]), sum(int(item["volume"]) for item in items),
-            str(first.get("symbol", "NIFTY")), str(first.get("expiry", "")), str(first.get("contract_type", "FUT")),
+            str(first.get("symbol", "NIFTY")), str(first.get("expiry", "")), str(first.get("contract_type", "CONTINUOUS")),
             session_date, hashlib.sha256(raw.encode()).hexdigest()))
     return AggregateBuildResult(tuple(aggregates), tuple(issues))
