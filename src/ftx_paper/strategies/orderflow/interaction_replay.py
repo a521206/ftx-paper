@@ -10,11 +10,14 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from .context_location_replay import ContextLocationReplay
+from .context_location_replay import (
+    ContextLocationReplay,
+    replay_context_location_artifact,
+)
 from .interaction_detector import InteractionDetector
 from .location_observation import LocationObservation
 from .orderflow_common import Aggregate, parse_timestamp, serialize_timestamp
-from .timestamps import NIFTY_ZONE, serialize_utc, nifty_label
+from .timestamps import NIFTY_ZONE, coerce_timestamp, serialize_utc, nifty_label
 from .state_machine_types import LocationRegistry
 from .templates import DEFAULT_TEMPLATES, TRADE_TEMPLATES, TradeTemplate
 from .value_publication import ValuePublication
@@ -34,6 +37,7 @@ class InteractionResponseReplay:
     execution_phase_facts: dict[str, tuple[dict[str, Any], ...]] = field(default_factory=dict)
     parity_layers: dict[str, tuple[dict[str, Any], ...]] = field(default_factory=dict)
     execution_diagnostics: tuple[dict[str, Any], ...] = ()
+    replay_records: tuple[dict[str, Any], ...] = ()
 
     def parity_phase_facts(self) -> dict[str, list[dict[str, Any]]]:
         return {
@@ -168,6 +172,13 @@ def replay_interaction_response(
     one = tuple(aggregates.get("1m", ()))
     five = tuple(aggregates.get("5m", ()))
     all_bars = tuple(sorted(one, key=lambda item: (item.available_at, item.time)))
+    source_open_interest = {
+        (str(row.get("session_date", "")), nifty_label(coerce_timestamp(str(row["time"])))): int(
+            row.get("oi", row.get("open_interest", 0)) or 0
+        )
+        for row in raw_rows
+        if row.get("time") is not None
+    }
     observations: dict[str, tuple[LocationObservation, ...]] = {}
     for fact in context.context_location:
         values = fact.get("values", {})
@@ -256,6 +267,7 @@ def replay_interaction_response(
         detector=detector,
         templates=DEFAULT_TEMPLATES,
     )
+    replay_records: list[dict[str, Any]] = []
 
     def apply_regime_publications(as_of: datetime) -> None:
         eligible = [
@@ -569,13 +581,14 @@ def replay_interaction_response(
                     available_at=observation.available_at,
                 ))
             if transition.created:
+                reference_provenance = detector.interactions[iid].reference_provenance
                 facts.append(_fact("interaction_created", iid, f"aggregate:{event_current.timeframe}:{nifty_label(event_current.time)}", {
                     "interaction_id": iid, "location": str(transition.interaction.location),
                     "timeframe": transition.interaction.timeframe,
                     "reference_generation": transition.interaction.reference_generation,
                     "reference_level": transition.interaction.reference_level,
                     "band_low": transition.interaction.band_low, "band_high": transition.interaction.band_high,
-                    "source_aggregate_id": None,
+                    "source_aggregate_id": reference_provenance.get("source_aggregate_id"),
                     "source_observation_id": observation.source_observation_id if observation is not None else None,
                     "stage": "OBSERVING_LOCATION", "evidence": [event_current.to_dict()],
                 }, observed_at=event_current.end_time, available_at=event_current.available_at))
@@ -631,6 +644,43 @@ def replay_interaction_response(
                 row=current.to_dict(),
                 available5=available5,
             )
+            replay_bar = current.to_dict()
+            source_oi = source_open_interest.get(
+                (current.session_date, nifty_label(current.time))
+            )
+            if source_oi is not None:
+                replay_bar["oi"] = source_oi
+            ordinary_context = transition_owner.context.market_contexts.ordinary_context
+            visible_context = None
+            if ordinary_context is not None:
+                visible_context = max(
+                    (
+                        item
+                        for item in transition_owner.context.market_contexts.versions.get(
+                            ordinary_context.context_id, ()
+                        )
+                        if item.available_at <= current.end_time
+                    ),
+                    key=lambda item: item.available_at,
+                    default=None,
+                )
+            replay_records.append({
+                "sequence": bar_index,
+                "timestamp": nifty_label(current.time),
+                "available_at": next_time,
+                "bar": replay_bar,
+                "latest_5m": latest5.to_dict() if latest5 is not None else None,
+                "events": [dict(item) for item in bar_events],
+                "ordinary_context_ref": (
+                    {
+                        "context_id": visible_context.context_id,
+                        "version": visible_context.version,
+                    }
+                    if visible_context is not None
+                    else None
+                ),
+                "capture_scope": "canonical_orderflow_owner",
+            })
     parity_streams = transition_owner.context.parity_snapshot()
     interaction_facts = tuple(facts)
     opportunity_facts = tuple(parity_streams.get("opportunity_lifecycle", ()))
@@ -649,7 +699,62 @@ def replay_interaction_response(
             for name, values in transition_owner.context.parity_layers.items()
         },
         execution_diagnostics=tuple(transition_owner.context.execution_diagnostics),
+        replay_records=tuple(replay_records),
     )
 
 
-__all__ = ["InteractionResponseReplay", "replay_interaction_response"]
+def replay_canonical_owner(
+    phase3_artifact: Mapping[str, Any],
+    *,
+    session_date: str,
+    evidence: Any,
+    aggregates: Mapping[str, Sequence[Aggregate]],
+    registry: LocationRegistry,
+    fill_permission_margin: float | None = 0.05,
+    prior_value: ValuePublication | None = None,
+    raw_rows: Sequence[Mapping[str, Any]] = (),
+    rows_by_date: Mapping[str, Sequence[Mapping[str, object]]] | None = None,
+    atr_by_session: Mapping[str, float | None] | None = None,
+) -> tuple[ContextLocationReplay, InteractionResponseReplay]:
+    """Run the canonical owner closure once for a bounded replay.
+
+    Context/location facts are an input publication phase of this owner, not a
+    second strategy pass. The returned interaction owner retains the mutable
+    opportunity and execution state used for the remainder of the transition.
+    """
+    available_at = max(
+        (
+            coerce_timestamp(str(item["available_at"]))
+            for timeframe in ("1m", "5m")
+            for item in phase3_artifact["aggregates"][timeframe]
+        ),
+        default=None,
+    )
+    # Phase 4 supplies only causal location observations here.  Ordinary
+    # strategy context is published once by the chronological interaction
+    # owner below; feeding evidence contexts into a second replay would create
+    # two competing strategy producers.
+    context = replay_context_location_artifact(
+        phase3_artifact,
+        session_date=session_date,
+        evidence=replace(evidence, contexts=(), context_stream_id=None),
+        replay_clock=serialize_utc(available_at) if available_at is not None else None,
+    )
+    interaction = replay_interaction_response(
+        aggregates,
+        context,
+        registry,
+        fill_permission_margin=fill_permission_margin,
+        prior_value=prior_value,
+        raw_rows=raw_rows,
+        rows_by_date=rows_by_date,
+        atr_by_session=atr_by_session,
+    )
+    return context, interaction
+
+
+__all__ = [
+    "InteractionResponseReplay",
+    "replay_canonical_owner",
+    "replay_interaction_response",
+]

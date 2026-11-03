@@ -16,7 +16,7 @@ from typing import Any
 from .evidence_publication import EvidencePublication
 from .hierarchy import MarketContext
 from .location_observation import LocationObservation
-from .market_observation import MarketObservation, observe_market
+from .market_observation import MARKET_CLOSE_TIME, MarketObservation, observe_market
 from .orderflow_common import Aggregate
 from .timestamps import coerce_timestamp, nifty_label, serialize_utc, session_minute
 from .runtime_boundary import CompletedObservation, ReplayInputAdapter
@@ -178,6 +178,7 @@ def replay_context_location_artifact(
     *,
     session_date: str,
     evidence: EvidencePublication,
+    context_publications: Sequence[Mapping[str, Any]] = (),
     replay_clock: str | None = None,
 ) -> ContextLocationReplay:
     """Replay the completed aggregate sections emitted by Phase 3."""
@@ -219,6 +220,7 @@ def replay_context_location_artifact(
     market = MarketObservation(aggregates, (), {}, source_fingerprint)
     return _replay_market(
         market, session_date=session_date, evidence=evidence,
+        context_publications=context_publications,
         replay_clock=replay_clock,
     )
 
@@ -228,6 +230,7 @@ def _replay_market(
     *,
     session_date: str,
     evidence: EvidencePublication,
+    context_publications: Sequence[Mapping[str, Any]] = (),
     replay_clock: str | None,
 ) -> ContextLocationReplay:
     observations = _completed_observations(
@@ -238,6 +241,35 @@ def _replay_market(
     store = MarketContextStore()
     for context in evidence.contexts:
         store.publish(context)
+    for publication in context_publications:
+        value = publication.get("context")
+        if isinstance(value, MarketContext):
+            store.publish(value)
+        elif isinstance(value, Mapping):
+            store.publish(MarketContext(
+                context_id=str(value["context_id"]), version=str(value["version"]),
+                timestamp=coerce_timestamp(value["timestamp"]),
+                available_at=coerce_timestamp(value["available_at"]),
+                location=value.get("location"), market_state=value.get("market_state"),
+                long_score=value.get("long_score"), short_score=value.get("short_score"),
+                evidence=tuple(value.get("evidence", ())),
+                source_timeframe=str(value.get("source_timeframe", "5m")),
+                parent_context_id=value.get("parent_context_id"),
+                definition_version=str(value.get("definition_version", "1")),
+                source_provenance=tuple(value.get("source_provenance", ())),
+            ))
+    context_stream_id = evidence.context_stream_id
+    if context_stream_id is None and context_publications:
+        context_ids = {
+            str(value.context_id if isinstance(value, MarketContext) else value["context_id"])
+            for publication in context_publications
+            for value in (publication.get("context"),)
+            if (
+                isinstance(value, MarketContext)
+                or isinstance(value, Mapping) and value.get("context_id") is not None
+            )
+        }
+        context_stream_id = next(iter(context_ids), None) if len(context_ids) == 1 else None
     registry = LocationRegistry(evidence.location_stream_id or f"orderflow:{session_date}")
     for location in evidence.locations:
         registry.register(location)
@@ -246,6 +278,10 @@ def _replay_market(
             item for timeframe in ("1m", "5m")
             for item in market.aggregates[timeframe]
             if item.session_date == session_date
+            and not (
+                item.timeframe == "1m"
+                and session_minute(session_date, item.time)[-5:] >= MARKET_CLOSE_TIME
+            )
             and (replay_clock is None or coerce_timestamp(item.available_at) <= coerce_timestamp(replay_clock))
         ),
             key=lambda item: (coerce_timestamp(item.available_at), item.timeframe, item.time),
@@ -269,7 +305,6 @@ def _replay_market(
             unavailable.append(evidence.atr.unavailable_reason or "missing_atr")
         elif evidence.atr.available_at is not None and coerce_timestamp(aggregate.available_at) < coerce_timestamp(evidence.atr.available_at):
             unavailable.append("atr_not_yet_available")
-        context_stream_id = evidence.context_stream_id
         if context_stream_id is None:
             context_ids = {item.context_id for item in evidence.contexts}
             context_stream_id = next(iter(context_ids), None) if len(context_ids) == 1 else None
@@ -312,9 +347,9 @@ def _replay_market(
                                 item,
                                 record,
                                 source_fingerprint=market.source_fingerprint,
-                                available_at=(
-                                    _location_publication_at(record, market.aggregates)
-                                    if record.alias == "VWAP" else aggregate.available_at
+                                available_at=max(
+                                    coerce_timestamp(item.available_at),
+                                    coerce_timestamp(record.available_at),
                                 ),
                             )
                             for item in children
@@ -373,6 +408,7 @@ def _completed_observations(
         for aggregate in aggregates[timeframe]:
             if (
                 aggregate.session_date != session_date
+                or (timeframe == "1m" and session_minute(session_date, aggregate.time)[-5:] >= MARKET_CLOSE_TIME)
                 or (replay_clock is not None and coerce_timestamp(aggregate.available_at) > coerce_timestamp(replay_clock))
             ):
                 continue

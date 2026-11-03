@@ -3049,21 +3049,23 @@ class ExecutionCoordinator:
         ):
             quantity = position.quantity * 0.5
             self._queue_exit("partial_3r", next_time, life, quantity=quantity)
-            event = {
-                "kind": "exit_signal",
-                "level": "3R",
-                "reason": "partial_3r",
-                "lifecycle_id": life.lifecycle_id,
-                "observed_at": timestamp,
-                "available_at": next_time,
-                "quantity": quantity,
-                "remaining_quantity": position.quantity - quantity,
-                "risk_reward": 3.0,
-                "owner": "position_management",
-                "evidence_timeframe": "1m",
-            }
-            context.record_event(event, record_lifecycle=False)
-            bar_events.append(event)
+            if self.engine.state_for(life.lifecycle_id).pending_exit is not None:
+                event = {
+                    "kind": "exit_signal",
+                    "level": "3R",
+                    "reason": "partial_3r",
+                    "lifecycle_id": life.lifecycle_id,
+                    "observed_at": timestamp,
+                    "available_at": next_time,
+                    "quantity": quantity,
+                    "remaining_quantity": position.quantity - quantity,
+                    "risk_reward": 3.0,
+                    "owner": "position_management",
+                    "evidence_timeframe": "1m",
+                }
+                context.emit_market_event(
+                    event, EXHAUSTION_RISK, bar_events, life, record_lifecycle=False,
+                )
         stop_update = update_position_stop(
             position, setup, row, trailing_stop, vwap_stop
         )
@@ -3235,13 +3237,19 @@ class ExecutionCoordinator:
                     "observed_at": continuation["evidence_time"],
                     "available_at": continuation["evidence_available_at"],
                     "components": continuation,
+                    "causal_basis": (
+                        "latest causally available location synthetic snapshot broke its prior snapshot boundary"
+                        if synthetic_snapshots is not None
+                        else "completed position-level 1m/5m structural acceptance against continuation"
+                    ),
                     "owner": "position_management",
                     "evidence_timeframe": "synthetic"
                     if synthetic_snapshots is not None
                     else "1m/5m",
                 }
-                context.record_event(event)
-                bar_events.append(event)
+                context.emit_market_event(
+                    event, EXHAUSTION_RISK, bar_events, life, record_lifecycle=False,
+                )
 
     def evaluate_position_exit_plan(
         self,

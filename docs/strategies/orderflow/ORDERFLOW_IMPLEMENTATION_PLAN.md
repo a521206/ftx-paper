@@ -1427,6 +1427,49 @@ adapter:
   session `STOPPED` with one audit event, but must not rebuild state from future
   bars or create a second engine.
 
+### Phase 9 Canonical-Owner Migration Constraint
+
+The missing architecture layer is the ported canonical chronological producer,
+not another Paper evidence or context adapter. Canonical
+`NiftyZoning/src/orderflow/state_machine.py` owns the ordering between context
+publication, interaction/response processing, Phase 4 recording, opportunity
+formation, execution, settlement, and parity capture. Paper must eventually
+have one equivalent owner shared by live and bounded replay.
+
+The following current paths are temporary verification boundaries, not a second
+strategy architecture:
+
+- `context_location_replay.py` may compare explicit Phase 4 publications, but
+  must not become the runtime context owner.
+- `interaction_replay.py` may exercise the ported interaction closure, but must
+  not independently publish Paper-derived strategy context or replace the
+  canonical chronological owner.
+- `replay_pipeline.py` may run bounded comparison harnesses, but the production
+  path must not replay Phase 4, then interaction policy, then Phase 4 again to
+  reconstruct one canonical sequence.
+- `transition.py` is a host seam until it delegates to the complete ported
+  canonical owner. Its existence does not prove that the current split owners
+  are behaviorally equivalent to `state_machine.py`.
+
+The host boundary may supply normalized bars, explicit canonical evidence, Paper
+execution notifications, clocks, and persistence services. It may not calculate
+context scores, select locations, infer responses, form lifecycles, or derive
+execution decisions. Any missing canonical publication remains `UNAVAILABLE`
+with its reason until the canonical producer publishes it.
+
+The canonical-owner migration is blocked until all of the following are true:
+
+- live and bounded replay invoke the same complete canonical transition;
+- context, location, interaction, opportunity, execution, and ledger facts are
+  emitted from that owner in canonical order;
+- the production path no longer requires a Phase 4 replay rerun after
+  interaction processing;
+- the snapshot contains the complete canonical mutable graph, including context
+  versions, locations, interactions, opportunities, execution state, causal
+  cursors, and parity identities; and
+- Paper persistence and API layers consume those facts without reconstructing
+  strategy state from terminal snapshots or reports.
+
 ### Phase 9 Delivery Sequence
 
 #### 9A - Close The Phase 8 Prerequisite
@@ -1503,9 +1546,16 @@ canonical transition graph remains open.**
   live session and route them through the existing transition boundary.
 - Keep subscriptions, lifecycle, clock, notifications, and snapshots in Paper;
   keep all policy and lifecycle decisions canonical.
+- Replace the current split production sequence with one ported canonical owner.
+  Context publication, interaction processing, Phase 4 capture, lifecycle
+  advancement, and execution must occur in the same causal transition.
+- Treat `context_location_replay.py`, `interaction_replay.py`, and the replay
+  pipeline's Phase 4 rerun as temporary comparison tools until this owner is
+  complete. Do not add a host `ContextProvider` that computes strategy context.
 
-Exit gate: a fixed prefix produces the same state, event, decision, and execution
-prefix through live and bounded replay.
+Exit gate: a fixed prefix produces the same canonical state, event, decision,
+execution, and parity prefix through live and bounded replay, without a second
+Paper state machine or a second context/interaction policy path.
 
 #### 9D - Replace The Temporary Replay Path
 
@@ -1522,6 +1572,9 @@ path owns all canonical capture responsibilities.
 - Route every replay observation through the live transition owner; do not call
   live feed callbacks from replay.
 - Move artifact persistence behind the production runtime/store boundary.
+- Remove the production dependency on the Phase 4 -> interaction -> Phase 4
+  replay sequence. That sequence may remain only in the comparison harness until
+  the unified owner produces equivalent facts directly.
 
 Exit gate: replay retry is idempotent and isolated from live/account state.
 
@@ -1571,6 +1624,11 @@ not claimed while the transition graph lacks a complete restore contract.
   through existing runtime/store boundaries.
 - Restore the canonical snapshot on recoverable restart; otherwise mark the
   interrupted session `STOPPED` with one audit event.
+- Include the complete canonical mutable graph in the snapshot: context store,
+  ordinary and interaction context references, location generations,
+  interaction detector state, opportunities/lifecycles, intents, reservations,
+  pending exits, positions, causal cursors, idempotency identities, and parity
+  streams/layers.
 - Make duplicate observations, notifications, and recovery attempts idempotent.
 - Add API/CLI projections as read-only views; they must not recompute decisions.
 
@@ -1647,6 +1705,156 @@ Exit gate:
 - `scripts/orderflow/orderflow_replay.py` is retired, together with any
   harness-only artifact assumptions. Its responsibilities are covered by the
   production Paper replay adapter and shared canonical transition boundary.
+
+## Architecture Correction: Canonical Owner Closure
+
+The layer ports and host seams above do not by themselves establish the
+canonical ownership model. The current Paper implementation still has a split
+production path: `replay_pipeline.py` runs `ReplayMachine`, then the context /
+location replay, then interaction replay, and may run the context replay again
+from interaction-produced publications. `OrderflowTransitionOwner.snapshot()`
+also stores projections and emitted facts without the complete mutable state
+needed to resume the canonical graph.
+
+This section is the required continuation of Phase 9. It supersedes any
+earlier status that treats `OrderflowTransitionOwner` as the strategy owner or
+the split replay modules as an acceptable production orchestration path.
+
+### Owner-Closure Rules
+
+- The pinned NiftyZoning commit remains the behavior authority. Every mutation,
+  emitted fact, ordering rule, identity, and unavailable reason must be traced
+  to that commit.
+- The ported canonical owner is the only strategy owner. Paper supplies input,
+  clock, cancellation, persistence, API, and paper-account adapters only.
+- Live and bounded replay call one observation transition. Replay may bound
+  input and capture artifacts, but it may not add a second policy pass.
+- `context_location_replay.py`, `interaction_replay.py`, and the current
+  `replay_pipeline.py` sequence are comparison harnesses until their behavior
+  is absorbed by the canonical owner; they are not production policy engines.
+- A missing producer stream is `UNAVAILABLE` or `INCOMPLETE`, never an observed
+  empty stream. Reports and terminal projections cannot recreate producer facts.
+- No phase advances on a passing unit test alone. Its canonical trace,
+  Paper-vs-canonical causal comparison, recovery check, and ownership review
+  must all pass first.
+
+### Phase A - Freeze Baseline And Inventory Ownership
+
+Record the pinned canonical commit, then inventory every canonical mutation and
+fact in `state_machine.py`, `state_machine_types.py`, and the direct closure:
+source/aggregate cursors, gap/session state, context publication, locations,
+interactions, responses, opportunities, intents, reservations, positions,
+pending exits, fills, settlement, parity streams, layers, and causal/idempotency
+keys. Classify every Paper module and call site as canonical behavior, host
+adapter, temporary comparison harness, or obsolete duplicate. Add divergence
+tests for the current double Phase 4 pass, context publication order, and
+snapshot loss before restructuring.
+
+Exit gate: the inventory is symbol- and call-site-complete; the baseline tests
+demonstrate the known divergences; no implementation is changed to hide a
+failure.
+
+### Phase B - Port The Canonical Owner Closure
+
+Port the canonical orchestration shell and its required closure as one
+dependency graph, preserving the canonical call order and point-in-time
+availability. The owner must perform, in one transition: source observation and
+gap/session updates; context/permission publication; interaction/response
+handling; Phase 4 facts; opportunity lifecycle; admission/trigger/execution;
+settlement/ledger facts; and parity capture. Port
+`state_machine_types.py`, source/replay, context/location, interaction/response,
+opportunity/lifecycle, intent/admission/allocation, execution, and reporting
+symbols only as required by that closure. Do not add Paper scoring, location
+reconstruction, interaction rules, lifecycle rules, exits, or settlement rules.
+
+Exit gate: canonical tests pass for the closure; a one-observation trace shows
+the exact canonical event and publication order; every Paper policy helper is
+either removed or explicitly classified as a comparison-only harness.
+
+### Phase C - Make The Transition Owner A Host Wrapper
+
+Replace the strategy logic in `OrderflowTransitionOwner` with construction,
+input normalization, clock/cancellation handling, notification routing, and
+Paper adapter calls around the ported canonical owner. Live and bounded replay
+must invoke the same one-observation method. Remove production imports and
+calls to `context_location_replay.py` and `interaction_replay.py`; retain them
+only behind explicitly named comparison commands/tests. Remove the Phase 4
+rerun and any replay path that feeds interaction-generated context back into a
+second strategy pass.
+
+Exit gate: live-style and bounded-replay prefixes produce identical canonical
+state, event order, context publication order, and parity streams; production
+call-graph tests prove that neither replay module is invoked.
+
+### Phase D - Complete Canonical Snapshot And Recovery
+
+Define a versioned canonical snapshot/restore contract covering source and
+aggregate cursors; gap/session state; context store and ordinary-context
+reference; location registry and generations; interaction detector state and
+frozen observations; opportunities/lifecycles; intents, reservations, pending
+exits, positions, and execution-group claims; parity streams/layers and
+coverage; causal clock; and all idempotency/identity sets and counters. Restore
+this state before processing an explicit bounded suffix. Never reconstruct it
+from future bars, terminal reports, summaries, or SQLite projections.
+
+Exit gate: checkpointing at every causal boundary and resuming an explicit
+suffix reproduces the uninterrupted canonical prefix byte-for-byte at the
+state/fact contract; duplicate observations and notifications remain
+idempotent; unrecoverable sessions stop with one audit event.
+
+### Phase E - Bind Paper Execution Without Policy Duplication
+
+Keep canonical execution as the only owner of admission, allocation, trigger,
+reservation, stop, exit, fill, settlement, and orderflow-ledger semantics. The
+Paper adapter translates canonical paper proposals and notifications to the
+existing Paper execution/accounting service. Broker modules remain market-data
+only. Diagnostic replay cannot mutate the Paper account; explicit Paper
+execution cannot submit broker orders or claim execution before canonical fill.
+
+Exit gate: no Paper module computes or overrides execution policy; execution
+notifications round-trip through the canonical owner; no-trade and
+entry/exit/settlement traces match canonical causal ordering.
+
+### Phase F - Emit Unified Causal Reporting And Parity
+
+Have the canonical owner emit all phase streams and final layers at the point
+their producers run. Compare source, context publication, interaction,
+opportunity, admission, trigger/exit, fills, transitions, settlement, and
+ledger facts in causal sequence, including context publication order. Mark a
+stream or layer `UNAVAILABLE` when its producer did not run. Remove report
+reconstruction from terminal state, counters, or summaries.
+
+Exit gate: the six phase streams and four final layers are manifest-first and
+`MATCHED` for no-trade and execution-bearing fixtures; the first causal
+mismatch is deterministic; no artifact relies on a projection-only fact.
+
+### Phase G - Integrate Runtime Persistence And Recovery
+
+Wire the single canonical owner into the API/runtime/store boundary. Persist
+canonical events, snapshots, notifications, and artifacts idempotently. Restore
+the complete snapshot before accepting new observations, and expose facts as
+read-only projections. Keep runtime metadata, broker data, and Paper account
+ledger fields outside canonical hashes and strategy state.
+
+Exit gate: live restart, bounded replay restart, duplicate delivery, and
+notification retry preserve the same canonical prefix; API/CLI reads never
+recompute strategy state.
+
+### Phase H - Retire Transitional Engines And Integrate Production
+
+After all preceding gates pass, remove duplicate Paper policy helpers and
+production dependencies on `context_location_replay.py`, `interaction_replay.py`,
+the split `replay_pipeline.py` orchestration, and any `ReplayMachine` wrapper
+that remains a second owner. Retain only the smallest host adapter and
+comparison tooling needed for regression diagnosis. Run the complete focused
+canonical parity matrix, Paper tests, Ruff, Pyright, and diff review before
+enabling the owner in production runtime composition.
+
+Exit gate: live and replay share the same canonical transition/state/execution
+owner; no Paper module computes strategy context, locations, responses,
+lifecycle, or execution policy; snapshot recovery reproduces the causal prefix;
+all required streams/layers are `MATCHED`; and no transitional production path
+remains.
 
 ## Validation Commands
 

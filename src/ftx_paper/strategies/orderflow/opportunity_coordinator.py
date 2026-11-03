@@ -809,6 +809,7 @@ class OpportunityCoordinator:
                     "template_id": template.template_id,
                     "response_type": template.response_type.value,
                     "direction": response.direction.value,
+                    "session_date": interaction.session_date,
                     "arbitration_selected": arbitration.selected,
                     "arbitration_reason": arbitration.arbitration_reason,
                     "observed_at": response.observed_at,

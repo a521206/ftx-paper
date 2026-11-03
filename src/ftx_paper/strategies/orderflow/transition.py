@@ -7,22 +7,608 @@ mutable clock, one interaction owner, and one execution owner.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from copy import deepcopy
 from datetime import datetime
+from enum import Enum
+import math
 from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
 
 from ftx_paper.execution.events import ExecutionNotification
 
 from .coordinator import OrderflowAdvance, OrderflowClockInput, OrderflowCoordinator
-from .execution import AdmissionStatus, ExecutionCoordinator, ExecutionEngine, IntentStatus
+from .execution import (
+    AdmissionStatus,
+    EntryOrder,
+    EntryReservation,
+    ExecutionAdmission,
+    ExecutionCoordinator,
+    ExecutionEngine,
+    ExecutionState,
+    ExitOrder,
+    Fill,
+    IntentStatus,
+    ReservationStatus,
+)
 from .features import daily_atr_cache
-from .hierarchy import ContextVersionRef, TriggerObservation
+from .hierarchy import (
+    ContextObservation,
+    ContextVersionRef,
+    ContextRelation,
+    EntryPolicy,
+    ExitIntent,
+    IntentStatus as HierarchyIntentStatus,
+    MarketContext,
+    Permission,
+    PositionManagement,
+    PositionStatus,
+    RegimePermission,
+    ResolvedExitRule,
+    StructuralSetup,
+    TradeIntent,
+    TriggerObservation,
+)
+from .lifecycle import EvidenceRef, LifecycleEvent, SetupOpportunity
 from .opportunity_coordinator import LifecycleFormation
 from .opportunity_timeout import advance_opportunity_timeout
-from .state_machine_types import ExecutionConstraints, LocationRegistry, ReplayContext
+from .state_machine_types import (
+    ExecutionConstraints,
+    LocationRecord,
+    LocationRegistry,
+    LocationStatus,
+    MarketContextStore,
+    ReplayContext,
+)
+from .location_geometry import LocationBand
+from .interactions import (
+    CandleClassification,
+    CloseSide,
+    DepartureDirection,
+    InteractionCandle,
+    InteractionCloseReason,
+    InteractionSnapshot,
+    InteractionStatus,
+    ProjectionSnapshot,
+)
+from .orderflow_common import Aggregate
+from .templates import Direction, LocationTemplate, TRADE_TEMPLATES
 from .timestamps import coerce_timestamp, nifty_label, serialize_utc
+
+
+def _snapshot_value(value: Any) -> Any:
+    """Convert canonical mutable state to deterministic persistence values."""
+    if isinstance(value, datetime):
+        return serialize_utc(value)
+    if isinstance(value, Enum):
+        return value.value
+    if is_dataclass(value):
+        return {
+            item.name: _snapshot_value(getattr(value, item.name))
+            for item in fields(value)
+        }
+    if isinstance(value, Mapping):
+        return {str(key): _snapshot_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_snapshot_value(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return sorted((_snapshot_value(item) for item in value), key=str)
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("canonical state contains a non-finite number")
+    return value
+
+
+def _context_snapshot(context: ReplayContext) -> dict[str, Any]:
+    store = context.market_contexts
+    return {
+        "versions": _snapshot_value(store.versions),
+        "ordinary_context": _snapshot_value(store.ordinary_context),
+        "interaction_contexts": _snapshot_value(store.interaction_contexts),
+    }
+
+
+def _location_snapshot(registry: LocationRegistry) -> dict[str, Any]:
+    return {
+        "stream_id": registry.stream_id,
+        "records": _snapshot_value(registry.records),
+        "aliases": _snapshot_value(registry.aliases),
+    }
+
+
+def _execution_claims_snapshot(engine: ExecutionEngine) -> dict[str, Any]:
+    return {
+        "entry_owners": [
+            {"key": list(key), "owner": owner}
+            for key, owner in engine._entry_owners.items()
+        ],
+        "execution_group_claims": _snapshot_value(engine._execution_group_claims),
+        "position_owners": _snapshot_value(engine._position_owners),
+        "position_transfer_claimed": _snapshot_value(engine._position_transfer_claimed),
+    }
+
+
+def _restore_context_store(raw: Mapping[str, Any]) -> MarketContextStore:
+    store = MarketContextStore()
+    versions = raw.get("versions", {})
+    if not isinstance(versions, Mapping):
+        raise ValueError("canonical context versions are invalid")
+    for context_id, values in versions.items():
+        if not isinstance(values, list):
+            raise ValueError("canonical context versions must be lists")
+        for value in values:
+            if not isinstance(value, Mapping):
+                raise ValueError("canonical context version is invalid")
+            store.publish(MarketContext(
+                context_id=str(value["context_id"]),
+                version=str(value["version"]),
+                timestamp=coerce_timestamp(value["timestamp"]),
+                available_at=coerce_timestamp(value["available_at"]),
+                location=value.get("location"),
+                market_state=value.get("market_state"),
+                long_score=value.get("long_score"),
+                short_score=value.get("short_score"),
+                evidence=tuple(value.get("evidence", ())),
+                source_timeframe=str(value.get("source_timeframe", "5m")),
+                parent_context_id=value.get("parent_context_id"),
+                definition_version=str(value.get("definition_version", "1")),
+                source_provenance=tuple(value.get("source_provenance", ())),
+            ))
+    ordinary = raw.get("ordinary_context")
+    if isinstance(ordinary, Mapping):
+        store.ordinary_context = ContextVersionRef(
+            str(ordinary["context_id"]), str(ordinary["version"]),
+        )
+    interactions = raw.get("interaction_contexts", {})
+    if isinstance(interactions, Mapping):
+        store.interaction_contexts = {
+            str(key): ContextVersionRef(
+                str(value["context_id"]), str(value["version"]),
+            )
+            for key, value in interactions.items()
+            if isinstance(value, Mapping)
+        }
+    return store
+
+
+def _restore_location_registry(raw: Mapping[str, Any]) -> LocationRegistry:
+    registry = LocationRegistry(str(raw.get("stream_id", "orderflow:paper")))
+    records = raw.get("records", {})
+    if not isinstance(records, Mapping):
+        raise ValueError("canonical location records are invalid")
+    for value in records.values():
+        if not isinstance(value, Mapping):
+            raise ValueError("canonical location record is invalid")
+        band = value.get("band", {})
+        if not isinstance(band, Mapping):
+            raise ValueError("canonical location band is invalid")
+        registry.register(LocationRecord(
+            location_id=str(value["location_id"]),
+            alias=str(value["alias"]),
+            price=float(value["price"]),
+            source_session=str(value["source_session"]),
+            created_at=coerce_timestamp(value["created_at"]),
+            available_at=coerce_timestamp(value["available_at"]),
+            stream_id=registry.stream_id,
+            band=LocationBand(float(band["low"]), float(band["high"])),
+            generation=int(value.get("generation", 1)),
+            status=LocationStatus(value.get("status", LocationStatus.ACTIVE)),
+            frozen_atr=value.get("frozen_atr"),
+            parent_extreme_generation=value.get("parent_extreme_generation"),
+            source_aggregate_id=value.get("source_aggregate_id"),
+            source_observation_id=value.get("source_observation_id"),
+            timeframe=str(value.get("timeframe", "")),
+            source_method=value.get("source_method"),
+        ))
+    return registry
+
+
+def _restore_aggregate(raw: Mapping[str, Any] | None) -> Aggregate | None:
+    if raw is None:
+        return None
+    return Aggregate(
+        time=coerce_timestamp(raw["time"]),
+        end_time=coerce_timestamp(raw["end_time"]),
+        available_at=coerce_timestamp(raw["available_at"]),
+        timeframe=str(raw["timeframe"]),
+        source_bar_count=int(raw["source_bar_count"]),
+        open=float(raw["open"]), high=float(raw["high"]),
+        low=float(raw["low"]), close=float(raw["close"]),
+        volume=int(raw["volume"]), symbol=str(raw["symbol"]),
+        expiry=str(raw.get("expiry", "")),
+        contract_type=str(raw.get("contract_type", "CONTINUOUS")),
+        session_date=str(raw["session_date"]),
+        source_fingerprint=str(raw["source_fingerprint"]),
+    )
+
+
+def _restore_interaction_snapshot(raw: Mapping[str, Any]) -> InteractionSnapshot:
+    creation = _restore_aggregate(raw.get("creation_candle"))
+    if creation is None:
+        raise ValueError("canonical interaction is missing its creation candle")
+    candles = tuple(
+        InteractionCandle(
+            candle=candle,
+            classification=CandleClassification(item["classification"]),
+            is_terminal=bool(item.get("is_terminal", False)),
+        )
+        for item in raw.get("candles", ())
+        if isinstance(item, Mapping)
+        for candle in (_restore_aggregate(item.get("candle")),)
+        if candle is not None
+    )
+    raw_projections = raw.get("synthetic_snapshots", {})
+    projections = tuple(
+        (
+            str(timeframe),
+            tuple(
+                ProjectionSnapshot(
+                    timeframe=str(item["timeframe"]),
+                    open=float(item["open"]), high=float(item["high"]),
+                    low=float(item["low"]), close=float(item["close"]),
+                    volume=float(item["volume"]),
+                    source_candle_ids=tuple(item.get("source_candle_ids", ())),
+                    first_source_start=coerce_timestamp(item["first_source_start"]),
+                    last_source_end=coerce_timestamp(item["last_source_end"]),
+                    available_at=coerce_timestamp(item["available_at"]),
+                )
+                for item in values if isinstance(item, Mapping)
+            ),
+        )
+        for timeframe, values in raw_projections.items()
+    ) if isinstance(raw_projections, Mapping) else ()
+    band = raw.get("band")
+    if not isinstance(band, Mapping):
+        raise ValueError("canonical interaction is missing its band")
+    return InteractionSnapshot(
+        interaction_id=str(raw["interaction_id"]),
+        instrument=str(raw["instrument"]), session_date=str(raw["session_date"]),
+        location=str(raw["location"]), timeframe=str(raw["timeframe"]),
+        template_version=str(raw["template_version"]), creation_candle=creation,
+        reference_level=float(raw["reference_level"]),
+        band=LocationBand(float(band["low"]), float(band["high"])),
+        pre_contact_side=(CloseSide(raw["pre_contact_side"])
+                          if raw.get("pre_contact_side") is not None else None),
+        interaction_started_at=coerce_timestamp(raw["interaction_started_at"]),
+        available_at=coerce_timestamp(raw["available_at"]),
+        reference_generation=int(raw["reference_generation"]),
+        sessions_carried=int(raw["sessions_carried"]),
+        status=InteractionStatus(raw["status"]),
+        departure_direction=(DepartureDirection(raw["departure_direction"])
+                             if raw.get("departure_direction") is not None else None),
+        terminal_close_side=(CloseSide(raw["terminal_close_side"])
+                             if raw.get("terminal_close_side") is not None else None),
+        terminal_candle_id=raw.get("terminal_candle_id"),
+        close_reason=(InteractionCloseReason(raw["close_reason"])
+                      if raw.get("close_reason") is not None else None),
+        candles=candles, synthetic_snapshots=projections,
+        pd_role=raw.get("pd_role"),
+    )
+
+
+def _restore_namespace(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        restored = {
+            str(key): _restore_namespace(item) for key, item in value.items()
+        }
+        for key in ("failed_reversal_locked",):
+            if key in restored and isinstance(restored[key], list):
+                restored[key] = set(restored[key])
+        return SimpleNamespace(**restored)
+    if isinstance(value, list):
+        return [_restore_namespace(item) for item in value]
+    return value
+
+
+def _restore_evidence_ref(raw: Mapping[str, Any] | None) -> EvidenceRef | None:
+    if raw is None:
+        return None
+    return EvidenceRef(
+        evidence_id=str(raw["evidence_id"]), timeframe=str(raw["timeframe"]),
+        observed_at=coerce_timestamp(raw["observed_at"]),
+        available_at=coerce_timestamp(raw["available_at"]),
+        source_fingerprint=str(raw["source_fingerprint"]),
+        source_bar_count=int(raw["source_bar_count"]),
+    )
+
+
+def _restore_template(raw: Mapping[str, Any] | None) -> Any | None:
+    if raw is None:
+        return None
+    template_id = raw.get("template_id")
+    for template in TRADE_TEMPLATES.values():
+        if template.template_id == template_id:
+            return template
+    raise ValueError(f"unknown canonical trade template: {template_id!r}")
+
+
+def _restore_context_observation(raw: Mapping[str, Any] | None) -> ContextObservation | None:
+    if raw is None:
+        return None
+    return ContextObservation(
+        context_id=str(raw["context_id"]),
+        context_version=str(raw["context_version"]),
+        observed_at=coerce_timestamp(raw["observed_at"]),
+        available_at=coerce_timestamp(raw["available_at"]),
+        relation=ContextRelation(raw["relation"]),
+        source_timeframe=str(raw["source_timeframe"]),
+        evidence=dict(raw.get("evidence", {})),
+    )
+
+
+def _restore_context_ref(raw: Mapping[str, Any] | None) -> ContextVersionRef | None:
+    if raw is None:
+        return None
+    return ContextVersionRef(str(raw["context_id"]), str(raw["version"]))
+
+
+def _restore_exit_intent(raw: Mapping[str, Any] | None) -> ExitIntent | None:
+    if raw is None:
+        return None
+    return ExitIntent(
+        intent_id=str(raw["intent_id"]), position_id=str(raw["position_id"]),
+        rule_id=str(raw["rule_id"]), location=str(raw["location"]),
+        status=HierarchyIntentStatus(raw["status"]),
+        created_at=coerce_timestamp(raw["created_at"]),
+        expiry=coerce_timestamp(raw["expiry"]),
+        interaction_id=raw.get("interaction_id"),
+        formation_context=_restore_context_ref(raw.get("formation_context")),
+        decision_context=_restore_context_ref(raw.get("decision_context")),
+        cancel_reason=raw.get("cancel_reason"),
+        triggered_at=(coerce_timestamp(raw["triggered_at"])
+                      if raw.get("triggered_at") else None),
+    )
+
+
+def _restore_exit_plan(raw: Sequence[Any]) -> tuple[ResolvedExitRule, ...]:
+    return tuple(
+        ResolvedExitRule(
+            rule_id=str(item["rule_id"]), location=str(item["location"]),
+            mode=str(item["mode"]), level=item.get("level"),
+            source_context=_restore_context_ref(item.get("source_context")),
+            interaction_id=item.get("interaction_id"), response=item.get("response"),
+            execution=item.get("execution"), score_direction=item.get("score_direction"),
+            score_margin=item.get("score_margin"), required=bool(item.get("required", False)),
+            trigger_policy=str(item.get("trigger_policy", "touch")),
+        )
+        for item in raw if isinstance(item, Mapping)
+    )
+
+
+def _restore_opportunity(raw: Mapping[str, Any]) -> SetupOpportunity:
+    parent = raw.get("parent_context")
+    parent_ref = (
+        ContextVersionRef(str(parent["context_id"]), str(parent["version"]))
+        if isinstance(parent, Mapping) else None
+    )
+    raw_events = raw.get("_events", ())
+    events = tuple(
+        LifecycleEvent(
+            event_id=str(item["event_id"]), lifecycle_id=str(item["lifecycle_id"]),
+            sequence=int(item["sequence"]), kind=str(item["kind"]),
+            observed_at=coerce_timestamp(item["observed_at"]),
+            available_at=coerce_timestamp(item["available_at"]),
+            effective_at=(coerce_timestamp(item["effective_at"])
+                          if item.get("effective_at") is not None else None),
+            payload=dict(item.get("payload", {})),
+        )
+        for item in raw_events if isinstance(raw_events, list) and isinstance(item, Mapping)
+    )
+    response_evidence = tuple(
+        aggregate for item in raw.get("response_evidence", ())
+        if isinstance(item, Mapping)
+        for aggregate in (_restore_aggregate(item),) if aggregate is not None
+    )
+    return SetupOpportunity(
+        lifecycle_id=str(raw["lifecycle_id"]), direction=Direction(raw["direction"]),
+        session_date=str(raw["session_date"]), instrument=str(raw["instrument"]),
+        strategy=str(raw["strategy"]), formation_at=coerce_timestamp(raw["formation_at"]),
+        formation_available_at=coerce_timestamp(raw["formation_available_at"]),
+        candidate_id=str(raw["candidate_id"]), parent_context=parent_ref,
+        location=(LocationTemplate(raw["location"]) if raw.get("location") is not None else None),
+        reference_level=raw.get("reference_level"),
+        context_candle=_restore_aggregate(raw.get("context_candle")),
+        breakout_level=float(raw["breakout_level"]),
+        failure_boundary=float(raw["failure_boundary"]),
+        context_candle_lineage=_restore_evidence_ref(raw.get("context_candle_lineage")),
+        origin_evidence_id=raw.get("origin_evidence_id"),
+        response_evidence_ids=tuple(raw.get("response_evidence_ids", ())),
+        response_evidence=response_evidence,
+        response_evidence_lineage=tuple(
+            ref for item in raw.get("response_evidence_lineage", ())
+            if isinstance(item, Mapping)
+            for ref in (_restore_evidence_ref(item),) if ref is not None
+        ),
+        policy_version=raw.get("policy_version"),
+        reference_generation=int(raw.get("reference_generation", 0)),
+        causal_identity=raw.get("causal_identity"),
+        location_interaction_id=raw.get("location_interaction_id"),
+        opening_interaction_kind=raw.get("opening_interaction_kind"),
+        opening_interaction_evidence=list(raw.get("opening_interaction_evidence", ())),
+        opening_policy_version=raw.get("opening_policy_version"),
+        template_id=raw.get("template_id"), status=raw.get("status", "FORMED"),
+        response_episode_id=raw.get("response_episode_id"),
+        episode_confirmed=bool(raw.get("episode_confirmed", False)),
+        execution_group_id=raw.get("execution_group_id"),
+        clock=coerce_timestamp(raw["clock"]) if raw.get("clock") else None,
+        decision_context_required=bool(raw.get("decision_context_required", True)),
+        timeout_limit=int(raw.get("timeout_limit", 6)),
+        timeout_count=int(raw.get("timeout_count", 0)),
+        timeout_evidence_timeframe=str(raw.get("timeout_evidence_timeframe", "5m")),
+        timeout_counted_source_ids=list(raw.get("timeout_counted_source_ids", ())),
+        timeout_counted_snapshot_ids=list(raw.get("timeout_counted_snapshot_ids", ())),
+        retest_touched=bool(raw.get("retest_touched", False)),
+        retest_confirmed=bool(raw.get("retest_confirmed", False)), _events=events,
+    )
+
+
+def _restore_setup(raw: Mapping[str, Any] | None) -> StructuralSetup | None:
+    if raw is None:
+        return None
+    parent_context = raw.get("parent_context_id")
+    exit_plan = tuple(
+        ResolvedExitRule(
+            rule_id=str(item["rule_id"]), location=str(item["location"]),
+            mode=str(item["mode"]), level=item.get("level"),
+            source_context=(
+                ContextVersionRef(str(item["source_context"]["context_id"]),
+                                  str(item["source_context"]["version"]))
+                if isinstance(item.get("source_context"), Mapping) else None
+            ),
+            interaction_id=item.get("interaction_id"), response=item.get("response"),
+            execution=item.get("execution"), score_direction=item.get("score_direction"),
+            score_margin=item.get("score_margin"), required=bool(item.get("required", False)),
+            trigger_policy=str(item.get("trigger_policy", "touch")),
+        )
+        for item in (raw.get("exit_plan") or ()) if isinstance(item, Mapping)
+    )
+    return StructuralSetup(
+        setup_id=str(raw["setup_id"]), version=str(raw["version"]),
+        regime_version=str(raw["regime_version"]), direction=str(raw["direction"]),
+        kind=str(raw["kind"]), entry_zone_low=float(raw["entry_zone_low"]),
+        entry_zone_high=float(raw["entry_zone_high"]),
+        structural_reference=float(raw["structural_reference"]),
+        sweep_extreme=raw.get("sweep_extreme"), failure_boundary=float(raw["failure_boundary"]),
+        expires_at=coerce_timestamp(raw["expires_at"]), active=bool(raw.get("active", True)),
+        required_confirmation=tuple(raw.get("required_confirmation", ())),
+        parent_context_id=parent_context,
+        parent_context_version=raw.get("parent_context_version"),
+        context_relation=ContextRelation(raw.get("context_relation", ContextRelation.CONFIRMED)),
+        context_reference_level=raw.get("context_reference_level"),
+        lifecycle_id=raw.get("lifecycle_id"),
+        template=_restore_template(raw.get("template")),
+        exit_plan=exit_plan,
+    )
+
+
+def _restore_regime(raw: Mapping[str, Any] | None) -> RegimePermission | None:
+    if raw is None:
+        return None
+    return RegimePermission(
+        version=str(raw["version"]), context=str(raw["context"]),
+        long=Permission(raw["long"]), short=Permission(raw["short"]),
+        restrictions=tuple(raw.get("restrictions", ())),
+        opening_gap_state=raw.get("opening_gap_state"),
+        opening_gap_direction=raw.get("opening_gap_direction"),
+    )
+
+
+def _restore_execution_state(raw: Mapping[str, Any]) -> ExecutionState:
+    admission = raw.get("admission", {})
+    reservation = raw.get("reservation")
+    pending_entry = raw.get("pending_entry")
+    pending_exit = raw.get("pending_exit")
+    intent = raw.get("intent")
+    position = raw.get("position")
+    restored_intent = None
+    if isinstance(intent, Mapping):
+        restored_intent = TradeIntent(
+            intent_id=str(intent["intent_id"]), setup_id=str(intent["setup_id"]),
+            regime_version=str(intent["regime_version"]), direction=str(intent["direction"]),
+            status=HierarchyIntentStatus(intent["status"]),
+            created_at=coerce_timestamp(intent["created_at"]), trigger_price=float(intent["trigger_price"]),
+            failure_boundary=float(intent["failure_boundary"]), expiry=coerce_timestamp(intent["expiry"]),
+            confirmation=tuple(intent.get("confirmation", ())),
+            cancel_reason=intent.get("cancel_reason"),
+            triggered_at=(coerce_timestamp(intent["triggered_at"]) if intent.get("triggered_at") else None),
+            setup_version=intent.get("setup_version"),
+            entry_policy=EntryPolicy(intent.get("entry_policy", "intrabar_cross")),
+            required_confirmation=tuple(intent.get("required_confirmation", ())),
+            armed_at=(coerce_timestamp(intent["armed_at"]) if intent.get("armed_at") else None),
+            effective_at=(coerce_timestamp(intent["effective_at"]) if intent.get("effective_at") else None),
+            filled_at=(coerce_timestamp(intent["filled_at"]) if intent.get("filled_at") else None),
+            lifecycle_id=intent.get("lifecycle_id"),
+            formation_context=_restore_context_ref(intent.get("formation_context")),
+            decision_context=_restore_context_ref(intent.get("decision_context")),
+        )
+    restored_admission = ExecutionAdmission(
+        status=AdmissionStatus(admission.get("status", AdmissionStatus.NOT_EVALUATED)),
+        reason=admission.get("reason"), decided_at=admission.get("decided_at"),
+        intent_id=admission.get("intent_id"),
+    ) if isinstance(admission, Mapping) else ExecutionAdmission()
+    restored_reservation = None
+    if isinstance(reservation, Mapping):
+        restored_reservation = EntryReservation(
+            reservation_id=str(reservation["reservation_id"]),
+            opportunity_id=str(reservation["opportunity_id"]),
+            direction=str(reservation["direction"]),
+            session_date=str(reservation["session_date"]),
+            reserved_at=str(reservation["reserved_at"]),
+            status=ReservationStatus(reservation.get("status", "ACTIVE")),
+            released_at=reservation.get("released_at"),
+            release_reason=reservation.get("release_reason"),
+        )
+    restored_entry = None
+    if isinstance(pending_entry, Mapping) and restored_intent is not None:
+        restored_entry = EntryOrder(
+            intent=restored_intent, available_at=str(pending_entry["available_at"]),
+            fill_price=float(pending_entry["fill_price"]),
+            session_date=pending_entry.get("session_date"),
+        )
+    restored_exit = None
+    if isinstance(pending_exit, Mapping):
+        restored_exit = ExitOrder(
+            reason=str(pending_exit["reason"]), available_at=str(pending_exit["available_at"]),
+            requested_price=pending_exit.get("requested_price"),
+            execution_policy=str(pending_exit.get("execution_policy", "next_available_bar_open")),
+            quantity=pending_exit.get("quantity"), session_date=pending_exit.get("session_date"),
+            position_id=pending_exit.get("position_id"),
+        )
+    restored_position = None
+    if isinstance(position, Mapping):
+        restored_position = PositionManagement(
+            position_id=str(position["position_id"]), intent_id=str(position["intent_id"]),
+            setup_id=str(position["setup_id"]), regime_version=str(position["regime_version"]),
+            direction=str(position["direction"]), status=PositionStatus(position["status"]),
+            failure_boundary=float(position["failure_boundary"]),
+            initial_risk_points=float(position["initial_risk_points"]),
+            protective_stop=position.get("protective_stop"), target=position.get("target"),
+            closed_at=position.get("closed_at"), exit_reason=position.get("exit_reason"),
+            fill_price=position.get("fill_price"), quantity=float(position.get("quantity", 1.0)),
+            lifecycle_id=position.get("lifecycle_id"),
+            exit_plan=_restore_exit_plan(position.get("exit_plan", ())),
+            exit_intent=_restore_exit_intent(position.get("exit_intent")),
+            partial_exit_taken=bool(position.get("partial_exit_taken", False)),
+            post_3r_activated=bool(position.get("post_3r_activated", False)),
+        )
+    fills = tuple(
+        Fill(str(item["fill_id"]), str(item["opportunity_id"]), str(item["kind"]),
+             float(item["quantity"]), float(item["price"]), str(item["filled_at"]),
+             float(item.get("cost", 0.0)))
+        for item in raw.get("fills", ()) if isinstance(item, Mapping)
+    )
+    return ExecutionState(
+        opportunity_id=str(raw["opportunity_id"]), setup=_restore_setup(raw.get("setup")),
+        setup_available_at=raw.get("setup_available_at"),
+        exit_plan_frozen=bool(raw.get("exit_plan_frozen", False)), intent=restored_intent,
+        admission=restored_admission, reservation=restored_reservation,
+        pending_entry=restored_entry, pending_exit=restored_exit, position=restored_position,
+        entry_at=raw.get("entry_at"), exit_at=raw.get("exit_at"),
+        exit_price=raw.get("exit_price"), realized_points=raw.get("realized_points"),
+        admission_history=tuple(
+            ExecutionAdmission(
+                status=AdmissionStatus(item.get("status", AdmissionStatus.NOT_EVALUATED)),
+                reason=item.get("reason"), decided_at=item.get("decided_at"),
+                intent_id=item.get("intent_id"),
+            )
+            for item in raw.get("admission_history", ()) if isinstance(item, Mapping)
+        ),
+        reservation_history=tuple(
+            EntryReservation(
+                reservation_id=str(item["reservation_id"]),
+                opportunity_id=str(item["opportunity_id"]), direction=str(item["direction"]),
+                session_date=str(item["session_date"]), reserved_at=str(item["reserved_at"]),
+                status=ReservationStatus(item.get("status", "ACTIVE")),
+                released_at=item.get("released_at"), release_reason=item.get("release_reason"),
+            )
+            for item in raw.get("reservation_history", ()) if isinstance(item, Mapping)
+        ),
+        fills=list(fills), entry_attempted=bool(raw.get("entry_attempted", False)),
+        entry_aliases=tuple(raw.get("entry_aliases", ())),
+        retest_touched=bool(raw.get("retest_touched", False)),
+        retest_touch_observed_at=raw.get("retest_touch_observed_at"),
+        retest_touch_available_at=raw.get("retest_touch_available_at"),
+        retest_touch_evidence=raw.get("retest_touch_evidence"),
+    )
 
 
 def _execution_trace_state(state: Any) -> dict[str, Any]:
@@ -158,21 +744,71 @@ class OrderflowTransitionOwner:
         return self.context.parity_snapshot()
 
     def snapshot(self) -> dict[str, Any]:
-        """Return the canonical producer prefix needed for recovery."""
+        """Return the complete canonical mutable state and producer prefix."""
+        context = self.context
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "clock": serialize_utc(self._clock) if self._clock is not None else None,
-            "events": deepcopy(self.context.events),
-            "transitions": deepcopy(self.context.transitions),
-            "parity_streams": deepcopy(self.context.parity_streams),
-            "parity_observed": sorted(self.context.parity_observed),
-            "parity_layers": deepcopy(self.context.parity_layers),
-            "execution_diagnostics": deepcopy(self.context.execution_diagnostics),
+            "canonical_state": {
+                "source": {
+                    "rows": _snapshot_value(context.rows),
+                    "rows_by_date": _snapshot_value(context.rows_by_date),
+                    "prior_session_rows": _snapshot_value(context.prior_session_rows),
+                    "atr_by_session": _snapshot_value(context.atr_by_session),
+                    "aggregates": _snapshot_value(context.aggregates),
+                    "current_session_date": context.current_session_date,
+                },
+                "context_store": _context_snapshot(context),
+                "location_registry": _location_snapshot(self.location_registry),
+                "interactions": _snapshot_value(context.interactions),
+                "opportunities": _snapshot_value(context.opportunities),
+                "execution_states": _snapshot_value(context.execution_engine.snapshot()),
+                "execution_claims": _execution_claims_snapshot(context.execution_engine),
+                "execution_proposals": _snapshot_value(context.execution_proposals),
+                "regime": _snapshot_value(context.regime),
+                "execution_constraints": _snapshot_value(context.execution_constraints),
+                "opening_context": _snapshot_value(context.opening_context),
+                "continuous": _snapshot_value(context.continuous),
+                "session": _snapshot_value(context.session),
+                "regime_gate": _snapshot_value(context.regime_gate),
+                "market_state": context.market_state,
+                "last_confirmation_context_time": _snapshot_value(
+                    context.last_confirmation_context_time,
+                ),
+                "child_observation": _snapshot_value(context.child_observation),
+                "regime_gate_blocked_lifecycles": _snapshot_value(
+                    context.regime_gate_blocked_lifecycles,
+                ),
+                "session_extreme_gate_blocked_lifecycles": _snapshot_value(
+                    context.session_extreme_gate_blocked_lifecycles,
+                ),
+                "pending_bar_events": _snapshot_value(context.pending_bar_events),
+                "decision_context_evidence": _snapshot_value(context.decision_context_evidence),
+                "opportunity_identities": _snapshot_value(context.opportunity_identities),
+                "published_resolved_responses": _snapshot_value(
+                    context.published_resolved_responses,
+                ),
+                "opportunity_outcomes": _snapshot_value(context.opportunity_outcomes),
+                "or_seed_candles": _snapshot_value(context.or_seed_candles),
+                "setup_number": context.setup_number,
+                "neutral_event_ordinals": _snapshot_value(context.neutral_event_ordinals),
+                "neutral_keys_by_causal_id": _snapshot_value(
+                    context.neutral_keys_by_causal_id,
+                ),
+                "published_intents": sorted(self._published_intents),
+                "execution_notifications": sorted(self._execution_notifications),
+            },
+            "events": deepcopy(context.events),
+            "transitions": deepcopy(context.transitions),
+            "parity_streams": deepcopy(context.parity_streams),
+            "parity_observed": sorted(context.parity_observed),
+            "parity_layers": deepcopy(context.parity_layers),
+            "execution_diagnostics": deepcopy(context.execution_diagnostics),
         }
 
     def restore_snapshot(self, snapshot: Mapping[str, Any]) -> None:
         """Restore producer-owned facts and the transition clock idempotently."""
-        if snapshot.get("schema_version") != 1:
+        if snapshot.get("schema_version") not in {1, 2}:
             raise ValueError("unsupported orderflow snapshot schema")
         raw_clock = snapshot.get("clock")
         if raw_clock is not None and not isinstance(raw_clock, str):
@@ -191,6 +827,150 @@ class OrderflowTransitionOwner:
         self.context.parity_observed = set(observed)
         self.context.parity_layers = deepcopy(snapshot.get("parity_layers", {}))
         self.context.execution_diagnostics = deepcopy(snapshot.get("execution_diagnostics", []))
+        canonical = snapshot.get("canonical_state")
+        if not isinstance(canonical, Mapping):
+            return
+        source = canonical.get("source")
+        if isinstance(source, Mapping):
+            if isinstance(source.get("rows"), list):
+                self.context.rows = deepcopy(source["rows"])
+            if isinstance(source.get("rows_by_date"), Mapping):
+                self.context.rows_by_date = deepcopy(source["rows_by_date"])
+            if isinstance(source.get("prior_session_rows"), list):
+                self.context.prior_session_rows = tuple(
+                    tuple(dict(item) for item in values)
+                    for values in source["prior_session_rows"]
+                    if isinstance(values, list)
+                )
+            if isinstance(source.get("atr_by_session"), Mapping):
+                self.context.atr_by_session = deepcopy(source["atr_by_session"])
+            if isinstance(source.get("aggregates"), Mapping):
+                self.context.aggregates = deepcopy(source["aggregates"])
+            current_session = source.get("current_session_date")
+            self.context.current_session_date = (
+                str(current_session) if current_session is not None else None
+            )
+        context_store = canonical.get("context_store")
+        if isinstance(context_store, Mapping):
+            self.context.market_contexts = _restore_context_store(context_store)
+        location = canonical.get("location_registry")
+        if isinstance(location, Mapping):
+            restored_registry = _restore_location_registry(location)
+            self.location_registry = restored_registry
+            self.context.location_registry = restored_registry
+            self.observation_owner.location_registry = restored_registry
+        for name in (
+            "pending_bar_events", "decision_context_evidence",
+            "opportunity_identities", "opportunity_outcomes", "neutral_event_ordinals",
+            "neutral_keys_by_causal_id",
+        ):
+            value = canonical.get(name)
+            if value is not None:
+                setattr(self.context, name, deepcopy(value))
+        raw_interactions = canonical.get("interactions")
+        if isinstance(raw_interactions, Mapping):
+            self.context.interactions = {
+                str(key): _restore_interaction_snapshot(value)
+                for key, value in raw_interactions.items()
+                if isinstance(value, Mapping)
+            }
+        raw_opportunities = canonical.get("opportunities")
+        if isinstance(raw_opportunities, Mapping):
+            restored_opportunities: dict[str, SetupOpportunity] = {}
+            for lifecycle_id, value in raw_opportunities.items():
+                if not isinstance(value, Mapping):
+                    continue
+                restored = _restore_opportunity(value)
+                restored_opportunities[str(lifecycle_id)] = restored
+                self.context.execution_engine.register(restored.lifecycle_id)
+            self.context.opportunities = restored_opportunities
+        raw_execution_states = canonical.get("execution_states")
+        if isinstance(raw_execution_states, Mapping):
+            self.context.execution_engine._states = {
+                str(lifecycle_id): _restore_execution_state(value)
+                for lifecycle_id, value in raw_execution_states.items()
+                if isinstance(value, Mapping)
+            }
+        claims = canonical.get("execution_claims")
+        if isinstance(claims, Mapping):
+            entry_owners = claims.get("entry_owners")
+            if isinstance(entry_owners, list):
+                self.context.execution_engine._entry_owners = {
+                    tuple(item["key"]): str(item["owner"])
+                    for item in entry_owners
+                    if isinstance(item, Mapping)
+                    and isinstance(item.get("key"), list)
+                    and len(item["key"]) == 5
+                }
+            for name in ("_execution_group_claims", "_position_owners"):
+                value = claims.get(name[1:])
+                if isinstance(value, Mapping):
+                    setattr(
+                        self.context.execution_engine, name,
+                        {
+                            str(key): tuple(item) if name == "_execution_group_claims" else str(item)
+                            for key, item in value.items()
+                        },
+                    )
+            transferred = claims.get("position_transfer_claimed")
+            if isinstance(transferred, list):
+                self.context.execution_engine._position_transfer_claimed = set(transferred)
+        if isinstance(canonical.get("opening_context"), Mapping):
+            self.context.opening_context = deepcopy(canonical["opening_context"])
+        raw_proposals = canonical.get("execution_proposals")
+        if isinstance(raw_proposals, list):
+            self.context.execution_proposals = []
+        for name in ("continuous", "session", "regime_gate"):
+            if name in canonical:
+                setattr(self.context, name, _restore_namespace(canonical[name]))
+        regime = canonical.get("regime")
+        if isinstance(regime, Mapping):
+            self.context.regime = _restore_regime(regime)
+        elif regime is None:
+            self.context.regime = None
+        if canonical.get("market_state") is not None:
+            self.context.market_state = canonical["market_state"]
+        raw_confirmation_time = canonical.get("last_confirmation_context_time")
+        self.context.last_confirmation_context_time = (
+            coerce_timestamp(raw_confirmation_time)
+            if isinstance(raw_confirmation_time, str) else None
+        )
+        child_observation = canonical.get("child_observation")
+        self.context.child_observation = (
+            _restore_context_observation(child_observation)
+            if isinstance(child_observation, Mapping) else None
+        )
+        for name in (
+            "regime_gate_blocked_lifecycles",
+            "session_extreme_gate_blocked_lifecycles",
+        ):
+            value = canonical.get(name)
+            if isinstance(value, list):
+                setattr(self.context, name, set(value))
+        constraints = canonical.get("execution_constraints")
+        if isinstance(constraints, Mapping):
+            self.context.execution_constraints = ExecutionConstraints(
+                max_open_positions=int(constraints.get("max_open_positions", 1)),
+                max_session_entries=constraints.get("max_session_entries"),
+                max_direction_entries=constraints.get("max_direction_entries"),
+                post_trade_cooldown_minutes=int(
+                    constraints.get("post_trade_cooldown_minutes", 0),
+                ),
+                fill_permission_margin=constraints.get("fill_permission_margin"),
+                stop_atr_buffer=float(constraints.get("stop_atr_buffer", 0.25)),
+                failed_reversal_lockout=bool(constraints.get("failed_reversal_lockout", False)),
+            )
+        if isinstance(canonical.get("published_resolved_responses"), list):
+            self.context.published_resolved_responses = {
+                tuple(item) for item in canonical["published_resolved_responses"]
+                if isinstance(item, list) and len(item) == 2
+            }
+        if isinstance(canonical.get("or_seed_candles"), list):
+            self.context.or_seed_candles = set(canonical["or_seed_candles"])
+        if isinstance(canonical.get("setup_number"), int):
+            self.context.setup_number = canonical["setup_number"]
+        self._published_intents = set(canonical.get("published_intents", ()))
+        self._execution_notifications = set(canonical.get("execution_notifications", ()))
 
     @property
     def engine(self) -> Any:

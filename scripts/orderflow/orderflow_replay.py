@@ -6,6 +6,7 @@ import argparse
 from datetime import datetime
 import json
 from pathlib import Path
+import sys
 from typing import Any
 
 from ftx_paper.config import PaperConfig
@@ -43,8 +44,13 @@ def main(argv: list[str] | None = None) -> int:
                 include_interactions=args.include_interactions,
             )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"orderflow replay failed: {exc}", file=sys.stderr)
         result = {"status": "INCOMPLETE", "reason": str(exc)}
-    rendered = json.dumps(result, indent=2, sort_keys=True)
+    try:
+        rendered = json.dumps(result, indent=2, sort_keys=True)
+    except (TypeError, ValueError) as exc:
+        print(f"orderflow replay failed while rendering output: {exc}", file=sys.stderr)
+        return 1
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered + "\n", encoding="utf-8")

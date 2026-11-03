@@ -11,15 +11,13 @@ from typing import Any, cast
 from ftx_paper.runtime import RuntimeStore
 from ftx_paper.runtime.futures_source import FuturesSessionSourceResolver
 from ftx_paper.strategies.orderflow import observe_market
-from ftx_paper.strategies.orderflow.state_machine import ReplayMachine
 from ftx_paper.strategies.orderflow.evidence import (
     PaperFeatureAdapter,
     SerializedEvidenceAdapter,
     evidence_payload,
     produce_evidence,
 )
-from ftx_paper.strategies.orderflow.context_location_replay import replay_context_location_artifact
-from ftx_paper.strategies.orderflow.interaction_replay import replay_interaction_response
+from ftx_paper.strategies.orderflow.interaction_replay import replay_canonical_owner
 from ftx_paper.strategies.orderflow.location_geometry import LocationBand
 from ftx_paper.strategies.orderflow.orderflow_common import Aggregate
 from ftx_paper.strategies.orderflow.state_machine_types import LocationRecord, LocationRegistry
@@ -389,21 +387,20 @@ class OrderflowReplayEngine:
             parsed_aggregates=parsed_aggregates,
             precomputed_vwap_measurements=precomputed_vwap_measurements,
         )["publication"])
-        phase4_replay = replay_context_location_artifact(
-            phase3_artifact,
-            session_date=session_date,
-            evidence=phase4_evidence,
-            replay_clock=final_clock,
-        )
         interaction_replay = None
         interaction_response: tuple[dict[str, Any], ...] = ()
+        phase4_replay = None
         if include_interactions:
             aggregates = {
                 timeframe: tuple(_aggregate(item, timeframe) for item in artifact["aggregates"][timeframe])
                 for timeframe in ("1m", "5m")
             }
-            interaction_replay = replay_interaction_response(
-                aggregates, phase4_replay, _location_registry(final_evidence, session_date),
+            phase4_replay, interaction_replay = replay_canonical_owner(
+                phase3_artifact,
+                session_date=session_date,
+                evidence=phase4_evidence,
+                aggregates=aggregates,
+                registry=_location_registry(final_evidence, session_date),
                 fill_permission_margin=fill_permission_margin,
                 prior_value=phase4_evidence.prior_value,
                 raw_rows=rows,
@@ -411,18 +408,24 @@ class OrderflowReplayEngine:
                 atr_by_session=atr_by_session,
             )
             interaction_response = interaction_replay.facts
-        machine = ReplayMachine(
-            rows,
-            evidence_events=evidence_events,
-            evidence_at_clock=evidence_at_clock,
-            session_date=session_date,
+        else:
+            from ftx_paper.strategies.orderflow.context_location_replay import (
+                replay_context_location_artifact,
+            )
+            phase4_replay = replay_context_location_artifact(
+                phase3_artifact,
+                session_date=session_date,
+                evidence=phase4_evidence,
+                replay_clock=final_clock,
+            )
+        replay_records = (
+            _json_safe(list(interaction_replay.replay_records))
+            if interaction_replay is not None
+            else []
         )
-        # ReplayMachine is retained only as the bounded evidence projection.
-        # Interaction and execution chronology are owned by the transition
-        # owner inside replay_interaction_response above.
-        replay_records, final_state = machine.run()
-
-        final_evidence = _as_of_evidence(final_state.evidence, final_clock)
+        final_evidence = _as_of_evidence(
+            evidence_at_clock(final_clock), final_clock,
+        )
         locations = final_evidence["locations"]
         interaction_phase_facts = (
             interaction_replay.parity_phase_facts()
@@ -440,9 +443,9 @@ class OrderflowReplayEngine:
         phase_facts.update({
             "context_publication": (
                 list(interaction_replay.context_publications)
-                if interaction_replay is not None else list(final_state.context_publications)
+                if interaction_replay is not None else []
             ),
-            **phase4_replay.parity_phase_facts(),
+            **(phase4_replay.parity_phase_facts() if phase4_replay is not None else {}),
             **({"opportunity_lifecycle": interaction_phase_facts["opportunity_lifecycle"]}
                if interaction_phase_facts else {}),
             **({"interaction_response": _json_safe(list(interaction_response))}
@@ -498,16 +501,32 @@ class OrderflowReplayEngine:
         parity_coverage = {
             "phase_streams": {
                 name: {
-                    "status": "MATCHED",
-                    "observed": True,
-                    "coverage": "observed_empty" if not phase_facts[name] else "observed",
+                    "status": (
+                        "MATCHED"
+                        if name in {"source_observation", "context_location"}
+                        or interaction_replay is not None
+                        else "UNAVAILABLE"
+                    ),
+                    "observed": (
+                        name in {"source_observation", "context_location"}
+                        or interaction_replay is not None
+                    ),
+                    "coverage": (
+                        "observed_empty" if not phase_facts[name] else "observed"
+                    ) if (
+                        name in {"source_observation", "context_location"}
+                        or interaction_replay is not None
+                    ) else "unavailable",
                 }
                 for name in PHASE_STREAMS
             },
             "layers": {
                 name: {
-                    "status": "MATCHED", "observed": True,
-                    "coverage": "observed" if parity_layers[name] else "observed_empty",
+                    "status": "MATCHED" if name == "run_scope" or interaction_replay is not None else "UNAVAILABLE",
+                    "observed": name == "run_scope" or interaction_replay is not None,
+                    "coverage": (
+                        "observed" if parity_layers[name] else "observed_empty"
+                    ) if name == "run_scope" or interaction_replay is not None else "unavailable",
                 }
                 for name in LAYERS
             },

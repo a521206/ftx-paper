@@ -9,14 +9,26 @@ from ftx_paper.strategies.orderflow.evidence_publication import (
 )
 from ftx_paper.strategies.orderflow.location_geometry import LocationBand
 from ftx_paper.strategies.orderflow.market_observation import MarketObservation
+from ftx_paper.strategies.orderflow.market_observation import rows_available_for_observation
+from ftx_paper.strategies.orderflow.hierarchy import MarketContext
 from ftx_paper.strategies.orderflow.orderflow_common import Aggregate
 from ftx_paper.strategies.orderflow.state_machine_types import LocationRecord
+from ftx_paper.strategies.orderflow.timestamps import serialize_utc
 from ftx_paper.strategies.orderflow.value_publication import ValuePublication
 from ftx_paper.strategies.orderflow.vwap_location import VwapMeasurement
 
 
 SESSION = "2026-10-05"
 UTC = timezone.utc
+
+
+def test_observation_clock_includes_terminal_market_close_input() -> None:
+    rows = [
+        {"session_date": SESSION, "time": "15:29"},
+        {"session_date": SESSION, "time": "15:30"},
+    ]
+
+    assert [row["time"] for row in rows_available_for_observation(rows)] == ["15:29", "15:30"]
 
 
 def _aggregate(timeframe: str, minute: int, *, count: int) -> Aggregate:
@@ -87,6 +99,29 @@ def test_vwap_same_timestamp_uses_completed_5m_availability() -> None:
     assert replay.context_location[-1]["values"]["locations"]
 
 
+def test_5m_child_observations_publish_at_their_causal_availability() -> None:
+    children = tuple(_aggregate("1m", minute, count=1) for minute in range(15, 20))
+    five = _aggregate("5m", 15, count=5)
+    replay = _replay_market(
+        MarketObservation({"1m": children, "5m": (five,)}, (), {}, "source"),
+        session_date=SESSION,
+        evidence=_evidence(
+            LocationRecord(
+                "OR_LOW:2026-10-05:1", "OR_LOW", 100.0, SESSION,
+                five.available_at, five.available_at, "stream",
+                LocationBand(99.0, 101.0), frozen_atr=4.0, generation=1,
+            ),
+        ),
+        replay_clock=None,
+    )
+
+    observations = replay.context_location[-1]["values"]["locations"]
+    child_observations = observations[:5]
+    assert [item["available_at"] for item in child_observations] == [
+        serialize_utc(five.available_at)
+    ] * 5
+
+
 def test_misaligned_5m_records_unavailable_context_location_fact() -> None:
     one = _aggregate("1m", 19, count=1)
     five = _aggregate("5m", 15, count=5)
@@ -102,3 +137,32 @@ def test_misaligned_5m_records_unavailable_context_location_fact() -> None:
     assert fact["values"]["timeframe"] == "5m"
     assert fact["values"]["locations"] == []
     assert "missing_context" in fact["unavailable"]
+
+
+def test_context_publication_is_visible_to_phase4_replay() -> None:
+    children = tuple(_aggregate("1m", minute, count=1) for minute in range(15, 20))
+    five = _aggregate("5m", 15, count=5)
+    context = MarketContext(
+        context_id="5m-context-NIFTY-2026-10-05-1m_5m",
+        version="v1",
+        timestamp=five.time,
+        available_at=five.available_at,
+        location=None,
+        market_state="BALANCE",
+        source_timeframe="5m",
+        definition_version="1m_5m",
+        source_provenance=({"source_candle_id": five.time},),
+    )
+    replay = _replay_market(
+        MarketObservation({"1m": children, "5m": (five,)}, (), {}, "source"),
+        session_date=SESSION,
+        evidence=_evidence(),
+        context_publications=({"context": context},),
+        replay_clock=None,
+    )
+
+    fact = replay.context_location[-1]
+    assert fact["values"]["context"]["context_id"] == context.context_id
+    assert fact["values"]["context"]["source_provenance"][0]["source_candle_id"] == (
+        serialize_utc(five.time)
+    )
