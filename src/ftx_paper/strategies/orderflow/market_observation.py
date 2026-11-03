@@ -14,10 +14,15 @@ from .state_machine_source import source_fingerprint
 MARKET_CLOSE_TIME = "15:30"
 
 
+def is_observation_minute(session_date: str, value: Any) -> bool:
+    """Return whether a source minute falls before the exclusive market close."""
+    return session_minute(session_date, value)[-5:] < MARKET_CLOSE_TIME
+
+
 def rows_available_for_observation(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         row for row in rows
-        if session_minute(str(row["session_date"]), row["time"])[-5:] < MARKET_CLOSE_TIME
+        if is_observation_minute(str(row["session_date"]), row["time"])
     ]
 
 

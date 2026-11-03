@@ -43,6 +43,7 @@ from ftx_paper.strategies.shared.exits import ExitAction
 from ftx_paper.strategies.shared.factory import StrategyContext, StrategySelector
 from ftx_paper.config import NIFTY_LOT_SIZE
 from ftx_paper.strategies.orderflow.timestamps import nifty_label
+from ftx_paper.strategies.orderflow.market_observation import is_observation_minute
 
 _EXECUTION_EVENT_TYPES = frozenset({
     "ORDER_INTENT", "ORDER_AUTHORIZED", "ORDER_ACK", "FILL",
@@ -1070,6 +1071,10 @@ class ReplayWorker:
         ]
         replay_bars = self.inputs.bars(
             session_date, rows=replay_rows, futures_source=futures_source,
+        )
+        replay_bars = tuple(
+            bar for bar in replay_bars
+            if is_observation_minute(session_date, nifty_label(bar.timestamp))
         )
         prior_values: dict[str, Any] = {}
         atr_values: dict[str, Any] = {}

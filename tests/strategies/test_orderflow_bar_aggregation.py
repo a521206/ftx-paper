@@ -2,7 +2,10 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from ftx_paper.strategies.orderflow.canonical.ict.bars import SourceBar, build_completed_bars
-from ftx_paper.strategies.orderflow.market_observation import observe_market
+from ftx_paper.strategies.orderflow.market_observation import (
+    is_observation_minute,
+    observe_market,
+)
 from ftx_paper.strategies.orderflow.orderflow_common import build_aggregate_result
 
 
@@ -70,3 +73,5 @@ def test_market_observation_excludes_bar_at_exclusive_session_close() -> None:
         item.time.astimezone(ZoneInfo("Asia/Kolkata")).strftime("%H:%M")
         for item in observed.aggregates["1m"]
     ] == ["15:29"]
+    assert is_observation_minute("2026-10-12", "2026-10-12T15:29")
+    assert not is_observation_minute("2026-10-12", "2026-10-12T15:30")
