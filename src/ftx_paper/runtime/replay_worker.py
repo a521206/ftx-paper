@@ -1066,11 +1066,23 @@ class ReplayWorker:
         # window would reseed it from a different history than canonical replay.
         for warmup_date in sorted(warmup_dates):
             warmup_rows = self.store.read_market_bars(warmup_date)
-            warmup_bars.extend(self.inputs.bars(
+            warmup_source = self.inputs.resolve_source(warmup_date, rows=warmup_rows)
+            warmup_rows = [
+                row for row in warmup_rows
+                if str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
+            ]
+            normalized_warmup = self.inputs.bars(
                 warmup_date,
                 rows=warmup_rows,
-                futures_source=self.inputs.resolve_source(warmup_date, rows=warmup_rows),
-            ))
+                futures_source=warmup_source,
+            )
+            # CanonicalInputProvider derives orderflow features from futures
+            # only. Avoid retaining the potentially massive option surface for
+            # every historical session while preserving the full ATR history.
+            warmup_bars.extend(
+                bar for bar in normalized_warmup
+                if str(bar.instrument.instrument_type).upper() in {"FUT", "FUTURES"}
+            )
         aggregator = ReplayInput.aggregator(bars)
         runtime = self.strategy_selector.create(
             "ftx-paper-orderflow",

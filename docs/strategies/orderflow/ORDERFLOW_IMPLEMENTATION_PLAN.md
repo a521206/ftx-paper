@@ -204,6 +204,65 @@ Persist canonical events, snapshots, notifications, and artifacts idempotently.
 Expose read-only API/CLI projections. API and persistence code must not
 recompute decisions from trades, counters, reports, or terminal snapshots.
 
+## Phase 10: Close Live/Replay Execution Parity
+
+**Status: Not started. The canonical strategy boundary is shared, but the host
+execution paths still contain unresolved causal and ownership differences.**
+
+### 10A. Accepted operational differences
+
+Live and bounded replay may differ in the following host concerns only:
+
+- input transport: broker-normalized incremental bars versus stored bounded bars;
+- clock driving: feed completion and wall-clock deadlines versus deterministic
+  historical timestamps;
+- capture and persistence: runtime event storage versus run-scoped replay
+  artifacts;
+- recovery: persistent runtime recovery versus fresh isolated replay state;
+- Paper execution adapter: live PaperBroker/execution-service submission versus
+  deterministic in-process replay settlement.
+
+Neither path may submit broker orders. These differences must not change
+canonical decisions, causal evidence, lifecycle transitions, execution facts, or
+ledger semantics. Synthetic output remains reporting-only where the host
+contract requires it.
+
+### 10B. Implementation gaps to close
+
+1. `ReplayWorker` currently performs host-level entry deferral, authorization,
+   reservation, fills, exits, settlement, notifications, and ledger projection.
+   Reduce it to bounded loading, cancellation, clock advancement, capture, and
+   fresh owner construction; route execution through the same canonical owner
+   and Paper host adapter used by live.
+2. Live uses the current bundle timestamp while replay advances
+   `available_at`/`decision_at` to the next futures bar. Define and test one
+   causal availability contract so this cannot alter admission, timeout,
+   trigger, or settlement ordering.
+3. Live uses a ten-second supporting-bar deadline while replay uses a zero-second
+   deadline. Align the resulting canonical bundle/evidence behavior or record a
+   formally accepted clock/input variance with proof that decision streams are
+   unchanged.
+4. Complete the canonical owner from context publication through settlement and
+   remove transitional duplicate orchestration paths.
+5. Complete DB-backed live/replay fact capture, snapshot/recovery of the mutable
+   canonical graph, and retirement of the temporary replay harness.
+
+### 10C. Acceptance criteria
+
+Phase 10 is accepted only when all of the following hold:
+
+- no-trade and execution-bearing sessions match canonical decision,
+  execution/settlement, and portfolio-ledger streams;
+- any variance is limited to the documented ATR/prior-value input rule and is
+  explicitly classified as `INPUT_VARIANCE`;
+- live and replay use the same complete transition and execution owner;
+- replay does not reconstruct facts from terminal snapshots or duplicate
+  canonical policy/execution logic;
+- snapshot recovery reproduces the same causal prefix without rereading future
+  bars; and
+- the comparison gate passes with no `MISMATCHED`, `INCOMPLETE`, or
+  `UNAVAILABLE` downstream phase.
+
 ## Completion Gate
 
 The replacement is complete only when:
