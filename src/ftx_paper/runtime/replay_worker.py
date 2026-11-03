@@ -167,15 +167,11 @@ class ReplayWorker:
         request = ReplayRequest.from_mapping(request).to_dict()
         run_id = uuid4().hex
         cancel = Event()
-        session_date = str(request.get("session_date") or "").strip()[:10]
-        if not session_date:
-            raise ValueError("replay requires one session_date")
-        # One stored result per trading day. Re-running a date replaces its
-        # prior result so stale trades cannot remain visible.
-        self.store.clear_replay_runs_for_date(session_date)
+        run_id, created = self.store.create_or_get_replay_run(run_id, request)
+        if not created:
+            return run_id
         with self._lock:
             self._cancel[run_id] = cancel
-        self.store.create_replay_run(run_id, request)
         self._ensure_started()
         try:
             self._queue.put_nowait((run_id, request, cancel))

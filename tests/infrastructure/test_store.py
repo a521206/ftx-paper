@@ -141,10 +141,23 @@ def test_runtime_store_keeps_same_minute_contract_bars_separate(tmp_path):
 def test_runtime_store_clears_replay_runs_for_requested_date(tmp_path):
     store = RuntimeStore(tmp_path)
     store.create_replay_run("old-jan-5", {"session_date": "2026-01-05"})
+    store.update_replay_run("old-jan-5", status="completed")
     store.create_replay_run("old-jan-6", {"session_date": "2026-01-06"})
 
     assert store.clear_replay_runs_for_date("2026-01-05") == 1
     assert [run["run_id"] for run in store.read_replay_runs()] == ["old-jan-6"]
+
+
+def test_runtime_store_keeps_inflight_replay_runs_for_requested_date(tmp_path):
+    store = RuntimeStore(tmp_path)
+    store.create_replay_run("queued-jan-5", {"session_date": "2026-01-05"})
+    store.create_replay_run("running-jan-5", {"session_date": "2026-01-05"})
+    store.update_replay_run("running-jan-5", status="running")
+
+    assert store.clear_replay_runs_for_date("2026-01-05") == 0
+    assert {run["run_id"] for run in store.read_replay_runs()} == {
+        "queued-jan-5", "running-jan-5",
+    }
 
 
 def test_runtime_store_deletes_replay_and_result_chunks(tmp_path):

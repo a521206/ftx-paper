@@ -909,6 +909,51 @@ class SqliteRuntimeStore:
         )
         return self.read_replay_run(run_id) or {}
 
+    def create_or_get_replay_run(
+        self, run_id: str, request: dict[str, Any],
+    ) -> tuple[str, bool]:
+        """Atomically reuse an in-flight equivalent or create a new replay."""
+        now = self._now()
+        session_date = str(request.get("session_date") or "").strip()[:10]
+        encoded_request = json.dumps(_json_safe(request, path="replay request"), sort_keys=True)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                "SELECT run_id, request FROM replay_runs "
+                "WHERE status IN ('queued', 'running') "
+                "AND substr(json_extract(request, '$.session_date'), 1, 10) = ?",
+                (session_date,),
+            ).fetchall()
+            for existing_id, existing_request in rows:
+                if json.loads(existing_request) == json.loads(encoded_request):
+                    return str(existing_id), False
+
+            connection.execute(
+                "DELETE FROM replay_result_chunks WHERE run_id IN "
+                "(SELECT run_id FROM replay_runs WHERE status IN "
+                "('completed', 'failed', 'cancelled', 'rejected') AND "
+                "substr(json_extract(request, '$.session_date'), 1, 10) = ?)",
+                (session_date,),
+            )
+            connection.execute(
+                "DELETE FROM replay_runs WHERE status IN "
+                "('completed', 'failed', 'cancelled', 'rejected') AND "
+                "substr(json_extract(request, '$.session_date'), 1, 10) = ?",
+                (session_date,),
+            )
+            connection.execute(
+                "INSERT INTO replay_runs(run_id, status, request, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (run_id, "queued", encoded_request, now, now),
+            )
+        self.append_event(
+            "REPLAY_QUEUED",
+            {"run_id": run_id, **request},
+            f"replay_activity:queued:{run_id}",
+            timestamp=now,
+        )
+        return run_id, True
+
     def update_replay_run(self, run_id: str, *, status: str, result: dict[str, Any] | None = None,
                           error: str | None = None) -> None:
         updated_at = self._now()
@@ -1068,19 +1113,22 @@ class SqliteRuntimeStore:
         return deleted
 
     def clear_replay_runs_for_date(self, session_date: str) -> int:
-        """Delete stored replay runs whose requested session is this date."""
+        """Delete terminal replay runs whose requested session is this date."""
         normalized = str(session_date).strip()[:10]
         if not normalized:
             return 0
         with self._connect() as connection:
             connection.execute(
                 "DELETE FROM replay_result_chunks WHERE run_id IN "
-                "(SELECT run_id FROM replay_runs WHERE substr(json_extract(request, '$.session_date'), 1, 10) = ?)",
+                "(SELECT run_id FROM replay_runs WHERE status IN "
+                "('completed', 'failed', 'cancelled', 'rejected') AND "
+                "substr(json_extract(request, '$.session_date'), 1, 10) = ?)",
                 (normalized,),
             )
             cursor = connection.execute(
                 "DELETE FROM replay_runs "
-                "WHERE substr(json_extract(request, '$.session_date'), 1, 10) = ?",
+                "WHERE status IN ('completed', 'failed', 'cancelled', 'rejected') AND "
+                "substr(json_extract(request, '$.session_date'), 1, 10) = ?",
                 (normalized,),
             )
             return cursor.rowcount
