@@ -1085,6 +1085,15 @@ class SqliteRuntimeStore:
             )
             return cursor.rowcount
 
+    def delete_replay_run(self, run_id: str) -> bool:
+        """Delete one replay and any separately stored result chunks."""
+        with self._connect() as connection:
+            cursor = connection.execute("DELETE FROM replay_runs WHERE run_id=?", (run_id,))
+            if cursor.rowcount != 1:
+                return False
+            connection.execute("DELETE FROM replay_result_chunks WHERE run_id=?", (run_id,))
+        return True
+
     def recover_interrupted(self) -> bool:
         status = self.read_status()
         if status.get("state") not in {"RUNNING", "STARTING", "START_REQUESTED"}:

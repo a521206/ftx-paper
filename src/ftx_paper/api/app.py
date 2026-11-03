@@ -188,6 +188,20 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             return incomplete_replay_response(run)
         return jsonify(json_safe(run))
 
+    @app.delete("/api/v1/strategies/<strategy_id>/replays/<run_id>")
+    def delete_replay(strategy_id: str, run_id: str):
+        selected = strategy_filter()
+        if selected is INVALID_STRATEGY:
+            return jsonify(error_payload("invalid_strategy", "strategy_id is not configured")), 400
+        run = store.read_replay_run(run_id)
+        if run is None or run.get("request", {}).get("strategy_id") != strategy_id:
+            return jsonify(error_payload("not_found", "replay not found")), 404
+        if run.get("status") not in {"completed", "failed", "cancelled", "rejected"}:
+            return jsonify(error_payload("invalid_status", "queued or running replays cannot be deleted")), 409
+        if not store.delete_replay_run(run_id):
+            return jsonify(error_payload("not_found", "replay not found")), 404
+        return jsonify({"deleted": True, "run_id": run_id})
+
     @app.get("/api/v1/strategies/<strategy_id>/replays/<run_id>/parity/manifest")
     def replay_parity_manifest(strategy_id: str, run_id: str):
         run = store.read_replay_run(run_id)

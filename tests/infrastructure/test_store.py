@@ -147,6 +147,20 @@ def test_runtime_store_clears_replay_runs_for_requested_date(tmp_path):
     assert [run["run_id"] for run in store.read_replay_runs()] == ["old-jan-6"]
 
 
+def test_runtime_store_deletes_replay_and_result_chunks(tmp_path):
+    store = RuntimeStore(tmp_path)
+    store.create_replay_run("remove-me", {"session_date": "2026-01-05"})
+    store.update_replay_run("remove-me", status="completed", result={"ok": True})
+
+    assert store.delete_replay_run("remove-me") is True
+    assert store.read_replay_run("remove-me") is None
+    with store._connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM replay_result_chunks WHERE run_id=?", ("remove-me",)
+        ).fetchone()[0] == 0
+    assert store.delete_replay_run("remove-me") is False
+
+
 def test_runtime_store_compaction_keeps_inflight_replay_runs(tmp_path):
     store = RuntimeStore(tmp_path)
     store.create_replay_run("completed-run", {"session_date": "2026-01-05"})
