@@ -1058,10 +1058,12 @@ class ReplayWorker:
             raise RuntimeError("replay strategy selector was not configured")
         rows = self.store.read_market_bars(session_date)
         futures_source = self.inputs.resolve_source(session_date, rows=rows)
-        bars = self.inputs.bars(session_date, rows=rows, futures_source=futures_source)
-        source_futures_bars = tuple(
-            bar for bar in bars
-            if str(bar.instrument.instrument_type).upper() in {"FUT", "FUTURES"}
+        replay_rows = [
+            row for row in rows
+            if str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
+        ]
+        replay_bars = self.inputs.bars(
+            session_date, rows=replay_rows, futures_source=futures_source,
         )
         prior_values: dict[str, Any] = {}
         atr_values: dict[str, Any] = {}
@@ -1111,14 +1113,14 @@ class ReplayWorker:
         except (OSError, KeyError, TypeError, ValueError):
             from ftx_paper.strategies.orderflow.evidence_publication import AtrPublication
             atr_values[session_date] = AtrPublication.unavailable("derived_artifact_unavailable")
-        aggregator = ReplayInput.aggregator(bars)
+        aggregator = ReplayInput.aggregator(replay_bars)
         runtime = self.strategy_selector.create(
             "ftx-paper-orderflow",
             StrategyContext(enabled_vehicles=vehicles),
         )
         bind_replay_bars = getattr(runtime, "bind_replay_bars", None)
         if callable(bind_replay_bars):
-            bind_replay_bars(bars, prior_values=prior_values, atr_values=atr_values)
+            bind_replay_bars(replay_bars, prior_values=prior_values, atr_values=atr_values)
         # The selector composes the same PaperOrderflowRuntime used by live
         # hosting.  Replay owns only the bounded clock and capture loop.
         engine = PaperEngine(runtime)
@@ -1129,7 +1131,7 @@ class ReplayWorker:
             ledger_scope="replay",
         )
         bundles_seen = 0
-        for bar in bars:
+        for bar in replay_bars:
             if cancel.is_set():
                 break
             bundle = aggregator.ingest(bar)
@@ -1144,7 +1146,7 @@ class ReplayWorker:
 
         snapshot = getattr(runtime, "snapshot", lambda: {})()
         input_manifest = self.input_manifest(
-            session_date, rows=rows, bars=bars, futures_source=futures_source,
+            session_date, rows=rows, bars=replay_bars, futures_source=futures_source,
         )
         summary = dict(build_summary(list(events), []))
         current_source = input_manifest["provenance"].get("current")
@@ -1187,13 +1189,13 @@ class ReplayWorker:
         parity_payload = getattr(runtime, "parity_payload", None)
         if not callable(parity_payload):
             raise RuntimeError("orderflow runtime does not expose canonical parity facts")
-        orderflow_payload = dict(cast(dict[str, Any], parity_payload(rows)))
+        orderflow_payload = dict(cast(dict[str, Any], parity_payload(replay_rows)))
         orderflow_payload["records"] = list(events)
         orderflow_payload["replay_records"] = _source_replay_records(
-            source_futures_bars, session_date,
+            replay_bars, session_date,
         )
         orderflow_payload["session_date"] = session_date
-        orderflow_payload["source_bar_count"] = len(source_futures_bars)
+        orderflow_payload["source_bar_count"] = len(replay_bars)
         report["extensions"]["ftx-paper-orderflow"] = {
             "orderflow_payload": orderflow_payload,
             "facts": orderflow_payload.get("records", []),
