@@ -209,14 +209,6 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
             return jsonify(error_payload("invalid_date", "session_date must be YYYY-MM-DD")), 400
         if parsed_date != requested_date or parsed_date not in store.read_dates():
             return jsonify(error_payload("no_data", "no market data for session_date")), 404
-        if setup_worker is not None:
-            try:
-                setup_worker.ensure(
-                    replay_request.strategy_id or "",
-                    parsed_date,
-                )
-            except (RuntimeError, ValueError) as exc:
-                return jsonify(error_payload("setup_unavailable", str(exc))), 503
         payload = replay_request.to_dict()
         payload["session_date"] = parsed_date
         try:
