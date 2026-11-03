@@ -396,6 +396,10 @@ class RuntimeSession:
                 raise TypeError("runtime order execution must use PaperBroker")
             backfill_kwargs: dict[str, Any] = {"contract_store": self.store, "days": 20}
             if provider == "xts":
+                # Options are subscribed for live ticks, but historical option
+                # bars are not needed to initialize the runtime. Fetching them
+                # multiplies the warmup by the entire option chain on every launch.
+                backfill_kwargs["include_options"] = False
                 backfill_kwargs["stop_event"] = self._stop_event
             backfill = tuple(load_startup_backfill(client, cast(Any, resolved), **backfill_kwargs))
             if self._stop_event.is_set():

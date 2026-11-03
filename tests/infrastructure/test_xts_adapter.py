@@ -95,6 +95,26 @@ def test_load_startup_backfill():
     assert b.close == 25020.0
 
 
+def test_load_startup_backfill_can_skip_option_chain():
+    class CountingClient(MockXTSClient):
+        def __init__(self):
+            super().__init__([])
+            self.tokens = []
+
+        def ohlc(self, segment, token, start, end, compression=60):
+            self.tokens.append(token)
+            return []
+
+    client = CountingClient()
+    load_startup_backfill(client, [
+        {"instrument_token": 1, "segment_id": 2, "exchange": "NFO", "symbol": "NIFTYFUT", "instrument_type": "FUT"},
+        {"instrument_token": 2, "segment_id": 2, "exchange": "NFO", "symbol": "NIFTYCE", "instrument_type": "CE"},
+    ], include_options=False)
+
+    assert client.tokens
+    assert set(client.tokens) == {1}
+
+
 def test_resolve_instruments_uses_search_segment_name_for_vix():
     class SearchClient(MockXTSClient):
         def search(self, search_text):

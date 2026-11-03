@@ -391,13 +391,17 @@ def load_startup_backfill(
     instruments: Sequence[XTSInstrument] | Sequence[dict[str, Any]],
     *,
     days: int = 2,
+    include_options: bool = True,
     contract_store: Any | None = None,
     stop_event: Any | None = None,
 ) -> tuple[MarketBar, ...]:
     """Fetch bounded 1-minute historical warmup bars from XTS."""
     end = datetime.now(IST).date()
     start = end - timedelta(days=max(1, days + 3))
-    backfill_instruments = list(instruments)
+    backfill_instruments = [
+        item for item in instruments
+        if include_options or str(item.get("instrument_type", "")).upper() not in {"CE", "PE"}
+    ]
 
     bars: list[MarketBar] = []
     for item in backfill_instruments:
