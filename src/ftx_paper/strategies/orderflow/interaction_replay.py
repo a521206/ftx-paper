@@ -20,7 +20,7 @@ from .location_observation import LocationObservation
 from .orderflow_common import Aggregate, parse_timestamp, serialize_timestamp
 from .timestamps import NIFTY_ZONE, coerce_timestamp, serialize_utc, nifty_label
 from .state_machine_types import LocationRegistry
-from .templates import DEFAULT_TEMPLATES, TRADE_TEMPLATES, TradeTemplate
+from .templates import TRADE_TEMPLATES, TradeTemplate
 from .value_publication import ValuePublication
 from .opportunity_replay_host import bar_events_to_facts, build_opportunity_coordinator
 from .opening_gap_policy import OpeningGapPolicy
@@ -267,7 +267,7 @@ def replay_interaction_response(
     opportunity = build_opportunity_coordinator(
         transition_owner,
         detector=detector,
-        templates=DEFAULT_TEMPLATES,
+        templates=templates,
     )
     replay_records: list[dict[str, Any]] = []
 
@@ -324,26 +324,24 @@ def replay_interaction_response(
                 ),
             ))
         apply_regime_publications(current_available)
-        session_five = tuple(
-            item for item in five if item.session_date == current.session_date
-        )
-        first_five = min(session_five, key=lambda item: item.time, default=None)
         latest5 = available5[-1] if available5 else None
         new5 = latest5 is not None and latest5.available_at != observed5_available
         if new5 and latest5 is not None:
             observed5_available = latest5.available_at
-            if first_five is not None and latest5.time == first_five.time:
-                regime_publications.append((
-                    serialize_utc(current.available_at),
-                    opening_gap_policy.regime_for(
-                        state=opening_gap_state,
-                        direction=gap_direction if gap_direction in {"up", "down"} else None,
-                        version=f"opening-gap-permission-{serialize_utc(current.available_at)}",
-                        context="opening_gap",
-                        restrictions=("causal_opening_gap",),
-                    ),
-                ))
-                apply_regime_publications(current_available)
+            # The canonical owner publishes the ordinary 5m permission at
+            # every newly available 5m candle. Opening-gap transitions are
+            # separate publications and must not replace this boundary.
+            regime_publications.append((
+                serialize_utc(latest5.available_at),
+                opening_gap_policy.regime_for(
+                    state=opening_gap_state,
+                    direction=gap_direction if gap_direction in {"up", "down"} else None,
+                    version="5m-permission-allowed",
+                    context="5m_directional_context",
+                    restrictions=("completed_5m_only",),
+                ),
+            ))
+            apply_regime_publications(current_available)
         if current.timeframe == "1m" and gap_direction in {"up", "down"} and opening_gap_reference is not None:
             if gap_last_1m_available is None or current.available_at > gap_last_1m_available:
                 gap_last_1m_available = current.available_at
@@ -437,6 +435,7 @@ def replay_interaction_response(
                 "observed_at": serialize_utc(latest5.end_time),
                 "aggregate_time": serialize_utc(latest5.time),
                 "available_at": serialize_utc(latest5.available_at),
+                "version": transition_owner.context.regime.version if transition_owner.context.regime else None,
                 "status": "allowed",
                 "owner": "5m",
                 "evidence_timeframe": "5m",
@@ -444,6 +443,25 @@ def replay_interaction_response(
                 "market_state": permission_context.market_state,
                 "long_score": long_score,
                 "short_score": short_score,
+                "directional": (
+                    transition_owner.context.regime.long
+                    != transition_owner.context.regime.short
+                    if transition_owner.context.regime is not None else False
+                ),
+                "long_permission": (
+                    transition_owner.context.regime.long.value
+                    if transition_owner.context.regime is not None else None
+                ),
+                "short_permission": (
+                    transition_owner.context.regime.short.value
+                    if transition_owner.context.regime is not None else None
+                ),
+                "opening_gap_state": opening_gap_state,
+                "opening_context": {
+                    "direction": gap_direction,
+                    "state": opening_gap_state,
+                    "reference_level": opening_gap_reference,
+                },
             }, bar_events)
         _publish_replaced_interactions(
             detector=detector,
