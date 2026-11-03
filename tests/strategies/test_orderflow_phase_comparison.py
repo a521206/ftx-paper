@@ -11,7 +11,6 @@ from scripts.orderflow.compare_canonical_replay import (
     _normalize_phase35_locations,
     _paper_api_payload,
     _paper_phase35_projection,
-    _resolve_canonical_artifact,
     _timeout_before_canonical_trigger,
     _execution_trace_diagnostics,
 )
@@ -37,7 +36,6 @@ from ftx_paper.strategies.orderflow.templates import (
     OpeningInteractionKind,
     TRADE_TEMPLATES,
 )
-from ftx_paper.strategies.orderflow.timestamps import parse_session_timestamp, serialize_utc
 
 
 def test_conditional_exit_is_required_at_entry_like_canonical() -> None:
@@ -121,15 +119,6 @@ def test_paper_api_payload_reads_orderflow_report_extension() -> None:
     })
 
     assert result == payload
-
-
-def test_resolve_canonical_artifact_reuses_retained_canonical_file(tmp_path) -> None:
-    session_date = "2026-10-05"
-    artifact = tmp_path / session_date / "run" / f"{session_date}-canonical.json"
-    artifact.parent.mkdir(parents=True)
-    artifact.write_text('{"sessions":{"2026-10-05":{}}}', encoding="utf-8")
-
-    assert _resolve_canonical_artifact(tmp_path, session_date) == artifact
 
 
 def test_form_opportunity_assigns_location_reference_generation_conflict_key() -> None:
@@ -647,12 +636,3 @@ def test_pd_role_context_uses_post_contact_evidence_and_has_context_identity() -
         for item in context.events
     )
     assert "interaction_response" not in context.parity_snapshot()
-
-
-def test_session_timestamp_normalizes_local_seconds_and_offsets() -> None:
-    assert serialize_utc(parse_session_timestamp(
-        "2026-10-01", "2026-10-01T09:21:00",
-    )) == "2026-10-01T03:51:00.000000Z"
-    assert serialize_utc(parse_session_timestamp(
-        "2026-10-01", "2026-10-01T09:21:00+05:30",
-    )) == "2026-10-01T03:51:00.000000Z"

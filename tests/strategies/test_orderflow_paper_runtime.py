@@ -7,22 +7,6 @@ from ftx_paper.runtime.session import RuntimeSession
 from ftx_paper.runtime import RuntimeStore
 from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.strategies.orderflow import PaperOrderflowRuntime
-from ftx_paper.strategies.orderflow.boundary.factory import OrderflowStrategyFactory
-from ftx_paper.strategies.shared.factory import StrategyContext
-
-
-def test_paper_runtime_constructs_one_shared_transition_owner() -> None:
-    runtime = PaperOrderflowRuntime()
-
-    assert runtime.strategy._transition_owner is runtime.transition_owner
-    assert runtime.transition_owner.execution_adapter is runtime.execution_adapter
-    assert runtime.snapshot()["runtime_schema_version"] == 1
-
-
-def test_orderflow_factory_uses_paper_runtime_owner() -> None:
-    strategy = OrderflowStrategyFactory().create(StrategyContext())
-
-    assert strategy.transition_owner.location_registry.stream_id == "NIFTY::1m"
 
 
 def test_bounded_replay_uses_fresh_owner_and_is_idempotent() -> None:

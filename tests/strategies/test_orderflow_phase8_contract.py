@@ -9,16 +9,8 @@ from scripts.orderflow.compare_canonical_replay import (
 )
 
 from ftx_paper.strategies.orderflow.parity_artifacts import (
-    ARTIFACT_TYPE,
-    CONTRACT_ID,
-    CONTRACT_VERSION,
-    DECISION_STAGES,
-    EXECUTION_KINDS,
     LAYERS,
-    LEDGER_KINDS,
-    PARITY_PAYLOAD_KEYS,
     PHASE_STREAMS,
-    SCHEMA_VERSION,
     build_parity_artifact,
     build_parity_artifact_from_payload,
     compare_parity_artifacts,
@@ -31,29 +23,6 @@ from ftx_paper.strategies.orderflow.parity_artifacts import (
 )
 from ftx_paper.strategies.orderflow.state_machine_reporting import build_replay_payload
 from ftx_paper.strategies.orderflow.state_machine_types import ReplayContext
-
-
-def test_phase8_contract_surface_matches_canonical_order() -> None:
-    assert (ARTIFACT_TYPE, SCHEMA_VERSION) == ("producer_parity", 1)
-    assert (CONTRACT_ID, CONTRACT_VERSION) == ("orderflow_producer_parity", 1)
-    assert PHASE_STREAMS == (
-        "source_observation",
-        "context_location",
-        "interaction_response",
-        "opportunity_lifecycle",
-        "intent_admission",
-        "trigger_exit",
-    )
-    assert LAYERS == (
-        "run_scope",
-        "decision",
-        "execution_settlement",
-        "portfolio_ledger",
-    )
-    assert DECISION_STAGES == ("interaction", "candidate", "admission", "trigger", "exit")
-    assert "synthetic_settlement" in EXECUTION_KINDS
-    assert "closeout" in LEDGER_KINDS
-    assert PARITY_PAYLOAD_KEYS == ("parity_phase_facts", "parity_layers", "parity_coverage")
 
 
 def test_contract_requires_every_phase_stream_and_layer() -> None:

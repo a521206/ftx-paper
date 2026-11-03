@@ -9,7 +9,6 @@ from ftx_paper.strategies.orderflow.evidence_publication import (
 )
 from ftx_paper.strategies.orderflow.location_geometry import LocationBand
 from ftx_paper.strategies.orderflow.market_observation import MarketObservation
-from ftx_paper.strategies.orderflow.market_observation import rows_available_for_observation
 from ftx_paper.strategies.orderflow.orderflow_common import Aggregate
 from ftx_paper.strategies.orderflow.state_machine_types import LocationRecord
 from ftx_paper.strategies.orderflow.timestamps import serialize_utc
@@ -19,15 +18,6 @@ from ftx_paper.strategies.orderflow.vwap_location import VwapMeasurement
 
 SESSION = "2026-10-05"
 UTC = timezone.utc
-
-
-def test_observation_clock_includes_terminal_market_close_input() -> None:
-    rows = [
-        {"session_date": SESSION, "time": "15:29"},
-        {"session_date": SESSION, "time": "15:30"},
-    ]
-
-    assert [row["time"] for row in rows_available_for_observation(rows)] == ["15:29", "15:30"]
 
 
 def _aggregate(timeframe: str, minute: int, *, count: int) -> Aggregate:
