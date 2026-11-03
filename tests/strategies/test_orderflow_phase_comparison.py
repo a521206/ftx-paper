@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from scripts.orderflow.compare_canonical_replay import (
+    _compare_phase35,
     _exit_diagnostics,
     _first_exit_diagnostic_difference,
     _first_execution_trace_difference,
@@ -103,6 +104,35 @@ def test_phase35_projection_uses_ordinary_context_references() -> None:
         "context_id": "5m-context-NIFTY-2026-10-05-1m_5m",
         "version": "v1",
     }]
+
+
+def test_phase35_comparison_ignores_atr_lineage_when_values_match() -> None:
+    common = {
+        "locations": [],
+        "vwap_measurements": [],
+        "prior_value": None,
+        "contexts": [],
+        "unavailable": [],
+        "context_stream_id": None,
+        "location_stream_id": None,
+    }
+    canonical = {
+        "evidence": {
+            **common,
+            "atr": {"value": 223.449924185514, "lineage": ["canonical-source"]},
+        },
+    }
+    paper = {
+        "session_date": "2026-10-05",
+        "evidence": {
+            **common,
+            "atr": {"value": 223.449924185514, "lineage": ["paper-source"]},
+        },
+    }
+
+    result = _compare_phase35(canonical, paper)
+
+    assert result["status"] == "MATCHED"
 
 
 def test_paper_api_payload_reads_orderflow_report_extension() -> None:
@@ -465,7 +495,7 @@ def test_phase6_projection_preserves_only_formed_lifecycle_facts() -> None:
     ]
 
 
-def test_replay_context_publishes_interactions_and_canonical_source_identity() -> None:
+def test_replay_context_records_interactions_and_explicit_phase_facts() -> None:
     context = ReplayContext(execution_engine=ExecutionEngine())
     context.record_event({
         "kind": "interaction_created",
@@ -473,14 +503,18 @@ def test_replay_context_publishes_interactions_and_canonical_source_identity() -
         "observed_at": "2026-10-05T09:19:00+05:30",
         "available_at": "2026-10-05T09:20:00+05:30",
     })
-    context.record_event({
+    context.record_parity_fact("source_observation", {
         "kind": "source_observation",
-        "parity_stream": "source_observation",
+        "occurred_at": "2026-10-05T09:15:00+05:30",
         "identity": "aggregate:1m:2026-10-05T09:15",
         "observed_at": "2026-10-05T09:15:00+05:30",
         "available_at": "2026-10-05T09:16:00+05:30",
-        "aggregate": {"close": 22654.7},
-        "source_fingerprint": "fingerprint-1",
+        "causal_parent_id": None,
+        "values": {
+            "aggregate": {"close": 22654.7},
+            "source_fingerprint": "fingerprint-1",
+        },
+        "unavailable": [],
         "lineage": [],
     })
 

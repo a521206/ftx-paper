@@ -52,7 +52,7 @@ def api_main() -> None:
     from ftx_paper.runtime.store import RuntimeStore
     from ftx_paper.infrastructure.artifacts import SetupArtifactStore
     from ftx_paper.application.setup_worker import SetupTaskRegistry, SetupWorker
-    from ftx_paper.strategies.orderflow.setup import build_daily_atr_task, build_prior_session_task
+    from ftx_paper.strategies.orderflow.setup import build_daily_atr_task, build_prior_session_levels_task, build_prior_session_task
     from ftx_paper.strategies.research.parity_artifacts import build_parity_artifact
     from ftx_paper.strategies.shared.factory import StrategyContext
 
@@ -142,6 +142,7 @@ def api_main() -> None:
         )
         setup_worker = SetupWorker(SetupTaskRegistry((
             build_prior_session_task(store, SetupArtifactStore(config.home)),
+            build_prior_session_levels_task(store, SetupArtifactStore(config.home)),
             build_daily_atr_task(store, SetupArtifactStore(config.home)),
         )))
         operations = RuntimeOperations(session, replay_worker)

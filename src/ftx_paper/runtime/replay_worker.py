@@ -1067,6 +1067,7 @@ class ReplayWorker:
         )
         prior_values: dict[str, Any] = {}
         atr_values: dict[str, Any] = {}
+        prior_session_levels: dict[str, Mapping[str, Any]] = {}
         artifact_store = self.artifact_store
         artifact_identity = {
             "strategy_id": "ftx-paper-orderflow", "task_id": "prior-session-value",
@@ -1099,6 +1100,32 @@ class ReplayWorker:
             from ftx_paper.strategies.orderflow.value_publication import ValuePublication
             prior_values[session_date] = ValuePublication(None, None, None, (), "derived_artifact_unavailable")
         try:
+            levels_identity = {
+                "strategy_id": "ftx-paper-orderflow", "task_id": "prior-session-levels",
+                "algorithm_version": "orderflow.prior-session-levels.v1",
+                "config_fingerprint": "prior-session-levels-NIFTY", "instrument": "NIFTY",
+            }
+            levels_artifact = artifact_store.read(levels_identity, session_date)
+            expected_prior = max((str(item) for item in self.store.read_dates() if str(item) < session_date), default=None)
+            if levels_artifact is not None and levels_artifact.get("status") == "available":
+                payload = levels_artifact["payload"]
+                prior_provenance = self.inputs.prior_source_provenance(session_date)
+                source_fingerprints = levels_artifact.get("source", {}).get("source_fingerprints", [])
+                if (
+                    payload.get("target_session") != session_date
+                    or payload.get("source_session") != expected_prior
+                    or levels_artifact.get("source", {}).get("sessions") != [expected_prior]
+                    or prior_provenance is None
+                    or not source_fingerprints
+                    or source_fingerprints[-1] != prior_provenance.get("source_fingerprint")
+                ):
+                    raise ValueError("prior-session-levels source is stale")
+                prior_session_levels[session_date] = payload
+        except (OSError, KeyError, TypeError, ValueError):
+            prior_session_levels.clear()
+        if session_date not in prior_session_levels:
+            prior_session_levels[session_date] = {}
+        try:
             atr_identity = {
                 "strategy_id": "ftx-paper-orderflow", "task_id": "daily-atr",
                 "algorithm_version": "orderflow.daily-atr.wilder.v1",
@@ -1123,7 +1150,28 @@ class ReplayWorker:
         )
         bind_replay_bars = getattr(runtime, "bind_replay_bars", None)
         if callable(bind_replay_bars):
-            bind_replay_bars(replay_bars, prior_values=prior_values, atr_values=atr_values)
+            prior_date = max(
+                (str(value) for value in self.store.read_dates() if str(value) < session_date),
+                default=None,
+            )
+            feature_history_bars = ()
+            if prior_date is not None:
+                prior_rows = self.store.read_market_bars(prior_date)
+                prior_source = self.inputs.resolve_source(prior_date, rows=prior_rows)
+                prior_futures_rows = [
+                    row for row in prior_rows
+                    if str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
+                ]
+                feature_history_bars = self.inputs.bars(
+                    prior_date, rows=prior_futures_rows, futures_source=prior_source,
+                )
+            bind_replay_bars(
+                replay_bars,
+                feature_history_bars=feature_history_bars,
+                prior_values=prior_values,
+                atr_values=atr_values,
+                prior_session_levels=prior_session_levels,
+            )
         # The selector composes the same PaperOrderflowRuntime used by live
         # hosting.  Replay owns only the bounded clock and capture loop.
         engine = PaperEngine(runtime)

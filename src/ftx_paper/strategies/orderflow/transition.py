@@ -1067,24 +1067,11 @@ class OrderflowTransitionOwner:
             raise ValueError("orderflow transition clock cannot move backwards")
         observation = self.observation_owner.advance(item)
         row = item.one_minute.to_dict()
-        source_id = observation.source_event.get("identity") if observation.source_event else None
-        if source_id is not None and not any(
+        if not any(
             str(existing.get("time")) == str(item.one_minute.time)
             for existing in self.context.rows
         ):
             self.context.rows.append(row)
-        if observation.source_event is not None and not any(
-            fact.get("identity") == observation.source_event.get("neutral_event_key")
-            or (
-                isinstance(fact.get("values"), Mapping)
-                and fact["values"].get("identity") == observation.source_event.get("identity")
-            )
-            for fact in self.context.parity_streams.get("source_observation", ())
-        ):
-            self.context.record_event({
-                **observation.source_event,
-                "parity_stream": "source_observation",
-            })
         for event in observation.events:
             self.context.record_event(event)
         if regime is not None:
@@ -1095,6 +1082,9 @@ class OrderflowTransitionOwner:
         next_time = nifty_label(item.one_minute.available_at)
         available5 = list(self.observation_owner.five_minute_aggregates)
         self.context.aggregates["5m"] = available5
+        self._record_phase4_source_observations(
+            (*self.observation_owner.one_minute_aggregates, *available5),
+        )
         if item.five_minute is not None:
             latest = item.five_minute
             if self.context.last_confirmation_context_time != latest.time:
@@ -1141,6 +1131,47 @@ class OrderflowTransitionOwner:
                 for name, values in self.context.parity_snapshot().items()
             },
         )
+
+    def _record_phase4_source_observations(
+        self, aggregates: Sequence[Aggregate],
+    ) -> None:
+        """Record source facts once, at the owner that advances causal time."""
+        known = {
+            str(fact.get("identity"))
+            for fact in self.context.parity_streams.get("source_observation", ())
+        }
+        one_minute = self.observation_owner.one_minute_aggregates
+        for aggregate in aggregates:
+            identity = f"aggregate:{aggregate.timeframe}:{nifty_label(aggregate.time)}"
+            if identity in known:
+                continue
+            children = tuple(
+                child for child in one_minute
+                if aggregate.timeframe == "5m"
+                and aggregate.time <= child.time <= aggregate.end_time
+                and child.available_at <= aggregate.available_at
+            )
+            self.context.record_parity_fact("source_observation", {
+                "kind": "source_observation",
+                "occurred_at": aggregate.end_time,
+                "observed_at": aggregate.end_time,
+                "available_at": aggregate.available_at,
+                "sequence": len(self.context.parity_streams.get("source_observation", ())),
+                "identity": identity,
+                "causal_parent_id": (
+                    f"aggregate:1m:{nifty_label(children[-1].time)}"
+                    if children else None
+                ),
+                "values": {
+                    "aggregate": aggregate.to_dict(),
+                    "source_fingerprint": aggregate.source_fingerprint,
+                },
+                "unavailable": [],
+                "lineage": [
+                    f"aggregate:1m:{nifty_label(child.time)}" for child in children
+                ],
+            })
+            known.add(identity)
 
     def _publish_ordinary_context(self, latest: Aggregate) -> None:
         """Publish the canonical 5m decision context at bar availability."""

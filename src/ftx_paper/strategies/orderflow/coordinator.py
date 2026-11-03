@@ -10,7 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from .causal_events import CausalEventRegistry
 from .evidence_publication import AtrPublication
 from .interaction_detector import InteractionDetector, InteractionTransition
 from .location_observation import LocationObservation
@@ -41,7 +40,6 @@ class OrderflowAdvance:
     """Facts emitted by one idempotent coordinator transition."""
 
     events: tuple[dict[str, Any], ...] = ()
-    source_event: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -49,7 +47,6 @@ class OrderflowCoordinator:
     """Canonical interaction owner shared by incremental live and replay runs."""
 
     location_registry: LocationRegistry
-    causal_events: CausalEventRegistry = field(default_factory=CausalEventRegistry)
     detector: InteractionDetector = field(init=False)
     _one_minute: list[Aggregate] = field(default_factory=list, init=False)
     _five_minute: list[Aggregate] = field(default_factory=list, init=False)
@@ -67,6 +64,11 @@ class OrderflowCoordinator:
         """Completed 5m evidence available to the execution boundary."""
         return tuple(self._five_minute)
 
+    @property
+    def one_minute_aggregates(self) -> tuple[Aggregate, ...]:
+        """Completed 1m source aggregates in causal order."""
+        return tuple(self._one_minute)
+
     def advance(self, item: OrderflowClockInput) -> OrderflowAdvance:
         """Advance state at one completed bar's availability boundary.
 
@@ -77,17 +79,8 @@ class OrderflowCoordinator:
         """
         one = item.one_minute
         source_id = f"aggregate:{one.timeframe}:{nifty_label(one.time)}"
-        source_event = self.causal_events.publish_source_observation(
-            source_id=source_id,
-            session_date=one.session_date,
-            observed_at=one.end_time,
-            available_at=one.available_at,
-            source_fingerprint=one.source_fingerprint,
-        )
-        source_event["aggregate"] = one.to_dict()
-        source_event["lineage"] = []
         if source_id in self._seen:
-            return OrderflowAdvance((), source_event)
+            return OrderflowAdvance()
         self._seen.add(source_id)
         self._one_minute.append(one)
         atr = item.atr.value if item.atr is not None else None
@@ -105,6 +98,7 @@ class OrderflowCoordinator:
                     atr=atr,
                 )
                 self._levels_published.add(key)
+        events: list[dict[str, Any]] = []
         new_five_minute = False
         if item.five_minute is not None:
             five = item.five_minute
@@ -112,18 +106,11 @@ class OrderflowCoordinator:
             if five_id not in {f"aggregate:5m:{nifty_label(bar.time)}" for bar in self._five_minute}:
                 new_five_minute = True
                 self._five_minute.append(five)
-                self.causal_events.publish_source_observation(
-                    source_id=five_id,
-                    session_date=five.session_date,
-                    observed_at=five.end_time,
-                    available_at=five.available_at,
-                    source_fingerprint=five.source_fingerprint,
-                )
                 if atr is not None:
                     self.location_registry.publish_session_extrema(
                         tuple(self._five_minute), session_date=five.session_date, atr=atr,
                     )
-        if atr is not None:
+        if atr is not None and self._five_minute:
             for measurement in item.vwap_measurements:
                 if measurement.available_at > one.available_at:
                     continue
@@ -143,7 +130,6 @@ class OrderflowCoordinator:
                     atr=atr,
                 )
                 self._vwap_published.add(vwap_identity)
-        events: list[dict[str, Any]] = []
         current_observations_1m = tuple(
             observation
             for observation in item.observations_1m
@@ -200,7 +186,7 @@ class OrderflowCoordinator:
                 ))
         for transition in transitions:
             events.extend(self._transition_events(transition, one))
-        return OrderflowAdvance(tuple(events), source_event)
+        return OrderflowAdvance(tuple(events))
 
     @staticmethod
     def _transition_events(transition: InteractionTransition, clock: Aggregate) -> tuple[dict[str, Any], ...]:

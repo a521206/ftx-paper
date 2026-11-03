@@ -63,6 +63,8 @@ class CanonicalInputProvider:
         feature_store: FeatureStore | None = None,
         prior_values: Mapping[str, Any] | None = None,
         atr_values: Mapping[str, Any] | None = None,
+        prior_session_levels: Mapping[str, Mapping[str, Any]] | None = None,
+        derive_prior_session_levels: bool = True,
     ) -> None:
         dates = dict(rows_by_date or {})
         if rows and not dates:
@@ -70,6 +72,8 @@ class CanonicalInputProvider:
         self._feature_store = feature_store or FeatureStore(dates)
         self._prior_values = dict(prior_values or {})
         self._atr_values = None if atr_values is None else dict(atr_values)
+        self._prior_session_levels = None if prior_session_levels is None else dict(prior_session_levels)
+        self._derive_prior_session_levels = derive_prior_session_levels
         self._rows = tuple(dict(row) for row in rows)
         if not self._rows and dates:
             target = max(str(key) for key in dates)
@@ -92,7 +96,11 @@ class CanonicalInputProvider:
             for timeframe in ("1m", "5m")
         }
         rows_by_date = self._feature_store.rows_by_date
-        adapter = PaperFeatureAdapter(rows_by_date, prior_values=self._prior_values, atr_values=self._atr_values)
+        adapter = PaperFeatureAdapter(
+            rows_by_date, prior_values=self._prior_values, atr_values=self._atr_values,
+            prior_session_levels=self._prior_session_levels,
+            derive_prior_session_levels=self._derive_prior_session_levels,
+        )
         vwap = {
             timeframe: causal_vwap_prefix(values, session_date=session_date)
             for timeframe, values in parsed.items()
@@ -167,20 +175,22 @@ class CanonicalInputProvider:
             for record in evidence.locations:
                 if record.available_at > one.available_at:
                     continue
-                source = aggregate_by_id.get(record.timeframe, {}).get(
-                    str(record.source_aggregate_id),
-                )
-                if source is None:
-                    continue
-                # The detector evaluates one completed 5m aggregate at a
-                # time. Older observations remain causally available but must
-                # not be replayed with the current aggregate.
-                if source.timeframe == "5m" and (latest5 is None or source.time != latest5.time):
-                    continue
-                children = _causal_children(source, aggregates_by_timeframe["1m"])
-                if source.timeframe == "5m" and len(children) != 5:
-                    continue
-                if source.timeframe == "5m":
+                if not record.timeframe or record.timeframe == "1m":
+                    one_observation = _location_observation(
+                        one, record, source_fingerprint=one.source_fingerprint,
+                    )
+                    observations_1m.append(one_observation)
+                if latest5 is not None and (
+                    not record.timeframe or record.timeframe == "5m"
+                ):
+                    source = aggregate_by_id["5m"].get(nifty_label(latest5.time))
+                    if source is None or source.time != latest5.time:
+                        continue
+                    children = _causal_children(
+                        source, aggregates_by_timeframe["1m"],
+                    )
+                    if len(children) != 5:
+                        continue
                     child_observations = tuple(
                         _location_observation(
                             item, record, source_fingerprint=source.source_fingerprint,
@@ -195,10 +205,6 @@ class CanonicalInputProvider:
                     observations_5m.append(_location_observation(
                         source, record, source_fingerprint=source.source_fingerprint,
                         child_observation_ids=tuple(item.observation_id for item in child_observations),
-                    ))
-                else:
-                    observations_1m.append(_location_observation(
-                        source, record, source_fingerprint=source.source_fingerprint,
                     ))
             self._by_identity[source_id] = CanonicalInputEnvelope(
                 OrderflowClockInput(
@@ -232,15 +238,30 @@ class CanonicalInputProvider:
         rows_by_date: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
         prior_values: Mapping[str, Any] | None = None,
         atr_values: Mapping[str, Any] | None = None,
+        prior_session_levels: Mapping[str, Mapping[str, Any]] | None = None,
+        derive_prior_session_levels: bool = True,
     ) -> "CanonicalInputProvider":
-        return cls(rows, rows_by_date=rows_by_date, prior_values=prior_values, atr_values=atr_values)
+        return cls(
+            rows, rows_by_date=rows_by_date, prior_values=prior_values,
+            atr_values=atr_values, prior_session_levels=prior_session_levels,
+            derive_prior_session_levels=derive_prior_session_levels,
+        )
 
     @classmethod
-    def from_market_bars(cls, bars: Sequence[Any], *, prior_values: Mapping[str, Any] | None = None, atr_values: Mapping[str, Any] | None = None) -> "CanonicalInputProvider":
+    def from_market_bars(
+        cls,
+        bars: Sequence[Any],
+        *,
+        feature_history_bars: Sequence[Any] = (),
+        prior_values: Mapping[str, Any] | None = None,
+        atr_values: Mapping[str, Any] | None = None,
+        prior_session_levels: Mapping[str, Mapping[str, Any]] | None = None,
+        derive_prior_session_levels: bool = True,
+    ) -> "CanonicalInputProvider":
         """Adapt Paper completed futures bars into the canonical source shape."""
         rows = cls._rows_from_market_bars(bars)
         rows_by_date: dict[str, list[dict[str, Any]]] = {}
-        for row in rows:
+        for row in (*cls._rows_from_market_bars(feature_history_bars), *rows):
             rows_by_date.setdefault(str(row["session_date"]), []).append(row)
         target = max(rows_by_date, default=None)
         return cls(
@@ -248,6 +269,8 @@ class CanonicalInputProvider:
             rows_by_date=rows_by_date,
             prior_values=prior_values,
             atr_values=atr_values,
+            prior_session_levels=prior_session_levels,
+            derive_prior_session_levels=derive_prior_session_levels,
         )
 
     def append_market_bars(self, bars: Sequence[Any]) -> None:

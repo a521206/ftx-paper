@@ -545,9 +545,19 @@ def _compare_phase35(canonical: dict[str, Any], paper: dict[str, Any]) -> dict[s
             **independent,
             "layer": "phase3_5",
         }
+    # ATR value and publication metadata are parity inputs; repository-specific
+    # lineage is not, provided both producers publish the same numeric value.
+    canonical_comparable = dict(canonical_value)
+    paper_comparable = dict(paper_value)
+    canonical_comparable["atr"] = {
+        key: value for key, value in canonical_atr.items() if key != "lineage"
+    }
+    paper_comparable["atr"] = {
+        key: value for key, value in paper_atr.items() if key != "lineage"
+    }
     dependent = _compare_fields(
-        canonical_value,
-        paper_value,
+        canonical_comparable,
+        paper_comparable,
         PHASE35_ATR_DEPENDENT_FIELDS,
         label="phase3_5",
     )

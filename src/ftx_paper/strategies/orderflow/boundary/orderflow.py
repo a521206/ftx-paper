@@ -61,11 +61,10 @@ class OrderflowStrategy:
             formations=(self._formation_provider(clock_input) if self._formation_provider else ()),
             instrument=bar.instrument,
         )
-        decisions: list[StrategyDecision] = []
-        if advance.observation.source_event is not None:
-            decisions.append(StrategyDecision("SOURCE_OBSERVATION", advance.observation.source_event))
-        decisions.extend(StrategyDecision(str(item["kind"]).upper(), item) for item in advance.observation.events)
-        return tuple(decisions)
+        return tuple(
+            StrategyDecision(str(item["kind"]).upper(), item)
+            for item in advance.observation.events
+        )
 
     def on_execution_event(self, event: ExecutionNotification) -> None:
         self._transition_owner.on_execution_event(event)

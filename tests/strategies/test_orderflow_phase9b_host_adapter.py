@@ -16,9 +16,13 @@ from ftx_paper.strategies.orderflow.providers import (
     CanonicalInputProvider,
 )
 from ftx_paper.strategies.orderflow.coordinator import OrderflowClockInput, OrderflowCoordinator
+from ftx_paper.strategies.orderflow.evidence_publication import AtrPublication
 from ftx_paper.strategies.orderflow.orderflow_common import Aggregate
 from ftx_paper.strategies.orderflow.interaction_detector import InteractionDetector
 from ftx_paper.strategies.orderflow.state_machine_types import LocationRegistry
+from ftx_paper.strategies.orderflow.state_machine_reporting import build_replay_payload
+from ftx_paper.strategies.orderflow.transition import OrderflowTransitionOwner
+from ftx_paper.strategies.orderflow.vwap_location import VwapMeasurement
 
 
 UTC = timezone.utc
@@ -130,6 +134,54 @@ def test_bounded_provider_publishes_causal_aggregates_and_lineage() -> None:
     assert provider.envelopes[-1].input.five_minute is not None
 
 
+def test_replay_provider_does_not_derive_pd_levels_from_prior_bars() -> None:
+    prior_day = [
+        SimpleNamespace(
+            timestamp=datetime(2026, 9, 30, 3, 45 + index, tzinfo=UTC),
+            open=100.0,
+            high=110.0 + index,
+            low=90.0 - index,
+            close=100.0,
+            volume=10,
+            open_interest=1,
+            instrument=SimpleNamespace(
+                instrument_type="FUT", symbol="NIFTY", expiry="2026-10-29",
+            ),
+        )
+        for index in range(5)
+    ]
+    current_day = [
+        SimpleNamespace(
+            timestamp=datetime(2026, 10, 1, 3, 45 + index, tzinfo=UTC),
+            open=100.0,
+            high=102.0 + index,
+            low=98.0 - index,
+            close=100.0,
+            volume=10,
+            open_interest=1,
+            instrument=SimpleNamespace(
+                instrument_type="FUT", symbol="NIFTY", expiry="2026-10-29",
+            ),
+        )
+        for index in range(5)
+    ]
+
+    provider = CanonicalInputProvider.from_market_bars(
+        current_day,
+        feature_history_bars=prior_day,
+        prior_session_levels={"2026-10-01": {}},
+        derive_prior_session_levels=False,
+    )
+
+    assert len(provider.envelopes) == len(current_day)
+    first_input = provider.envelopes[0].input
+    assert first_input.one_minute.session_date == "2026-10-01"
+    assert first_input.session_levels is not None
+    assert first_input.session_levels.prior_day_low is None
+    assert first_input.session_levels.prior_day_high is None
+    assert first_input.prior_session == "2026-09-30"
+
+
 def test_coordinator_limits_1m_observations_to_current_clock(monkeypatch) -> None:
     current = Aggregate(
         "2026-10-01T09:20", "2026-10-01T09:20", "2026-10-01T09:21",
@@ -215,6 +267,128 @@ def test_coordinator_evaluates_each_new_5m_aggregate_once(monkeypatch) -> None:
         ))
 
     assert len(captured) == 1
+
+
+def test_coordinator_defers_vwap_publication_until_first_completed_5m() -> None:
+    registry = LocationRegistry("test")
+    coordinator = OrderflowCoordinator(registry)
+    atr = AtrPublication(
+        100.0,
+        datetime(2026, 10, 1, 3, 40, tzinfo=UTC),
+        datetime(2026, 10, 1, 3, 45, tzinfo=UTC),
+        "atr-source",
+        ("atr-source",),
+    )
+    measurement = VwapMeasurement(
+        "1m", "2026-10-01", "2026-10-01T09:15",
+        datetime(2026, 10, 1, 3, 45, tzinfo=UTC),
+        datetime(2026, 10, 1, 3, 46, tzinfo=UTC),
+        100.0, "vwap-source", "vwap_typical_price_volume_v1",
+    )
+    opening = Aggregate(
+        "2026-10-01T09:15", "2026-10-01T09:15", "2026-10-01T09:16",
+        "1m", 1, 100.0, 101.0, 99.0, 100.0, 100,
+        "NIFTY", "", "CONTINUOUS", "2026-10-01", "one-15",
+    )
+
+    result_before_5m = coordinator.advance(OrderflowClockInput(
+        one_minute=opening, atr=atr, vwap_measurements=(measurement,),
+    ))
+
+    assert registry.resolve_as_of(
+        "VWAP", opening.available_at, timeframe="1m",
+    ) is None
+    assert not any(
+        event["kind"] in {"interaction_created", "location_interaction_observed"}
+        and event.get("values", {}).get("location") == "VWAP"
+        for event in result_before_5m.events
+    )
+
+    last_minute = Aggregate(
+        "2026-10-01T09:19", "2026-10-01T09:19", "2026-10-01T09:20",
+        "1m", 1, 100.0, 101.0, 99.0, 100.0, 100,
+        "NIFTY", "", "CONTINUOUS", "2026-10-01", "one-19",
+    )
+    first_five = Aggregate(
+        "2026-10-01T09:15", "2026-10-01T09:19", "2026-10-01T09:20",
+        "5m", 5, 100.0, 101.0, 99.0, 100.0, 500,
+        "NIFTY", "", "CONTINUOUS", "2026-10-01", "five-15",
+    )
+    coordinator.advance(OrderflowClockInput(
+        one_minute=last_minute, five_minute=first_five, atr=atr,
+        vwap_measurements=(measurement,),
+    ))
+
+    assert registry.resolve_as_of(
+        "VWAP", first_five.available_at, timeframe="1m",
+    ) is not None
+
+
+def test_first_opening_interaction_matches_canonical_location_priority() -> None:
+    atr = AtrPublication(
+        100.0,
+        datetime(2026, 10, 1, 3, 40, tzinfo=UTC),
+        datetime(2026, 10, 1, 3, 45, tzinfo=UTC),
+        "atr-source",
+        ("atr-source",),
+    )
+    rows = _rows()
+    for row, prices in zip(
+        rows,
+        (
+            (100.0, 104.0, 90.0, 100.0),
+            (100.0, 102.0, 99.0, 101.0),
+            (101.0, 103.0, 100.0, 102.0),
+            (102.0, 104.0, 101.0, 103.0),
+            (103.0, 105.0, 102.0, 104.0),
+        ),
+        strict=True,
+    ):
+        row.update(dict(zip(("open", "high", "low", "close"), prices, strict=True)))
+    provider = CanonicalInputProvider.from_rows(
+        rows, atr_values={"2026-10-01": atr},
+    )
+    coordinator = OrderflowCoordinator(LocationRegistry("test"))
+    interactions = []
+    for envelope in provider.envelopes:
+        advance = coordinator.advance(envelope.input)
+        interactions.extend(
+            event for event in advance.events
+            if event["kind"] == "location_interaction_observed"
+        )
+
+    assert interactions
+    assert interactions[0]["values"]["location"] == "OR_HIGH"
+    assert interactions[0]["observed_at"] == datetime(
+        2026, 10, 1, 3, 49, tzinfo=UTC,
+    )
+
+
+def test_transition_owner_records_5m_source_fact_with_1m_lineage() -> None:
+    provider = CanonicalInputProvider.from_rows(_rows())
+    owner = OrderflowTransitionOwner(LocationRegistry("test"))
+
+    for envelope in provider.envelopes:
+        owner.advance(envelope.input)
+
+    source_facts = owner.context.parity_streams["source_observation"]
+    five_fact = next(
+        fact for fact in source_facts
+        if fact["identity"] == "aggregate:5m:2026-10-01T09:15"
+    )
+    assert five_fact["available_at"] == "2026-10-01T03:50:00.000000Z"
+    assert five_fact["causal_parent_id"] == "aggregate:1m:2026-10-01T09:19"
+    assert five_fact["values"]["aggregate"]["source_bar_count"] == 5
+    assert five_fact["lineage"] == [
+        f"aggregate:1m:2026-10-01T09:{minute:02d}"
+        for minute in range(15, 20)
+    ]
+    assert [fact["identity"] for fact in source_facts] == [
+        *(f"aggregate:1m:2026-10-01T09:{minute:02d}" for minute in range(15, 20)),
+        "aggregate:5m:2026-10-01T09:15",
+    ]
+    payload = build_replay_payload(owner, [], [], _rows(), capture_mode="replay")
+    assert payload["parity_phase_facts"]["source_observation"] == source_facts
 
 
 def test_coordinator_emits_gap_for_missing_5m_location_observation() -> None:

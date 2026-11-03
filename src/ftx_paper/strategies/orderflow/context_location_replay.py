@@ -19,7 +19,6 @@ from .location_observation import LocationObservation
 from .market_observation import MARKET_CLOSE_TIME, MarketObservation, observe_market
 from .orderflow_common import Aggregate
 from .timestamps import coerce_timestamp, nifty_label, serialize_utc, session_minute
-from .runtime_boundary import CompletedObservation, ReplayInputAdapter
 from .state_machine_types import LocationRecord, LocationRegistry, MarketContextStore
 
 
@@ -142,16 +141,9 @@ def _context_fact(
 
 @dataclass(frozen=True, slots=True)
 class ContextLocationReplay:
-    """Causal source and context/location facts emitted by one replay."""
+    """Causal context/location facts emitted by one replay."""
 
-    source_observations: tuple[dict[str, Any], ...]
     context_location: tuple[dict[str, Any], ...]
-
-    def parity_phase_facts(self) -> dict[str, list[dict[str, Any]]]:
-        return {
-            "source_observation": [dict(item) for item in self.source_observations],
-            "context_location": [dict(item) for item in self.context_location],
-        }
 
 
 def attach_context_publications(
@@ -209,7 +201,7 @@ def attach_context_publications(
             if reason != "missing_context"
         ]
         facts.append(fact)
-    return ContextLocationReplay(replay.source_observations, tuple(facts))
+    return ContextLocationReplay(tuple(facts))
 
 
 def replay_context_location(
@@ -288,11 +280,6 @@ def _replay_market(
     evidence: EvidencePublication,
     replay_clock: str | None,
 ) -> ContextLocationReplay:
-    observations = _completed_observations(
-        market.aggregates, session_date=session_date, replay_clock=replay_clock,
-    )
-    source = ReplayInputAdapter()
-    source.process(observations)
     store = MarketContextStore()
     for context in evidence.contexts:
         store.publish(context)
@@ -416,41 +403,7 @@ def _replay_market(
         if not location_values:
             unavailable.append("missing_context")
         facts.append(_context_fact(aggregate, context, location_values, unavailable))
-    lineage_by_identity = {item.identity: list(item.lineage) for item in observations}
-    source_facts = []
-    for event in source.state.events:
-        fact = event.to_dict()
-        fact["lineage"] = lineage_by_identity.get(event.identity, [])
-        source_facts.append(fact)
-    return ContextLocationReplay(tuple(source_facts), tuple(facts))
-
-
-def _completed_observations(
-    aggregates: Mapping[str, Sequence[Aggregate]], *, session_date: str, replay_clock: str | None,
-) -> tuple[CompletedObservation, ...]:
-    one_minute = aggregates["1m"]
-    identities = {aggregate.time: f"aggregate:1m:{nifty_label(aggregate.time)}" for aggregate in one_minute}
-    result: list[CompletedObservation] = []
-    for timeframe in ("1m", "5m"):
-        for aggregate in aggregates[timeframe]:
-            if (
-                aggregate.session_date != session_date
-                or (timeframe == "1m" and session_minute(session_date, aggregate.time)[-5:] >= MARKET_CLOSE_TIME)
-                or (replay_clock is not None and coerce_timestamp(aggregate.available_at) > coerce_timestamp(replay_clock))
-            ):
-                continue
-            children = _causal_children(aggregate, one_minute)
-            if timeframe == "5m" and len(children) != 5:
-                continue
-            lineage = tuple(identities[item.time] for item in children) if timeframe == "5m" else ()
-            result.append(CompletedObservation(
-                identity=f"aggregate:{timeframe}:{nifty_label(aggregate.time)}",
-                observed_at=coerce_timestamp(aggregate.end_time),
-                available_at=coerce_timestamp(aggregate.available_at),
-                values={"aggregate": aggregate.to_dict(), "source_fingerprint": aggregate.source_fingerprint},
-                lineage=lineage,
-            ))
-    return tuple(sorted(result, key=lambda item: (item.available_at, item.identity)))
+    return ContextLocationReplay(tuple(facts))
 
 
 def _causal_children(

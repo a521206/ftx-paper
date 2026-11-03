@@ -193,6 +193,28 @@ def validate_atr_payload(payload: Mapping[str, Any]) -> None:
         raise ValueError("daily ATR lineage is required")
 
 
+def validate_prior_session_levels_payload(payload: Mapping[str, Any]) -> None:
+    required = {"target_session", "source_session", "symbol", "high", "low", "observed_at", "available_at", "lineage"}
+    if set(payload) != required:
+        raise ValueError("invalid prior-session-levels payload fields")
+    if not all(isinstance(payload[key], str) and payload[key] for key in ("target_session", "source_session", "symbol")):
+        raise ValueError("invalid prior-session-levels identity")
+    if payload["symbol"] != "NIFTY":
+        raise ValueError("unsupported prior-session-levels symbol")
+    high, low = payload["high"], payload["low"]
+    if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)) for value in (high, low)) or float(high) < float(low):
+        raise ValueError("invalid prior-session extrema")
+    observed = _parse_timestamp(payload["observed_at"], "payload.observed_at")
+    available = _parse_timestamp(payload["available_at"], "payload.available_at")
+    if available < observed:
+        raise ValueError("prior-session-levels availability precedes observation")
+    lineage = payload["lineage"]
+    if not isinstance(lineage, list) or len(lineage) < 2 or not all(isinstance(item, str) and item for item in lineage):
+        raise ValueError("prior-session-levels lineage is required")
+    if not lineage[0].startswith("source:") or not any(item.startswith("bar:") for item in lineage[1:]):
+        raise ValueError("prior-session-levels lineage must identify source bars")
+
+
 class SetupArtifactStore:
     """Read/write immutable setup artifacts under a persistent home directory."""
 
@@ -305,6 +327,8 @@ class SetupArtifactStore:
                 deserialize_value_publication(payload)
             elif contract_id == "ftx-paper-orderflow.daily-atr":
                 validate_atr_payload(payload)
+            elif contract_id == "ftx-paper-orderflow.prior-session-levels":
+                validate_prior_session_levels_payload(payload)
             else:
                 raise ValueError("unsupported setup artifact contract")
         elif envelope["status"] == "unavailable":

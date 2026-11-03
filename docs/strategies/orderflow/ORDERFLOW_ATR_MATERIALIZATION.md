@@ -1,22 +1,28 @@
-# Orderflow ATR Materialization
+# Orderflow ATR And Prior-Session Level Materialization
 
 ## Purpose
 
-This document defines the orderflow-specific ATR task built on the shared daily
-setup materialization design in
+This document defines orderflow daily setup tasks built on the shared setup
+materialization design in
 `docs/strategies/shared/DAILY_SETUP_MATERIALIZATION.md`.
 
-The task removes recursive ATR history reconstruction from replay while
-preserving the canonical NiftyZoning calculation and causal publication rules.
-This document records the implementation contract and current acceptance status.
+The daily-ATR task removes recursive ATR history reconstruction from replay.
+The prior-session-levels task publishes completed-session high/low facts so
+replay need not reload and scan the prior session. Both preserve source lineage
+and causal availability. This document records each contract and its status.
 
 ## Status
 
-Implemented in the Paper runtime. The `daily-atr` task produces immutable,
+The `daily-atr` task is implemented in the Paper runtime. It produces immutable,
 validated artifacts with chronological Wilder state, source provenance, target
-availability, and downstream invalidation on source correction. Replay validates
-the artifact's source lineage and causal session bounds before consuming it.
-Replay does not reconstruct ATR from historical warmup bars.
+availability, and downstream invalidation on source correction. Replay consumes
+the artifact and does not reconstruct ATR from historical warmup bars.
+
+The `prior-session-levels` task is registered and implemented as an independent
+setup task. It publishes immutable high/low artifacts with source-bar lineage,
+and replay validates and consumes them without rescanning prior-session bars for
+those extrema. Canonical parity acceptance remains pending. These levels are
+direct facts from one completed source session, not derived indicators.
 
 Focused strategy/infrastructure validation passes. Remaining acceptance work is
 canonical cross-repository parity and production operational readiness.
@@ -55,6 +61,83 @@ instrument:        NIFTY
 The task is strategy-owned, while source reads, artifact persistence, job
 lifecycle, scheduling, and catalog lookup remain owned by the shared setup
 worker and its ports.
+
+## Prior-Session Levels
+
+The setup registry declares this separate task:
+
+```text
+strategy_id:       ftx-paper-orderflow
+task_id:           prior-session-levels
+algorithm_version: orderflow.prior-session-levels.v1
+schema_version:    1
+instrument:        NIFTY
+```
+
+This task publishes `PD_HIGH` and `PD_LOW` for each eligible target session
+from the selected continuous-futures bars of the immediately preceding completed
+trading session. The task runs in the same initial catch-up and incremental setup
+workflow as `daily-atr`; it is not calculated in the replay hot path. Keep it
+separate from ATR because it is a pair of observed extrema, not an indicator
+derived from a multi-session formula. Keep it separate from prior-session value
+because value-area geometry has a different canonical producer and contract.
+
+The available artifact uses the shared `strategy_daily_setup` envelope with:
+
+```text
+contract.id:       ftx-paper-orderflow.prior-session-levels
+task_id:           prior-session-levels
+algorithm_version: orderflow.prior-session-levels.v1
+```
+
+Its source section identifies exactly one source session and records the
+selected storage contract, normalized continuous-source fingerprint and recipe,
+source bar count, and session finalization boundary. Its payload contains:
+
+```json
+{
+  "target_session": "2026-10-05",
+  "source_session": "2026-10-01",
+  "symbol": "NIFTY",
+  "high": 25250.0,
+  "low": 24910.0,
+  "observed_at": "2026-10-01T10:00:00Z",
+  "available_at": "2026-10-05T03:45:00Z",
+  "lineage": [
+    "source:normalized-source-fingerprint",
+    "bar:2026-10-01T09:15:00Z",
+    "bar:2026-10-01T09:16:00Z",
+    "..."
+  ]
+}
+```
+
+`high` and `low` are the maximum source-bar high and minimum source-bar low,
+respectively, over the same selected, normalized completed session. `observed_at`
+is the final source observation used to establish the extrema; `available_at` is
+the target session open. Artifact creation time must not substitute for either
+domain timestamp. If the prior session is missing, incomplete, gapped, or its
+selected source is invalid, publish an explicit unavailable result or fail
+according to the task policy; do not use a different session or partial range.
+
+Replay validates the artifact contract, digest, target/source session identity,
+selected source provenance, payload values, and causal timestamps, then injects
+the levels into the feature input before today's first decision. It must not
+rescan prior-session intraday bars for these extrema. Setup
+invalidation/rebuild owns source corrections; stale, missing, or corrupt level
+artifacts remain unavailable rather than triggering an implicit replay-time
+recomputation. The published locations must retain the prior source session and
+artifact/source lineage so the durable value does not obscure the underlying
+market evidence. Lineage must identify the exact contributing source bars (by
+stable source IDs or timestamps) as well as the normalized source fingerprint;
+the session identifier alone is insufficient.
+
+Unlike ATR, a correction to this task's one source session invalidates only
+artifacts whose target session uses that source; it does not recursively
+invalidate later sessions. The task's parity check compares exact high/low,
+source session and identity, observed/available times, lineage, and explicit
+unavailable status against extrema recomputed from the same canonical source
+bars.
 
 ## Ownership Boundary
 

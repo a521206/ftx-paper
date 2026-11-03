@@ -1,9 +1,9 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from ftx_paper.contracts.setup import SetupRunRequest
 from ftx_paper.infrastructure.artifacts import SetupArtifactStore, deserialize_atr_publication
 from ftx_paper.runtime.futures_source import FuturesSessionSourceResolver
-from ftx_paper.strategies.orderflow.setup import build_daily_atr_task, build_prior_session_task
+from ftx_paper.strategies.orderflow.setup import build_daily_atr_task, build_prior_session_levels_task, build_prior_session_task
 
 
 class _Store:
@@ -36,6 +36,21 @@ def _store(session_count: int = 18) -> _Store:
             "expiry": "2026-10-31",
         }]
     return _Store(rows)
+
+
+def _complete_session_store(session_count: int) -> _Store:
+    store = _store(session_count)
+    for session, seed_rows in store.rows_by_date.items():
+        seed = seed_rows[0]
+        start = datetime.fromisoformat(f"{session}T03:45:00+00:00")
+        store.rows_by_date[session] = [
+            {
+                **seed,
+                "minute": (start + timedelta(minutes=index)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+            for index in range(376)
+        ]
+    return store
 
 
 def test_daily_atr_materializes_typed_target_publication(tmp_path) -> None:
@@ -151,3 +166,77 @@ def test_prior_value_from_session_keeps_preceding_source_history(tmp_path, monke
         expected_fingerprint.provenance()["source_fingerprint"]
     ]
     assert artifact["source"]["source_fingerprint_recipe"] == "normalized-continuous-bars-v1"
+
+
+def test_prior_session_levels_publish_extrema_with_bar_lineage(tmp_path) -> None:
+    store = _complete_session_store(session_count=3)
+    artifacts = SetupArtifactStore(tmp_path)
+    task = build_prior_session_levels_task(store, artifacts)
+
+    result = task.materialize(SetupRunRequest(
+        "ftx-paper-orderflow", "prior-session-levels", "catch_up",
+        from_session="2026-01-03", through_session="2026-01-03",
+    ))
+
+    assert result["materialized"] == 1
+    identity = {
+        "strategy_id": "ftx-paper-orderflow", "task_id": "prior-session-levels",
+        "algorithm_version": "orderflow.prior-session-levels.v1",
+        "config_fingerprint": "prior-session-levels-NIFTY", "instrument": "NIFTY",
+    }
+    artifact = artifacts.read(identity, "2026-01-03")
+    assert artifact is not None
+    payload = artifact["payload"]
+    assert (payload["source_session"], payload["high"], payload["low"]) == ("2026-01-02", 111.0, 91.0)
+    assert payload["observed_at"] == "2026-01-02T10:00:00.000000Z"
+    assert payload["available_at"] == "2026-01-03T03:45:00.000000Z"
+    assert payload["lineage"][0] == f"source:{artifact['source']['source_fingerprints'][0]}"
+    assert len(payload["lineage"]) == 377
+    assert payload["lineage"][-1] == "bar:2026-01-02T10:00:00Z"
+
+
+def test_prior_session_levels_invalidate_only_targets_using_corrected_session(tmp_path) -> None:
+    store = _complete_session_store(session_count=4)
+    artifacts = SetupArtifactStore(tmp_path)
+    task = build_prior_session_levels_task(store, artifacts)
+    request = SetupRunRequest("ftx-paper-orderflow", "prior-session-levels", "catch_up")
+    task.materialize(request)
+    identity = {
+        "strategy_id": "ftx-paper-orderflow", "task_id": "prior-session-levels",
+        "algorithm_version": "orderflow.prior-session-levels.v1",
+        "config_fingerprint": "prior-session-levels-NIFTY", "instrument": "NIFTY",
+    }
+    before = {day: artifacts.read(identity, f"2026-01-{day:02d}") for day in (2, 3, 4)}
+
+    store.rows_by_date["2026-01-02"][0]["high"] = 999.0
+    task.materialize(request)
+
+    after = {day: artifacts.read(identity, f"2026-01-{day:02d}") for day in (2, 3, 4)}
+    assert before[2] is not None and after[2] is not None
+    assert before[2]["manifest"]["artifact_sha256"] == after[2]["manifest"]["artifact_sha256"]
+    assert before[3] is not None and after[3] is not None
+    assert before[3]["manifest"]["artifact_sha256"] != after[3]["manifest"]["artifact_sha256"]
+    assert before[4] is not None and after[4] is not None
+    assert before[4]["manifest"]["artifact_sha256"] == after[4]["manifest"]["artifact_sha256"]
+
+
+def test_prior_session_levels_reject_incomplete_session(tmp_path) -> None:
+    store = _store(session_count=2)
+    artifacts = SetupArtifactStore(tmp_path)
+    task = build_prior_session_levels_task(store, artifacts)
+
+    result = task.materialize(SetupRunRequest(
+        "ftx-paper-orderflow", "prior-session-levels", "catch_up",
+        from_session="2026-01-02", through_session="2026-01-02",
+    ))
+
+    identity = {
+        "strategy_id": "ftx-paper-orderflow", "task_id": "prior-session-levels",
+        "algorithm_version": "orderflow.prior-session-levels.v1",
+        "config_fingerprint": "prior-session-levels-NIFTY", "instrument": "NIFTY",
+    }
+    artifact = artifacts.read(identity, "2026-01-02")
+    assert result["unavailable"] == 1
+    assert artifact is not None
+    assert artifact["status"] == "unavailable"
+    assert artifact["unavailable_reason"] == "prior_session_source_incomplete"

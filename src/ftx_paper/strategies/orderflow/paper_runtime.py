@@ -114,11 +114,24 @@ class PaperOrderflowRuntime:
         self.strategy.bind_execution_service(service, diagnostic=diagnostic)
 
     def bind_replay_bars(
-        self, bars: Sequence[Any], *, prior_values: Mapping[str, Any] | None = None, atr_values: Mapping[str, Any] | None = None,
+        self,
+        bars: Sequence[Any],
+        *,
+        feature_history_bars: Sequence[Any] = (),
+        prior_values: Mapping[str, Any] | None = None,
+        atr_values: Mapping[str, Any] | None = None,
+        prior_session_levels: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         """Install target-session input with validated setup publications."""
         self.strategy.bind_input_provider(
-            CanonicalInputProvider.from_market_bars(bars, prior_values=prior_values, atr_values=atr_values)
+            CanonicalInputProvider.from_market_bars(
+                bars,
+                feature_history_bars=feature_history_bars,
+                prior_values=prior_values,
+                atr_values=atr_values,
+                prior_session_levels=prior_session_levels,
+                derive_prior_session_levels=False,
+            )
         )
 
     def bind_live_bars(self, bars: Sequence[Any]) -> None:
