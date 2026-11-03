@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +15,10 @@ from ftx_paper.strategies.orderflow.providers import (
     CanonicalFormationProvider,
     CanonicalInputProvider,
 )
+from ftx_paper.strategies.orderflow.coordinator import OrderflowClockInput, OrderflowCoordinator
+from ftx_paper.strategies.orderflow.orderflow_common import Aggregate
+from ftx_paper.strategies.orderflow.interaction_detector import InteractionDetector
+from ftx_paper.strategies.orderflow.state_machine_types import LocationRegistry
 
 
 UTC = timezone.utc
@@ -123,6 +128,31 @@ def test_bounded_provider_publishes_causal_aggregates_and_lineage() -> None:
     assert first.input.atr.value is None
     assert "insufficient_daily_atr_history" in first.unavailable
     assert provider.envelopes[-1].input.five_minute is not None
+
+
+def test_coordinator_limits_1m_observations_to_current_clock(monkeypatch) -> None:
+    current = Aggregate(
+        "2026-10-01T09:20", "2026-10-01T09:20", "2026-10-01T09:21",
+        "1m", 1, 100.0, 101.0, 99.0, 100.5, 100,
+        "NIFTY", "", "FUT", "2026-10-01", "clock",
+    )
+    observations = (
+        SimpleNamespace(timeframe="1m", source_aggregate_id="2026-10-01T09:19"),
+        SimpleNamespace(timeframe="1m", source_aggregate_id="2026-10-01T09:20"),
+        SimpleNamespace(timeframe="5m", source_aggregate_id="2026-10-01T09:20"),
+    )
+    captured: list[tuple[object, ...]] = []
+
+    monkeypatch.setattr(
+        InteractionDetector,
+        "observe_1m",
+        lambda _self, **kwargs: captured.append(kwargs["observations"]) or [],
+    )
+    coordinator = OrderflowCoordinator(LocationRegistry("test"))
+
+    coordinator.advance(OrderflowClockInput(one_minute=current, observations_1m=observations))
+
+    assert captured == [(observations[1],)]
 
 
 def test_live_provider_rejects_malformed_explicit_input_without_bar_fallback() -> None:

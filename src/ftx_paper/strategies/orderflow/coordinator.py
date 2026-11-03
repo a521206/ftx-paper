@@ -136,11 +136,17 @@ class OrderflowCoordinator:
                 )
                 self._vwap_published.add(measurement.source_aggregate_id)
         events: list[dict[str, Any]] = []
+        current_observations_1m = tuple(
+            observation
+            for observation in item.observations_1m
+            if observation.timeframe == "1m"
+            and observation.source_aggregate_id == nifty_label(one.time)
+        )
         transitions = self.detector.observe_1m(
             current=one,
             available=list(self._one_minute),
             atr=atr,
-            observations=item.observations_1m,
+            observations=current_observations_1m,
         )
         if item.five_minute is not None and item.observations_5m:
             transitions += tuple(self.detector.observe(
