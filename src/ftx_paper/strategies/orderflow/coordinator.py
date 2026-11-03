@@ -84,6 +84,8 @@ class OrderflowCoordinator:
             available_at=one.available_at,
             source_fingerprint=one.source_fingerprint,
         )
+        source_event["aggregate"] = one.to_dict()
+        source_event["lineage"] = []
         if source_id in self._seen:
             return OrderflowAdvance((), source_event)
         self._seen.add(source_id)

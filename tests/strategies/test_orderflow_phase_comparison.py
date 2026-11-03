@@ -479,10 +479,19 @@ def test_replay_context_publishes_interactions_and_canonical_source_identity() -
         "identity": "aggregate:1m:2026-10-05T09:15",
         "observed_at": "2026-10-05T09:15:00+05:30",
         "available_at": "2026-10-05T09:16:00+05:30",
+        "aggregate": {"close": 22654.7},
+        "source_fingerprint": "fingerprint-1",
+        "lineage": [],
     })
 
     assert context.parity_streams["interaction_response"][0]["kind"] == "interaction_created"
     assert context.parity_streams["source_observation"][0]["identity"] == "aggregate:1m:2026-10-05T09:15"
+    source = context.parity_streams["source_observation"][0]
+    assert source["values"] == {
+        "aggregate": {"close": 22654.7},
+        "source_fingerprint": "fingerprint-1",
+    }
+    assert source["lineage"] == []
 
 
 def test_opening_interaction_is_published_as_a_lifecycle_event_only() -> None:

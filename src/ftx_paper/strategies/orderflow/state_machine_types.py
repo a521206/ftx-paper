@@ -619,7 +619,14 @@ class ReplayContext:
                         and payload.get("identity")
                         else payload.get("neutral_event_key", payload.get("event_id", ""))
                     ),
-                    _parity_safe(payload),
+                    (
+                        {
+                            "aggregate": _parity_safe(payload["aggregate"]),
+                            "source_fingerprint": payload.get("source_fingerprint"),
+                        }
+                        if parity_stream == "source_observation" and "aggregate" in payload
+                        else _parity_safe(payload)
+                    ),
                 )
             )
             self.record_parity_fact(str(parity_stream), {
@@ -632,6 +639,7 @@ class ReplayContext:
                 "causal_parent_id": lifecycle_id,
                 "values": values,
                 "unavailable": [],
+                **({"lineage": _parity_safe(payload.get("lineage", []))} if parity_stream == "source_observation" else {}),
             })
         self.events.append(payload)
         if payload.get("kind") in _EXECUTION_DIAGNOSTIC_KINDS:
