@@ -109,7 +109,7 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
         allowed = {"http://127.0.0.1:8502", "http://localhost:8502"}
         response.headers["Access-Control-Allow-Origin"] = origin if origin in allowed else "http://127.0.0.1:8502"
         response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
         return response
 
     @app.before_request
