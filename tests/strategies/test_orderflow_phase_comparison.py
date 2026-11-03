@@ -465,6 +465,26 @@ def test_phase6_projection_preserves_only_formed_lifecycle_facts() -> None:
     ]
 
 
+def test_replay_context_publishes_interactions_and_canonical_source_identity() -> None:
+    context = ReplayContext(execution_engine=ExecutionEngine())
+    context.record_event({
+        "kind": "interaction_created",
+        "identity": "interaction:NIFTY:2026-10-05:OR_HIGH:1m:09:19",
+        "observed_at": "2026-10-05T09:19:00+05:30",
+        "available_at": "2026-10-05T09:20:00+05:30",
+    })
+    context.record_event({
+        "kind": "source_observation",
+        "parity_stream": "source_observation",
+        "identity": "aggregate:1m:2026-10-05T09:15",
+        "observed_at": "2026-10-05T09:15:00+05:30",
+        "available_at": "2026-10-05T09:16:00+05:30",
+    })
+
+    assert context.parity_streams["interaction_response"][0]["kind"] == "interaction_created"
+    assert context.parity_streams["source_observation"][0]["identity"] == "aggregate:1m:2026-10-05T09:15"
+
+
 def test_opening_interaction_is_published_as_a_lifecycle_event_only() -> None:
     registry = LocationRegistry("test")
     context = ReplayContext(

@@ -22,7 +22,7 @@ def _store(session_count: int = 18) -> _Store:
     for offset in range(session_count):
         session = (start + timedelta(days=offset)).isoformat()
         rows[session] = [{
-            "minute": f"{session}T15:30:00Z",
+            "minute": f"{session}T03:45:00Z",
             "open": 100.0 + offset,
             "high": 110.0 + offset,
             "low": 90.0 + offset,
@@ -31,6 +31,8 @@ def _store(session_count: int = 18) -> _Store:
             "open_interest": 1,
             "instrument_type": "FUTURES",
             "exchange": "NFO",
+            "symbol": "NIFTY",
+            "expiry": "2026-10-31",
         }]
     return _Store(rows)
 
@@ -59,6 +61,26 @@ def test_daily_atr_materializes_typed_target_publication(tmp_path) -> None:
     publication = deserialize_atr_publication(payload)
     assert publication.value is not None
     assert publication.lineage[-1].startswith("source:")
+
+
+def test_daily_atr_uses_selected_front_contract_only(tmp_path) -> None:
+    store = _store()
+    for rows in store.rows_by_date.values():
+        rows.append({**rows[0], "expiry": "2026-12-31", "high": 1000.0, "low": 1.0})
+    artifacts = SetupArtifactStore(tmp_path)
+
+    build_daily_atr_task(store, artifacts).materialize(
+        SetupRunRequest("ftx-paper-orderflow", "daily-atr", "catch_up")
+    )
+
+    identity = {
+        "strategy_id": "ftx-paper-orderflow", "task_id": "daily-atr",
+        "algorithm_version": "orderflow.daily-atr.wilder.v1",
+        "config_fingerprint": "daily-atr-NIFTY-14", "instrument": "NIFTY",
+    }
+    artifact = artifacts.read(identity, "2026-01-15")
+    assert artifact is not None
+    assert artifact["payload"]["value"] == 20.0
 
 
 def test_daily_atr_rebuilds_later_values_after_source_correction(tmp_path) -> None:

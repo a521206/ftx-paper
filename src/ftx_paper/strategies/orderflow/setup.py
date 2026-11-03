@@ -11,6 +11,7 @@ from ftx_paper.application.setup_worker import DailySetupTask
 from ftx_paper.contracts.setup import SetupRunRequest
 from ftx_paper.infrastructure.artifacts.setup_store import SetupArtifactStore, build_envelope, build_payload_envelope, canonical_json
 from ftx_paper.runtime.store import RuntimeStore
+from ftx_paper.runtime.futures_source import FuturesSessionSourceResolver
 from ftx_paper.strategies.orderflow.canonical.orderflow.value_publication import (
     prior_profile_is_complete, publish_value_references,
 )
@@ -26,11 +27,11 @@ ATR_TASK_ID = "daily-atr"
 ATR_ALGORITHM_VERSION = "orderflow.daily-atr.wilder.v1"
 
 
-def _rows(store: RuntimeStore, session_date: str) -> list[dict[str, Any]]:
+def _rows(source: Any, session_date: str) -> list[dict[str, Any]]:
+    if source is None:
+        return []
     result = []
-    for row in store.read_market_bars(session_date):
-        if str(row.get("instrument_type", "")).upper() not in {"FUT", "FUTURES"}:
-            continue
+    for row in source.bars:
         result.append({
             "time": str(row["minute"]), "open": float(row["open"]), "high": float(row["high"]),
             "low": float(row["low"]), "close": float(row["close"]), "volume": int(row.get("volume") or 0),
@@ -40,24 +41,28 @@ def _rows(store: RuntimeStore, session_date: str) -> list[dict[str, Any]]:
     return result
 
 
-def _source_fingerprint(rows: list[dict[str, Any]]) -> str:
-    canonical_rows = [
-        {
-            "time": str(row["time"])[11:16],
-            "open": float(row["open"]),
-            "high": float(row["high"]),
-            "low": float(row["low"]),
-            "close": float(row["close"]),
-            "volume": int(row.get("volume") or 0),
-            "oi": int(row.get("oi") or 0),
-            "symbol": "NIFTY",
-            "expiry": "",
-            "contract_type": "CONTINUOUS",
-            "session_date": str(row["session_date"]),
-        }
-        for row in rows
-    ]
-    return hashlib.sha256(canonical_json(canonical_rows)).hexdigest()
+def _selected_source(source: Any) -> dict[str, Any]:
+    """Describe both the virtual series and its dated storage contract."""
+    return {
+        "exchange": source.identity.exchange,
+        "symbol": "NIFTY",
+        "expiry": "",
+        "contract_type": "CONTINUOUS",
+        "storage_identity": {
+            "symbol": source.identity.symbol,
+            "exchange": source.identity.exchange,
+            "instrument_type": source.identity.instrument_type,
+            "expiry": source.identity.expiry,
+        },
+        "rollover_policy_version": source.identity.policy_version,
+    }
+
+
+def _history_fingerprint(sources_by_date: Mapping[str, Any], sessions: list[str]) -> str:
+    return hashlib.sha256(canonical_json([
+        {"session": session, "source_fingerprint": sources_by_date[session].source_fingerprint}
+        for session in sessions
+    ])).hexdigest()
 
 
 def _observed_at(rows: list[dict[str, Any]]) -> datetime:
@@ -74,18 +79,27 @@ def build_prior_session_task(store: RuntimeStore, artifact_store: SetupArtifactS
             dates = [item for item in dates if item <= request.through_session]
         processed = materialized = reused = unavailable = failed = 0
         target_available: int | None = None
-        rows_by_date = {session: _rows(store, session) for session in all_dates}
-        targets = [session for session in dates if session != all_dates[0]] if all_dates else []
+        source_resolver = FuturesSessionSourceResolver(store)
+        sources_by_date = {session: source_resolver.resolve(session) for session in all_dates}
+        rows_by_date = {
+            session: _rows(sources_by_date[session], session) if sources_by_date[session] is not None else []
+            for session in all_dates
+        }
+        completed_dates = [session for session in all_dates if rows_by_date[session]]
+        targets = [session for session in dates if session in completed_dates and session != completed_dates[0]]
         for target in targets:
             if cancelled():
                 break
-            index = all_dates.index(target)
-            prior = all_dates[index - 1]
+            index = completed_dates.index(target)
+            prior = completed_dates[index - 1]
             prior_rows, target_rows = rows_by_date[prior], rows_by_date[target]
             if not prior_rows or not target_rows:
                 continue
+            prior_source = sources_by_date[prior]
+            if prior_source is None:
+                continue
             processed += 1
-            source_fp = _source_fingerprint(prior_rows)
+            source_fp = prior_source.source_fingerprint
             identity = {"strategy_id": STRATEGY_ID, "task_id": TASK_ID, "algorithm_version": ALGORITHM_VERSION,
                         "config_fingerprint": "value-profile-default", "instrument": "NIFTY"}
             if request.mode != "rebuild":
@@ -117,8 +131,8 @@ def build_prior_session_task(store: RuntimeStore, artifact_store: SetupArtifactS
                         PriorSessionValueReference(ref.source_sessions[0], ref.val, ref.poc, ref.vah, observed_at, available_at, lineage),
                         observed_at, available_at, lineage,
                     )
-                source = {"sessions": [prior], "selected_source": {"exchange": "NFO", "symbol": "NIFTY", "expiry": "", "contract_type": "FUTURES"},
-                          "source_fingerprints": [source_fp], "source_fingerprint_recipe": "ordered-canonical-bars-v1", "source_bar_count": len(prior_rows),
+                source = {"sessions": [prior], "selected_source": _selected_source(prior_source),
+                          "source_fingerprints": [source_fp], "source_fingerprint_recipe": "resolver-storage-source-v1", "source_bar_count": len(prior_rows),
                           "session_finalization": {"timezone": "Asia/Kolkata", "close": "15:30", "finalized_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}}
                 envelope = build_envelope(strategy_id=STRATEGY_ID, task_id=TASK_ID, algorithm_version=ALGORITHM_VERSION,
                                           target_session=target, source=source,
@@ -138,8 +152,14 @@ def build_prior_session_task(store: RuntimeStore, artifact_store: SetupArtifactS
 def build_daily_atr_task(store: RuntimeStore, artifact_store: SetupArtifactStore) -> DailySetupTask:
     def materialize(request: SetupRunRequest, cancelled: Callable[[], bool] = lambda: False) -> Mapping[str, int]:
         all_dates = sorted(str(item) for item in store.read_dates())
-        rows_by_date = {session: _rows(store, session) for session in all_dates}
+        source_resolver = FuturesSessionSourceResolver(store)
+        sources_by_date = {session: source_resolver.resolve(session) for session in all_dates}
+        rows_by_date = {
+            session: _rows(sources_by_date[session], session) if sources_by_date[session] is not None else []
+            for session in all_dates
+        }
         values = daily_atr_cache(rows_by_date)
+        completed_dates = [session for session in all_dates if rows_by_date[session]]
         processed = materialized = reused = unavailable = 0
         target_available: int | None = None
         targets = [item for item in all_dates if (not request.from_session or item >= request.from_session) and (not request.through_session or item <= request.through_session)]
@@ -150,10 +170,20 @@ def build_daily_atr_task(store: RuntimeStore, artifact_store: SetupArtifactStore
             identity = {"strategy_id": STRATEGY_ID, "task_id": ATR_TASK_ID, "algorithm_version": ATR_ALGORITHM_VERSION,
                         "config_fingerprint": "daily-atr-NIFTY-14", "instrument": "NIFTY"}
             value = values.get(target)
-            source_index = all_dates.index(target)
-            source_date = all_dates[source_index - 1] if source_index else None
-            source_rows = [row for session in all_dates[:source_index + 1] for row in rows_by_date[session]]
-            source_fingerprint = _source_fingerprint(source_rows) if source_rows else "none"
+            source_index = completed_dates.index(target) if target in completed_dates else None
+            if source_index is None:
+                source_date = None
+                source_rows = []
+            else:
+                source_date = completed_dates[source_index - 1] if source_index else None
+                source_rows = [
+                    row for session in completed_dates[:source_index]
+                    for row in rows_by_date[session]
+                ]
+            completed_source_count = source_index if source_index is not None else 0
+            source_fingerprint = _history_fingerprint(
+                sources_by_date, completed_dates[:source_index]
+            ) if source_rows else "none"
             if request.mode != "rebuild":
                 existing = artifact_store.read(identity, target)
                 existing_fingerprints = (
@@ -169,7 +199,7 @@ def build_daily_atr_task(store: RuntimeStore, artifact_store: SetupArtifactStore
             if value is None or source_date is None:
                 envelope = build_payload_envelope(
                     strategy_id=STRATEGY_ID, task_id=ATR_TASK_ID, algorithm_version=ATR_ALGORITHM_VERSION,
-                    target_session=target, source={"sessions": all_dates[:source_index], "selected_source": {"exchange": "NFO", "symbol": "NIFTY", "expiry": "", "contract_type": "FUTURES"}, "source_bar_count": sum(len(rows_by_date[item]) for item in all_dates[:source_index])},
+                    target_session=target, source={"sessions": completed_dates[:source_index] if source_index is not None else [], "selected_source": _selected_source(sources_by_date[completed_dates[source_index - 1]]) if source_index else {"symbol": "NIFTY", "expiry": "", "contract_type": "CONTINUOUS"}, "source_bar_count": len(source_rows)},
                     configuration={"config_fingerprint": identity["config_fingerprint"], "symbol": "NIFTY", "period": 14, "method": "wilder"},
                     payload=None, status="unavailable", unavailable_reason="insufficient_daily_atr_history",
                 )
@@ -180,7 +210,7 @@ def build_daily_atr_task(store: RuntimeStore, artifact_store: SetupArtifactStore
                 available = parse_nifty_label(f"{target}T09:15")
                 envelope = build_payload_envelope(
                     strategy_id=STRATEGY_ID, task_id=ATR_TASK_ID, algorithm_version=ATR_ALGORITHM_VERSION,
-                    target_session=target, source={"sessions": all_dates[:source_index + 1], "selected_source": {"exchange": "NFO", "symbol": "NIFTY", "expiry": "", "contract_type": "FUTURES"}, "source_fingerprints": [source_fingerprint], "source_fingerprint_recipe": "ordered-canonical-bars-v1", "source_bar_count": len(source_rows), "completed_session_count": len(all_dates[:source_index + 1])},
+                    target_session=target, source={"sessions": completed_dates[:completed_source_count], "selected_source": _selected_source(sources_by_date[source_date]) if source_date else {"symbol": "NIFTY", "expiry": "", "contract_type": "CONTINUOUS"}, "source_fingerprints": [source_fingerprint], "source_fingerprint_recipe": "ordered-storage-sources-v1", "source_bar_count": len(source_rows), "completed_session_count": completed_source_count},
                     configuration={"config_fingerprint": identity["config_fingerprint"], "symbol": "NIFTY", "period": 14, "method": "wilder"},
                     payload={"target_session": target, "source_session": source_date, "symbol": "NIFTY", "period": 14, "method": "wilder", "value": value,
                              "observed_at": serialize_utc(observed), "available_at": serialize_utc(available),

@@ -540,6 +540,8 @@ class ReplayContext:
 
     def record_event(self, event: dict[str, Any], *, record_lifecycle: bool = True) -> None:
         payload = dict(event)
+        if payload.get("kind") in _INTERACTION_RESPONSE_KINDS:
+            payload.setdefault("parity_stream", "interaction_response")
         lifecycle_id = payload.get("lifecycle_id")
         lifecycle = (
             self.opportunities.get(str(lifecycle_id))
@@ -610,7 +612,15 @@ class ReplayContext:
             identity, values = (
                 _lifecycle_parity_values(payload, lifecycle)
                 if parity_stream == "opportunity_lifecycle" else
-                (str(payload.get("neutral_event_key", payload.get("event_id", ""))), _parity_safe(payload))
+                (
+                    str(
+                        payload.get("identity")
+                        if parity_stream == "source_observation"
+                        and payload.get("identity")
+                        else payload.get("neutral_event_key", payload.get("event_id", ""))
+                    ),
+                    _parity_safe(payload),
+                )
             )
             self.record_parity_fact(str(parity_stream), {
                 "kind": str(payload.get("kind", "")),
