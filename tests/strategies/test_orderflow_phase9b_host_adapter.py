@@ -399,6 +399,15 @@ def test_transition_owner_records_5m_source_fact_with_1m_lineage() -> None:
     ]
     payload = build_replay_payload(owner, [], [], _rows(), capture_mode="replay")
     assert payload["parity_phase_facts"]["source_observation"] == source_facts
+    context_facts = owner.context.parity_streams["context_location"]
+    assert [fact["identity"] for fact in context_facts] == [
+        *(f"context-location:1m:2026-10-01T09:{minute:02d}" for minute in range(15, 20)),
+        "context-location:5m:2026-10-01T09:15",
+    ]
+    assert all(fact["kind"] == "context_location_observed" for fact in context_facts)
+    assert [fact["identity"] for fact in payload["parity_phase_facts"]["context_location"]] == [
+        fact["identity"] for fact in context_facts
+    ]
 
 
 def test_coordinator_emits_gap_for_missing_5m_location_observation() -> None:

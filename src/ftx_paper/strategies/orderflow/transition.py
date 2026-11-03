@@ -1098,6 +1098,7 @@ class OrderflowTransitionOwner:
         self.opportunity_owner.handle_structure(
             timestamp, next_time, row, available5, bar_events,
         )
+        self._record_phase4_context_location(item)
         generated_formations = self.opportunity_owner.formations_for(next_time)
         accepted_formations = self._accept_formations(
             (*formations, *generated_formations),
@@ -1130,6 +1131,62 @@ class OrderflowTransitionOwner:
                 for name, values in self.context.parity_snapshot().items()
             },
         )
+
+    def _record_phase4_context_location(self, item: OrderflowClockInput) -> None:
+        """Publish canonical context/location facts for completed aggregates."""
+        context = self.context
+        ordinary = (
+            context.market_contexts.resolve(context.market_contexts.ordinary_context)
+            if context.market_contexts.ordinary_context is not None else None
+        )
+        observations_by_timeframe = {
+            "1m": tuple(
+                observation for observation in item.observations_1m
+                if observation.timeframe == "1m"
+                and observation.source_aggregate_id == nifty_label(item.one_minute.time)
+            ),
+        }
+        aggregates = [(item.one_minute, observations_by_timeframe["1m"])]
+        if item.five_minute is not None:
+            observations_by_timeframe["5m"] = tuple(
+                observation for observation in item.observations_5m
+                if observation.timeframe == "5m"
+                and observation.source_aggregate_id == nifty_label(item.five_minute.time)
+            )
+            aggregates.append((item.five_minute, observations_by_timeframe["5m"]))
+        known = {
+            str(fact.get("identity"))
+            for fact in context.parity_streams.get("context_location", ())
+        }
+        for aggregate, observations in aggregates:
+            identity = f"context-location:{aggregate.timeframe}:{nifty_label(aggregate.time)}"
+            if identity in known:
+                continue
+            context.record_parity_fact("context_location", {
+                "kind": "context_location_observed",
+                "occurred_at": aggregate.end_time,
+                "observed_at": aggregate.end_time,
+                "available_at": aggregate.available_at,
+                "identity": identity,
+                "causal_parent_id": f"aggregate:{aggregate.timeframe}:{nifty_label(aggregate.time)}",
+                "values": {
+                    "timeframe": aggregate.timeframe,
+                    "source_observation_id": f"aggregate:{aggregate.timeframe}:{nifty_label(aggregate.time)}",
+                    "context": {
+                        "context_id": ordinary.context_id,
+                        "version": ordinary.version,
+                        "location": ordinary.location,
+                        "market_state": ordinary.market_state,
+                        "available_at": ordinary.available_at,
+                        "parent_context_id": ordinary.parent_context_id,
+                        "definition_version": ordinary.definition_version,
+                        "source_provenance": list(ordinary.source_provenance),
+                    } if ordinary is not None else None,
+                    "locations": [observation.to_dict() for observation in observations],
+                },
+                "unavailable": [] if ordinary is not None and observations else ["missing_context"],
+            })
+            known.add(identity)
 
     def _record_phase4_source_observations(
         self, aggregates: Sequence[Aggregate],
