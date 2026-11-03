@@ -11,7 +11,7 @@ from ftx_paper.strategies.orderflow.location_geometry import LocationBand
 from ftx_paper.strategies.orderflow.market_observation import MarketObservation
 from ftx_paper.strategies.orderflow.orderflow_common import Aggregate
 from ftx_paper.strategies.orderflow.state_machine_types import LocationRecord
-from ftx_paper.strategies.orderflow.timestamps import serialize_utc
+from ftx_paper.strategies.orderflow.timestamps import nifty_label, serialize_utc
 from ftx_paper.strategies.orderflow.value_publication import ValuePublication
 from ftx_paper.strategies.orderflow.vwap_location import VwapMeasurement
 
@@ -109,6 +109,36 @@ def test_5m_child_observations_publish_at_their_causal_availability() -> None:
     assert [item["available_at"] for item in child_observations] == [
         serialize_utc(five.available_at)
     ] * 5
+    location_id = child_observations[0]["location_id"]
+    assert [item["observation_id"] for item in child_observations] == [
+        f"{item['source_aggregate_id']}:1m:{location_id}"
+        for item in child_observations
+    ]
+    assert observations[-1]["child_observation_ids"] == [
+        item["observation_id"] for item in child_observations
+    ]
+
+
+def test_location_observation_id_is_independent_of_replay_fingerprint() -> None:
+    one = _aggregate("1m", 45, count=1)
+    location = LocationRecord(
+        "OR_LOW:2026-10-05:1", "OR_LOW", 100.0, SESSION,
+        one.available_at, one.available_at, "stream", LocationBand(99.0, 101.0),
+        frozen_atr=4.0, generation=1,
+    )
+
+    def observation_id(source_fingerprint: str) -> str:
+        replay = _replay_market(
+            MarketObservation({"1m": (one,), "5m": ()}, (), {}, source_fingerprint),
+            session_date=SESSION,
+            evidence=_evidence(location),
+            replay_clock=None,
+        )
+        return replay.context_location[0]["values"]["locations"][0]["observation_id"]
+
+    expected = f"{nifty_label(one.time)}:1m:{location.location_id}"
+    assert observation_id("replay-fingerprint-a") == expected
+    assert observation_id("replay-fingerprint-b") == expected
 
 
 def test_misaligned_5m_records_unavailable_context_location_fact() -> None:

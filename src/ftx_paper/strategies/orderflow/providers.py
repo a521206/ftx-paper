@@ -174,7 +174,7 @@ class CanonicalInputProvider:
                     continue
                 if not record.timeframe or record.timeframe == "1m":
                     one_observation = _location_observation(
-                        one, record, source_fingerprint=one.source_fingerprint,
+                        one, record,
                     )
                     observations_1m.append(one_observation)
                 if latest5 is not None and (
@@ -190,7 +190,7 @@ class CanonicalInputProvider:
                         continue
                     child_observations = tuple(
                         _location_observation(
-                            item, record, source_fingerprint=source.source_fingerprint,
+                            item, record,
                             available_at=max(
                                 coerce_timestamp(item.available_at),
                                 coerce_timestamp(record.available_at),
@@ -200,7 +200,7 @@ class CanonicalInputProvider:
                     )
                     observations_1m.extend(child_observations)
                     observations_5m.append(_location_observation(
-                        source, record, source_fingerprint=source.source_fingerprint,
+                        source, record,
                         child_observation_ids=tuple(item.observation_id for item in child_observations),
                     ))
             self._by_identity[source_id] = CanonicalInputEnvelope(

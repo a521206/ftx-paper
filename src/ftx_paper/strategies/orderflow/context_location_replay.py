@@ -32,11 +32,15 @@ def _context_as_of(
     return store.latest_as_of(context_stream_id, available_at)
 
 
+def _location_observation_id(aggregate: Aggregate, record: LocationRecord) -> str:
+    location_key = record.location_id or f"{record.alias}:{record.generation}"
+    return f"{nifty_label(aggregate.time)}:{aggregate.timeframe}:{location_key}"
+
+
 def _location_observation(
     aggregate: Aggregate,
     record: LocationRecord,
     *,
-    source_fingerprint: str,
     child_observation_ids: tuple[str, ...] = (),
     available_at: datetime | str | None = None,
 ) -> LocationObservation:
@@ -45,10 +49,7 @@ def _location_observation(
         else "BELOW" if aggregate.close < record.band_low
         else "INSIDE_BAND"
     )
-    observation_id = (
-        f"{source_fingerprint[:16]}:{nifty_label(aggregate.time)}:"
-        f"{aggregate.timeframe}:{record.location_id or f'{record.alias}:{record.generation}'}"
-    )
+    observation_id = _location_observation_id(aggregate, record)
     return LocationObservation(
         location=record.alias,
         location_id=record.location_id,
@@ -360,7 +361,6 @@ def _replay_market(
                             _location_observation(
                                 item,
                                 record,
-                                source_fingerprint=market.source_fingerprint,
                                 available_at=max(
                                     coerce_timestamp(item.available_at),
                                     coerce_timestamp(record.available_at),
@@ -372,14 +372,12 @@ def _replay_market(
                             _location_observation(
                                 aggregate,
                                 record,
-                                source_fingerprint=market.source_fingerprint,
                                 available_at=(
                                     _location_publication_at(record, market.aggregates)
                                     if record.alias == "VWAP" else None
                                 ),
                                 child_observation_ids=tuple(
-                                    f"{market.source_fingerprint[:16]}:{nifty_label(item.time)}:1m:"
-                                    f"{record.location_id or f'{record.alias}:{record.generation}'}"
+                                    _location_observation_id(item, record)
                                     for item in children
                                 ),
                             ),
@@ -389,7 +387,6 @@ def _replay_market(
                     else (_location_observation(
                         aggregate,
                         record,
-                        source_fingerprint=market.source_fingerprint,
                     ),)
                 )
             )
