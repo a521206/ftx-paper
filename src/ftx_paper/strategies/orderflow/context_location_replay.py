@@ -16,7 +16,7 @@ from typing import Any
 from .evidence_publication import EvidencePublication
 from .hierarchy import MarketContext
 from .location_observation import LocationObservation
-from .market_observation import MARKET_CLOSE_TIME, MarketObservation, observe_market
+from .market_observation import MarketObservation, is_observation_minute, observe_market
 from .orderflow_common import Aggregate
 from .timestamps import coerce_timestamp, nifty_label, serialize_utc, session_minute
 from .state_machine_types import LocationRecord, LocationRegistry, MarketContextStore
@@ -294,7 +294,7 @@ def _replay_market(
             if item.session_date == session_date
             and not (
                 item.timeframe == "1m"
-                and session_minute(session_date, item.time)[-5:] >= MARKET_CLOSE_TIME
+                and not is_observation_minute(session_date, item.time)
             )
             and (replay_clock is None or coerce_timestamp(item.available_at) <= coerce_timestamp(replay_clock))
         ),

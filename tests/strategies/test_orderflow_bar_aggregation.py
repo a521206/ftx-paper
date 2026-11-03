@@ -53,7 +53,7 @@ def test_aggregate_omits_contract_type() -> None:
     assert "contract_type" not in result.aggregates[0].to_dict()
 
 
-def test_market_observation_excludes_bar_at_exclusive_session_close() -> None:
+def test_market_observation_includes_bar_at_session_close() -> None:
     rows = [
         {
             "time": f"2026-10-12T15:{minute:02d}",
@@ -72,6 +72,6 @@ def test_market_observation_excludes_bar_at_exclusive_session_close() -> None:
     assert [
         item.time.astimezone(ZoneInfo("Asia/Kolkata")).strftime("%H:%M")
         for item in observed.aggregates["1m"]
-    ] == ["15:29"]
+    ] == ["15:29", "15:30"]
     assert is_observation_minute("2026-10-12", "2026-10-12T15:29")
-    assert not is_observation_minute("2026-10-12", "2026-10-12T15:30")
+    assert is_observation_minute("2026-10-12", "2026-10-12T15:30")
