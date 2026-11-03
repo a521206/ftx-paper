@@ -160,6 +160,20 @@ def test_runtime_store_keeps_inflight_replay_runs_for_requested_date(tmp_path):
     }
 
 
+def test_runtime_store_cancels_inflight_replay_runs(tmp_path):
+    store = RuntimeStore(tmp_path)
+    store.create_replay_run("queued-run", {"session_date": "2026-01-05", "strategy_id": "orderflow"})
+    store.create_replay_run("running-run", {"session_date": "2026-01-06", "strategy_id": "research"})
+    store.update_replay_run("running-run", status="running")
+    store.create_replay_run("completed-run", {"session_date": "2026-01-07"})
+    store.update_replay_run("completed-run", status="completed")
+
+    assert store.cancel_inflight_replay_runs() == 2
+    assert store.read_replay_run("queued-run")["status"] == "cancelled"
+    assert store.read_replay_run("running-run")["status"] == "cancelled"
+    assert store.read_replay_run("completed-run")["status"] == "completed"
+
+
 def test_runtime_store_deletes_replay_and_result_chunks(tmp_path):
     store = RuntimeStore(tmp_path)
     store.create_replay_run("remove-me", {"session_date": "2026-01-05"})

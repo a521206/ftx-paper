@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
+from functools import lru_cache
 import hashlib
 import json
 import math
@@ -79,6 +80,20 @@ _TRANSPORT_METADATA_KEYS = frozenset({
 _CAUSAL_METADATA_KEYS = frozenset({
     "causal_available_at", "causal_observed_at", "causal_parent_id", "parent_id",
 })
+
+
+@lru_cache(maxsize=8)
+def _load_canonical_payload(path: str) -> dict[str, Any]:
+    """Load a canonical artifact once per comparison process.
+
+    Canonical replay artifacts are intentionally detailed and can exceed 150 MB.
+    The phase comparisons only read them, so reparsing the same artifact for each
+    phase needlessly dominates comparison time and memory churn.
+    """
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("canonical replay payload must be an object")
+    return payload
 _ENVELOPE_DUPLICATE_KEYS = frozenset({
     "kind", "occurred_at", "observed_at", "available_at", "unavailable",
 })
@@ -672,7 +687,7 @@ def _normalize_phase35_locations(
 def _compare_phase4(canonical_path: Path, paper: dict[str, Any], session_date: str) -> dict[str, Any]:
     """Compare explicit causal source/context streams after Phase 4B replay."""
     try:
-        canonical_payload = json.loads(canonical_path.read_text(encoding="utf-8"))
+        canonical_payload = _load_canonical_payload(str(canonical_path))
         canonical_session = canonical_payload["sessions"][session_date]
         canonical_facts = _normalize_canonical_timestamps(
             canonical_session.get("parity_phase_facts", {}), session_date,
@@ -706,7 +721,7 @@ def _compare_phase4(canonical_path: Path, paper: dict[str, Any], session_date: s
 def _compare_phase45(canonical_path: Path, paper: dict[str, Any], session_date: str) -> dict[str, Any]:
     """Compare the explicit chronological interaction/response stream."""
     try:
-        canonical_payload = json.loads(canonical_path.read_text(encoding="utf-8"))
+        canonical_payload = _load_canonical_payload(str(canonical_path))
         canonical_facts = _normalize_canonical_timestamps(
             canonical_payload["sessions"][session_date].get("parity_phase_facts", {}), session_date,
         )
@@ -1309,7 +1324,7 @@ def _timeout_before_canonical_trigger(
 def _compare_phase6(canonical_path: Path, paper: dict[str, Any], session_date: str) -> dict[str, Any]:
     """Compare explicit opportunity/setup lifecycle facts."""
     try:
-        payload = json.loads(canonical_path.read_text(encoding="utf-8"))
+        payload = _load_canonical_payload(str(canonical_path))
         session = payload["sessions"][session_date]
         canonical_records = _canonical_phase6_records(session, session_date)
         if canonical_records is None:
@@ -1422,7 +1437,7 @@ def _compare_phase6(canonical_path: Path, paper: dict[str, Any], session_date: s
 def _compare_phase7(canonical_path: Path, paper: dict[str, Any], session_date: str) -> dict[str, Any]:
     """Compare explicit execution facts in causal stream order."""
     try:
-        payload = json.loads(canonical_path.read_text(encoding="utf-8"))
+        payload = _load_canonical_payload(str(canonical_path))
         canonical_session = payload["sessions"][session_date]
         canonical_replay = canonical_session.get("replay")
         if not isinstance(canonical_replay, Mapping):
@@ -1774,7 +1789,7 @@ def _compare_unified_artifact(
     if canonical_path is None or paper is None:
         return {"status": "INCOMPLETE", "reason": "replay artifact unavailable"}
     try:
-        canonical_payload = json.loads(canonical_path.read_text(encoding="utf-8"))
+        canonical_payload = _load_canonical_payload(str(canonical_path))
         canonical_session = canonical_payload["sessions"][session_date]
         if not isinstance(canonical_session, Mapping):
             raise ValueError("canonical session payload is unavailable")

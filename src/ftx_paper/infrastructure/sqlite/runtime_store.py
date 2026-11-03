@@ -894,6 +894,30 @@ class SqliteRuntimeStore:
         self._event_counts_cache = None
         return deleted
 
+    def cancel_inflight_replay_runs(self, *, reason: str = "cancelled during API startup") -> int:
+        """Cancel persisted replay work left by a previous API process."""
+        now = self._now()
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT run_id, request FROM replay_runs WHERE status IN ('queued', 'running')",
+            ).fetchall()
+            if rows:
+                connection.execute(
+                    "UPDATE replay_runs SET status='cancelled', error=?, updated_at=? "
+                    "WHERE status IN ('queued', 'running')",
+                    (reason, now),
+                )
+        for run_id, raw_request in rows:
+            request = json.loads(raw_request)
+            self.append_event(
+                "REPLAY_STATUS",
+                {"run_id": run_id, "status": "cancelled", "strategy_id": request.get("strategy_id"),
+                 "session_date": request.get("session_date"), "error": reason},
+                f"replay_activity:cancelled:{run_id}:{now}",
+                timestamp=now,
+            )
+        return len(rows)
+
     def create_replay_run(self, run_id: str, request: dict[str, Any]) -> dict[str, Any]:
         now = self._now()
         with self._connect() as connection:

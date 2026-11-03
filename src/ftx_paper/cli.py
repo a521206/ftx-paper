@@ -70,6 +70,12 @@ def api_main() -> None:
     session = None
     setup_worker = None
     try:
+        cancelled_replays = store.cancel_inflight_replay_runs()
+        if cancelled_replays:
+            logging.getLogger(__name__).info(
+                "Cancelled %d replay(s) left by a previous API process",
+                cancelled_replays,
+            )
         broker_name = config.broker.lower()
         if broker_name == "xts":
             try:
