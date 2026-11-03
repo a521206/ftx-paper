@@ -694,6 +694,73 @@ Relevant existing coverage includes:
 - `tests/strategies/test_orderflow_features.py`;
 - `tests/strategies/test_orderflow_phase_comparison.py`.
 
+## Replay Performance Design
+
+Daily setup materialization removes static prior-session profile work from the
+replay path, but it does not by itself solve the full
+`CanonicalInputProvider.from_market_bars()` cost. The provider must also avoid
+rebuilding canonical evidence independently for every decision-clock prefix.
+
+The clean runtime split is:
+
+```text
+setup materializer
+    -> immutable daily setup artifacts
+
+target session bars + validated setup artifact
+    -> one-pass canonical session evidence stream
+        -> orderflow replay
+```
+
+### Static setup artifacts
+
+The setup worker owns features that are finalized once per session, including
+prior-session value publication. Replay loads and validates these artifacts,
+then injects reconstructed domain objects into the strategy feature adapter.
+Replay must not call `build_prior_values()` or rebuild daily value profiles.
+
+### Incremental session evidence
+
+`CanonicalInputProvider` remains responsible for causal target-session input,
+but its build operation must be incremental rather than prefix-rebuilding:
+
+- initialize recursive state from validated setup artifacts and the explicitly
+  required ATR warmup state;
+- consume the selected target-session futures bars in chronological order;
+- update ATR, VWAP, session extrema, location publications, and causal
+  observations once per completed bar;
+- emit one `CanonicalInputEnvelope` per decision clock;
+- retain the same availability cutoffs, lineage, unavailable reasons, and
+  source identities as the canonical producer.
+
+The provider must not call `produce_evidence()` once for every growing prefix
+of the session. If a producer cannot be advanced incrementally without
+changing causal behavior, that producer should expose an explicit streaming
+boundary or materialize a versioned session-evidence artifact; replay must not
+silently approximate it by using the final snapshot.
+
+### Ownership and validation
+
+The setup worker owns static artifact production and persistence. The replay
+input provider owns only target-session chronological evidence assembly. The
+strategy transition owner remains the sole policy owner. Both paths use the
+same domain contracts and provenance rules.
+
+Performance changes are valid only when they preserve:
+
+- the exact decision-clock publication order;
+- as-of availability and observation timestamps;
+- source and causal lineage;
+- explicit unavailable evidence;
+- normalized source and configuration fingerprints;
+- parity with the canonical replay output.
+
+The migration therefore has two independent cutovers: first replace historical
+profile reconstruction with validated setup artifacts, then replace repeated
+prefix evidence construction with the incremental session provider. Measuring
+only the first cutover must not be treated as completion of replay
+optimization.
+
 ## Remaining Decisions
 
 - Define retention and garbage collection for old source/config/version
