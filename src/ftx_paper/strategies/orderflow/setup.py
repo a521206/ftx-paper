@@ -73,6 +73,7 @@ def build_prior_session_task(store: RuntimeStore, artifact_store: SetupArtifactS
         if request.through_session:
             dates = [item for item in dates if item <= request.through_session]
         processed = materialized = reused = unavailable = failed = 0
+        target_available: int | None = None
         rows_by_date = {session: _rows(store, session) for session in all_dates}
         targets = [session for session in dates if session != all_dates[0]] if all_dates else []
         for target in targets:
@@ -95,6 +96,9 @@ def build_prior_session_task(store: RuntimeStore, artifact_store: SetupArtifactS
                 )
                 if source_fp in existing_fingerprints:
                     reused += 1
+                    target_available = int(
+                        isinstance(existing, Mapping) and existing.get("status") == "available"
+                    )
                     continue
             try:
                 refs = publish_value_references(
@@ -123,9 +127,10 @@ def build_prior_session_task(store: RuntimeStore, artifact_store: SetupArtifactS
                 artifact_store.write(envelope, source_fingerprint=source_fp, output_root=request.output_root)
                 materialized += 1
                 unavailable += publication.reference is None
+                target_available = int(publication.reference is not None)
             except Exception:
                 failed += 1
-        return {"processed_sessions": processed, "materialized": materialized, "reused": reused, "unavailable": unavailable, "failed": failed}
+        return {"processed_sessions": processed, "materialized": materialized, "reused": reused, "unavailable": unavailable, "failed": failed, "target_available": target_available if target_available is not None else 0}
 
     return DailySetupTask(STRATEGY_ID, TASK_ID, ALGORITHM_VERSION, materialize)
 
@@ -136,6 +141,7 @@ def build_daily_atr_task(store: RuntimeStore, artifact_store: SetupArtifactStore
         rows_by_date = {session: _rows(store, session) for session in all_dates}
         values = daily_atr_cache(rows_by_date)
         processed = materialized = reused = unavailable = 0
+        target_available: int | None = None
         targets = [item for item in all_dates if (not request.from_session or item >= request.from_session) and (not request.through_session or item <= request.through_session)]
         for target in targets:
             if cancelled():
@@ -156,6 +162,9 @@ def build_daily_atr_task(store: RuntimeStore, artifact_store: SetupArtifactStore
                 )
                 if source_fingerprint in existing_fingerprints:
                     reused += 1
+                    target_available = int(
+                        isinstance(existing, Mapping) and existing.get("status") == "available"
+                    )
                     continue
             if value is None or source_date is None:
                 envelope = build_payload_envelope(
@@ -165,6 +174,7 @@ def build_daily_atr_task(store: RuntimeStore, artifact_store: SetupArtifactStore
                     payload=None, status="unavailable", unavailable_reason="insufficient_daily_atr_history",
                 )
                 unavailable += 1
+                target_available = 0
             else:
                 observed = _observed_at(rows_by_date[source_date])
                 available = parse_nifty_label(f"{target}T09:15")
@@ -176,8 +186,9 @@ def build_daily_atr_task(store: RuntimeStore, artifact_store: SetupArtifactStore
                              "observed_at": serialize_utc(observed), "available_at": serialize_utc(available),
                              "lineage": [f"daily_atr:NIFTY:{target}:{value:.12g}", f"source:{source_fingerprint}"]},
                 )
+                target_available = 1
             artifact_store.write(envelope, source_fingerprint=source_fingerprint, output_root=request.output_root)
             materialized += 1
-        return {"processed_sessions": processed, "materialized": materialized, "reused": reused, "unavailable": unavailable, "failed": 0}
+        return {"processed_sessions": processed, "materialized": materialized, "reused": reused, "unavailable": unavailable, "failed": 0, "target_available": target_available if target_available is not None else 0}
 
     return DailySetupTask(STRATEGY_ID, ATR_TASK_ID, ATR_ALGORITHM_VERSION, materialize)

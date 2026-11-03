@@ -61,3 +61,41 @@ def test_setup_worker_rejects_unknown_tasks_and_records_result():
     assert result is not None
     assert result["status"] == "completed"
     assert result["tasks"] == {"t": {"materialized": 1}}
+
+
+def test_setup_worker_ensures_all_strategy_tasks_before_replay():
+    calls: list[tuple[str, str, str | None]] = []
+
+    def materialize(request, _cancelled):
+        calls.append((request.task_id, request.mode, request.through_session))
+        return {"materialized": 1, "target_available": 1}
+
+    worker = SetupWorker(SetupTaskRegistry((
+        DailySetupTask("s", "first", "v1", materialize),
+        DailySetupTask("s", "second", "v2", materialize),
+        DailySetupTask("other", "ignored", "v3", materialize),
+    )))
+    try:
+        results = worker.ensure("s", "2026-10-05")
+    finally:
+        worker.shutdown()
+
+    assert [item["task_id"] for item in results] == ["first", "second"]
+    assert calls == [
+        ("first", "catch_up", "2026-10-05"),
+        ("second", "catch_up", "2026-10-05"),
+    ]
+
+
+def test_setup_worker_allows_partial_setup_after_waiting():
+    worker = SetupWorker(SetupTaskRegistry((
+        DailySetupTask("s", "task", "v1", lambda _request, _cancelled: {
+            "materialized": 1, "unavailable": 1, "target_available": 0,
+        }),
+    )))
+    try:
+        results = worker.ensure("s", "2026-10-05")
+    finally:
+        worker.shutdown()
+
+    assert results[0]["status"] == "partial"

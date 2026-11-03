@@ -31,6 +31,9 @@ class SetupTaskRegistry:
         except KeyError as exc:
             raise ValueError(f"unknown setup task: {strategy_id}/{task_id}") from exc
 
+    def for_strategy(self, strategy_id: str) -> tuple[DailySetupTask, ...]:
+        return tuple(task for task in self._tasks.values() if task.strategy_id == strategy_id)
+
 
 class SetupWorker:
     """Serialize setup jobs inside the API process."""
@@ -45,6 +48,7 @@ class SetupWorker:
         self._futures: dict[str, Future[None]] = {}
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="setup")
         self._lock = RLock()
+        self._ensure_lock = RLock()
 
     def submit(self, request: Mapping[str, Any] | SetupRunRequest) -> str:
         parsed = request if isinstance(request, SetupRunRequest) else SetupRunRequest.from_mapping(request)
@@ -109,6 +113,30 @@ class SetupWorker:
         with self._lock:
             value = self._jobs.get(job_id)
             return dict(value) if value is not None else None
+
+    def ensure(self, strategy_id: str, through_session: str) -> tuple[dict[str, Any], ...]:
+        """Materialize every registered setup task before a bounded replay."""
+        with self._ensure_lock:
+            results: list[dict[str, Any]] = []
+            for task in self.registry.for_strategy(strategy_id):
+                job_id = self.submit({
+                    "strategy_id": strategy_id,
+                    "task_id": task.task_id,
+                    "mode": "catch_up",
+                    "through_session": through_session,
+                    "requested_by": "replay-prerequisite",
+                })
+                future = self._futures[job_id]
+                future.result()
+                result = self.read(job_id)
+                if result is None:
+                    raise RuntimeError(f"setup job disappeared: {job_id}")
+                if result.get("status") in {"failed", "cancelled"}:
+                    raise RuntimeError(
+                        f"setup task failed: {strategy_id}/{task.task_id}"
+                    )
+                results.append(result)
+            return tuple(results)
 
     def cancel(self, job_id: str) -> bool:
         with self._lock:
