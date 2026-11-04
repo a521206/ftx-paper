@@ -215,7 +215,7 @@ orderflow owner once per completed input. The owner emits Paper execution
 proposals without authorizing them; host adapters drain and authorize those
 proposals, with replay remaining diagnostic-only. Focused live/replay prefix
 and host-ownership tests pass. This does not close the cross-repository parity,
-complete recovery, or production replay migration gates.
+or production replay migration gates.
 
 ### 9C. Complete Snapshot And Recovery
 
@@ -265,8 +265,9 @@ parallel artifact.
 
 ## Phase 10: Close Live/Replay Execution Parity
 
-**Status: In progress. The live/replay input owner is shared; execution,
-recovery, and cross-repository parity gates remain open.**
+**Status: In progress. The live/replay input owner and Paper recovery
+implementation are complete; execution and cross-repository parity gates
+remain open.**
 
 ### 10A. Accepted operational differences
 
@@ -292,6 +293,10 @@ contract requires it.
 The following backlog is ordered by dependency. Repeated references in Phases
 9C–9E, 10C, and the Completion Gate are acceptance conditions for these
 items, not separate tasks.
+
+**Next:** complete item 1, causal input parity. It is the first remaining
+dependency before execution-bearing parity and replay migration can be
+accepted.
 
 1. **Prove causal input parity.** Verify live setup publication for valid,
    missing, and unavailable artifacts, and for a source change handled by an
