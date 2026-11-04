@@ -1,7 +1,6 @@
 """Paper-owned feature provider for the Phase 3.5 publication boundary."""
 
 from __future__ import annotations
-# pyright: reportArgumentType=false
 
 from collections.abc import Mapping, Sequence
 
@@ -9,6 +8,8 @@ from ..market_observation import MarketObservation, observe_market
 from ..state_machine_types import SessionLevels
 from ..value_publication import ValuePublication
 from ..evidence_publication import AtrPublication
+from ..feature_store import CanonicalInputRow, PriorSessionLevels
+from ..timestamps import parse_nifty_label
 from .producer import EvidenceAdapter
 
 
@@ -17,11 +18,11 @@ class PaperFeatureAdapter(EvidenceAdapter):
 
     def __init__(
         self,
-        rows_by_date: Mapping[str, Sequence[Mapping[str, object]]],
+        rows_by_date: Mapping[str, Sequence[CanonicalInputRow]],
         *,
         prior_values: Mapping[str, ValuePublication] | None = None,
         atr_values: Mapping[str, AtrPublication] | None = None,
-        prior_session_levels: Mapping[str, Mapping[str, object]] | None = None,
+        prior_session_levels: Mapping[str, PriorSessionLevels] | None = None,
     ) -> None:
         self._rows = {str(date): tuple(dict(row) for row in rows) for date, rows in rows_by_date.items()}
         self._prior_values = dict(prior_values or {})
@@ -68,25 +69,23 @@ class PaperFeatureAdapter(EvidenceAdapter):
                 if first is None:
                     result = None
                 else:
+                    prior_levels = (
+                        self._prior_session_levels.get(session_date, {})
+                        if self._prior_session_levels is not None else {}
+                    )
+                    prior_low = prior_levels.get("low")
+                    prior_high = prior_levels.get("high")
                     result = SessionLevels(
                         opening_range_low=first.low,
                         opening_range_high=first.high,
                         prior_day_low=(
-                            float(self._prior_session_levels[session_date]["low"])
-                            if self._prior_session_levels is not None
-                            and session_date in self._prior_session_levels
-                            and "low" in self._prior_session_levels[session_date]
-                            else None
+                            float(prior_low) if prior_low is not None else None
                         ),
                         prior_day_high=(
-                            float(self._prior_session_levels[session_date]["high"])
-                            if self._prior_session_levels is not None
-                            and session_date in self._prior_session_levels
-                            and "high" in self._prior_session_levels[session_date]
-                            else None
+                            float(prior_high) if prior_high is not None else None
                         ),
                         opening_range_available_at=first.available_at,
-                        prior_day_available_at=f"{session_date}T09:15",
+                        prior_day_available_at=parse_nifty_label(f"{session_date}T09:15"),
                     )
             self._levels_cache[session_date] = result
         return self._levels_cache[session_date]

@@ -756,7 +756,11 @@ class ExecutionEngine:
             or state.intent.status is not IntentStatus.TRIGGERED
             or pending is None
         ):
-            raise ValueError("entry fill requires a triggered pending entry")
+            raise ValueError(
+                "entry fill requires a triggered pending entry: "
+                f"intent={getattr(state.intent, 'status', None)!r}, "
+                f"pending={pending is not None}"
+            )
         if state.position is not None:
             return state.position
         if quantity <= 0:
@@ -1953,6 +1957,16 @@ class ExecutionCoordinator:
             self.context.record_event(event)
             bar_events.append(event)
             return
+        current_state = self.engine.state_for(life.lifecycle_id)
+        current = current_state.intent
+        if (
+            current is None
+            or current.intent_id != triggered.intent_id
+            or current.status is not IntentStatus.TRIGGERED
+            or current_state.pending_entry is not pending
+        ):
+            self.engine.clear_pending_entry(life, at=causal_now)
+            return
         self.engine.fill_entry(
             life,
             price=fill_price,
@@ -2401,6 +2415,14 @@ class ExecutionCoordinator:
                     pending.session_date not in {None, str(row.get("session_date", life.session_date))}
                     or coerce_timestamp(pending.intent.expiry) <= coerce_timestamp(timestamp)
                 ):
+                    return
+                current_intent = state.intent
+                if (
+                    current_intent is None
+                    or current_intent.intent_id != pending.intent.intent_id
+                    or current_intent.status is not IntentStatus.TRIGGERED
+                ):
+                    self.engine.clear_pending_entry(life, at=timestamp)
                     return
                 self._complete_pending_entry_fill(
                     life,

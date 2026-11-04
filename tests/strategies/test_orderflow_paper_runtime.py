@@ -60,12 +60,10 @@ def test_input_stream_reports_selected_bundle_route_and_observation_counts() -> 
     assert bundle_input.input_diagnostic["observations_5m"] == 0
     assert "eligible_location_records" in bundle_input.input_diagnostic
 
-    explicit_input = provider(SimpleNamespace(
-        supporting_inputs={"orderflow_clock_input": provider.envelopes[0].input},
-    ))
+    duplicate_input = provider(SimpleNamespace(bars={MarketRole.FUTURES: bar}))
 
-    assert explicit_input.input_diagnostic["input_source"] == "bundle_orderflow_clock_input"
-    assert explicit_input.input_diagnostic["observations_1m"] == 0
+    assert duplicate_input.input_diagnostic["input_source"] == "stream_envelope"
+    assert duplicate_input.input_diagnostic["observations_1m"] == 0
 
 
 def test_input_stream_orders_rows_before_observation() -> None:
@@ -294,7 +292,7 @@ def test_orderflow_stream_reports_incomplete_five_minute_bucket_and_recovers() -
     assert nifty_label(recovered_input.five_minute.time).endswith("T09:20")
 
 
-def test_orderflow_stream_rejects_duplicate_live_bar_without_advancing() -> None:
+def test_orderflow_stream_ignores_duplicate_live_bar_without_advancing() -> None:
     instrument = Instrument("NIFTY", "NFO", "FUTURES")
     bar = MarketBar(
         instrument=instrument,
@@ -307,10 +305,76 @@ def test_orderflow_stream_rejects_duplicate_live_bar_without_advancing() -> None
     )
     stream = OrderflowInputStream.from_continuous_bars((bar,))
 
-    with pytest.raises(ValueError, match="strictly ordered"):
-        stream.append_continuous_bars((bar,))
+    stream.append_continuous_bars((bar,))
 
     assert len(stream.envelopes) == 1
+
+    earlier = MarketBar(
+        instrument=instrument,
+        timestamp=datetime(2026, 10, 1, 3, 44, tzinfo=timezone.utc),
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        volume=10,
+    )
+    with pytest.raises(ValueError, match="strictly ordered"):
+        stream.append_continuous_bars((earlier,))
+
+    assert len(stream.envelopes) == 1
+
+
+def test_orderflow_stream_deduplicates_history_and_target_overlap() -> None:
+    instrument = Instrument("NIFTY", "NFO", "FUTURES")
+    bar = MarketBar(
+        instrument=instrument,
+        timestamp=datetime(2026, 10, 1, 3, 45, tzinfo=timezone.utc),
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        volume=10,
+    )
+
+    stream = OrderflowInputStream.from_continuous_bars(
+        (bar,), feature_history_bars=(bar,),
+    )
+
+    assert len(stream.envelopes) == 1
+
+
+def test_orderflow_stream_logs_conflicting_incremental_row(caplog) -> None:
+    instrument = Instrument("NIFTY", "NFO", "FUTURES")
+    bar = MarketBar(
+        instrument=instrument,
+        timestamp=datetime(2026, 10, 1, 3, 45, tzinfo=timezone.utc),
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        volume=10,
+    )
+    conflicting = MarketBar(
+        instrument=instrument,
+        timestamp=bar.timestamp,
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=101.5,
+        volume=10,
+    )
+
+    stream = OrderflowInputStream.from_continuous_bars((bar,))
+
+    with caplog.at_level("WARNING"):
+        with pytest.raises(ValueError, match="conflicting canonical input row"):
+            stream.append_continuous_bars((conflicting,))
+
+    message = " ".join(caplog.messages)
+    assert "identity=('2026-10-01', '2026-10-01T09:15')" in message
+    assert "previous_origin=startup_seed" in message
+    assert "incoming_origin=incremental_append" in message
+    assert "'close': (100.5, 101.5)" in message
 
 
 def test_live_ingress_consumes_already_appended_bar_without_reappending() -> None:

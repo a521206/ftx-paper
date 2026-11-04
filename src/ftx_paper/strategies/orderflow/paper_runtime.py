@@ -8,6 +8,7 @@ from typing import Any
 from ftx_paper.domain.decision_context import DecisionContext
 from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.execution.service import ExecutionService
+from ftx_paper.contracts import MarketBar
 
 from .boundary.orderflow import OrderflowStrategy
 from .boundary.orderflow_config import OrderflowConfig
@@ -19,7 +20,8 @@ from .evidence_publication import AtrPublication, publish_phase4a_evidence
 from .opportunity_coordinator import LifecycleFormation
 from .state_machine_types import LocationRegistry
 from .transition import OrderflowTransitionOwner
-from .providers import OrderflowInputStream, CanonicalFormationProvider
+from .feature_store import CanonicalInputRow
+from .providers import OrderflowInputStream, CanonicalFormationProvider, PriorSessionLevels
 from .state_machine_reporting import build_replay_payload
 from .vwap_location import VwapMeasurement
 from .value_publication import ValuePublication
@@ -81,9 +83,9 @@ class PaperOrderflowRuntime:
     @classmethod
     def from_rows(
         cls,
-        rows: Sequence[Mapping[str, Any]],
+        rows: Sequence[CanonicalInputRow],
         *,
-        rows_by_date: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+        rows_by_date: Mapping[str, Sequence[CanonicalInputRow]] | None = None,
         formations: Iterable[LifecycleFormation] = (),
         config: OrderflowConfig | None = None,
         execution_adapter: OrderflowExecutionAdapter | None = None,
@@ -116,12 +118,12 @@ class PaperOrderflowRuntime:
 
     def bind_replay_bars(
         self,
-        bars: Sequence[Any],
+        bars: Sequence[MarketBar],
         *,
-        feature_history_bars: Sequence[Any] = (),
-        prior_values: Mapping[str, Any] | None = None,
-        atr_values: Mapping[str, Any] | None = None,
-        prior_session_levels: Mapping[str, Mapping[str, Any]] | None = None,
+        feature_history_bars: Sequence[MarketBar] = (),
+        prior_values: Mapping[str, ValuePublication] | None = None,
+        atr_values: Mapping[str, AtrPublication] | None = None,
+        prior_session_levels: Mapping[str, PriorSessionLevels] | None = None,
     ) -> None:
         """Install target-session input with validated setup publications."""
         self.strategy.bind_input_provider(
@@ -134,11 +136,11 @@ class PaperOrderflowRuntime:
             )
         )
 
-    def bind_live_bars(self, bars: Sequence[Any]) -> None:
+    def bind_live_bars(self, bars: Sequence[MarketBar]) -> None:
         """Seed the shared provider with startup historical bars."""
         self.strategy.bind_input_provider(OrderflowInputStream.from_continuous_bars(bars))
 
-    def append_feature_bar(self, bar: Any) -> None:
+    def append_feature_bar(self, bar: MarketBar) -> None:
         """Append one selected completed live bar to the input stream."""
         self.strategy.append_feature_bar(bar)
 
@@ -148,7 +150,7 @@ class PaperOrderflowRuntime:
         *,
         atr: AtrPublication | None = None,
         prior_value: ValuePublication | None = None,
-        prior_session_levels: Mapping[str, Any] | None = None,
+        prior_session_levels: PriorSessionLevels | None = None,
     ) -> None:
         """Publish validated setup artifacts to the same live/replay input stream."""
         self.strategy.publish_setup(

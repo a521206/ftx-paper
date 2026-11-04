@@ -6,12 +6,13 @@ repair gaps, or derive facts from terminal transition state.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Any, cast
+from typing import cast
 
-from ftx_paper.contracts import MarketRole
+from ftx_paper.contracts import MarketBar, MarketRole
 
 from .coordinator import OrderflowClockInput
 from .evidence.features_adapter import PaperFeatureAdapter
@@ -22,9 +23,12 @@ from .location_observation import causal_children, location_observation
 from .timestamps import coerce_timestamp, nifty_label, parse_nifty_label, session_minute
 from .vwap_location import CausalVwapAccumulator, VwapMeasurement
 from .opportunity_coordinator import LifecycleFormation
-from .feature_store import FeatureStore
+from .feature_store import CanonicalInputRow, FeatureStore, PriorSessionLevels
 from .state_machine_types import LocationRegistry, SessionLevels
 from .value_publication import ValuePublication
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,32 +52,35 @@ class OrderflowInputStream:
 
     def __init__(
         self,
-        rows: Sequence[Mapping[str, Any]] = (),
+        rows: Sequence[CanonicalInputRow] = (),
         *,
-        rows_by_date: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+        rows_by_date: Mapping[str, Sequence[CanonicalInputRow]] | None = None,
         feature_store: FeatureStore | None = None,
-        prior_values: Mapping[str, Any] | None = None,
-        atr_values: Mapping[str, Any] | None = None,
-        prior_session_levels: Mapping[str, Mapping[str, Any]] | None = None,
+        prior_values: Mapping[str, ValuePublication] | None = None,
+        atr_values: Mapping[str, AtrPublication] | None = None,
+        prior_session_levels: Mapping[str, PriorSessionLevels] | None = None,
     ) -> None:
-        dates = dict(rows_by_date or {})
-        if rows and not dates:
-            dates[str(rows[0]["session_date"])] = rows
+        row_groups = tuple(rows_by_date.values()) if rows_by_date else ()
+        if rows:
+            row_groups = (*row_groups, rows)
+        dates = self._merge_rows_by_date(row_groups)
         self._feature_store = feature_store or FeatureStore(dates)
         self._prior_values = dict(prior_values or {})
         self._atr_values = None if atr_values is None else dict(atr_values)
         self._prior_session_levels = None if prior_session_levels is None else dict(prior_session_levels)
-        selected_rows = tuple(dict(row) for row in rows)
+        selected_rows = tuple(cast(CanonicalInputRow, dict(row)) for row in rows)
         if not selected_rows and dates:
             target = max(str(key) for key in dates)
             if target not in dates:
                 raise ValueError(f"target orderflow session is absent: {target}")
             selected_rows = tuple(self._feature_store.rows_by_date[target])
         self._by_identity: dict[str, CanonicalInputEnvelope] = {}
+        self._source_rows: dict[tuple[str, str], CanonicalInputRow] = {}
+        self._source_row_origins: dict[tuple[str, str], str] = {}
         self._session_date: str | None = None
         self._prior_session: str | None = None
         self._last_row_timestamp: datetime | None = None
-        self._five_minute_rows: list[dict[str, Any]] = []
+        self._five_minute_rows: list[CanonicalInputRow] = []
         self._five_minute_start: int | None = None
         self._aggregates: dict[str, list[Aggregate]] = {"1m": [], "5m": []}
         self._vwap_accumulators: dict[str, CausalVwapAccumulator] = {}
@@ -91,7 +98,7 @@ class OrderflowInputStream:
             prior_session_levels=self._prior_session_levels,
         )
         for row in selected_rows:
-            self._append_row(row)
+            self._append_row(row, origin="startup_seed")
 
     def publish_setup(
         self,
@@ -99,7 +106,7 @@ class OrderflowInputStream:
         *,
         atr: AtrPublication | None = None,
         prior_value: ValuePublication | None = None,
-        prior_session_levels: Mapping[str, Any] | None = None,
+        prior_session_levels: PriorSessionLevels | None = None,
     ) -> None:
         """Update explicit setup publications; they take effect at their availability."""
         if atr is not None:
@@ -111,7 +118,9 @@ class OrderflowInputStream:
         if prior_session_levels is not None:
             if self._prior_session_levels is None:
                 self._prior_session_levels = {}
-            self._prior_session_levels[session_date] = dict(prior_session_levels)
+            self._prior_session_levels[session_date] = cast(
+                PriorSessionLevels, dict(prior_session_levels),
+            )
             if self._session_date == session_date:
                 self._session_levels = self._build_session_levels(session_date)
         self._adapter = PaperFeatureAdapter(
@@ -152,12 +161,62 @@ class OrderflowInputStream:
             prior_day_available_at=parse_nifty_label(f"{session_date}T09:15"),
         )
 
-    def _append_row(self, row: Mapping[str, Any]) -> CanonicalInputEnvelope | None:
-        source = dict(row)
+    @staticmethod
+    def _merge_rows_by_date(
+        groups: Iterable[Sequence[CanonicalInputRow]],
+    ) -> dict[str, list[CanonicalInputRow]]:
+        merged: dict[str, dict[str, CanonicalInputRow]] = {}
+        for rows in groups:
+            for row in rows:
+                source = cast(CanonicalInputRow, dict(row))
+                date = str(source["session_date"])
+                time = str(source["time"])
+                bucket = merged.setdefault(date, {})
+                previous = bucket.get(time)
+                if previous is not None and previous != source:
+                    raise ValueError(f"conflicting canonical input row: {date} {time}")
+                bucket[time] = source
+        return {
+            date: [bucket[time] for time in sorted(bucket)]
+            for date, bucket in merged.items()
+        }
+
+    def _append_row(
+        self,
+        row: CanonicalInputRow,
+        *,
+        origin: str = "incremental_append",
+    ) -> CanonicalInputEnvelope | None:
+        source = cast(CanonicalInputRow, dict(row))
         session_date = str(source["session_date"])
+        row_identity = (session_date, str(source["time"]))
+        previous = self._source_rows.get(row_identity)
+        if previous is not None:
+            if previous != source:
+                differing_fields = {
+                    key: (previous.get(key), source.get(key))
+                    for key in sorted(set(previous) | set(source))
+                    if previous.get(key) != source.get(key)
+                }
+                logger.warning(
+                    "conflicting orderflow canonical input row: identity=%s "
+                    "previous_origin=%s incoming_origin=%s differing_fields=%s "
+                    "previous=%r incoming=%r",
+                    row_identity,
+                    self._source_row_origins.get(row_identity, "unknown"),
+                    origin,
+                    differing_fields,
+                    previous,
+                    source,
+                )
+                raise ValueError(f"conflicting canonical input row: {session_date} {source['time']}")
+            return self._by_identity.get(f"aggregate:1m:{source['time']}")
         timestamp = coerce_timestamp(session_minute(session_date, source["time"]))
         if self._last_row_timestamp is not None and timestamp <= self._last_row_timestamp:
             raise ValueError("canonical input rows must be strictly ordered")
+        self._source_rows[row_identity] = source
+        self._source_row_origins[row_identity] = origin
+        self._feature_store.append((source,))
         self._last_row_timestamp = timestamp
         if session_date != self._session_date:
             if self._session_date is not None:
@@ -193,7 +252,7 @@ class OrderflowInputStream:
         hour, minute = (int(part) for part in local_time.split(":"))
         offset = hour * 60 + minute - (9 * 60 + 15)
         five_minute_start = (9 * 60 + 15) + (offset // 5) * 5
-        five_minute_gap: dict[str, Any] | None = None
+        five_minute_gap: dict[str, object] | None = None
         if five_minute_start != self._five_minute_start:
             if self._five_minute_rows and len(self._five_minute_rows) < 5:
                 assert self._five_minute_start is not None
@@ -417,12 +476,12 @@ class OrderflowInputStream:
     @classmethod
     def from_rows(
         cls,
-        rows: Sequence[Mapping[str, Any]],
+        rows: Sequence[CanonicalInputRow],
         *,
-        rows_by_date: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
-        prior_values: Mapping[str, Any] | None = None,
-        atr_values: Mapping[str, Any] | None = None,
-        prior_session_levels: Mapping[str, Mapping[str, Any]] | None = None,
+        rows_by_date: Mapping[str, Sequence[CanonicalInputRow]] | None = None,
+        prior_values: Mapping[str, ValuePublication] | None = None,
+        atr_values: Mapping[str, AtrPublication] | None = None,
+        prior_session_levels: Mapping[str, PriorSessionLevels] | None = None,
     ) -> "OrderflowInputStream":
         return cls(
             rows, rows_by_date=rows_by_date, prior_values=prior_values,
@@ -432,20 +491,18 @@ class OrderflowInputStream:
     @classmethod
     def from_continuous_bars(
         cls,
-        bars: Sequence[Any],
+        bars: Sequence[MarketBar],
         *,
-        feature_history_bars: Sequence[Any] = (),
-        prior_values: Mapping[str, Any] | None = None,
-        atr_values: Mapping[str, Any] | None = None,
-        prior_session_levels: Mapping[str, Mapping[str, Any]] | None = None,
+        feature_history_bars: Sequence[MarketBar] = (),
+        prior_values: Mapping[str, ValuePublication] | None = None,
+        atr_values: Mapping[str, AtrPublication] | None = None,
+        prior_session_levels: Mapping[str, PriorSessionLevels] | None = None,
     ) -> "OrderflowInputStream":
         """Create a stream from selected continuous futures bars chronologically."""
         rows = cls._rows_from_continuous_bars(bars)
-        rows_by_date: dict[str, list[dict[str, Any]]] = {}
-        for row in (*cls._rows_from_continuous_bars(feature_history_bars), *rows):
-            rows_by_date.setdefault(str(row["session_date"]), []).append(row)
-        for session_rows in rows_by_date.values():
-            session_rows.sort(key=lambda row: str(row["time"]))
+        rows_by_date = cls._merge_rows_by_date(
+            (cls._rows_from_continuous_bars(feature_history_bars), rows),
+        )
         target = max(rows_by_date, default=None)
         return cls(
             rows_by_date.get(target, ()) if target is not None else (),
@@ -455,17 +512,16 @@ class OrderflowInputStream:
             prior_session_levels=prior_session_levels,
         )
 
-    def append_continuous_bars(self, bars: Sequence[Any]) -> None:
+    def append_continuous_bars(self, bars: Sequence[MarketBar]) -> None:
         rows = self._rows_from_continuous_bars(bars)
         for row in rows:
-            self._append_row(row)
-            self._feature_store.append((row,))
+            self._append_row(row, origin="incremental_append")
 
     @staticmethod
-    def _rows_from_continuous_bars(bars: Sequence[Any]) -> list[dict[str, Any]]:
-        rows = []
+    def _rows_from_continuous_bars(bars: Sequence[MarketBar]) -> list[CanonicalInputRow]:
+        rows: list[CanonicalInputRow] = []
         for bar in bars:
-            if getattr(bar.instrument, "instrument_type", "") not in {"FUT", "FUTURES"}:
+            if bar.instrument.instrument_type not in {"FUT", "FUTURES"}:
                 continue
             if bar.instrument.symbol != "NIFTY" or bar.instrument.expiry is not None:
                 raise ValueError("orderflow input requires a selected continuous futures bar")
@@ -479,32 +535,7 @@ class OrderflowInputStream:
         return rows
 
     def from_bundle(self, bundle: object) -> CanonicalInputEnvelope:
-        if isinstance(bundle, Mapping):
-            supporting = bundle.get("supporting_inputs")
-            if isinstance(supporting, Mapping):
-                supplied = supporting.get("orderflow_clock_input")
-                if isinstance(supplied, OrderflowClockInput):
-                    return CanonicalInputEnvelope(supplied, (), (), "bundle_orderflow_clock_input")
-                envelope = supporting.get("canonical_input")
-                if isinstance(envelope, CanonicalInputEnvelope):
-                    return replace(envelope, input_source="bundle_canonical_input")
-            supplied = bundle.get("orderflow_clock_input")
-            if isinstance(supplied, OrderflowClockInput):
-                return CanonicalInputEnvelope(supplied, (), (), "bundle_orderflow_clock_input")
-            envelope = bundle.get("canonical_input")
-            if isinstance(envelope, CanonicalInputEnvelope):
-                return replace(envelope, input_source="bundle_canonical_input")
-        if hasattr(bundle, "values"):
-            return self.from_evidence(bundle)
-        supporting = getattr(bundle, "supporting_inputs", None)
-        if isinstance(supporting, Mapping):
-            supplied = supporting.get("orderflow_clock_input")
-            if isinstance(supplied, OrderflowClockInput):
-                return CanonicalInputEnvelope(supplied, (), (), "bundle_orderflow_clock_input")
-            envelope = supporting.get("canonical_input")
-            if isinstance(envelope, CanonicalInputEnvelope):
-                return replace(envelope, input_source="bundle_canonical_input")
-        bars = getattr(bundle, "bars", {})
+        bars = bundle.get("bars", {}) if isinstance(bundle, Mapping) else getattr(bundle, "bars", {})
         bar = bars.get(MarketRole.FUTURES) if isinstance(bars, Mapping) else None
         timestamp = getattr(bar, "timestamp", None)
         if bar is not None and timestamp is not None:
@@ -516,7 +547,7 @@ class OrderflowInputStream:
             return replace(self._by_identity[identity], input_source=source)
         raise ValueError("bundle has no canonical orderflow clock input")
 
-    def _append_bundle_ingress(self, bar: object, identity: str) -> str:
+    def _append_bundle_ingress(self, bar: MarketBar, identity: str) -> str:
         """Observe a bundle bar that no feature-append callback published.
 
         Live hosts append completed bars before observation; bounded replay has
@@ -526,20 +557,6 @@ class OrderflowInputStream:
             return "stream_envelope"
         self.append_continuous_bars((bar,))
         return "stream_appended_bar"
-
-    def from_evidence(self, evidence: object) -> CanonicalInputEnvelope:
-        """Consume an explicit completed-bar evidence envelope from live ingress."""
-        values = getattr(evidence, "values", None)
-        if not isinstance(values, Mapping) and isinstance(evidence, Mapping):
-            values = evidence.get("values")
-        if isinstance(values, Mapping):
-            supplied = values.get("canonical_input", values.get("orderflow_clock_input"))
-            if isinstance(supplied, CanonicalInputEnvelope):
-                return replace(supplied, input_source="evidence_canonical_input")
-            if isinstance(supplied, OrderflowClockInput):
-                return CanonicalInputEnvelope(supplied, (), (), "evidence_orderflow_clock_input")
-        raise ValueError("evidence has no explicit canonical orderflow input")
-
 
 class CanonicalFormationProvider:
     """Expose canonical owner formations once, in causal order."""
