@@ -4,9 +4,13 @@ from ftx_paper.strategies.orderflow.location_observation import (
     causal_children,
     location_observation,
 )
+from ftx_paper.strategies.orderflow.coordinator import (
+    OrderflowClockInput,
+    OrderflowCoordinator,
+)
 from ftx_paper.strategies.orderflow.location_geometry import LocationBand
 from ftx_paper.strategies.orderflow.orderflow_common import Aggregate
-from ftx_paper.strategies.orderflow.state_machine_types import LocationRecord
+from ftx_paper.strategies.orderflow.state_machine_types import LocationRecord, LocationRegistry
 from ftx_paper.strategies.orderflow.timestamps import nifty_label
 
 
@@ -63,3 +67,26 @@ def test_location_observation_uses_canonical_band_intersection() -> None:
     assert observation.observation_id == (
         f"{nifty_label(aggregate.time)}:1m:OR_HIGH:2026-10-01:1"
     )
+
+
+def test_coordinator_advances_five_minute_clock_without_observations() -> None:
+    one_minute = _aggregate(0)
+    five_minute = _aggregate(0, timeframe="5m")
+    coordinator = OrderflowCoordinator(LocationRegistry("test"))
+
+    class Detector:
+        def __init__(self) -> None:
+            self.called = False
+
+        def observe_1m(self, **_: object) -> list[object]:
+            return []
+
+        def observe(self, **_: object) -> list[object]:
+            self.called = True
+            return []
+
+    detector = Detector()
+    coordinator.detector = detector  # type: ignore[assignment]
+    coordinator.advance(OrderflowClockInput(one_minute, five_minute=five_minute))
+
+    assert detector.called is True

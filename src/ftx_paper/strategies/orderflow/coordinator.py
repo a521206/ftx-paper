@@ -178,15 +178,14 @@ class OrderflowCoordinator:
                     "available_at": five.available_at,
                     "reason": "incomplete_or_misaligned_1m_references",
                 })
-            if current_observations_5m:
-                transitions += tuple(self.detector.observe(
-                    current=five,
-                    available5=list(self._five_minute),
-                    available1=list(self._one_minute),
-                    atr=atr,
-                    observations5=current_observations_5m,
-                    observations1=item.observations_1m,
-                ))
+            transitions += tuple(self.detector.observe(
+                current=five,
+                available5=list(self._five_minute),
+                available1=list(self._one_minute),
+                atr=atr,
+                observations5=current_observations_5m,
+                observations1=item.observations_1m,
+            ))
         for transition in transitions:
             events.extend(self._transition_events(transition, one))
         return OrderflowAdvance(tuple(events))
