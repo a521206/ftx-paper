@@ -82,6 +82,18 @@ class PaperEngine:
         if callable(handler):
             handler(service, diagnostic=diagnostic)
 
+    def drain_execution_proposals(self) -> tuple[object, ...]:
+        handler = getattr(self.strategy, "drain_execution_proposals", None)
+        result = handler() if callable(handler) else ()
+        return tuple(result) if isinstance(result, (tuple, list)) else ()
+
+    def authorize_execution_proposals(
+        self, proposals: tuple[object, ...], *, timestamp: str,
+    ) -> None:
+        handler = getattr(self.strategy, "authorize_execution_proposals", None)
+        if callable(handler):
+            handler(proposals, timestamp=timestamp)
+
     def bind_feature_bars(self, bars: tuple[MarketBar, ...] | list[MarketBar]) -> None:
         handler = getattr(self.strategy, "bind_live_bars", None)
         if callable(handler):
@@ -220,6 +232,38 @@ class MultiStrategyEngine:
                     handler(service, diagnostic=diagnostic)
                 except Exception as exc:
                     self._disable_strategy(item, exc, phase="execution_binding")
+
+    def drain_execution_proposals(self) -> tuple[object, ...]:
+        proposals: list[object] = []
+        for item in self.instances:
+            if not item.enabled:
+                continue
+            handler = getattr(item.strategy, "drain_execution_proposals", None)
+            if callable(handler):
+                result = handler()
+                if isinstance(result, (tuple, list)):
+                    proposals.extend(result)
+        return tuple(proposals)
+
+    def authorize_execution_proposals(
+        self, proposals: tuple[object, ...], *, timestamp: str,
+    ) -> None:
+        if not proposals:
+            return
+        remaining = list(proposals)
+        for item in self.instances:
+            if not remaining or not item.enabled:
+                continue
+            handler = getattr(item.strategy, "authorize_execution_proposals", None)
+            if not callable(handler):
+                continue
+            count = len(remaining)
+            handler(tuple(remaining), timestamp=timestamp)
+            remaining.clear()
+            if count:
+                break
+        if remaining:
+            raise RuntimeError("orderflow execution proposals have no host adapter")
 
     def reset(self) -> None:
         for item in self.instances:

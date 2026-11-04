@@ -744,6 +744,8 @@ class RuntimeSession:
 
         def form_opportunity(_turn) -> Mapping[str, Any]:
             result_holder.append(evaluate_turn(active_engine, DecisionTurn(bundle, source, context)))
+            proposals = active_engine.drain_execution_proposals()
+            active_engine.authorize_execution_proposals(proposals, timestamp=timestamp)
             return {"proposal_count": len(result_holder[0].orders)}
 
         def arbitrate(_turn) -> Mapping[str, Any]:

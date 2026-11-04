@@ -9,11 +9,13 @@ from ftx_paper.runtime.session import RuntimeSession
 from ftx_paper.runtime import RuntimeStore
 from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.strategies.orderflow import PaperOrderflowRuntime
+from ftx_paper.strategies.orderflow.execution_adapter import PaperOrderProposal
 from ftx_paper.strategies.orderflow.evidence_publication import AtrPublication
 from ftx_paper.strategies.orderflow.market_observation import observe_market
 from ftx_paper.strategies.orderflow.vwap_location import causal_vwap_prefix
 from ftx_paper.strategies.orderflow.providers import OrderflowInputStream
 from ftx_paper.strategies.orderflow.timestamps import nifty_label, parse_nifty_label
+from ftx_paper.strategies.orderflow.transition import OrderflowEngine
 
 
 def test_bounded_replay_uses_fresh_owner_and_is_idempotent() -> None:
@@ -36,6 +38,71 @@ def test_bounded_replay_uses_fresh_owner_and_is_idempotent() -> None:
     assert first.engine.parity_streams == retry.engine.parity_streams
     assert first.engine.clock == retry.engine.clock
     assert PaperOrderflowRuntime().replay((bundle,), cancelled=lambda: True) == ()
+
+
+def test_live_and_replay_advance_one_shared_owner_per_completed_input(monkeypatch) -> None:
+    instrument = Instrument("NIFTY", "NFO", "FUTURES")
+    bars = tuple(
+        MarketBar(
+            instrument=instrument,
+            timestamp=datetime(2026, 10, 1, 4, minute, tzinfo=timezone.utc),
+            open=100.0 + minute,
+            high=101.0 + minute,
+            low=99.0 + minute,
+            close=100.5 + minute,
+            volume=10,
+        )
+        for minute in (0, 1)
+    )
+    bundles = tuple(SimpleNamespace(bars={MarketRole.FUTURES: bar}) for bar in bars)
+    live = PaperOrderflowRuntime()
+    replay = PaperOrderflowRuntime()
+    live_engine = PaperEngine(live.strategy)
+    replay_engine = PaperEngine(replay.strategy)
+    live_advances = 0
+    replay_advances = 0
+    original_advance = OrderflowEngine.advance
+
+    def count_advance(owner, *args, **kwargs):
+        nonlocal live_advances, replay_advances
+        if owner is live.engine:
+            live_advances += 1
+        elif owner is replay.engine:
+            replay_advances += 1
+        return original_advance(owner, *args, **kwargs)
+
+    monkeypatch.setattr(OrderflowEngine, "advance", count_advance)
+    for bundle in bundles:
+        live_engine.on_bundle(bundle)
+        live_engine.authorize_execution_proposals(
+            live_engine.drain_execution_proposals(), timestamp=nifty_label(bundle.bars[MarketRole.FUTURES].timestamp),
+        )
+        replay_engine.on_bundle(bundle)
+        replay_engine.authorize_execution_proposals(
+            replay_engine.drain_execution_proposals(), timestamp=nifty_label(bundle.bars[MarketRole.FUTURES].timestamp),
+        )
+
+    assert live_advances == len(bundles)
+    assert replay_advances == len(bundles)
+    assert live.engine.parity_streams == replay.engine.parity_streams
+
+
+def test_execution_proposals_are_drained_by_host_not_transition_owner() -> None:
+    runtime = PaperOrderflowRuntime()
+    proposal = PaperOrderProposal(
+        None, "life-1", "intent-1", 1.0,
+        "2026-10-01T09:15:00+05:30", "2026-10-01T09:16:00+05:30", True,
+    )
+    runtime.engine._host_proposals = (proposal,)
+    authorized: list[object] = []
+    runtime.execution_adapter.authorize = lambda value, *, timestamp: authorized.append(value)
+
+    drained = runtime.strategy.drain_execution_proposals()
+    runtime.strategy.authorize_execution_proposals(drained, timestamp="2026-10-01T09:15:00+05:30")
+
+    assert drained == (proposal,)
+    assert runtime.strategy.drain_execution_proposals() == ()
+    assert authorized == [proposal]
 
 
 def test_snapshot_restore_connects_runtime_execution_adapter() -> None:

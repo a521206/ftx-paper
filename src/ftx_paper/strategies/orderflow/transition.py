@@ -682,6 +682,7 @@ class TransitionAdvance:
 
     observation: OrderflowAdvance
     execution: Mapping[str, tuple[dict[str, Any], ...]]
+    host_proposals: tuple[Any, ...] = ()
 
 
 @dataclass(slots=True)
@@ -699,6 +700,7 @@ class OrderflowEngine:
     _clock: datetime | None = field(default=None, init=False, repr=False)
     _published_intents: set[str] = field(default_factory=set, init=False, repr=False)
     _execution_notifications: set[str] = field(default_factory=set, init=False, repr=False)
+    _host_proposals: tuple[Any, ...] = field(default=(), init=False, repr=False)
 
     @staticmethod
     def _intent_allows_requalification(state: Any) -> bool:
@@ -776,6 +778,12 @@ class OrderflowEngine:
     @property
     def parity_streams(self) -> dict[str, list[dict[str, Any]]]:
         return self.context.parity_snapshot()
+
+    def drain_host_proposals(self) -> tuple[Any, ...]:
+        """Return host proposals emitted by the most recent transition."""
+        proposals = self._host_proposals
+        self._host_proposals = ()
+        return proposals
 
     def snapshot(self) -> dict[str, Any]:
         """Return the complete canonical mutable state and producer prefix."""
@@ -1094,6 +1102,7 @@ class OrderflowEngine:
         current bar is allowed to create a new entry proposal.  This mirrors
         the canonical replay boundary and keeps live/replay on one path.
         """
+        self._host_proposals = ()
         available_at = coerce_timestamp(item.one_minute.available_at)
         if self._clock is not None and available_at < self._clock:
             raise ValueError("orderflow transition clock cannot move backwards")
@@ -1188,6 +1197,13 @@ class OrderflowEngine:
         self.opportunity_owner.handle_opening_interaction(
             row, timestamp, next_time, bar_events,
         )
+        pre_execution_events = self._settle_pending_execution(
+            index=0,
+            timestamp=timestamp,
+            next_time=next_time,
+            row=row,
+        )
+        self.context.pending_bar_events.extend(pre_execution_events)
         self._record_phase4_context_location(item)
         generated_formations = self.opportunity_owner.formations_for(next_time)
         accepted_formations = self._accept_formations(
@@ -1212,7 +1228,9 @@ class OrderflowEngine:
             row=row,
             available5=available5,
             instrument=instrument,
+            pre_execution_done=True,
         )
+        host_proposals = self._host_proposals
         self._clock = available_at
         return TransitionAdvance(
             observation=observation,
@@ -1220,6 +1238,7 @@ class OrderflowEngine:
                 name: tuple(values)
                 for name, values in self.context.parity_snapshot().items()
             },
+            host_proposals=host_proposals,
         )
 
     def _record_phase4_context_location(self, item: OrderflowInput) -> None:
@@ -1653,6 +1672,7 @@ class OrderflowEngine:
         row: Mapping[str, Any],
         available5: Sequence[Any] = (),
         instrument: Any | None = None,
+        pre_execution_done: bool = False,
     ) -> Mapping[str, tuple[dict[str, Any], ...]]:
         """Run the canonical execution clock for one completed 1m bar.
 
@@ -1670,18 +1690,14 @@ class OrderflowEngine:
         self.context.pending_bar_events.clear()
         self.context.execution_proposals.clear()
         row_dict = dict(row)
-        for life in tuple(self.context.opportunities.values()):
-            if life.active or self.context.position_is_open(life):
-                self.execution_owner.handle_execution(
-                    index,
-                    timestamp,
-                    next_time,
-                    row_dict,
-                    [],
-                    events,
-                    life,
-                    evaluate_entries=False,
-                )
+        if not pre_execution_done:
+            self._settle_pending_execution(
+                index=index,
+                timestamp=timestamp,
+                next_time=next_time,
+                row=row_dict,
+                events=events,
+            )
         managed: list[Any] = list(formations)
         formation_ids = {
             item.lifecycle.lifecycle_id
@@ -1764,6 +1780,31 @@ class OrderflowEngine:
             for name, values in self.context.parity_snapshot().items()
         }
 
+    def _settle_pending_execution(
+        self,
+        *,
+        index: int,
+        timestamp: str,
+        next_time: str,
+        row: Mapping[str, Any],
+        events: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Settle existing execution state before phase4 publication."""
+        emitted = events if events is not None else []
+        for life in tuple(self.context.opportunities.values()):
+            if life.active or self.context.position_is_open(life):
+                self.execution_owner.handle_execution(
+                    index,
+                    timestamp,
+                    next_time,
+                    dict(row),
+                    [],
+                    emitted,
+                    life,
+                    evaluate_entries=False,
+                )
+        return emitted
+
     def _publish_execution_proposals(
         self,
         formations: Sequence[LifecycleFormation],
@@ -1805,7 +1846,7 @@ class OrderflowEngine:
                 observed_at=timestamp,
                 available_at=next_time,
             )
-            adapter.authorize(proposal, timestamp=next_time)
+            self._host_proposals = (*self._host_proposals, proposal)
             self._published_intents.add(intent.intent_id)
 
     def decision_context_for_life(self, life: Any, as_of: str) -> Any | None:

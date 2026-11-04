@@ -1138,6 +1138,10 @@ class ReplayWorker:
                 continue
             bundles_seen += 1
             result = engine.on_bundle(bundle)
+            proposals = engine.drain_execution_proposals()
+            engine.authorize_execution_proposals(
+                proposals, timestamp=nifty_label(bundle.bars[MarketRole.FUTURES].timestamp),
+            )
             events.extend(
                 {"event_type": event.get("event_type", "ORDERFLOW_FACT"), **event}
                 for event in result.events

@@ -189,6 +189,9 @@ production parity or completion claim is allowed until Phase 8 is accepted.
 
 ### 9B. Define The Strategy Owner And Host Boundaries
 
+**Status: Complete for the implementation scope; production parity acceptance
+remains governed by Phase 8 and Phase 10.**
+
 - use one strategy owner for each completed input to advance source observation,
   context/location, interactions/responses, opportunity lifecycle, intent and
   admission, triggers, and canonical execution/settlement state; emit ordered,
@@ -206,6 +209,13 @@ production parity or completion claim is allowed until Phase 8 is accepted.
 - remove obsolete compatibility shims (e.g., the unused `state_machine.py`
   `ReplayState` alias) and confirm the `_record_phase4_*` parity-fact recorders
   are single-pass within the shared owner, not a second Phase 4 owner.
+
+The live `RuntimeSession` and bounded `ReplayWorker` now advance the same
+orderflow owner once per completed input. The owner emits Paper execution
+proposals without authorizing them; host adapters drain and authorize those
+proposals, with replay remaining diagnostic-only. Focused live/replay prefix
+and host-ownership tests pass. This does not close the cross-repository parity,
+complete recovery, or production replay migration gates.
 
 ### 9C. Complete Snapshot And Recovery
 
@@ -280,7 +290,8 @@ items, not separate tasks.
    Reconcile availability/decision timestamps and the supporting-bar deadline;
    any accepted input variance must be documented and shown not to alter
    decisions.
-2. **Complete the shared strategy owner and host boundary.** Route every live
+2. **Complete the shared strategy owner and host boundary.** **Implemented for
+   the current Paper boundary; parity acceptance remains open.** Route every live
    and replay input through the same strategy transition/execution owner. Keep
    Paper execution, account mutation, persistence, and artifact construction in
    host adapters; remove duplicate production orchestration only after the

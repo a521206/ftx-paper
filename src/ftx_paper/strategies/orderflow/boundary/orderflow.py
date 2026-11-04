@@ -11,7 +11,10 @@ from ftx_paper.strategies.shared.protocol import StrategyDecision, StrategyMetad
 from ftx_paper.contracts import MarketBar, MarketRole
 from ftx_paper.market.bundles import DecisionBundle
 from ftx_paper.strategies.orderflow.coordinator import OrderflowInput, OrderflowCoordinator
-from ftx_paper.strategies.orderflow.execution_adapter import OrderflowExecutionAdapter
+from ftx_paper.strategies.orderflow.execution_adapter import (
+    OrderflowExecutionAdapter,
+    PaperOrderProposal,
+)
 from ftx_paper.strategies.orderflow.execution import ExecutionCoordinator
 from ftx_paper.strategies.orderflow.state_machine_types import LocationRegistry
 from ftx_paper.strategies.orderflow.transition import OrderflowEngine
@@ -116,6 +119,24 @@ class OrderflowStrategy:
         self._engine.on_execution_event(event)
         if self._execution_adapter is not None:
             self._execution_adapter.on_execution_event(event)
+
+    def drain_execution_proposals(self) -> tuple[object, ...]:
+        """Transfer owner proposals to the runtime host for authorization."""
+        return self._engine.drain_host_proposals()
+
+    def authorize_execution_proposals(
+        self, proposals: Sequence[object], *, timestamp: str,
+    ) -> None:
+        if self._execution_adapter is None:
+            if proposals:
+                raise RuntimeError("orderflow execution adapter is required for proposals")
+            return
+        for proposal in proposals:
+            if not isinstance(proposal, PaperOrderProposal):
+                raise TypeError("orderflow host received an invalid execution proposal")
+            self._execution_adapter.authorize(
+                proposal, timestamp=proposal.available_at or timestamp,
+            )
 
     def bind_execution_service(self, service: ExecutionService, *, diagnostic: bool = False) -> None:
         """Attach the existing Paper execution owner without adding policy."""
