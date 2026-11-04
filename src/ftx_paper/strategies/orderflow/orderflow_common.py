@@ -14,6 +14,21 @@ SESSION_START = 9 * 60 + 15
 parse_timestamp = parse_utc
 serialize_timestamp = serialize_utc
 
+# Canonical market-state axis (NiftyZoning replay_common). Market regimes are
+# LATCHED: position-management emits the next regime and every later context
+# publication reuses the value until another management event replaces it.
+BALANCE = "BALANCE"
+LIQUIDITY_PROBE = "LIQUIDITY_PROBE"
+PROBE_ACCEPTED = "PROBE_ACCEPTED"
+PROBE_FAILED = "PROBE_FAILED"
+DISPLACEMENT = "DISPLACEMENT"
+CONTINUATION = "CONTINUATION"
+EXHAUSTION_CANDIDATE = "EXHAUSTION_CANDIDATE"
+REJECTION_CANDIDATE = "REJECTION_CANDIDATE"
+EXHAUSTION_RISK = "EXHAUSTION_RISK"
+RECOVERY = "RECOVERY"
+REVERSAL_CONFIRMED = "REVERSAL_CONFIRMED"
+
 
 def canonical_timestamp(value: str | datetime) -> datetime:
     """Normalize a causal value, accepting only explicit UTC or ingress labels."""

@@ -47,12 +47,11 @@ from .state_machine_types import (
     ORDERFLOW_TRAIL_ACTIVATE_BP,
     ORDERFLOW_TRAIL_BP,
 )
-from .orderflow_common import build_aggregate_result
+from .orderflow_common import EXHAUSTION_RISK, build_aggregate_result
 from ftx_paper.risk.trail_stop import TrailConfig, TrailTracker
 
 SESSION_EXIT_DEADLINE = "15:10"
 STRUCTURE_TIMEFRAME = "5m"
-EXHAUSTION_RISK = "exhaustion_risk"
 
 
 def _diagnostic_value(value: Any) -> Any:
@@ -90,22 +89,12 @@ class ExecutionHost(Protocol):
     """Causal context boundary required by execution coordination."""
 
     context: Any
-    mode: Any
     location_registry: Any
-
-    def refresh_decision_context(
-        self,
-        life: SetupOpportunity,
-        *,
-        timestamp: str,
-    ) -> Any | None: ...
 
     def scores_for_context_ref(
         self,
         reference: Any | None,
     ) -> tuple[float | None, float | None]: ...
-
-    def local_scores_at(self, timestamp: str) -> tuple[float | None, float | None]: ...
 
     def decision_context_for_life(
         self, life: SetupOpportunity, as_of: str
@@ -2311,16 +2300,16 @@ class ExecutionCoordinator:
                 },
                 "unavailable": [],
             })
-        if reason in {
-            "hard_stop",
-            "vwap_stop",
-            "trail_stop",
-            "session_close",
-            "failure_boundary",
-        }:
-            current = self.engine.state_for(life.lifecycle_id).position
-            if current is not None and current.exit_intent is not None:
-                self.engine.clear_exit_intent(life)
+            if reason in {
+                "hard_stop",
+                "vwap_stop",
+                "trail_stop",
+                "session_close",
+                "failure_boundary",
+            }:
+                current = self.engine.state_for(life.lifecycle_id).position
+                if current is not None and current.exit_intent is not None:
+                    self.engine.clear_exit_intent(life)
 
     def queue_exit(
         self,
@@ -2856,25 +2845,6 @@ class ExecutionCoordinator:
                     return self.handle_management(
                         index, timestamp, next_time, row, available5, bar_events, life
                     )
-                if coerce_timestamp(timestamp) >= coerce_timestamp(intent.expiry):
-                    cancelled = self.engine.cancel_exit_intent(life, reason="expired")
-                    self.engine.clear_pending_exit(life)
-                    if cancelled is not None:
-                        event = {
-                            "kind": "exit_intent_cancelled",
-                            "intent_id": cancelled.intent_id,
-                            "position_id": cancelled.position_id,
-                            "rule_id": cancelled.rule_id,
-                            "reason": "expired",
-                            "lifecycle_id": life.lifecycle_id,
-                            "observed_at": timestamp,
-                            "available_at": timestamp,
-                        }
-                        context.record_event(event, record_lifecycle=False)
-                        bar_events.append(event)
-                    return self.handle_management(
-                        index, timestamp, next_time, row, available5, bar_events, life
-                    )
                 admission = (
                     evaluate_exit_rule(self.machine, life, rule, timestamp=timestamp)
                     if self.machine is not None
@@ -2890,55 +2860,94 @@ class ExecutionCoordinator:
                         ),
                     )
                     self.engine.clear_pending_exit(life)
-                    event = {
-                        "kind": "exit_decision",
-                        "action": "hold",
-                        "intent_id": intent.intent_id,
-                        "position_id": intent.position_id,
-                        "rule_id": intent.rule_id,
-                        "reason": f"delayed_revalidation:{admission}",
-                        "lifecycle_id": life.lifecycle_id,
-                        "observed_at": timestamp,
-                        "available_at": timestamp,
-                    }
-                    context.record_event(event, record_lifecycle=False)
-                    bar_events.append(event)
+                    context.emit(
+                        {
+                            "kind": "exit_decision",
+                            "action": "hold",
+                            "intent_id": intent.intent_id,
+                            "position_id": intent.position_id,
+                            "rule_id": intent.rule_id,
+                            "reason": f"delayed_revalidation:{admission}",
+                            "observed_at": timestamp,
+                            "available_at": timestamp,
+                        },
+                        bar_events,
+                        life,
+                        record_lifecycle=False,
+                    )
                     return self.handle_management(
                         index, timestamp, next_time, row, available5, bar_events, life
                     )
+            assert state.position is not None
+            pending = state.pending_exit
+            if (
+                pending is not None
+                and pending.quantity is not None
+                and pending.quantity < state.position.quantity
+            ):
+                execution = self.settle_exit(
+                    life, filled_at=timestamp, open_price=float(row["open"])
+                )
+                context.emit(
+                    {
+                        "kind": "partial_exit_order",
+                        "position_id": execution.position_before.position_id,
+                        "time": timestamp,
+                        "reason": reason,
+                        "fill_price": execution.price,
+                        "quantity": execution.quantity,
+                        "remaining_quantity": execution.position_after.quantity,
+                        "risk_reward": 3.0,
+                        "execution_assumptions": execution.order.execution_policy,
+                    },
+                    bar_events,
+                    life,
+                    record_lifecycle=False,
+                )
+                return
             execution = self.settle_exit(
                 life, filled_at=timestamp, open_price=float(row["open"])
             )
             self._record_failed_reversal_close(life, reason, timestamp)
-            event = {
-                "kind": "exit_order",
-                "time": timestamp,
-                "reason": reason,
-                "requested_price": execution.order.requested_price,
-                "fill_price": execution.price,
-                "lifecycle_id": life.lifecycle_id,
-                "execution_assumptions": execution.order.execution_policy,
-            }
-            context.record_event(event, record_lifecycle=False)
-            bar_events.append(event)
             after = self.engine.state_for(life.lifecycle_id)
-            if execution.position_after.status is PositionStatus.OPEN:
-                partial = {
-                    "kind": "partial_exit_order",
-                    "position_id": execution.position_before.position_id,
+            entry_fill = next((fill for fill in after.fills if fill.kind == "entry"), None)
+            protective_stop = execution.position_before.protective_stop
+            risk_points = execution.position_before.initial_risk_points or None
+            risk_reward = (
+                after.realized_points / (risk_points * entry_fill.quantity)
+                if (
+                    after.realized_points is not None
+                    and entry_fill is not None
+                    and risk_points is not None
+                    and risk_points > 0
+                    and execution.position_before.quantity > 0
+                )
+                else None
+            )
+            assert after.position is not None
+            context.emit(
+                {
+                    "kind": "exit_order",
                     "time": timestamp,
                     "reason": reason,
+                    "requested_price": execution.order.requested_price,
                     "fill_price": execution.price,
-                    "quantity": execution.quantity,
-                    "remaining_quantity": execution.position_after.quantity,
-                    "risk_reward": 3.0,
-                    "execution_assumptions": execution.order.execution_policy,
                     "lifecycle_id": life.lifecycle_id,
-                }
-                context.record_event(partial, record_lifecycle=False)
-                bar_events.append(partial)
-            if execution.position_after.status is PositionStatus.CLOSED:
-                closed = {
+                    "lifecycle_stage": life.stage.value,
+                    "market_state_direction": after.position.direction,
+                    "market_state": context.market_state,
+                    "execution_assumptions": (
+                        pending.execution_policy
+                        if pending is not None
+                        else "next_available_bar_open"
+                    ),
+                },
+                bar_events,
+                life,
+                record_lifecycle=False,
+            )
+            context.emit(
+                {
                     "kind": "position_closed",
                     "position_id": execution.position_after.position_id,
                     "time": timestamp,
@@ -2946,35 +2955,52 @@ class ExecutionCoordinator:
                     "exit_price": execution.price,
                     "entry_price": execution.position_before.fill_price,
                     "quantity": execution.position_before.quantity,
-                    "protective_stop": execution.position_before.protective_stop,
-                    "risk_points": execution.position_before.initial_risk_points,
+                    "protective_stop": protective_stop,
+                    "risk_points": risk_points,
                     "reward_points": after.realized_points,
+                    "risk_reward": risk_reward,
+                    "execution_note": "",
                     "lifecycle_id": life.lifecycle_id,
-                }
-                context.record_event(closed, record_lifecycle=False)
-                bar_events.append(closed)
-                position_intent = after.position.exit_intent if after.position is not None else None
-                if position_intent is not None:
-                    if position_intent.status is IntentStatus.TRIGGERED:
-                        self.engine.clear_exit_intent(life)
-                    else:
-                        cancelled = self.engine.cancel_exit_intent(
-                            life, reason="position_closed"
-                        )
-                        if cancelled is not None:
-                            intent_event = {
-                                "kind": "exit_intent_cancelled",
-                                "intent_id": cancelled.intent_id,
-                                "position_id": cancelled.position_id,
-                                "rule_id": cancelled.rule_id,
-                                "reason": "position_closed",
-                                "lifecycle_id": life.lifecycle_id,
-                                "observed_at": timestamp,
-                                "available_at": timestamp,
-                            }
-                            context.record_event(intent_event, record_lifecycle=False)
-                            bar_events.append(intent_event)
-                self.engine.clear_pending_exit(life)
+                    "owner_lifecycle_id": life.lifecycle_id,
+                    "origin_lifecycle_id": execution.position_after.lifecycle_id,
+                    "lifecycle_stage": life.stage.value,
+                    "market_state_direction": after.position.direction,
+                    "market_state": context.market_state,
+                    "failed_reversal_count": (
+                        context.session.failed_reversal_counts.get(str(life.location), 0)
+                        if context.session is not None else 0
+                    ),
+                    "failed_reversal_locked": (
+                        str(life.location) in context.session.failed_reversal_locked
+                        if context.session is not None else False
+                    ),
+                },
+                bar_events,
+                life,
+                record_lifecycle=False,
+            )
+            if (
+                after.position.exit_intent is not None
+                and after.position.exit_intent.status is not IntentStatus.TRIGGERED
+            ):
+                cancelled = after.position.exit_intent
+                self.engine.cancel_exit_intent(life, reason="position_closed")
+                context.emit(
+                    {
+                        "kind": "exit_intent_cancelled",
+                        "intent_id": cancelled.intent_id,
+                        "position_id": cancelled.position_id,
+                        "reason": "position_closed",
+                        "observed_at": timestamp,
+                        "available_at": timestamp,
+                    },
+                    bar_events,
+                    life,
+                    record_lifecycle=False,
+                )
+            if after.position.exit_intent is not None and after.position.exit_intent.status is IntentStatus.TRIGGERED:
+                self.engine.clear_exit_intent(life)
+            self.engine.clear_pending_exit(life)
             return
         self.evaluate_position_exit_plan(
             life=life,
@@ -2983,7 +3009,9 @@ class ExecutionCoordinator:
             row=row,
             bar_events=bar_events,
         )
-        state = self.engine.state_for(life.lifecycle_id)
+        # Canonical gate reads the exit-plan state bound at handle-management
+        # entry: a discretionary exit queued by evaluate_position_exit_plan on
+        # this bar is not visible here, so partial_3r can still preempt it.
         pending = state.pending_exit
         if (
             defer_discretionary_execution

@@ -40,7 +40,12 @@ from .opportunity import (
     form_opportunity,
     opportunity_identity,
 )
-from .orderflow_common import Aggregate, candle_reference, canonical_timestamp
+from .orderflow_common import (
+    Aggregate,
+    LIQUIDITY_PROBE,
+    candle_reference,
+    canonical_timestamp,
+)
 from .policies import PDPolicy, LocationPolicy, StandardLocationPolicy
 from .policies.base import HypothesisEvaluation
 from .state_machine_types import LocationRegistry, ReplayContext
@@ -51,7 +56,6 @@ from .templates import (
 from .timestamps import nifty_label, serialize_utc
 from .timestamps import coerce_timestamp
 
-LIQUIDITY_PROBE = "LIQUIDITY_PROBE"
 TIMEFRAME_VARIANT = "1m_5m"
 STRUCTURE_TIMEFRAME = "5m"
 

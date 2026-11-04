@@ -13,7 +13,13 @@ from datetime import datetime
 from .hierarchy import ContextVersionRef, MarketContext, ContextObservation
 from .parity_artifacts import PHASE_STREAMS
 from .location_geometry import BAND_ATR_FRACTION, LocationBand
-from .orderflow_common import Aggregate
+from .orderflow_common import (
+    Aggregate,
+    BALANCE,
+    EXHAUSTION_CANDIDATE,
+    EXHAUSTION_RISK,
+    REJECTION_CANDIDATE,
+)
 from .timestamps import coerce_timestamp, nifty_label, serialize_utc
 
 from .lifecycle import EvidenceRef, LifecycleEvent, LifecycleStage, OpportunityStatus, SetupOpportunity  # noqa: F401
@@ -281,6 +287,55 @@ class LocationRegistry:
         return record
 
 
+class MarketState(StrEnum):
+
+    LATE_AUCTION = EXHAUSTION_CANDIDATE
+    REJECTION = REJECTION_CANDIDATE
+    FAILED_CONTINUATION = EXHAUSTION_RISK
+
+
+@dataclass(frozen=True, slots=True)
+class MarketStateRules:
+    positive_clv_min: float = 0.5
+    rejection_clv_max: float = -0.3
+    rejection_volume_multiple: float = 1.5
+
+
+MARKET_STATE_RULES = MarketStateRules()
+
+
+@dataclass
+class ContinuousReplayContext:
+    registry: LocationRegistry
+    prior_values: list[Any] = field(default_factory=list)
+    last_completed_bar: Aggregate | None = None
+    last_close: float | None = None
+    open_gaps: list[dict[str, Any]] = field(default_factory=list)
+
+    def publish_prior_value(self, prior_value: Any) -> None:
+        if prior_value is None or prior_value.reference is None:
+            return
+        key = prior_value.reference.session_date
+        if any(
+            item.reference is not None
+            and item.reference.session_date == key
+            for item in self.prior_values
+        ):
+            return
+        self.prior_values.append(prior_value)
+
+    def prior_value_as_of(self, available_at: datetime) -> Any:
+        clock = coerce_timestamp(available_at, field="prior value lookup")
+        return max(
+            (
+                item for item in self.prior_values
+                if item.available_at is not None and item.available_at <= clock
+            ),
+            key=lambda item: (item.available_at, item.reference.session_date),
+            default=None,
+        )
+
+
 @dataclass
 class MarketContextStore:
     versions: dict[str, list[MarketContext]] = field(default_factory=dict)
@@ -324,6 +379,8 @@ class ReplayContext:
     # Chronological state retained by the canonical state-machine boundary.
     current_session_date: str | None = None
     continuous: Any = None
+    opening_gap_policy: Any = None
+    previous5_available_at: Any = None
     session: Any = None
     opening_context: dict[str, Any] = field(default_factory=dict)
     last_confirmation_context_time: datetime | None = None
@@ -344,7 +401,7 @@ class ReplayContext:
     or_seed_candles: set[datetime] = field(default_factory=set)
     setup_number: int = 0
     child_observation: ContextObservation | None = None
-    market_state: str | None = "BALANCE"
+    market_state: str | None = BALANCE
     neutral_keys_by_causal_id: dict[tuple[str, str], str] = field(default_factory=dict, repr=False)
 
     def record_opportunity_outcome(
@@ -497,6 +554,11 @@ class ReplayContext:
     def __post_init__(self) -> None:
         if self.execution_engine is None:
             raise ValueError("ReplayContext requires an injected execution engine")
+        if self.opening_gap_policy is None:
+            from .opening_gap_policy import OpeningGapPolicy
+            self.opening_gap_policy = OpeningGapPolicy()
+        if self.continuous is None and self.location_registry is not None:
+            self.continuous = ContinuousReplayContext(registry=self.location_registry)
 
     def register_opportunity(self, opportunity: SetupOpportunity) -> bool:
         if opportunity.causal_identity is not None:
