@@ -605,8 +605,6 @@ class OpportunityCoordinator:
         self._invalidate_by_structure(available5, timestamp, bar_events)
         latest = latest_structure
         new_confirmation_context = latest.time != ctx.last_confirmation_context_time
-        if new_confirmation_context:
-            ctx.last_confirmation_context_time = latest.time
         confirmation_evidence = {
             "context": latest.to_dict(),
             "available_at": latest.available_at,

@@ -648,15 +648,54 @@ class OrderflowEngine:
         timeout_events: list[dict[str, Any]] = []
         self.advance_opportunity_timeouts(timestamp, available5, timeout_events)
         self.context.pending_bar_events.extend(timeout_events)
+        opportunities_before_structure = frozenset(self.context.opportunities)
+        self.context.input_diagnostics.append({
+            "kind": "orderflow_structure_boundary",
+            "time": timestamp,
+            "available_at": next_time,
+            "latest_structure_time": (
+                nifty_label(available5[-1].time) if available5 else None
+            ),
+            "market_state_before": self.context.market_state,
+            "last_confirmation_context_time": (
+                nifty_label(self.context.last_confirmation_context_time)
+                if self.context.last_confirmation_context_time is not None else None
+            ),
+        })
         self.opportunity_owner.handle_structure(
             timestamp, next_time, row, available5, bar_events,
         )
+        self.context.input_diagnostics.append({
+            "kind": "orderflow_structure_result",
+            "time": timestamp,
+            "available_at": next_time,
+            "market_state_after": self.context.market_state,
+            "last_confirmation_context_time": (
+                nifty_label(self.context.last_confirmation_context_time)
+                if self.context.last_confirmation_context_time is not None else None
+            ),
+            "new_opportunity_ids": sorted(
+                set(self.context.opportunities) - opportunities_before_structure
+            ),
+        })
         self.opportunity_owner.handle_opening_interaction(
             row, timestamp, next_time, bar_events,
         )
         if item.five_minute is not None:
             latest = item.five_minute
             if self.context.last_confirmation_context_time != latest.time:
+                self.context.input_diagnostics.append({
+                    "kind": "ordinary_context_boundary",
+                    "time": timestamp,
+                    "available_at": next_time,
+                    "context_time": nifty_label(latest.time),
+                    "market_state_argument": ordinary_market_state,
+                    "market_state_current": self.context.market_state,
+                    "last_confirmation_context_time": (
+                        nifty_label(self.context.last_confirmation_context_time)
+                        if self.context.last_confirmation_context_time is not None else None
+                    ),
+                })
                 self._publisher.ordinary_context(
                     latest, market_state=ordinary_market_state,
                 )
@@ -686,6 +725,20 @@ class OrderflowEngine:
             instrument=instrument,
             pre_execution_done=True,
         )
+        self.context.input_diagnostics.append({
+            "kind": "orderflow_execution_result",
+            "time": timestamp,
+            "available_at": next_time,
+            "market_state_after": self.context.market_state,
+            "accepted_lifecycle_ids": [
+                formation.lifecycle_id for formation in accepted_formations
+            ],
+            "bar_event_kinds": [
+                str(event.get("kind"))
+                for event in bar_events
+                if isinstance(event, dict) and event.get("kind") is not None
+            ],
+        })
         host_proposals = self._proposal_buffer.drain()
         self._clock = available_at
         return TransitionAdvance(

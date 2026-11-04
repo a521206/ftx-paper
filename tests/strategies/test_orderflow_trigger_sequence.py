@@ -86,6 +86,27 @@ def test_opening_seed_remains_provisional(monkeypatch) -> None:
     assert next(iter(transition.context.opportunities.values())).episode_confirmed is False
 
 
+def test_structure_does_not_advance_confirmation_context_time() -> None:
+    candle = Aggregate(
+        "2026-10-01T09:15", "2026-10-01T09:19", "2026-10-01T09:20",
+        "5m", 5, 100.0, 102.0, 99.0, 101.0, 100,
+        "NIFTY", "", "2026-10-01", "opening",
+    )
+    transition = OrderflowEngine(LocationRegistry("test"))
+    transition.context.aggregates = {"1m": [], "5m": [candle]}
+    transition.context.last_confirmation_context_time = None
+
+    transition.opportunity_owner.handle_structure(
+        "2026-10-01T09:20:00Z",
+        "2026-10-01T09:21:00Z",
+        candle.to_dict(),
+        [candle],
+        [],
+    )
+
+    assert transition.context.last_confirmation_context_time is None
+
+
 def test_transition_publishes_current_one_minute_aggregates_to_context() -> None:
     one_minute = Aggregate(
         "2026-10-01T09:20", "2026-10-01T09:20", "2026-10-01T09:21",
