@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from functools import lru_cache
 import re
 from zoneinfo import ZoneInfo
 
@@ -104,6 +105,7 @@ def coerce_timestamp(value: datetime | str, *, field: str = "timestamp") -> date
     return parse_session_timestamp(text[:10], text, field=field)
 
 
+@lru_cache(maxsize=8192)
 def nifty_label(value: datetime) -> str:
     """Return the preserved NiftyZoning session-local label for an instant."""
     return require_utc(value).astimezone(NIFTY_ZONE).strftime("%Y-%m-%dT%H:%M")

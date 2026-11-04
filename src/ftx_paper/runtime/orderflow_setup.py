@@ -57,27 +57,31 @@ def load_orderflow_setup(
 ) -> OrderflowSetup:
     """Load setup artifacts only when their source lineage matches stored bars."""
     dates = sorted(str(value) for value in store.read_dates() if str(value) < session_date)
+    source_cache: dict[str, Any | None] = {}
+    provenance_cache: dict[str, Mapping[str, Any] | None] = {}
+
+    def source_provenance(session: str | None) -> Mapping[str, Any] | None:
+        if session is None:
+            return None
+        if session not in provenance_cache:
+            source = source_cache.get(session)
+            if source is None and session not in source_cache:
+                source = source_resolver.resolve(session)
+                source_cache[session] = source
+            value = source.provenance() if source is not None else None
+            provenance_cache[session] = value if (
+                value
+                and value.get("ordered_unique_minutes")
+                and value.get("missing_minute_count") == 0
+            ) else None
+        return provenance_cache[session]
+
     prior_session = None
     for candidate in reversed(dates):
-        candidate_source = source_resolver.resolve(candidate)
-        candidate_provenance = (
-            candidate_source.provenance() if candidate_source is not None else None
-        )
-        if (
-            candidate_provenance
-            and candidate_provenance.get("ordered_unique_minutes")
-            and candidate_provenance.get("missing_minute_count") == 0
-        ):
+        candidate_provenance = source_provenance(candidate)
+        if candidate_provenance:
             prior_session = candidate
             break
-    def source_provenance(session: str | None) -> Mapping[str, Any] | None:
-        source = source_resolver.resolve(session) if session is not None else None
-        value = source.provenance() if source is not None else None
-        return value if (
-            value
-            and value.get("ordered_unique_minutes")
-            and value.get("missing_minute_count") == 0
-        ) else None
 
     prior_value = ValuePublication(None, None, None, (), "derived_artifact_unavailable")
     try:

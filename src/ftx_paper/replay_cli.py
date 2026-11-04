@@ -44,6 +44,7 @@ def run(
     include_parity_layers: bool,
     timeout: float,
     interval: float,
+    fetch_result: bool = True,
 ) -> dict[str, Any]:
     root = base_url.rstrip("/")
     queued = _request(
@@ -67,6 +68,8 @@ def run(
             f"{root}/api/v1/strategies/{strategy_id}/replays/{run_id}?view=status",
         )
         if result.get("status") in TERMINAL_STATUSES:
+            if not fetch_result:
+                return result
             return _request(f"{root}/api/v1/strategies/{strategy_id}/replays/{run_id}")
         if time.monotonic() >= deadline:
             raise RuntimeError(f"replay {run_id} did not complete within {timeout:g}s")
@@ -94,6 +97,7 @@ def main(argv: list[str] | None = None) -> int:
             include_parity_layers=args.include_parity_layers,
             timeout=args.timeout,
             interval=args.interval,
+            fetch_result=args.as_json,
         )
     except RuntimeError as exc:
         print(f"Replay error: {exc}", file=sys.stderr)
