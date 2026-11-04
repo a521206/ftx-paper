@@ -243,7 +243,7 @@ class OrderflowCoordinator:
                 ),
                 "source_observation_id": provenance.source_observation_id if provenance else None,
                 "stage": "OBSERVING_LOCATION",
-                "evidence": [clock.to_dict()],
+                "evidence": [transition.interaction.creation_candle.to_dict()],
                 "observed_at": clock.end_time,
                 "available_at": clock.available_at,
             })
