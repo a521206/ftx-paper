@@ -8,7 +8,10 @@ from ftx_paper.strategies.orderflow.state_machine_types import ExecutionConstrai
 from ftx_paper.strategies.orderflow.templates import Direction, TRADE_TEMPLATES
 from ftx_paper.strategies.orderflow.coordinator import OrderflowInput
 from ftx_paper.strategies.orderflow.transition import OrderflowEngine
+from ftx_paper.strategies.orderflow.opportunity_coordinator import OpportunityCoordinator
 from ftx_paper.strategies.orderflow.phase4 import ContextPublisher
+from ftx_paper.strategies.orderflow.execution import AdmissionStatus, IntentStatus
+from ftx_paper.strategies.orderflow.execution_clock import intent_allows_requalification
 
 
 def _row(*, open_: float, high: float, low: float, close: float, volume: float = 100.0) -> dict[str, object]:
@@ -21,6 +24,21 @@ def _row(*, open_: float, high: float, low: float, close: float, volume: float =
         "close": close,
         "volume": volume,
     }
+
+
+def test_session_extreme_gate_cancellation_allows_requalification() -> None:
+    state = SimpleNamespace(
+        admission=SimpleNamespace(status=AdmissionStatus.NOT_EVALUATED),
+        intent=SimpleNamespace(
+            status=IntentStatus.CANCELLED,
+            cancel_reason="active_position_session_extreme_gate",
+        ),
+    )
+
+    assert intent_allows_requalification(state) is True
+
+    state.intent.cancel_reason = "entry_already_owned"
+    assert intent_allows_requalification(state) is False
 
 
 def test_acceptance_displacement_rejects_directionless_small_bar() -> None:
@@ -73,9 +91,6 @@ def test_opening_seed_remains_provisional(monkeypatch) -> None:
         execution=transition.execution_owner,
         location_registry=transition.location_registry,
         detector=InteractionDetector(registry),
-        selected_context=transition.selected_interaction_context,
-        structure_interactions=transition.structure_interactions,
-        sync_interaction=transition.sync_interaction_snapshot,
         templates=TRADE_TEMPLATES,
     )
     events: list[dict[str, object]] = []
@@ -211,23 +226,22 @@ def test_episode_promotion_is_idempotent_and_invalidates_competitor() -> None:
             conflicting_unfilled_opportunities=lambda selected: (competing,),
             record_event=events.append,
         ),
-        execution_owner=SimpleNamespace(
+        execution=SimpleNamespace(
             invalidate_opportunity=lambda candidate, **kwargs: invalidations.append(
                 (candidate, kwargs["reason"])
             ),
         ),
     )
+    coordinator = OpportunityCoordinator(owner)
     bar_events: list[dict[str, object]] = []
 
-    OrderflowEngine.promote_episode(
-        owner,
+    coordinator.promote_episode(
         life,
         observed_at="2026-10-01T03:50:00Z",
         available_at="2026-10-01T03:51:00Z",
         bar_events=bar_events,
     )
-    OrderflowEngine.promote_episode(
-        owner,
+    coordinator.promote_episode(
         life,
         observed_at="2026-10-01T03:52:00Z",
         available_at="2026-10-01T03:53:00Z",

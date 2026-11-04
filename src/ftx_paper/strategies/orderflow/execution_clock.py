@@ -7,7 +7,7 @@ from typing import Any, Mapping, Sequence
 
 from ftx_paper.contracts import Instrument
 
-from .execution import entry_fill_decision
+from .execution import AdmissionStatus, IntentStatus, entry_fill_decision
 from .opportunity_coordinator import LifecycleFormation
 from .timestamps import coerce_timestamp
 
@@ -44,6 +44,23 @@ def _trace(state: Any) -> dict[str, Any]:
     }
 
 
+def intent_allows_requalification(state: Any) -> bool:
+    """Return whether the execution policy may reassess an active intent."""
+    intent = state.intent
+    if intent is None:
+        return state.admission.status is AdmissionStatus.NOT_EVALUATED
+    return (
+        intent.status is IntentStatus.CANCELLED
+        and intent.cancel_reason in {
+            "opening_gap_permission_changed",
+            "decision_context_unavailable",
+            "decision_context_scores_unavailable",
+            "fill_permission_mismatch",
+            "active_position_session_extreme_gate",
+        }
+    )
+
+
 class ExecutionClock:
     """Run execution policy in the transition's established causal order."""
 
@@ -66,7 +83,6 @@ class ExecutionClock:
         context = self.engine.context
         if available5:
             context.aggregates["5m"] = list(available5)
-        owner.active_position_gate.update(context, timestamp)
         events = list(context.pending_bar_events)
         context.pending_bar_events.clear()
         context.execution_proposals.clear()
@@ -111,7 +127,7 @@ class ExecutionClock:
             if (
                 life.active
                 and context.regime is not None
-                and self.engine._intent_allows_requalification(state)
+                and intent_allows_requalification(state)
                 and not owner.opportunity_expired(life, timestamp=timestamp)
             ):
                 owner.admit_opportunity(life, next_time, events)

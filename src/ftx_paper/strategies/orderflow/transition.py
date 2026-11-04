@@ -17,69 +17,27 @@ from ftx_paper.contracts import Instrument
 from ftx_paper.execution.events import ExecutionNotification
 
 from .coordinator import OrderflowAdvance, OrderflowInput, OrderflowCoordinator
-from .execution import (
-    AdmissionStatus,
-    ExecutionHost,
-    ExecutionCoordinator,
-    ExecutionState,
-    IntentStatus,
-)
+from .execution import ExecutionHost, ExecutionCoordinator, ExecutionState
 from .execution_adapter import OrderflowExecutionAdapter, PaperOrderProposal
 from .contextual import build_context_scores
 from .context_access import DecisionContextAccess
-from .hierarchy import Permission, TriggerObservation
+from .hierarchy import TriggerObservation
 from .lifecycle import SetupOpportunity
 from .opportunity_coordinator import LifecycleFormation, OpportunityCoordinator
-from .opportunity_timeout import advance_opportunity_timeout
 from .state_machine_types import (
     ExecutionConstraints,
     LocationRegistry,
     OrderflowState,
 )
-from .interactions import (
-    InteractionCloseReason,
-    InteractionStatus,
-)
 from .orderflow_common import Aggregate
 from .timestamps import coerce_timestamp, nifty_label, serialize_utc
 from . import snapshot_codec
-from .session_policy import classify_opening_gap
 from .proposal_buffer import ProposalBuffer
 from .opening_gap import OpeningGapOwner
 from .execution_clock import ExecutionClock
 from .phase4 import ContextPublisher, Phase4Recorder
-
-
-def _execution_trace_state(state: Any) -> dict[str, Any]:
-    position = state.position
-    pending = state.pending_exit
-    intent = state.intent
-
-    def value(item: Any) -> Any:
-        return getattr(item, "value", item)
-
-    return {
-        "intent": {
-            "status": value(intent.status),
-            "triggered_at": getattr(intent, "triggered_at", None),
-        } if intent is not None else None,
-        "pending_exit": {
-            "reason": pending.reason,
-            "available_at": pending.available_at,
-            "requested_price": pending.requested_price,
-            "execution_policy": pending.execution_policy,
-            "quantity": pending.quantity,
-        } if pending is not None else None,
-        "position": {
-            "status": value(position.status),
-            "quantity": position.quantity,
-            "fill_price": position.fill_price,
-            "failure_boundary": position.failure_boundary,
-            "protective_stop": position.protective_stop,
-            "post_3r_activated": position.post_3r_activated,
-            "partial_exit_taken": position.partial_exit_taken,
-        } if position is not None else None,
-    }
+from .permission import PermissionOwner
+from .session_boundary import SessionBoundaryOwner
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,22 +111,8 @@ class OrderflowEngine:
     _execution_host: ExecutionHost = field(init=False, repr=False)
     _phase4: Phase4Recorder = field(init=False, repr=False)
     _context_publisher: ContextPublisher = field(init=False, repr=False)
-
-    @staticmethod
-    def _intent_allows_requalification(state: Any) -> bool:
-        intent = state.intent
-        if intent is None:
-            return state.admission.status is AdmissionStatus.NOT_EVALUATED
-        return (
-            intent.status is IntentStatus.CANCELLED
-            and intent.cancel_reason in {
-                "opening_gap_permission_changed",
-                "decision_context_unavailable",
-                "decision_context_scores_unavailable",
-                "fill_permission_mismatch",
-                "active_position_session_extreme_gate",
-            }
-        )
+    _permission: PermissionOwner = field(init=False, repr=False)
+    _session_boundary: SessionBoundaryOwner = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.observation_owner = OrderflowCoordinator(self.location_registry)
@@ -187,15 +131,14 @@ class OrderflowEngine:
         self.execution_owner.host = self._execution_host
         self._opening_gap = OpeningGapOwner(self)
         self._execution_clock = ExecutionClock(self)
+        self._permission = PermissionOwner(self)
+        self._session_boundary = SessionBoundaryOwner(self)
         from .opportunity_replay_host import build_opportunity_coordinator
         self.opportunity_owner = build_opportunity_coordinator(
             context=self.context,
             execution=self.execution_owner,
             location_registry=self.location_registry,
             detector=self.observation_owner.detector,
-            selected_context=self.selected_interaction_context,
-            structure_interactions=self.structure_interactions,
-            sync_interaction=self.sync_interaction_snapshot,
         )
 
     def bind_observation_owner(self, owner: OrderflowCoordinator) -> None:
@@ -212,9 +155,6 @@ class OrderflowEngine:
             execution=self.execution_owner,
             location_registry=self.location_registry,
             detector=owner.detector,
-            selected_context=self.selected_interaction_context,
-            structure_interactions=self.structure_interactions,
-            sync_interaction=self.sync_interaction_snapshot,
         )
 
     def _build_execution_host(self) -> ExecutionHost:
@@ -237,32 +177,13 @@ class OrderflowEngine:
         available_at: str,
         bar_events: list[dict[str, Any]],
     ) -> None:
-        """Promote a provisional lifecycle after its final trigger checks."""
-        if life.episode_confirmed:
-            return
-        life.episode_confirmed = True
-        for competing in self.context.conflicting_unfilled_opportunities(life):
-            if competing.active:
-                self.execution_owner.invalidate_opportunity(
-                    competing,
-                    timestamp=observed_at,
-                    observed_at=observed_at,
-                    available_at=available_at,
-                    bar_events=bar_events,
-                    reason="opposing_episode_confirmed",
-                )
-        event = {
-            "kind": "episode_confirmed",
-            "lifecycle_id": life.lifecycle_id,
-            "observed_at": observed_at,
-            "available_at": available_at,
-            "direction": life.direction.value,
-            "conflict_key": life.conflict_key,
-            "owner": "1m",
-            "evidence_timeframe": "1m",
-        }
-        self.context.record_event(event)
-        bar_events.append(event)
+        """Delegate lifecycle promotion to the opportunity owner."""
+        self.opportunity_owner.promote_episode(
+            life,
+            observed_at=observed_at,
+            available_at=available_at,
+            bar_events=bar_events,
+        )
 
     @property
     def clock(self) -> datetime | None:
@@ -581,32 +502,6 @@ class OrderflowEngine:
             "parity_stream": "execution_transitions",
         })
 
-    def _accept_formations(
-        self, formations: Sequence[LifecycleFormation],
-    ) -> tuple[LifecycleFormation, ...]:
-        accepted: list[LifecycleFormation] = []
-        for formation in formations:
-            life = formation.lifecycle
-            if life is None:
-                continue
-            formation_key = (
-                f"{life.lifecycle_id}:{serialize_utc(life.formation_available_at)}"
-            )
-            if formation_key in self._formation_cursor:
-                continue
-            existing = self.context.opportunities.get(life.lifecycle_id)
-            if existing is None and not self.context.register_opportunity(life):
-                continue
-            if existing is not None and existing is not life:
-                continue
-            if formation.setup is not None and self.engine.setup_for(
-                life.lifecycle_id
-            ) is None:
-                self.attach_setup(formation)
-            self._formation_cursor.add(formation_key)
-            accepted.append(formation)
-        return tuple(accepted)
-
     def advance(
         self,
         item: OrderflowInput,
@@ -666,7 +561,7 @@ class OrderflowEngine:
             self.context.continuous.publish_prior_value(item.prior_value)
         bar_events = list(source.events)
         if previous_session is not None and previous_session != item.one_minute.session_date:
-            self.handle_session_boundary(
+            self._session_boundary.advance(
                 previous_session,
                 item.one_minute.session_date,
                 timestamp,
@@ -692,12 +587,13 @@ class OrderflowEngine:
                 or available5[-1].available_at > self.context.previous5_available_at
             )
         )
-        self.update_gap_state(
+        self._opening_gap.advance(
             item.one_minute.session_date,
             list(self.observation_owner.one_minute_aggregates),
             timestamp,
             bar_events,
         )
+        self.execution_owner.active_position_gate.update(self.context, timestamp)
         if new_5m and available5:
             market_state_before_permission = self.context.market_state
             permission_event_start = len(bar_events)
@@ -708,7 +604,7 @@ class OrderflowEngine:
                 atr=self.context.atr_by_session.get(available5[-1].session_date),
             )
             long_score, short_score = scores if scores is not None else (None, None)
-            self.handle_permission(available5[-1], long_score, short_score, bar_events)
+            self._permission.publish(available5[-1], long_score, short_score, bar_events)
             permission_events = bar_events[permission_event_start:]
             self.context.input_diagnostics.append({
                 "kind": "orderflow_permission_result",
@@ -731,7 +627,7 @@ class OrderflowEngine:
             new_five_minute=new_5m,
         )
         for transition in interaction.transitions:
-            self._apply_interaction_transition(transition, bar_events)
+            self.opportunity_owner.apply_interaction_transition(transition, bar_events)
         for event in interaction.events:
             self.context.record_event(event)
         self._phase4.source_observations(
@@ -739,7 +635,7 @@ class OrderflowEngine:
         )
         self._phase4.context_location(item)
         timeout_events: list[dict[str, Any]] = []
-        self.advance_opportunity_timeouts(timestamp, available5, timeout_events)
+        self.opportunity_owner.advance_timeouts(timestamp, available5, timeout_events)
         self.context.pending_bar_events.extend(timeout_events)
         opportunities_before_structure = frozenset(self.context.opportunities)
         self.context.input_diagnostics.append({
@@ -794,8 +690,8 @@ class OrderflowEngine:
             next_time,
             emitted=self._formation_cursor,
         )
-        accepted_formations = self._accept_formations(
-            (*formations, *generated_formations),
+        accepted_formations = self.opportunity_owner.accept_formations(
+            (*formations, *generated_formations), emitted=self._formation_cursor,
         )
         if accepted_formations:
             self.execution_owner.advance(
@@ -861,218 +757,6 @@ class OrderflowEngine:
         self.context.aggregates["1m"] = list(self.observation_owner.one_minute_aggregates)
         self.context.aggregates["5m"] = available5
         return source, row, available5
-
-    def _apply_interaction_transition(
-        self,
-        transition: Any,
-        bar_events: list[dict[str, Any]],
-    ) -> None:
-        """Apply one detector transition before opportunity evaluation."""
-        interaction = transition.interaction
-        self.opportunity_owner.publish_interaction_context(interaction, bar_events)
-        self.sync_interaction_snapshot(interaction)
-
-    def sync_interaction_snapshot(self, interaction: Any) -> None:
-        """Project detector-owned interaction state into the context snapshot."""
-        detector_state = self.observation_owner.detector.interactions_for(
-            interaction.timeframe,
-        ).get(interaction.interaction_id)
-        self.context.interactions[interaction.interaction_id] = (
-            detector_state.evaluation_snapshot()
-            if detector_state is not None else interaction
-        )
-
-    def selected_interaction_context(
-        self, interaction_id: str, *, as_of: datetime | str,
-    ) -> Any | None:
-        available_at = coerce_timestamp(as_of)
-        return max(
-            (
-                item for item in self.context.market_contexts.versions.get(
-                    f"interaction:{interaction_id}", (),
-                )
-                if item.available_at <= available_at
-            ),
-            key=lambda item: item.available_at,
-            default=None,
-        )
-
-    def structure_interactions(self) -> tuple[Any, ...]:
-        return tuple(
-            state.evaluation_snapshot()
-            for state in self.observation_owner.detector.interactions.values()
-            if state.timeframe == "5m"
-        )
-
-    def handle_session_boundary(
-        self,
-        previous_session: str | None,
-        session_date: str,
-        timestamp: str,
-        opening: Aggregate,
-        bar_events: list[dict[str, Any]],
-    ) -> None:
-        """Switch the daily opening-gap context without resetting the stream."""
-        context = self.context
-        context.current_session_date = session_date
-        continuous = context.continuous
-        context.opening_context = classify_opening_gap(
-            opening=opening,
-            registry=self.location_registry,
-            prior_value=(
-                continuous.prior_value_as_of(opening.available_at)
-                if continuous is not None else None
-            ),
-        )
-        context.emit({
-            "kind": "session_boundary",
-            "previous_session": previous_session,
-            "session_date": session_date,
-            "observed_at": timestamp,
-            "available_at": timestamp,
-        }, bar_events)
-        detector = self.observation_owner.detector
-        for interaction in tuple(detector.interactions.values()):
-            if interaction.status is not InteractionStatus.ACTIVE:
-                continue
-            templates = tuple(
-                item for item in (self.opportunity_owner.host.templates.values())
-                if interaction.location in item.locations
-            )
-            updated = detector.advance_session(
-                interaction.interaction_id,
-                available_at=timestamp,
-                carry_sessions=max(
-                    (item.carry_sessions for item in templates), default=-1,
-                ),
-            )
-            if updated.status is InteractionStatus.ENDED:
-                self.sync_interaction_snapshot(updated)
-                context.emit(
-                    {
-                        "kind": "interaction_ended",
-                        "interaction_id": updated.interaction_id,
-                        "reason": InteractionCloseReason.SESSION_END.value,
-                        "observed_at": timestamp,
-                        "available_at": timestamp,
-                    },
-                    bar_events,
-                )
-        self._opening_gap.start({
-            **context.opening_context,
-            "session_date": session_date,
-        })
-
-    def handle_permission(
-        self,
-        latest: Aggregate,
-        long_score: float | None,
-        short_score: float | None,
-        bar_events: list[dict[str, Any]],
-    ) -> None:
-        """Publish the completed-5m permission regime (canonical handle_permission)."""
-        context = self.context
-        context.previous5_available_at = latest.available_at
-        self._context_publisher.ordinary_context(latest, (long_score, short_score))
-        current = self._opening_gap.current(latest.session_date)
-        ordinary_reference = context.market_contexts.ordinary_context
-        context.regime = context.opening_gap_policy.regime_for(
-            state=str(current.get("state")) if current is not None else None,
-            direction=str(current.get("direction")) if current is not None else None,
-            version="5m-permission-allowed",
-            context="5m_directional_context",
-            restrictions=("completed_5m_only",),
-        )
-        context.emit(
-            {
-                "kind": "permission",
-                "level": "5m",
-                "time": nifty_label(latest.time),
-                "decision_at": nifty_label(latest.time),
-                "observed_at": latest.end_time,
-                "aggregate_time": latest.time,
-                "available_at": latest.available_at,
-                "version": context.regime.version,
-                "status": Permission.ALLOWED.value,
-                "owner": "5m",
-                "evidence_timeframe": "5m",
-                "context_id": (
-                    ordinary_reference.context_id
-                    if ordinary_reference is not None else None
-                ),
-                "market_state": context.market_state,
-                "directional": context.regime.long != context.regime.short,
-                "long_permission": context.regime.long.value,
-                "short_permission": context.regime.short.value,
-                "opening_gap_state": context.regime.opening_gap_state,
-                "long_score": long_score,
-                "short_score": short_score,
-                "reference_level": None,
-                "opening_context": dict(context.opening_context),
-            },
-            bar_events,
-        )
-        for life in context.opportunities.values():
-            if life.active:
-                context.emit(
-                    {
-                        "kind": "context_observed",
-                        "observed_at": latest.end_time,
-                        "available_at": latest.available_at,
-                        "context": context.snapshot(
-                            context.market_contexts.resolve(ordinary_reference)
-                            if ordinary_reference is not None else None
-                        ),
-                        "long_score": long_score,
-                        "short_score": short_score,
-                    },
-                    bar_events,
-                )
-
-    def update_gap_state(
-        self,
-        session_date: str,
-        available1: Sequence[Aggregate],
-        timestamp: str,
-        bar_events: list[dict[str, Any]],
-    ) -> None:
-        """Advance the current opening gap from completed one-minute evidence."""
-        self._opening_gap.advance(session_date, available1, timestamp, bar_events)
-
-    def advance_opportunity_timeouts(
-        self,
-        timestamp: str,
-        available5: Sequence[Any],
-        bar_events: list[dict[str, Any]],
-    ) -> None:
-        """Expire existing opportunities before current-bar structure admission."""
-        for life in tuple(self.context.opportunities.values()):
-            if not life.active or self.context.position_is_open(life):
-                continue
-            interaction = (
-                self.context.interactions.get(life.location_interaction_id)
-                if life.location_interaction_id is not None else None
-            )
-            timeout = advance_opportunity_timeout(
-                life,
-                interaction=interaction,
-                evidence=available5,
-                as_of=timestamp,
-            )
-            if life.timeout_count >= life.timeout_limit:
-                self.execution_owner.expire_opportunity(
-                    life,
-                    timestamp=timeout.expiry_at or timestamp,
-                    bar_events=bar_events,
-                    reason="evidence_timeout",
-                    timeout_event={
-                        "timeout_count": life.timeout_count,
-                        "timeout_limit": life.timeout_limit,
-                        "evidence_timeframe": life.timeout_evidence_timeframe,
-                        "counted_source_ids": list(life.timeout_counted_source_ids),
-                        "counted_snapshot_ids": list(life.timeout_counted_snapshot_ids),
-                    },
-                )
 
     def decision_context_for_life(self, life: Any, as_of: str) -> Any | None:
         return self._context_access.for_life(life, as_of)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
-from typing import Any, Protocol
+from typing import Any, Protocol, Sequence
 
 from .contextual import build_context_scores
 from .execution import (
@@ -40,6 +40,7 @@ from .opportunity import (
     form_opportunity,
     opportunity_identity,
 )
+from .opportunity_timeout import advance_opportunity_timeout
 from .orderflow_common import (
     Aggregate,
     LIQUIDITY_PROBE,
@@ -115,6 +116,120 @@ class OpportunityCoordinator:
     def __init__(self, host: OpportunityReplayHost) -> None:
         self.host = host
         self._last_invalidation_5m_available_at: datetime | None = None
+
+    def promote_episode(
+        self,
+        life: SetupOpportunity,
+        *,
+        observed_at: str,
+        available_at: str,
+        bar_events: list[dict[str, Any]],
+    ) -> None:
+        """Confirm a provisional episode and invalidate opposing candidates."""
+        if life.episode_confirmed:
+            return
+        life.episode_confirmed = True
+        for competing in self.host.context.conflicting_unfilled_opportunities(life):
+            if competing.active:
+                self.host.execution.invalidate_opportunity(
+                    competing,
+                    timestamp=observed_at,
+                    observed_at=observed_at,
+                    available_at=available_at,
+                    bar_events=bar_events,
+                    reason="opposing_episode_confirmed",
+                )
+        event = {
+            "kind": "episode_confirmed",
+            "lifecycle_id": life.lifecycle_id,
+            "observed_at": observed_at,
+            "available_at": available_at,
+            "direction": life.direction.value,
+            "conflict_key": life.conflict_key,
+            "owner": "1m",
+            "evidence_timeframe": "1m",
+        }
+        self.host.context.record_event(event)
+        bar_events.append(event)
+
+    def accept_formations(
+        self,
+        formations: tuple[LifecycleFormation, ...],
+        *,
+        emitted: set[str],
+    ) -> tuple[LifecycleFormation, ...]:
+        """Register and attach formations once at their causal availability."""
+        accepted: list[LifecycleFormation] = []
+        for formation in formations:
+            life = formation.lifecycle
+            if life is None:
+                continue
+            formation_key = f"{life.lifecycle_id}:{serialize_utc(life.formation_available_at)}"
+            if formation_key in emitted:
+                continue
+            existing = self.host.context.opportunities.get(life.lifecycle_id)
+            if existing is None and not self.host.context.register_opportunity(life):
+                continue
+            if existing is not None and existing is not life:
+                continue
+            if (
+                formation.setup is not None
+                and self.host.execution.engine.setup_for(life.lifecycle_id) is None
+            ):
+                self.host.execution.attach_setup(formation)
+            emitted.add(formation_key)
+            accepted.append(formation)
+        return tuple(accepted)
+
+    def advance_timeouts(
+        self,
+        timestamp: str,
+        available5: Sequence[Any],
+        bar_events: list[dict[str, Any]],
+    ) -> None:
+        """Expire existing opportunities before current-bar structure admission."""
+        context = self.host.context
+        for life in tuple(context.opportunities.values()):
+            if not life.active or context.position_is_open(life):
+                continue
+            interaction = (
+                context.interactions.get(life.location_interaction_id)
+                if life.location_interaction_id is not None else None
+            )
+            timeout = advance_opportunity_timeout(
+                life,
+                interaction=interaction,
+                evidence=available5,
+                as_of=timestamp,
+            )
+            if life.timeout_count >= life.timeout_limit:
+                self.host.execution.expire_opportunity(
+                    life,
+                    timestamp=timeout.expiry_at or timestamp,
+                    bar_events=bar_events,
+                    reason="evidence_timeout",
+                    timeout_event={
+                        "timeout_count": life.timeout_count,
+                        "timeout_limit": life.timeout_limit,
+                        "evidence_timeframe": life.timeout_evidence_timeframe,
+                        "counted_source_ids": list(life.timeout_counted_source_ids),
+                        "counted_snapshot_ids": list(life.timeout_counted_snapshot_ids),
+                    },
+                )
+
+    def sync_interaction_snapshot(self, interaction: InteractionSnapshot) -> None:
+        """Project detector-owned interaction state through the opportunity host."""
+        self.host.sync_interaction_snapshot(interaction)
+
+    def apply_interaction_transition(
+        self,
+        transition: Any,
+        bar_events: list[dict[str, Any]],
+    ) -> None:
+        """Publish and snapshot one detector transition before evaluation."""
+        interaction = transition.interaction
+        self.publish_interaction_context(interaction, bar_events)
+        self.sync_interaction_snapshot(interaction)
 
     def new_formations_for(
         self, clock: datetime | str, *, emitted: set[str],
