@@ -114,6 +114,15 @@ source, and shared validated setup loader. Per-prefix canonical comparison,
 proof against future-row influence, and live refresh for artifacts created after
 startup remain open.
 
+One deliberate exception to future-row influence is recorded here: session
+levels derive the opening range from the session's loaded rows
+(`OrderflowInputStream._build_session_levels`, mirroring canonical
+`derive_session_levels`, which is built from the full session's aggregates at
+session start). Bounded replay loads the whole session, so its derived opening
+range is session-wide by canonical design; a mid-session restart derives the
+same opening range from the stored row prefix alone. All other per-input
+preparation must remain future-row free.
+
 ## Phase 4: Context And Locations
 
 **Status: Complete for deterministic/runtime-neutral contracts.**
@@ -266,7 +275,8 @@ items, not separate tasks.
    missing, and unavailable artifacts, and for a source change handled by an
    explicit rebuild, including startup and subsequent updates. Prove incremental live preparation uses only the current completed
    input and explicitly published causal references, with no future-row
-   influence. Compare each input prefix against the pinned NiftyZoning behavior.
+   influence aside from the recorded session-levels exception (Phase 3).
+   Compare each input prefix against the pinned NiftyZoning behavior.
    Reconcile availability/decision timestamps and the supporting-bar deadline;
    any accepted input variance must be documented and shown not to alter
    decisions.
