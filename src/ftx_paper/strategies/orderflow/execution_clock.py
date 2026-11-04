@@ -67,9 +67,49 @@ class ExecutionClock:
 
     def __init__(self, engine: Any) -> None:
         self.engine = engine
-        self._pre_managed_ids: set[str] = set()
 
-    def advance(
+    def advance_transition(
+        self,
+        formations: Sequence[LifecycleFormation],
+        *,
+        regime: Any,
+        regime_publications: Sequence[tuple[str, Any]],
+        triggers: Mapping[str, Any] | None,
+        bar_opens: Mapping[str, float] | None,
+        decision_scores: Mapping[str, tuple[float | None, float | None]] | None,
+        constraints: Any,
+        decision_at: str,
+        index: int,
+        timestamp: str,
+        next_time: str,
+        row: Mapping[str, Any],
+        available5: Sequence[Any] = (),
+        instrument: Instrument | None = None,
+    ) -> Mapping[str, tuple[dict[str, Any], ...]]:
+        """Coordinate formation admission and the post-structure execution pass."""
+        owner = self.engine.execution_owner
+        if formations:
+            owner.advance(
+                tuple(formations),
+                regime=regime,
+                regime_publications=regime_publications,
+                triggers=triggers,
+                bar_opens=bar_opens,
+                decision_scores=decision_scores,
+                constraints=constraints,
+                decision_at=decision_at,
+            )
+        return self.advance_post_structure(
+            tuple(formations),
+            index=index,
+            timestamp=timestamp,
+            next_time=next_time,
+            row=row,
+            available5=available5,
+            instrument=instrument,
+        )
+
+    def advance_post_structure(
         self,
         formations: Sequence[LifecycleFormation],
         *,
@@ -79,7 +119,6 @@ class ExecutionClock:
         row: Mapping[str, Any],
         available5: Sequence[Any] = (),
         instrument: Instrument | None = None,
-        pre_execution_done: bool = False,
     ) -> Mapping[str, tuple[dict[str, Any], ...]]:
         owner = self.engine.execution_owner
         context = self.engine.context
@@ -88,12 +127,6 @@ class ExecutionClock:
         events = list(context.pending_bar_events)
         context.pending_bar_events.clear()
         context.execution_proposals.clear()
-        row_dict = dict(row)
-        if not pre_execution_done:
-            self.settle_pending(
-                index=index, timestamp=timestamp, next_time=next_time,
-                row=row_dict, events=events,
-            )
         managed: list[Any] = list(formations)
         formation_ids = {
             item.lifecycle.lifecycle_id
@@ -138,11 +171,10 @@ class ExecutionClock:
                 life, session_date=str(life.session_date),
                 timestamp=timestamp, bar_events=events,
             )
-            if life.lifecycle_id not in self._pre_managed_ids:
-                owner.handle_management(
-                    index, timestamp, next_time, dict(row), list(available5), events, life,
-                    defer_discretionary_execution=True,
-                )
+            owner.handle_management(
+                index, timestamp, next_time, dict(row), list(available5), events, life,
+                defer_discretionary_execution=True,
+            )
             if life.active:
                 owner.handle_execution(
                     index, timestamp, next_time, dict(row), [], events, life,
@@ -177,17 +209,8 @@ class ExecutionClock:
         row: Mapping[str, Any], events: list[dict[str, Any]],
     ) -> None:
         owner = self.engine.execution_owner
-        self._pre_managed_ids = set()
-        available5 = list(self.engine.observation_owner.five_minute_aggregates)
         for life in tuple(self.engine.context.opportunities.values()):
             if life.active or self.engine.context.position_is_open(life):
-                state = owner.engine.state_for(life.lifecycle_id)
-                if state.position is not None:
-                    owner.handle_management(
-                        index, timestamp, next_time, dict(row), available5, events, life,
-                        defer_discretionary_execution=True,
-                    )
-                    self._pre_managed_ids.add(life.lifecycle_id)
                 owner.handle_execution(
                     index, timestamp, next_time, dict(row), [], events, life,
                     evaluate_entries=False,

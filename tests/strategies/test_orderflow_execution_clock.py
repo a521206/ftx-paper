@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from ftx_paper.strategies.orderflow.execution_clock import ExecutionClock
 
 
-def test_pre_phase_management_is_not_repeated_by_post_structure_pass() -> None:
+def test_management_runs_only_in_post_structure_execution_pass() -> None:
     lifecycle = SimpleNamespace(
         lifecycle_id="life-1",
         active=True,
@@ -63,13 +63,12 @@ def test_pre_phase_management_is_not_repeated_by_post_structure_pass() -> None:
         row=row,
         events=[],
     )
-    clock.advance(
+    clock.advance_post_structure(
         (SimpleNamespace(lifecycle=lifecycle, setup=None, available_at=lifecycle.formation_available_at),),
         index=0,
         timestamp="2026-10-01T03:50:00Z",
         next_time="2026-10-01T03:51:00Z",
         row=row,
-        pre_execution_done=True,
     )
 
-    assert calls == ["management", "execution", "execution"]
+    assert calls == ["execution", "management", "execution"]

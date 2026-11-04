@@ -833,26 +833,21 @@ class OrderflowEngine:
         row: dict[str, Any],
         available5: list[Aggregate],
     ) -> None:
-        if accepted_formations:
-            self.execution_owner.advance(
-                tuple(accepted_formations),
-                regime=regime,
-                regime_publications=regime_publications,
-                triggers=triggers,
-                bar_opens=bar_opens,
-                decision_scores=decision_scores,
-                constraints=constraints,
-                decision_at=next_time,
-            )
-        self._execution_clock.advance(
+        self._execution_clock.advance_transition(
             tuple(accepted_formations),
+            regime=regime,
+            regime_publications=regime_publications,
+            triggers=triggers,
+            bar_opens=bar_opens,
+            decision_scores=decision_scores,
+            constraints=constraints,
+            decision_at=next_time,
             index=index,
             timestamp=timestamp,
             next_time=next_time,
             row=row,
             available5=available5,
             instrument=instrument,
-            pre_execution_done=True,
         )
 
     def _record_execution_result(
