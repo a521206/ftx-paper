@@ -29,6 +29,7 @@ from ftx_paper.strategies.orderflow.parity_artifacts import (
     build_phase4_artifact,
     build_phase7_artifact,
     build_parity_artifact_from_payload,
+    compare_chronological_streams,
     compare_parity_artifacts,
     compare_phase4_manifests,
     compare_phase7_manifests,
@@ -44,10 +45,6 @@ PHASE35_ATR_DEPENDENT_FIELDS = ("atr", "locations", "vwap_measurements", "contex
 PHASE35_ATR_INDEPENDENT_FIELDS = tuple(
     field for field in PHASE35_FIELDS if field not in PHASE35_ATR_DEPENDENT_FIELDS
 )
-# ATR is sourced from repository-specific history, but variance must remain
-# bounded before dependent evidence can be accepted as input variance.
-ATR_RELATIVE_TOLERANCE = 0.01
-ATR_ABSOLUTE_TOLERANCE = 2.5
 PHASE3_FIELDS = (
     "source_fingerprint", "aggregates", "source_gaps", "issues", "session_boundaries",
 )
@@ -169,20 +166,19 @@ def _retain_replay_artifacts(
     return result
 
 
-def _phase_accepted(phase: Mapping[str, Any], *, allow_variance: bool = False) -> bool:
-    accepted = {"MATCHED", "INPUT_VARIANCE"} if allow_variance else {"MATCHED"}
-    return phase.get("status") in accepted
+def _phase_accepted(phase: Mapping[str, Any]) -> bool:
+    return phase.get("status") == "MATCHED"
 
 
 def _gate_result(result: Mapping[str, Any]) -> dict[str, Any]:
     phases = ("phase3", "phase3_5", "phase4", "phase4_5", "phase6", "phase7", "parity")
     accepted = {
         "phase3": _phase_accepted(result.get("phase3", {})),
-        "phase3_5": _phase_accepted(result.get("phase3_5", {}), allow_variance=True),
-        "phase4": _phase_accepted(result.get("phase4", {}), allow_variance=True),
+        "phase3_5": _phase_accepted(result.get("phase3_5", {})),
+        "phase4": _phase_accepted(result.get("phase4", {})),
         "phase4_5": _phase_accepted(result.get("phase4_5", {})),
-        "phase6": _phase_accepted(result.get("phase6", {}), allow_variance=True),
-        "phase7": _phase_accepted(result.get("phase7", {}), allow_variance=True),
+        "phase6": _phase_accepted(result.get("phase6", {})),
+        "phase7": _phase_accepted(result.get("phase7", {})),
         "parity": _phase_accepted(result.get("parity", {})),
     }
     failed = [name for name in phases if not accepted[name]]
@@ -449,9 +445,9 @@ def _phase45_semantic_projection(record: Mapping[str, Any], session_date: str) -
 
 
 def _compare_phase35_independent(
-    canonical: dict[str, Any], paper: dict[str, Any], tolerance: float,
+    canonical: dict[str, Any], paper: dict[str, Any],
 ) -> dict[str, Any]:
-    """Compare independent evidence while bounding prior-profile value drift."""
+    """Compare independent evidence exactly."""
     fields = tuple(field for field in PHASE35_ATR_INDEPENDENT_FIELDS if field != "prior_value")
     result = _compare_fields(canonical, paper, fields, label="phase3_5_independent")
     if result["status"] != "MATCHED":
@@ -467,22 +463,18 @@ def _compare_phase35_independent(
         right_value = right.get(field)
         if not isinstance(left_value, (int, float)) or not isinstance(right_value, (int, float)) or not math.isfinite(left_value) or not math.isfinite(right_value):
             return {"status": "MISMATCHED", "layer": "phase3_5_independent", "field": f"prior_value.{field}"}
-        if abs(left_value - right_value) > tolerance:
-            return {"status": "MISMATCHED", "layer": "phase3_5_independent", "field": f"prior_value.{field}", "canonical_value": left_value, "paper_value": right_value, "tolerance": tolerance}
-    # Snapshot identity and fingerprint belong to the producer's profile
-    # store.  Phase 3.5 parity compares the published value geometry and
-    # causal availability, not repository-specific source provenance.
+        if left_value != right_value:
+            return {"status": "MISMATCHED", "layer": "phase3_5_independent", "field": f"prior_value.{field}", "canonical_value": left_value, "paper_value": right_value}
+    # Snapshot identity and fingerprint belong to the producer's profile store;
+    # compare the published value geometry and causal availability instead.
     ignored = {"fingerprint", "reference_id", "poc", "vah", "val"}
     remaining_left = {key: value for key, value in left.items() if key not in ignored}
     remaining_right = {key: value for key, value in right.items() if key not in ignored}
     if remaining_left != remaining_right:
         return {"status": "MISMATCHED", "layer": "phase3_5_independent", "field": "prior_value", "first_mismatch": _first_difference(remaining_left, remaining_right, "prior_value")}
-    # The comparison fingerprint intentionally excludes tolerant value fields
-    # and the producer fingerprint that was derived from them.
     return {
         "status": "MATCHED",
         "layer": "phase3_5_independent",
-        "reason": "bounded_prior_value_input_variance",
         "comparison_fingerprint": _digest(remaining_left),
     }
 
@@ -503,43 +495,12 @@ def _compare_phase35(canonical: dict[str, Any], paper: dict[str, Any]) -> dict[s
     if not isinstance(canonical_atr, dict) or not isinstance(paper_atr, dict):
         return {"status": "INCOMPLETE", "layer": "phase3_5", "reason": "atr is not an object"}
     if canonical_atr.get("value") != paper_atr.get("value"):
-        canonical_value_atr = canonical_atr.get("value")
-        paper_value_atr = paper_atr.get("value")
-        if not isinstance(canonical_value_atr, (int, float)) or not isinstance(paper_value_atr, (int, float)) or not math.isfinite(canonical_value_atr) or not math.isfinite(paper_value_atr):
-            return {"status": "MISMATCHED", "layer": "phase3_5", "reason": "ATR values are not numeric"}
-        difference = abs(canonical_value_atr - paper_value_atr)
-        tolerance = max(ATR_ABSOLUTE_TOLERANCE, abs(canonical_value_atr) * ATR_RELATIVE_TOLERANCE)
-        independent = _compare_phase35_independent(
-            canonical_value,
-            paper_value,
-            tolerance,
-        )
-        return {
-            "status": "INPUT_VARIANCE" if difference <= tolerance and independent["status"] == "MATCHED" else "MISMATCHED",
-            "layer": "phase3_5",
-            "reason": "ATR source histories differ; dependent evidence is not numerically comparable",
-            "variance_fields": list(PHASE35_ATR_DEPENDENT_FIELDS),
-            "atr": {
-                "canonical": canonical_value_atr,
-                "paper": paper_value_atr,
-                "absolute_difference": difference,
-                "tolerance": tolerance,
-                "relative_difference": difference / abs(canonical_value_atr) if canonical_value_atr else None,
-            },
-            "dependent_counts": {
-                field: {
-                    "canonical": len(canonical_value[field]) if isinstance(canonical_value[field], list) else None,
-                    "paper": len(paper_value[field]) if isinstance(paper_value[field], list) else None,
-                }
-                for field in PHASE35_ATR_DEPENDENT_FIELDS
-            },
-            "independent": independent,
-        }
-    # Prior-value geometry and causal availability are semantic evidence.  The
-    # reference id and fingerprint are producer-owned profile-store lineage,
-    # so compare them through the same bounded semantic path used when ATR
-    # histories differ rather than treating repository provenance as parity.
-    independent = _compare_phase35_independent(canonical_value, paper_value, 0.0)
+        return {"status": "MISMATCHED", "layer": "phase3_5", "field": "atr.value",
+                "canonical_value": canonical_atr.get("value"),
+                "paper_value": paper_atr.get("value")}
+    # Prior-value geometry and causal availability are semantic evidence;
+    # reference IDs and fingerprints are producer-owned profile-store lineage.
+    independent = _compare_phase35_independent(canonical_value, paper_value)
     if independent["status"] != "MATCHED":
         return {
             **independent,
@@ -569,18 +530,6 @@ def _compare_phase35(canonical: dict[str, Any], paper: dict[str, Any]) -> dict[s
         "manifest": dependent["manifest"],
         "prior_value": independent,
     }
-
-
-def _bounded_atr_dependent_difference(phase4: dict[str, Any], tolerance: float) -> bool:
-    """Accept only numeric ATR geometry differences within the ATR bound."""
-    field = str(phase4.get("field", ""))
-    canonical = phase4.get("canonical_value")
-    paper = phase4.get("paper_value")
-    if not field.endswith((".band_low", ".band_high")):
-        return False
-    if not isinstance(canonical, (int, float)) or not isinstance(paper, (int, float)) or not math.isfinite(canonical) or not math.isfinite(paper):
-        return False
-    return abs(canonical - paper) <= tolerance
 
 
 def _paper_phase35_projection(session_result: dict[str, Any]) -> dict[str, Any]:
@@ -740,19 +689,18 @@ def _compare_phase4(canonical_path: Path, paper: dict[str, Any], session_date: s
             stream: [_normalize_phase_record_for_compare(item, session_date) for item in records]
             for stream, records in paper_facts.items()
         }
-        canonical = build_phase4_artifact(
-            run_id=f"canonical-{session_date}", producer={"name": "NiftyZoning"},
-            scope={"date": session_date}, payload={"parity_phase_facts": canonical_facts},
-        )
-        paper_artifact = build_phase4_artifact(
-            run_id=f"paper-{session_date}", producer={"name": "ftx-paper"},
-            scope={"date": session_date}, payload={"parity_phase_facts": paper_facts},
-        )
-        return compare_phase4_manifests(
-            canonical, paper_artifact, streams=PHASE4_STREAMS,
-            canonical_records=lambda stream: canonical["phase_streams"][stream],
-            paper_records=lambda stream: paper_artifact["phase_streams"][stream],
-        )
+        for stream in PHASE4_STREAMS:
+            canonical_records = canonical_facts.get(stream)
+            paper_records = paper_facts.get(stream)
+            if not isinstance(canonical_records, list) or not isinstance(paper_records, list):
+                return {"status": "INCOMPLETE", "stream": stream, "reason": "phase facts unavailable"}
+            result = compare_chronological_streams(
+                canonical_records, paper_records, stream=stream,
+                session_date=session_date,
+            )
+            if result["status"] != "MATCHED":
+                return {"stream": stream, **result}
+        return {"status": "MATCHED"}
     except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
         return {"status": "INCOMPLETE", "stream": "source_observation", "reason": str(exc)}
 
@@ -773,48 +721,13 @@ def _compare_phase45(canonical_path: Path, paper: dict[str, Any], session_date: 
         paper_records = paper_facts.get("interaction_response", [])
         if not isinstance(canonical_records, list) or not isinstance(paper_records, list):
             return {"status": "INCOMPLETE", "stream": "interaction_response", "reason": "interaction facts are unavailable"}
-        canonical_semantics = [
-            _phase45_semantic_projection(item, session_date)
-            for item in canonical_records
-        ]
-        paper_semantics = [
-            _phase45_semantic_projection(item, session_date)
-            for item in paper_records
-        ]
-        result: dict[str, Any]
-        for index, (canonical_value, paper_value) in enumerate(zip(canonical_semantics, paper_semantics)):
-            if canonical_value != paper_value:
-                difference = _first_difference(canonical_value, paper_value)
-                assert difference is not None
-                result = {
-                    "status": "MISMATCHED", "index": index, "field": difference["path"],
-                    "canonical_value": difference["canonical"], "paper_value": difference["paper"],
-                    "canonical_record": canonical_value, "paper_record": paper_value,
-                }
-                break
-        else:
-            if len(canonical_semantics) != len(paper_semantics):
-                result = {
-                    "status": "MISMATCHED", "index": min(len(canonical_semantics), len(paper_semantics)),
-                    "reason": "count", "canonical_count": len(canonical_semantics),
-                    "paper_count": len(paper_semantics),
-                }
-            else:
-                result = {"status": "MATCHED", "count": len(canonical_semantics)}
-                diagnostics = [
-                    {
-                        "index": index,
-                        "canonical_identity": canonical.get("identity"),
-                        "paper_identity": paper.get("identity"),
-                        "canonical_parent": canonical.get("causal_parent_id") or canonical.get("causal_parent_key"),
-                        "paper_parent": paper.get("causal_parent_id") or paper.get("causal_parent_key"),
-                    }
-                    for index, (canonical, paper) in enumerate(zip(canonical_records, paper_records))
-                    if canonical != paper
-                ]
-                if diagnostics:
-                    result["ignored_producer_metadata"] = diagnostics
-        return {"stream": "interaction_response", **result}
+        return {
+            "stream": "interaction_response",
+            **compare_chronological_streams(
+                canonical_records, paper_records, stream="interaction_response",
+                session_date=session_date,
+            ),
+        }
     except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
         reason = str(exc)
         if "timezone-aware" in reason and reason != "parity timestamps must be timezone-aware":
@@ -1455,19 +1368,6 @@ def _compare_phase6(canonical_path: Path, paper: dict[str, Any], session_date: s
             canonical_records=lambda stream: canonical["phase_streams"][stream],
             paper_records=lambda stream: paper_artifact["phase_streams"][stream],
         )
-        if (
-            result.get("status") == "MISMATCHED"
-            and str(result.get("field", "")).endswith(("failure_boundary", "entry_boundary"))
-            and isinstance(result.get("canonical_value"), (int, float))
-            and isinstance(result.get("paper_value"), (int, float))
-            and abs(float(result["canonical_value"]) - float(result["paper_value"])) <= ATR_ABSOLUTE_TOLERANCE
-        ):
-            return {
-                "status": "INPUT_VARIANCE",
-                "stream": "opportunity_lifecycle",
-                "reason": "bounded ATR variance affects lifecycle boundaries",
-                "first_difference": result,
-            }
         return result
     except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
         return {"status": "INCOMPLETE", "stream": "opportunity_lifecycle", "reason": str(exc)}
@@ -1588,25 +1488,6 @@ def _compare_phase7(canonical_path: Path, paper: dict[str, Any], session_date: s
                         canonical_trace, paper_trace,
                     ),
                 }
-        if (
-            result.get("status") == "MISMATCHED"
-            and str(result.get("field", "")).startswith("values.")
-            and str(result.get("field", "")).rsplit(".", 1)[-1]
-            in {
-                "price", "quantity", "requested_price", "failure_boundary",
-                "protective_stop", "stop",
-            }
-            and isinstance(result.get("canonical_value"), (int, float))
-            and isinstance(result.get("paper_value"), (int, float))
-            and abs(float(result["canonical_value"]) - float(result["paper_value"]))
-            <= ATR_ABSOLUTE_TOLERANCE
-        ):
-            result = {
-                "status": "INPUT_VARIANCE",
-                "stream": result.get("stream", "execution_fills"),
-                "reason": "bounded ATR variance affects execution price",
-                "first_difference": result,
-            }
         return result
     except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
         return {"status": "INCOMPLETE", "stream": PHASE7_STREAMS[0], "reason": str(exc)}
@@ -2005,26 +1886,11 @@ def compare_date(
             else {"status": "INCOMPLETE", "stream": PHASE7_STREAMS[0], "reason": "replay artifact unavailable"}
         )
         parity = _compare_unified_artifact(canonical_path, paper_replay, session_date)
-        if phase6.get("status") not in {"MATCHED", "INPUT_VARIANCE"}:
+        if phase6.get("status") != "MATCHED":
             phase7 = {
                 "status": "UNAVAILABLE",
                 "stream": PHASE7_STREAMS[0],
                 "reason": "phase6_gate_not_accepted",
-            }
-        atr_payload = phase35.get("atr")
-        atr_tolerance = atr_payload.get("tolerance") if isinstance(atr_payload, dict) else None
-        if (
-            phase35.get("status") == "INPUT_VARIANCE"
-            and phase4.get("status") == "MISMATCHED"
-            and isinstance(atr_tolerance, (int, float))
-            and _bounded_atr_dependent_difference(phase4, atr_tolerance)
-        ):
-            phase4 = {
-                "status": "INPUT_VARIANCE",
-                "stream": phase4.get("stream", "context_location"),
-                "reason": "bounded ATR variance affects dependent context/location evidence",
-                "variance": phase35.get("atr"),
-                "first_dependent_difference": phase4,
             }
         retained_artifacts = _retain_replay_artifacts(
             artifact_dir, session_date, run_id or uuid4().hex[:8], canonical_path, paper_replay_path,

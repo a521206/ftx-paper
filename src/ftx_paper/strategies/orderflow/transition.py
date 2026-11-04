@@ -582,11 +582,20 @@ class OrderflowEngine:
                 constraints=constraints,
             )
         )
+        available5 = [
+            aggregate for aggregate in available5
+            if coerce_timestamp(aggregate.available_at) <= coerce_timestamp(timestamp)
+        ]
+        available1 = [
+            aggregate for aggregate in self.observation_owner.one_minute_aggregates
+            if coerce_timestamp(aggregate.available_at) <= coerce_timestamp(timestamp)
+        ]
         new_5m = self._advance_pre_structure(
             item,
             timestamp=timestamp,
             next_time=next_time,
             row=row,
+            available1=available1,
             available5=available5,
             bar_index=bar_index,
             bar_events=bar_events,
@@ -594,11 +603,14 @@ class OrderflowEngine:
         interaction = self._process_interactions(
             item,
             new_5m=new_5m,
+            available1=available1,
+            available5=available5,
             timestamp=timestamp,
             bar_events=bar_events,
         )
         self._record_phase4(
             item,
+            available1=available1,
             available5=available5,
             timestamp=timestamp,
             available_at=next_time,
@@ -689,12 +701,12 @@ class OrderflowEngine:
                 **self.context.atr_by_session,
                 item.one_minute.session_date: item.atr.value,
             }
+        timestamp = nifty_label(item.one_minute.time)
         source, row, available5 = self._ingest_observation(item)
         if regime is not None:
             self.context.regime = regime
         if constraints is not None:
             self.context.execution_constraints = constraints
-        timestamp = nifty_label(item.one_minute.time)
         next_time = nifty_label(item.one_minute.available_at)
         if item.prior_value is not None and self.context.continuous is not None:
             self.context.continuous.publish_prior_value(item.prior_value)
@@ -718,6 +730,7 @@ class OrderflowEngine:
         timestamp: str,
         next_time: str,
         row: dict[str, Any],
+        available1: list[Aggregate],
         available5: list[Aggregate],
         bar_index: int,
         bar_events: list[dict[str, Any]],
@@ -740,13 +753,14 @@ class OrderflowEngine:
         )
         self._trace_phase("opening_gap_update", timestamp, next_time, lambda: self._opening_gap.advance(
             item.one_minute.session_date,
-            list(self.observation_owner.one_minute_aggregates),
+            available1,
             timestamp,
             bar_events,
         ))
         self._trace_phase("active_position_gate", timestamp, next_time, lambda: self.execution_owner.active_position_gate.update(self.context, timestamp))
         if new_5m and available5:
             market_state_before_permission = self.context.market_state
+            previous5_before_permission = self.context.previous5_available_at
             permission_event_start = len(bar_events)
             scores = build_context_scores(
                 available5[-1],
@@ -765,6 +779,13 @@ class OrderflowEngine:
                 "market_state_after": self.context.market_state,
                 "changed": market_state_before_permission != self.context.market_state,
                 "latest_structure_time": nifty_label(available5[-1].time),
+                "decision_timestamp": timestamp,
+                "decision_available_at": next_time,
+                "latest_5m_time": nifty_label(available5[-1].time),
+                "latest_5m_available_at": available5[-1].available_at,
+                "previous5_available_at_before": previous5_before_permission,
+                "previous5_available_at_after": self.context.previous5_available_at,
+                "new_5m": new_5m,
                 "long_score": long_score,
                 "short_score": short_score,
                 "event_kinds": [
@@ -780,6 +801,8 @@ class OrderflowEngine:
         item: OrderflowInput,
         *,
         new_5m: bool,
+        available1: list[Aggregate],
+        available5: list[Aggregate],
         timestamp: str,
         bar_events: list[dict[str, Any]],
     ) -> OrderflowAdvance:
@@ -788,6 +811,8 @@ class OrderflowEngine:
             interaction = self.observation_owner.observe_interactions(
                 item,
                 new_five_minute=new_5m,
+                available1=available1,
+                available5=available5,
                 input_diagnostics=self.context.input_diagnostics,
             )
             for transition in interaction.transitions:
@@ -824,6 +849,7 @@ class OrderflowEngine:
         self,
         item: OrderflowInput,
         *,
+        available1: list[Aggregate],
         available5: list[Aggregate],
         timestamp: str,
         available_at: str,
@@ -833,7 +859,7 @@ class OrderflowEngine:
             timestamp,
             available_at,
             lambda: self._phase4.source_observations(
-                (*self.observation_owner.one_minute_aggregates, *available5),
+                (*available1, *available5),
             ),
         )
         self._trace_phase(
@@ -926,6 +952,7 @@ class OrderflowEngine:
         event_start = len(self.context.events)
         result = action()
         after = self._trace_snapshot()
+        phase_events = self.context.events[event_start:]
         self.context.input_diagnostics.append({
             "kind": "phase4_clock_trace",
             "ordinal": sum(
@@ -939,9 +966,17 @@ class OrderflowEngine:
             "after": after,
             "event_range": [event_start, len(self.context.events)],
             "event_kinds": sorted({
-                str(event.get("kind")) for event in self.context.events[event_start:]
+                str(event.get("kind")) for event in phase_events
                 if event.get("kind")
             }),
+            "event_links": [
+                {
+                    "event_id": event.get("event_id", event.get("id")),
+                    "sequence": event.get("sequence", event_start + offset),
+                    "kind": event.get("kind"),
+                }
+                for offset, event in enumerate(phase_events)
+            ],
         })
         return result
 

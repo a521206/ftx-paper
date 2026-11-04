@@ -304,6 +304,85 @@ def test_unified_comparison_ignores_producer_extensions() -> None:
     assert compare_parity_artifacts(left, right) == {"status": "MATCHED"}
 
 
+def test_unified_comparison_ignores_local_identity_but_compares_parent() -> None:
+    coverage = {"phase_streams": _empty_coverage(PHASE_STREAMS), "layers": _empty_coverage(LAYERS)}
+    record = {
+        "kind": "decision", "stage": "candidate",
+        "occurred_at": "2026-10-01T09:20:00Z",
+        "observed_at": "2026-10-01T09:20:00Z",
+        "available_at": "2026-10-01T09:20:00Z", "sequence": 0,
+        "identity": "canonical-local-id", "causal_parent_id": "canonical-parent",
+        "values": {"direction": "long"}, "unavailable": [],
+    }
+    other = {**record, "identity": "paper-local-id", "causal_parent_id": "paper-parent"}
+    common = {
+        "parity_phase_facts": {name: [] for name in PHASE_STREAMS},
+        "parity_coverage": {**coverage, "layers": {**coverage["layers"], "decision": {
+            "status": "MATCHED", "observed": True, "coverage": "observed",
+        }}},
+        "scope": {"timezone": "Asia/Kolkata"},
+    }
+    left = build_parity_artifact_from_payload(
+        {**common, "parity_layers": {**{name: [] for name in LAYERS}, "decision": [record]}},
+        run_id="left", producer={"name": "canonical"},
+    )
+    right = build_parity_artifact_from_payload(
+        {**common, "parity_layers": {**{name: [] for name in LAYERS}, "decision": [other]}},
+        run_id="right", producer={"name": "paper"},
+    )
+
+    assert left["layers"]["decision"][0]["comparison_key"] == right["layers"]["decision"][0]["comparison_key"]
+    result = compare_parity_artifacts(left, right)
+    assert result["status"] == "MISMATCHED"
+    assert result["field"] == "causal_parent_id"
+
+
+def test_unified_comparison_compares_source_fingerprint() -> None:
+    coverage = {"phase_streams": _empty_coverage(PHASE_STREAMS), "layers": _empty_coverage(LAYERS)}
+    record = {
+        "kind": "source_observation",
+        "occurred_at": "2026-10-01T09:20:00Z",
+        "observed_at": "2026-10-01T09:20:00Z",
+        "available_at": "2026-10-01T09:20:00Z", "sequence": 0,
+        "identity": "local-id", "causal_parent_id": None,
+        "values": {"source_fingerprint": "canonical-source"}, "unavailable": [],
+    }
+    other = {**record, "values": {"source_fingerprint": "paper-source"}}
+    common = {
+        "parity_phase_facts": {**{name: [] for name in PHASE_STREAMS}, "source_observation": [record]},
+        "parity_coverage": {**coverage, "phase_streams": {**coverage["phase_streams"], "source_observation": {
+            "status": "MATCHED", "observed": True, "coverage": "observed",
+        }}},
+        "scope": {"timezone": "Asia/Kolkata"},
+    }
+    left = build_parity_artifact_from_payload(
+        {**common, "parity_layers": {name: [] for name in LAYERS}},
+        run_id="left", producer={"name": "canonical"},
+    )
+    right = build_parity_artifact_from_payload(
+        {**common, "parity_phase_facts": {**{name: [] for name in PHASE_STREAMS}, "source_observation": [other]}, "parity_layers": {name: [] for name in LAYERS}},
+        run_id="right", producer={"name": "paper"},
+    )
+
+    result = compare_parity_artifacts(left, right)
+    assert result["status"] == "MISMATCHED"
+    assert result["field"] == "values.source_fingerprint"
+
+
+def test_unknown_status_is_not_a_parity_status() -> None:
+    coverage = {"phase_streams": _empty_coverage(PHASE_STREAMS), "layers": _empty_coverage(LAYERS)}
+    coverage["phase_streams"]["source_observation"] = {
+        "status": "UNSUPPORTED", "observed": True, "coverage": "observed_empty",
+    }
+    with pytest.raises(ValueError, match="invalid parity status"):
+        build_parity_artifact(
+            run_id="run-1", producer={"name": "paper"},
+            scope={"timezone": "Asia/Kolkata"},
+            phase_streams={name: [] for name in PHASE_STREAMS},
+            layers={name: [] for name in LAYERS}, coverage=coverage,
+        )
+
+
 def test_unified_comparison_normalizes_embedded_session_labels() -> None:
     record = {
         "kind": "interaction",

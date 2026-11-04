@@ -37,6 +37,10 @@ canonical execution lifecycle transitions; the Paper host adapter performs
 account-facing execution and accounting. Persistence and artifact construction
 remain host responsibilities over emitted facts, not recomputed decisions.
 
+The single parity contract, phase gates, unified artifact ordering, and
+diagnostic boundary are maintained in the canonical NiftyZoning document at
+`C:\Users\agraw\Python\NiftyZoning\docs\orderflow\PARITY_CONTRACT.md`.
+
 ## Current Status
 
 Implemented in the Paper source tree:
@@ -80,12 +84,10 @@ Every phase requires all of these checks:
 8. Obsolete production providers, duplicate transition owners, and replay-only
    strategy paths are removed when their replacements pass the relevant gates.
 
-Bounded `INPUT_VARIANCE` is acceptable only for the existing documented
-ATR/prior-value input rule. It must be recorded explicitly and must not hide a
-control-flow, identity, timestamp, lifecycle, or execution mismatch. A final
-artifact may be accepted with bounded input variance only when the comparator
-marks that variance as accepted; `MISMATCHED`, `INCOMPLETE`, and `UNAVAILABLE`
-remain failures for the relevant gate.
+Input differences are parity mismatches. ATR, prior-value, control-flow,
+identity, timestamp, lifecycle, and execution differences must not be accepted
+as variance or hidden by a tolerance. `MISMATCHED`, `INCOMPLETE`, and
+`UNAVAILABLE` remain failures for the relevant gate.
 
 ## Phase 1: Remove Paper-Native Behavior
 
@@ -175,9 +177,8 @@ dropped from the Phase 7 contract. Each record retains identity, causal parent,
 timestamps, sequence, values, and unavailable state.
 
 Phase 8 is accepted only when the eligible canonical/Paper artifacts compare in
-stream and layer order. A bounded `INPUT_VARIANCE` may be accepted only when the
-comparison result explicitly says so; downstream lifecycle or execution
-`MISMATCHED` results keep this gate open.
+stream and layer order without mismatches; downstream `MISMATCHED`,
+`INCOMPLETE`, or `UNAVAILABLE` results keep this gate open.
 
 ## Phase 9: Complete The Paper Host
 
@@ -316,8 +317,7 @@ accepted.
    influence aside from the recorded session-levels exception (Phase 3).
    Compare each input prefix against the pinned NiftyZoning behavior.
    Reconcile availability/decision timestamps and the supporting-bar deadline;
-   any accepted input variance must be documented and shown not to alter
-   decisions.
+   any input difference remains a parity mismatch until corrected.
 2. **Complete the shared strategy owner and host boundary.** **Owner
    implementation exists; explicit production host routing and parity acceptance
    remain open.** Route every live and replay input through the same orderflow
@@ -337,9 +337,8 @@ accepted.
 3. **Pass execution-bearing parity and complete fact capture.** Rerun eligible
    source-matched sessions after UTC normalization. Compare no-trade and
    execution-bearing decision, execution/settlement, and portfolio-ledger
-   streams against canonical output. Accept only the documented ATR/prior-value
-   variance, explicitly classified as `INPUT_VARIANCE`. Persist DB-backed live
-   and replay facts. The unified parity artifact is emitted and persisted for
+   streams against canonical output. ATR and prior-value differences remain
+   mismatches. Persist DB-backed live and replay facts. The unified parity artifact is emitted and persisted for
    bounded replay only; live captures the same producer-owned facts as
    idempotent `ORDERFLOW_FACT` rows, and a live parity report would be built on
    demand from those facts rather than persisted as a parallel artifact.
@@ -365,8 +364,7 @@ Phase 10 is accepted only when all of the following hold:
 
 - no-trade and execution-bearing sessions match canonical decision,
   execution/settlement, and portfolio-ledger streams;
-- any variance is limited to the documented ATR/prior-value input rule and is
-  explicitly classified as `INPUT_VARIANCE`;
+- no input, causal, lifecycle, execution, or ledger variance is accepted;
 - live and replay advance the same strategy owner once per completed input, and
   host execution outcomes are captured without introducing parallel strategy
   policy;

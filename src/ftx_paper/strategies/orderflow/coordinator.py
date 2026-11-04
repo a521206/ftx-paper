@@ -7,7 +7,7 @@ levels, ATR, VWAP, locations, or child observations.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 import hashlib
 from typing import Any
@@ -224,11 +224,15 @@ class OrderflowCoordinator:
         item: OrderflowInput,
         *,
         new_five_minute: bool,
+        available1: Sequence[Aggregate] | None = None,
+        available5: Sequence[Aggregate] | None = None,
         input_diagnostics: list[dict[str, Any]] | None = None,
     ) -> OrderflowAdvance:
         """Evaluate location interactions after permission/context processing."""
         one = item.one_minute
         atr = item.atr.value if item.atr is not None else None
+        causal1 = list(self._one_minute if available1 is None else available1)
+        causal5 = list(self._five_minute if available5 is None else available5)
         events: list[dict[str, Any]] = []
         current_observations_1m = tuple(
             observation
@@ -316,14 +320,14 @@ class OrderflowCoordinator:
                 })
             transitions = tuple(self.detector.observe_1m(
                 current=one,
-                available=list(self._one_minute),
+                available=causal1,
                 atr=atr,
                 observations=current_observations_1m,
             ))
             transitions += tuple(self.detector.observe(
                 current=five,
-                available5=list(self._five_minute),
-                available1=list(self._one_minute),
+                available5=causal5,
+                available1=causal1,
                 atr=atr,
                 observations5=current_observations_5m,
                 observations1=current_5m_observations_1m,
@@ -331,7 +335,7 @@ class OrderflowCoordinator:
         else:
             transitions = tuple(self.detector.observe_1m(
                 current=one,
-                available=list(self._one_minute),
+                available=causal1,
                 atr=atr,
                 observations=current_observations_1m,
             ))

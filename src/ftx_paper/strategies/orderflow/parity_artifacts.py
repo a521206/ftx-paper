@@ -45,19 +45,37 @@ _CONTRACT_METADATA_FIELDS = frozenset({
     "expiry", "series", "strike", "option_type",
     "token", "instrument_token", "security_id",
 })
+_NON_COMPARABLE_FIELDS = frozenset({
+    "identity", "causal_parent_key", "parent_id",
+    "event_id", "neutral_event_key", "sequence", "stream_sequence",
+    "comparison_key", "producer_extensions", "contract_type", "_publication_available_at",
+    "parity_stream", "terminal_candle_id", "terminal_close_side",
+})
+_CAUSAL_TIMESTAMP_KEYS = frozenset({
+    "as_of", "available_at", "created_at", "current_available_at", "end_time",
+    "formation_at", "formation_available_at", "observed_at", "occurred_at",
+    "response_available_at", "response_observed_at", "causal_available_at",
+    "causal_observed_at", "context_candle_available_at", "time", "filled_at",
+    "reserved_at", "released_at", "decided_at", "effective_at", "triggered_at",
+})
 
 
 def _comparison_value(value: Any) -> Any:
-    """Remove market-contract provenance from a parity comparison projection."""
+    """Project producer records onto shared semantic parity values."""
     if isinstance(value, Mapping):
         return {
-            key: _comparison_value(item)
+            str(key): _comparison_value(item)
             for key, item in value.items()
-            if key not in _CONTRACT_METADATA_FIELDS and key != "producer_extensions"
+            if key not in _CONTRACT_METADATA_FIELDS and key not in _NON_COMPARABLE_FIELDS
         }
     if isinstance(value, list):
         return [_comparison_value(item) for item in value]
     return value
+
+
+def comparison_value(value: Any) -> Any:
+    """Return the shared producer-neutral semantic comparison projection."""
+    return _comparison_value(value)
 
 
 def _without_contract_type(value: Any) -> Any:
@@ -88,6 +106,29 @@ def _json(value: object) -> bytes:
 
 def canonical_hash(value: object) -> str:
     return hashlib.sha256(_json(value)).hexdigest()
+
+
+def comparison_key(record: Mapping[str, Any], *, stream: str) -> str:
+    """Return a producer-neutral key for one ordered parity record.
+
+    Mutable evidence is intentionally excluded so a changed value reports its
+    actual field mismatch rather than masquerading as a record-alignment gap.
+    ``sequence`` preserves duplicate same-clock occurrences without using a
+    producer-local identity.
+    """
+    stable = {
+        key: record.get(key)
+        for key in ("kind", "occurred_at", "observed_at", "available_at", "sequence")
+    }
+    values = record.get("values")
+    if isinstance(values, Mapping):
+        for key in (
+            "session_date", "timeframe", "source_observation_id", "interaction_id",
+            "lifecycle_id", "intent_id", "position_id", "fill_id",
+        ):
+            if values.get(key) is not None:
+                stable[key] = values[key]
+    return f"{stream}:{canonical_hash(_comparison_value(stable))}"
 
 
 def _records_hash(records: Sequence[Mapping[str, Any]]) -> str:
@@ -149,6 +190,35 @@ def _normalize_embedded_ids(value: Any, *, key: str | None = None) -> Any:
     return f"{prefix}{serialize_utc(parsed)}"
 
 
+def _normalize_causal_values(
+    value: Any, *, session_date: str | None, key: str | None = None,
+) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(item_key): _normalize_causal_values(
+                item,
+                session_date=session_date,
+                key=str(item_key) if str(item_key) in _CAUSAL_TIMESTAMP_KEYS else None,
+            )
+            for item_key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _normalize_causal_values(item, session_date=session_date, key=key)
+            for item in value
+        ]
+    if key is None or not isinstance(value, str):
+        return value
+    try:
+        if session_date and len(value) >= 10 and value[4] == "-" and value[7] == "-" and value[10:11] in {"T", " "}:
+            return serialize_utc(parse_session_timestamp(value[:10], value))
+        if session_date and len(value) == 5 and value[2] == ":":
+            return serialize_utc(parse_session_timestamp(session_date, value))
+        return serialize_utc(parse_utc(value))
+    except (TypeError, ValueError):
+        return value
+
+
 def normalize_phase_record(record: Mapping[str, Any], *, sequence: int) -> dict[str, Any]:
     required = {"kind", "occurred_at", "observed_at", "available_at", "identity", "causal_parent_id", "values", "unavailable"}
     missing = required - set(record)
@@ -161,6 +231,7 @@ def normalize_phase_record(record: Mapping[str, Any], *, sequence: int) -> dict[
     if parse_utc(result["available_at"]) < parse_utc(result["observed_at"]):
         raise ValueError("phase record availability precedes observation")
     result["sequence"] = sequence
+    result["comparison_key"] = comparison_key(result, stream="phase")
     if not isinstance(result["identity"], str) or not result["identity"]:
         raise ValueError("phase record identity is required")
     if not isinstance(result["values"], Mapping):
@@ -175,6 +246,7 @@ def normalize_phase_record(record: Mapping[str, Any], *, sequence: int) -> dict[
 
 def _normalize_record(
     record: Mapping[str, Any], *, stream: str, sequence: int, layer: str | None = None,
+    session_date: str | None = None,
 ) -> dict[str, Any]:
     required = {
         "kind", "occurred_at", "observed_at", "available_at", "sequence",
@@ -183,7 +255,10 @@ def _normalize_record(
     missing = required - set(record)
     if missing:
         raise ValueError(f"{stream} record missing {sorted(missing)}")
-    result = _normalize_embedded_ids(_without_contract_type(_copy(record)))
+    result = _normalize_causal_values(
+        _normalize_embedded_ids(_without_contract_type(_copy(record))),
+        session_date=session_date,
+    )
     result["occurred_at"] = _timestamp(result["occurred_at"])
     result["observed_at"] = _timestamp(result["observed_at"])
     result["available_at"] = _timestamp(result["available_at"])
@@ -197,6 +272,7 @@ def _normalize_record(
         raise ValueError(f"{stream} unavailable values must be named strings")
     if result["causal_parent_id"] is not None and not isinstance(result["causal_parent_id"], str):
         raise ValueError(f"{stream} causal_parent_id must be a string or null")
+    result["comparison_key"] = comparison_key(result, stream=stream)
     if layer == "run_scope":
         if result["kind"] != "run_scope":
             raise ValueError("run_scope records must use kind run_scope")
@@ -214,6 +290,17 @@ def _normalize_record(
     elif layer == "portfolio_ledger" and result["kind"] not in LEDGER_KINDS:
         raise ValueError("invalid portfolio_ledger kind")
     return result
+
+
+def normalize_parity_record(
+    record: Mapping[str, Any], *, stream: str, sequence: int,
+    layer: str | None = None, session_date: str | None = None,
+) -> dict[str, Any]:
+    """Normalize one record using the unified parity contract."""
+    return _normalize_record(
+        record, stream=stream, sequence=sequence, layer=layer,
+        session_date=session_date,
+    )
 
 
 def _stream_manifest(
@@ -502,18 +589,39 @@ def compare_phase7_manifests(canonical: Mapping[str, Any], paper: Mapping[str, A
 
 def compare_chronological_streams(
     canonical: Sequence[Mapping[str, Any]], paper: Sequence[Mapping[str, Any]],
+    *, stream: str = "phase", session_date: str | None = None,
 ) -> dict[str, Any]:
     """Compare causal facts in timestamp/sequence order and report the first gap."""
-    left = [_comparison_value(normalize_phase_record(item, sequence=index)) for index, item in enumerate(canonical)]
-    right = [_comparison_value(normalize_phase_record(item, sequence=index)) for index, item in enumerate(paper)]
+    left_records = [normalize_parity_record(item, stream=stream, sequence=index, session_date=session_date) for index, item in enumerate(canonical)]
+    right_records = [normalize_parity_record(item, stream=stream, sequence=index, session_date=session_date) for index, item in enumerate(paper)]
+    left = [_comparison_value(item) for item in left_records]
+    right = [_comparison_value(item) for item in right_records]
     for index, (left_item, right_item) in enumerate(zip(left, right)):
+        if left_records[index]["comparison_key"] != right_records[index]["comparison_key"]:
+            return {
+                "status": "MISMATCHED", "index": index,
+                "comparison_key": left_records[index]["comparison_key"],
+                "field": "comparison_key",
+                "canonical_value": left_records[index]["comparison_key"],
+                "paper_value": right_records[index]["comparison_key"],
+                "diagnostic_refs": {
+                    "canonical": left_records[index].get("identity"),
+                    "paper": right_records[index].get("identity"),
+                },
+            }
         if left_item != right_item:
             field, left_value, right_value = _first_mismatch(left_item, right_item)
-            return {"status": "MISMATCHED", "index": index, "field": field,
+            return {"status": "MISMATCHED", "index": index, "comparison_key": left_records[index]["comparison_key"], "field": field,
                     "canonical_value": left_value, "paper_value": right_value,
-                    "canonical_record": left_item, "paper_record": right_item}
+                    "canonical_record": left_item, "paper_record": right_item,
+                    "diagnostic_refs": {
+                        "canonical": left_records[index].get("identity"),
+                        "paper": right_records[index].get("identity"),
+                    }}
     if len(left) != len(right):
-        return {"status": "MISMATCHED", "index": min(len(left), len(right)),
+        index = min(len(left), len(right))
+        return {"status": "MISMATCHED", "index": index,
+                "comparison_key": (left_records[index]["comparison_key"] if index < len(left_records) else right_records[index]["comparison_key"]),
                 "reason": "count", "canonical_count": len(left), "paper_count": len(right)}
     return {"status": "MATCHED", "count": len(left)}
 
@@ -544,7 +652,7 @@ def compare_parity_artifacts(
             left = left_group[name]
             right = right_group[name]
             statuses = (str(left["status"]), str(right["status"]))
-            if statuses != ("MATCHED", "MATCHED"):
+            if any(status in {"MISMATCHED", "INCOMPLETE", "UNAVAILABLE"} for status in statuses):
                 return {"status": _status_precedence(statuses), "stream": name,
                         "group": manifest_group, "canonical": dict(left),
                         "paper": dict(right)}
@@ -556,23 +664,18 @@ def compare_parity_artifacts(
                 continue
             canonical_values = left_records[name]
             paper_values = right_records[name]
-            for sequence, (canonical_value, paper_value) in enumerate(
-                zip(canonical_values, paper_values)
-            ):
-                if _comparison_value(canonical_value) != _comparison_value(paper_value):
-                    field, left_value, right_value = _first_mismatch(
-                        canonical_value, paper_value,
-                    )
-                    return {"status": "MISMATCHED", "stream": name,
-                            "group": manifest_group, "sequence": sequence,
-                            "field": field, "canonical_value": left_value,
-                            "paper_value": right_value}
-            sequence = min(len(canonical_values), len(paper_values))
-            return {"status": "MISMATCHED", "stream": name,
-                    "group": manifest_group, "sequence": sequence,
-                    "field": "sequence", "reason": differing,
-                    "canonical_count": len(canonical_values),
-                    "paper_count": len(paper_values)}
+            result = compare_chronological_streams(
+                canonical_values, paper_values, stream=name,
+                session_date=(canonical.get("scope", {}).get("date")
+                              if isinstance(canonical.get("scope"), Mapping) else None),
+            )
+            if result["status"] != "MATCHED":
+                return {
+                    "group": manifest_group,
+                    "stream": name,
+                    "sequence": result.get("index"),
+                    **result,
+                }
     return {"status": "MATCHED"}
 
 
@@ -656,8 +759,10 @@ __all__ = [
     "PHASE_STREAMS", "PHASE7_STREAMS", "SCHEMA_VERSION",
     "build_parity_artifact", "build_parity_artifact_from_payload",
     "build_phase4_artifact", "build_phase7_artifact", "canonical_hash",
+    "comparison_key", "comparison_value",
     "compare_chronological_streams", "compare_parity_artifacts", "compare_phase4_manifests",
-    "compare_phase7_manifests", "normalize_phase_record", "phase_facts_from_payload",
+    "compare_phase7_manifests", "normalize_parity_record", "normalize_phase_record",
+    "phase_facts_from_payload",
     "read_parity_artifact", "read_parity_page", "validate_contract_declarations",
     "validate_parity_artifact", "write_parity_artifact",
 ]

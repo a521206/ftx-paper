@@ -281,10 +281,9 @@ match on:
 - lineage and fingerprints;
 - explicit unavailable status and reason when no value is publishable.
 
-The existing bounded ATR `INPUT_VARIANCE` rule may classify repository source
-history differences only when the difference is documented, numeric, and within
-the configured tolerance. A different Wilder seed caused by a truncated replay
-warmup is not input variance; it is an implementation mismatch.
+Repository source-history differences are parity mismatches. A different Wilder
+seed caused by a truncated replay warmup is likewise an implementation mismatch;
+neither may be hidden by a tolerance or classified as accepted variance.
 
 ## Validation Status
 
