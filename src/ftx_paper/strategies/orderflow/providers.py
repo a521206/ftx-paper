@@ -300,6 +300,8 @@ class CanonicalInputProvider:
         rows_by_date: dict[str, list[dict[str, Any]]] = {}
         for row in (*cls._rows_from_market_bars(feature_history_bars), *rows):
             rows_by_date.setdefault(str(row["session_date"]), []).append(row)
+        for session_rows in rows_by_date.values():
+            session_rows.sort(key=lambda row: str(row["time"]))
         target = max(rows_by_date, default=None)
         return cls(
             rows_by_date.get(target, ()) if target is not None else (),

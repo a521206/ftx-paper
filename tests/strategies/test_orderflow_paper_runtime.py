@@ -61,6 +61,26 @@ def test_input_provider_reports_selected_bundle_route_and_observation_counts() -
     assert explicit_input.input_diagnostic["observations_1m"] == 0
 
 
+def test_market_bar_provider_orders_rows_before_observation() -> None:
+    instrument = Instrument("NIFTY", "NFO", "FUTURES")
+    bars = tuple(
+        MarketBar(
+            instrument=instrument,
+            timestamp=datetime(2026, 10, 1, 4, minute, tzinfo=timezone.utc),
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.5,
+            volume=10,
+        )
+        for minute in (1, 0)
+    )
+
+    provider = CanonicalInputProvider.from_market_bars(bars)
+
+    assert [item.input.one_minute.time.minute for item in provider.envelopes] == [0, 1]
+
+
 def test_live_session_binds_existing_paper_execution_service(tmp_path) -> None:
     runtime = PaperOrderflowRuntime()
     session = RuntimeSession(RuntimeStore(tmp_path), None, [], engine=PaperEngine(runtime.strategy))
