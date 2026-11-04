@@ -1,4 +1,7 @@
 from ftx_paper.runtime.orderflow_setup import validate_atr_artifact_source
+from ftx_paper.runtime.futures_source import (
+    FuturesSessionSource, SessionSourceIdentity,
+)
 from ftx_paper.runtime.replay_input import ReplayInput
 import pytest
 
@@ -63,6 +66,30 @@ def test_prior_source_provenance_is_cached_until_reset():
     replay_input.reset()
     replay_input.prior_source_provenance("2026-01-05")
     assert store.read_dates_calls == 2
+
+
+def test_bars_keeps_selected_futures_source_exchange():
+    source = FuturesSessionSource(
+        session_date="2026-01-05",
+        identity=SessionSourceIdentity(
+            symbol="NIFTY26JANFUT", exchange="NFO", instrument_type="FUT",
+            expiry="2026-01-27", policy_version="test",
+        ),
+        bars=(), source_bar_count=0, source_fingerprint="source",
+    )
+    replay_input = ReplayInput(_Store(), _Resolver())
+    rows = [{
+        "symbol": "NIFTY26JANFUT", "exchange": "NFO",
+        "minute": "2026-01-05T03:45:00Z", "instrument_type": "FUT",
+        "expiry": "2026-01-27", "open": 100, "high": 101,
+        "low": 99, "close": 100, "volume": 1,
+    }]
+
+    bars = replay_input.bars("2026-01-05", rows=rows, futures_source=source)
+
+    assert len(bars) == 1
+    assert bars[0].instrument.symbol == "NIFTY"
+    assert bars[0].instrument.exchange == "NFO"
 
 
 def test_atr_artifact_source_validation_rejects_invalid_lineage_and_late_source_bar():

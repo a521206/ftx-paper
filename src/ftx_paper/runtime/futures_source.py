@@ -55,6 +55,10 @@ class FuturesSessionSource:
         return self.identity.symbol
 
     @property
+    def exchange(self) -> str:
+        return self.identity.exchange
+
+    @property
     def expiry(self) -> str:
         return self.identity.expiry
 
