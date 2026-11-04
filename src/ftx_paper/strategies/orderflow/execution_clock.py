@@ -100,6 +100,7 @@ class ExecutionClock:
             state = owner.engine.state_for(life.lifecycle_id)
             if not life.active and state.position is None:
                 continue
+            life.clock = timestamp
             if owner.opportunity_expired(life, timestamp=timestamp):
                 owner.expire_opportunity(
                     life,
@@ -107,11 +108,6 @@ class ExecutionClock:
                     bar_events=events,
                 )
                 continue
-            owner.apply_session_deadline(
-                life, session_date=str(life.session_date),
-                timestamp=timestamp, bar_events=events,
-            )
-            state = owner.engine.state_for(life.lifecycle_id)
             if (
                 life.active
                 and context.regime is not None
@@ -120,6 +116,10 @@ class ExecutionClock:
             ):
                 owner.admit_opportunity(life, next_time, events)
             trace_before = _trace(owner.engine.state_for(life.lifecycle_id))
+            owner.apply_session_deadline(
+                life, session_date=str(life.session_date),
+                timestamp=timestamp, bar_events=events,
+            )
             owner.handle_management(
                 index, timestamp, next_time, dict(row), list(available5), events, life,
                 defer_discretionary_execution=True,

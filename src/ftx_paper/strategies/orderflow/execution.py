@@ -1578,6 +1578,13 @@ class ExecutionCoordinator:
     def admit_opportunity(
         self, life: SetupOpportunity, next_time: str, bar_events: list[dict[str, Any]]
     ) -> None:
+        existing_state = self.engine.state_for(life.lifecycle_id)
+        if (
+            existing_state.position is not None
+            or existing_state.intent is not None
+            and existing_state.intent.status is not IntentStatus.CANCELLED
+        ):
+            return
         decision_at = nifty_label(life.formation_available_at)
         setup = self.context.execution_engine.setup_for(life.lifecycle_id)
         reason = None
@@ -1660,12 +1667,28 @@ class ExecutionCoordinator:
             None,
         )
         if source_life is not None:
+            source_state = self.engine.state_for(source_life.lifecycle_id)
+            successor_state = self.engine.state_for(life.lifecycle_id)
             transferred_position = self.engine.transfer_position_owner(
                 source_life,
                 life,
                 available_at=life.formation_available_at,
             )
             if transferred_position is not None:
+                self.context.execution_diagnostics.append({
+                    "kind": "position_ownership_transfer_diagnostic",
+                    "position_id": transferred_position.position_id,
+                    "from_lifecycle_id": source_life.lifecycle_id,
+                    "to_lifecycle_id": life.lifecycle_id,
+                    "source_entry_at": source_state.entry_at,
+                    "source_intent_id": source_state.intent.intent_id if source_state.intent else None,
+                    "source_intent_status": source_state.intent.status.value if source_state.intent else None,
+                    "source_intent_triggered_at": source_state.intent.triggered_at if source_state.intent else None,
+                    "successor_intent_id": successor_state.intent.intent_id if successor_state.intent else None,
+                    "successor_intent_status": successor_state.intent.status.value if successor_state.intent else None,
+                    "successor_intent_triggered_at": successor_state.intent.triggered_at if successor_state.intent else None,
+                    "available_at": life.formation_available_at,
+                })
                 self.context.record_event({
                     "kind": "position_ownership_transferred",
                     "position_id": transferred_position.position_id,
@@ -1754,14 +1777,16 @@ class ExecutionCoordinator:
             formation_at = coerce_timestamp(life.formation_available_at)
             if formation_at >= coerce_timestamp(setup.expires_at):
                 continue
+            already_registered = life.lifecycle_id in self.engine.current()
             self.engine.register(life.lifecycle_id)
             if self.engine.setup_for(life.lifecycle_id) is None:
                 self.engine.attach_setup(
                     life, setup, available_at=str(life.formation_available_at)
                 )
             events: list[dict[str, Any]] = []
-            self.admit_opportunity(life, decision_at, events)
-            self._record_intent_admission(life, formation.available_at)
+            if not already_registered:
+                self.admit_opportunity(life, decision_at, events)
+                self._record_intent_admission(life, formation.available_at)
         return self.context.parity_snapshot()
 
     def _record_intent_admission(self, life: SetupOpportunity, fallback_at: Any) -> None:
@@ -2874,10 +2899,30 @@ class ExecutionCoordinator:
         defer_discretionary_execution: bool = False,
     ) -> None:
         state = self.engine.state_for(life.lifecycle_id)
+        position = state.position
+        intent = state.intent
+        pending = state.pending_exit
+        position_open = self.context.position_is_open(life)
+        self.context.execution_diagnostics.append({
+            "kind": "management_gate_evaluated",
+            "lifecycle_id": life.lifecycle_id,
+            "observed_at": timestamp,
+            "available_at": next_time,
+            "life_active": life.active,
+            "episode_confirmed": life.episode_confirmed,
+            "position_present": position is not None,
+            "position_open": position_open,
+            "position_quantity": position.quantity if position is not None else None,
+            "position_fill_price": position.fill_price if position is not None else None,
+            "pending_exit_reason": pending.reason if pending is not None else None,
+            "pending_exit_available_at": pending.available_at if pending is not None else None,
+            "intent_status": intent.status.value if intent is not None else None,
+            "intent_triggered_at": intent.triggered_at if intent is not None else None,
+            "defer_discretionary_execution": defer_discretionary_execution,
+        })
         if not life.active and state.position is None:
             return
         context = self.context
-        pending = state.pending_exit
         if (
             pending is not None
             and context.position_is_open(life)
@@ -3300,8 +3345,27 @@ class ExecutionCoordinator:
                 "available_at": next_time,
                 "location_interaction_id": life.location_interaction_id,
                 "entry_at": state.entry_at,
+                "entry_time": (
+                    nifty_label(coerce_timestamp(state.intent.triggered_at))[11:]
+                    if state.intent is not None and state.intent.triggered_at is not None
+                    else None
+                ),
+                "entry_price": entry_price,
+                "failure_boundary": position.failure_boundary,
+                "prior_count": len(context.rows[:index]),
+                "prior_first_time": (
+                    context.rows[0].get("time") if context.rows[:index] else None
+                ),
+                "prior_last_time": (
+                    context.rows[index - 1].get("time") if index > 0 else None
+                ),
                 "completed_1m_count": len(context.aggregates.get("1m", ())),
                 "completed_5m_count": len(available5),
+                "completed_1m_last_time": (
+                    context.aggregates.get("1m", [])[-1].time
+                    if context.aggregates.get("1m") else None
+                ),
+                "completed_5m_last_time": available5[-1].time if available5 else None,
                 "synthetic_snapshot_count": len(synthetic_snapshots or ()),
                 "synthetic_snapshots": [
                     {

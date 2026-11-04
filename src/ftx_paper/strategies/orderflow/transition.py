@@ -601,9 +601,10 @@ class OrderflowEngine:
             )
         else:
             self.context.current_session_date = item.one_minute.session_date
+        bar_index = len(self.context.rows) - 1
         pre_execution_events: list[dict[str, Any]] = []
         self._execution_clock.settle_pending(
-            index=0,
+            index=bar_index,
             timestamp=timestamp,
             next_time=next_time,
             row=row,
@@ -636,6 +637,8 @@ class OrderflowEngine:
             bar_events,
         )
         if new_5m and available5:
+            market_state_before_permission = self.context.market_state
+            permission_event_start = len(bar_events)
             scores = build_context_scores(
                 available5[-1],
                 raw_rows=self.context.rows,
@@ -644,6 +647,23 @@ class OrderflowEngine:
             )
             long_score, short_score = scores if scores is not None else (None, None)
             self.handle_permission(available5[-1], long_score, short_score, bar_events)
+            permission_events = bar_events[permission_event_start:]
+            self.context.input_diagnostics.append({
+                "kind": "orderflow_permission_result",
+                "time": timestamp,
+                "available_at": next_time,
+                "market_state_before": market_state_before_permission,
+                "market_state_after": self.context.market_state,
+                "changed": market_state_before_permission != self.context.market_state,
+                "latest_structure_time": nifty_label(available5[-1].time),
+                "long_score": long_score,
+                "short_score": short_score,
+                "event_kinds": [
+                    str(event.get("kind"))
+                    for event in permission_events
+                    if isinstance(event, dict) and event.get("kind") is not None
+                ],
+            })
         timeout_events: list[dict[str, Any]] = []
         self.advance_opportunity_timeouts(timestamp, available5, timeout_events)
         self.context.pending_bar_events.extend(timeout_events)
@@ -661,9 +681,12 @@ class OrderflowEngine:
                 if self.context.last_confirmation_context_time is not None else None
             ),
         })
+        market_state_before_structure = self.context.market_state
+        structure_event_start = len(bar_events)
         self.opportunity_owner.handle_structure(
             timestamp, next_time, row, available5, bar_events,
         )
+        structure_events = bar_events[structure_event_start:]
         self.context.input_diagnostics.append({
             "kind": "orderflow_structure_result",
             "time": timestamp,
@@ -673,6 +696,19 @@ class OrderflowEngine:
                 nifty_label(self.context.last_confirmation_context_time)
                 if self.context.last_confirmation_context_time is not None else None
             ),
+            "market_state_before": market_state_before_structure,
+            "changed": bool(
+                any(
+                    isinstance(event, dict)
+                    and event.get("market_state") is not None
+                    for event in structure_events
+                )
+            ),
+            "event_kinds": [
+                str(event.get("kind"))
+                for event in structure_events
+                if isinstance(event, dict) and event.get("kind") is not None
+            ],
             "new_opportunity_ids": sorted(
                 set(self.context.opportunities) - opportunities_before_structure
             ),
@@ -698,7 +734,7 @@ class OrderflowEngine:
             )
         self._execution_clock.advance(
             tuple(accepted_formations),
-            index=0,
+            index=bar_index,
             timestamp=timestamp,
             next_time=next_time,
             row=row,
