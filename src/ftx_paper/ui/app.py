@@ -25,6 +25,7 @@ def create_ui_app(api_base_url: str | None = None) -> Flask:
         strategy_id = request.args.get("strategy_id", "")
         strategy_templates = {
             ("ftx-paper-research", "decisions"): "strategies/ftx-paper-research.html",
+            ("ftx-paper-orderflow", "decisions"): "strategies/ftx-paper-orderflow-decisions.html",
             ("ftx-paper-orderflow", "replay"): "strategies/ftx-paper-orderflow.html",
         }
         template = strategy_templates.get((strategy_id, page), "index.html")
