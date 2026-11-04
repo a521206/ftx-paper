@@ -193,6 +193,12 @@ class OrderflowEngine:
     def parity_streams(self) -> dict[str, list[dict[str, Any]]]:
         return self.context.parity_snapshot()
 
+    def _execution_snapshot(self) -> Mapping[str, tuple[dict[str, Any], ...]]:
+        return {
+            name: tuple(values)
+            for name, values in self.context.parity_snapshot().items()
+        }
+
     def drain_host_proposals(self) -> tuple[PaperOrderProposal, ...]:
         """Return host proposals emitted by the most recent transition."""
         return self._proposal_buffer.drain()
@@ -274,6 +280,22 @@ class OrderflowEngine:
 
     def restore_snapshot(self, snapshot: Mapping[str, Any]) -> None:
         """Restore producer-owned facts and the transition clock idempotently."""
+        self._validate_snapshot(snapshot)
+        raw_clock = snapshot.get("clock")
+        self._clock = coerce_timestamp(raw_clock) if raw_clock else None
+        self.context.events = deepcopy(snapshot.get("events", []))
+        self.context.transitions = deepcopy(snapshot.get("transitions", []))
+        self.context.parity_streams = deepcopy(snapshot.get("parity_streams", {}))
+        self.context.parity_observed = set(snapshot.get("parity_observed", []))
+        self.context.parity_layers = deepcopy(snapshot.get("parity_layers", {}))
+        self.context.execution_diagnostics = deepcopy(snapshot.get("execution_diagnostics", []))
+        canonical = snapshot.get("canonical_state")
+        if not isinstance(canonical, Mapping):
+            return
+        self._restore_snapshot_canonical(canonical)
+
+    @staticmethod
+    def _validate_snapshot(snapshot: Mapping[str, Any]) -> None:
         if snapshot.get("schema_version") not in {1, 2}:
             raise ValueError("unsupported orderflow snapshot schema")
         raw_clock = snapshot.get("clock")
@@ -294,16 +316,8 @@ class OrderflowEngine:
                 value = canonical.get(name, [])
                 if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
                     raise ValueError(f"orderflow snapshot {name} is invalid")
-        self._clock = coerce_timestamp(raw_clock) if raw_clock else None
-        self.context.events = deepcopy(snapshot.get("events", []))
-        self.context.transitions = deepcopy(snapshot.get("transitions", []))
-        self.context.parity_streams = deepcopy(snapshot.get("parity_streams", {}))
-        self.context.parity_observed = set(observed)
-        self.context.parity_layers = deepcopy(snapshot.get("parity_layers", {}))
-        self.context.execution_diagnostics = deepcopy(snapshot.get("execution_diagnostics", []))
-        canonical = snapshot.get("canonical_state")
-        if not isinstance(canonical, Mapping):
-            return
+
+    def _restore_snapshot_canonical(self, canonical: Mapping[str, Any]) -> None:
         source = canonical.get("source")
         if isinstance(source, Mapping):
             if isinstance(source.get("rows"), list):
@@ -525,13 +539,92 @@ class OrderflowEngine:
         if self.observation_owner.has_seen(item):
             return TransitionAdvance(
                 observation=OrderflowAdvance(),
-                execution={
-                    name: tuple(values)
-                    for name, values in self.parity_streams.items()
-                },
+                execution=self._execution_snapshot(),
             )
         if self._clock is not None and available_at < self._clock:
             raise ValueError("orderflow transition clock cannot move backwards")
+        source, row, available5, timestamp, next_time, bar_events, bar_index = (
+            self._prepare_transition(
+                item,
+                available_at=available_at,
+                regime=regime,
+                constraints=constraints,
+            )
+        )
+        new_5m = self._advance_pre_structure(
+            item,
+            timestamp=timestamp,
+            next_time=next_time,
+            row=row,
+            available5=available5,
+            bar_index=bar_index,
+            bar_events=bar_events,
+        )
+        interaction = self._process_interactions(
+            item,
+            new_5m=new_5m,
+            available5=available5,
+            timestamp=timestamp,
+            bar_events=bar_events,
+        )
+        self._advance_structure(
+            timestamp=timestamp,
+            next_time=next_time,
+            row=row,
+            available5=available5,
+            bar_events=bar_events,
+        )
+        generated_formations = self.opportunity_owner.new_formations_for(
+            next_time,
+            emitted=self._formation_cursor,
+        )
+        accepted_formations = self.opportunity_owner.accept_formations(
+            (*formations, *generated_formations),
+            emitted=self._formation_cursor,
+        )
+        self._advance_execution(
+            accepted_formations,
+            regime=regime,
+            regime_publications=regime_publications,
+            triggers=triggers,
+            bar_opens=bar_opens,
+            decision_scores=decision_scores,
+            constraints=constraints,
+            instrument=instrument,
+            index=bar_index,
+            timestamp=timestamp,
+            next_time=next_time,
+            row=row,
+            available5=available5,
+        )
+        self._record_execution_result(
+            timestamp=timestamp,
+            next_time=next_time,
+            accepted_formations=accepted_formations,
+            bar_events=bar_events,
+        )
+        return self._finish_transition(
+            available_at=available_at,
+            source=source,
+            interaction=interaction,
+        )
+
+    def _prepare_transition(
+        self,
+        item: OrderflowInput,
+        *,
+        available_at: datetime,
+        regime: Any,
+        constraints: ExecutionConstraints | None,
+    ) -> tuple[
+        OrderflowAdvance,
+        dict[str, Any],
+        list[Aggregate],
+        str,
+        str,
+        list[dict[str, Any]],
+        int,
+    ]:
         self._proposal_buffer.begin_transition()
         previous_session = self.context.current_session_date
         self.context.input_diagnostics.append({
@@ -550,7 +643,7 @@ class OrderflowEngine:
                 **self.context.atr_by_session,
                 item.one_minute.session_date: item.atr.value,
             }
-        source, row, available5 = self._advance_observation(item)
+        source, row, available5 = self._ingest_observation(item)
         if regime is not None:
             self.context.regime = regime
         if constraints is not None:
@@ -570,7 +663,19 @@ class OrderflowEngine:
             )
         else:
             self.context.current_session_date = item.one_minute.session_date
-        bar_index = len(self.context.rows) - 1
+        return source, row, available5, timestamp, next_time, bar_events, len(self.context.rows) - 1
+
+    def _advance_pre_structure(
+        self,
+        item: OrderflowInput,
+        *,
+        timestamp: str,
+        next_time: str,
+        row: dict[str, Any],
+        available5: list[Aggregate],
+        bar_index: int,
+        bar_events: list[dict[str, Any]],
+    ) -> bool:
         pre_execution_events: list[dict[str, Any]] = []
         self._execution_clock.settle_pending(
             index=bar_index,
@@ -622,6 +727,17 @@ class OrderflowEngine:
                     if isinstance(event, dict) and event.get("kind") is not None
                 ],
             })
+        return new_5m
+
+    def _process_interactions(
+        self,
+        item: OrderflowInput,
+        *,
+        new_5m: bool,
+        available5: list[Aggregate],
+        timestamp: str,
+        bar_events: list[dict[str, Any]],
+    ) -> OrderflowAdvance:
         interaction = self.observation_owner.observe_interactions(
             item,
             new_five_minute=new_5m,
@@ -637,6 +753,17 @@ class OrderflowEngine:
         timeout_events: list[dict[str, Any]] = []
         self.opportunity_owner.advance_timeouts(timestamp, available5, timeout_events)
         self.context.pending_bar_events.extend(timeout_events)
+        return interaction
+
+    def _advance_structure(
+        self,
+        *,
+        timestamp: str,
+        next_time: str,
+        row: dict[str, Any],
+        available5: list[Aggregate],
+        bar_events: list[dict[str, Any]],
+    ) -> None:
         opportunities_before_structure = frozenset(self.context.opportunities)
         self.context.input_diagnostics.append({
             "kind": "orderflow_structure_boundary",
@@ -686,13 +813,24 @@ class OrderflowEngine:
         self.opportunity_owner.handle_opening_interaction(
             row, timestamp, next_time, bar_events,
         )
-        generated_formations = self.opportunity_owner.new_formations_for(
-            next_time,
-            emitted=self._formation_cursor,
-        )
-        accepted_formations = self.opportunity_owner.accept_formations(
-            (*formations, *generated_formations), emitted=self._formation_cursor,
-        )
+
+    def _advance_execution(
+        self,
+        accepted_formations: Sequence[LifecycleFormation],
+        *,
+        regime: Any,
+        regime_publications: Sequence[tuple[str, Any]],
+        triggers: Mapping[str, TriggerObservation] | None,
+        bar_opens: Mapping[str, float] | None,
+        decision_scores: Mapping[str, tuple[float | None, float | None]] | None,
+        constraints: ExecutionConstraints | None,
+        instrument: Instrument | None,
+        index: int,
+        timestamp: str,
+        next_time: str,
+        row: dict[str, Any],
+        available5: list[Aggregate],
+    ) -> None:
         if accepted_formations:
             self.execution_owner.advance(
                 tuple(accepted_formations),
@@ -706,7 +844,7 @@ class OrderflowEngine:
             )
         self._execution_clock.advance(
             tuple(accepted_formations),
-            index=bar_index,
+            index=index,
             timestamp=timestamp,
             next_time=next_time,
             row=row,
@@ -714,6 +852,15 @@ class OrderflowEngine:
             instrument=instrument,
             pre_execution_done=True,
         )
+
+    def _record_execution_result(
+        self,
+        *,
+        timestamp: str,
+        next_time: str,
+        accepted_formations: Sequence[LifecycleFormation],
+        bar_events: list[dict[str, Any]],
+    ) -> None:
         self.context.input_diagnostics.append({
             "kind": "orderflow_execution_result",
             "time": timestamp,
@@ -728,6 +875,14 @@ class OrderflowEngine:
                 if isinstance(event, dict) and event.get("kind") is not None
             ],
         })
+
+    def _finish_transition(
+        self,
+        *,
+        available_at: datetime,
+        source: OrderflowAdvance,
+        interaction: Any,
+    ) -> TransitionAdvance:
         host_proposals = self._proposal_buffer.drain()
         self._clock = available_at
         return TransitionAdvance(
@@ -735,14 +890,11 @@ class OrderflowEngine:
                 (*source.events, *interaction.events),
                 interaction.transitions,
             ),
-            execution={
-                name: tuple(values)
-                for name, values in self.context.parity_snapshot().items()
-            },
+            execution=self._execution_snapshot(),
             host_proposals=host_proposals,
         )
 
-    def _advance_observation(
+    def _ingest_observation(
         self, item: OrderflowInput,
     ) -> tuple[OrderflowAdvance, dict[str, Any], list[Aggregate]]:
         """Ingest source evidence and expose completed aggregate evidence."""

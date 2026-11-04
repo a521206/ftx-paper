@@ -203,9 +203,11 @@ class OpportunityCoordinator:
                 as_of=timestamp,
             )
             if life.timeout_count >= life.timeout_limit:
+                expiry_at = timeout.expiry_at or timestamp
+                life.clock = coerce_timestamp(expiry_at)
                 self.host.execution.expire_opportunity(
                     life,
-                    timestamp=timeout.expiry_at or timestamp,
+                    timestamp=expiry_at,
                     bar_events=bar_events,
                     reason="evidence_timeout",
                     timeout_event={
@@ -214,6 +216,11 @@ class OpportunityCoordinator:
                         "evidence_timeframe": life.timeout_evidence_timeframe,
                         "counted_source_ids": list(life.timeout_counted_source_ids),
                         "counted_snapshot_ids": list(life.timeout_counted_snapshot_ids),
+                        "formation_timestamp": life.formation_at,
+                        "expiry_timestamp": expiry_at,
+                        "expiry_reason": (
+                            "six_evidence_progression_units_without_fill"
+                        ),
                     },
                 )
 

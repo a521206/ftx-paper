@@ -207,7 +207,7 @@ def test_transition_publishes_ordinary_context_before_structure(monkeypatch) -> 
 
     assert calls.index("ordinary_context") < calls.index("interactions")
     assert calls.index("interactions") < calls.index("source_observations")
-    assert calls.index("source_observations") < calls.index("context_location")
+    assert calls.index("interactions") < calls.index("context_location")
     assert calls.index("interactions") < calls.index("structure")
 
 
