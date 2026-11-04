@@ -442,6 +442,46 @@ class ExecutionEngine:
     def snapshot(self) -> dict[str, ExecutionState]:
         return self.current()
 
+    def snapshot_claims(self) -> dict[str, Any]:
+        """Return execution ownership claims through the public state API."""
+        return {
+            "entry_owners": [
+                {"key": list(key), "owner": owner}
+                for key, owner in self._entry_owners.items()
+            ],
+            "execution_group_claims": dict(self._execution_group_claims),
+            "position_owners": dict(self._position_owners),
+            "position_transfer_claimed": sorted(self._position_transfer_claimed),
+        }
+
+    def restore_state(
+        self,
+        states: Mapping[str, ExecutionState],
+        claims: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Restore execution state without exposing private storage to hosts."""
+        self._states = dict(states)
+        raw = claims or {}
+        self._entry_owners = {
+            tuple(item["key"]): str(item["owner"])
+            for item in raw.get("entry_owners", ())
+            if isinstance(item, Mapping)
+            and isinstance(item.get("key"), list)
+            and len(item["key"]) == 5
+        }
+        self._execution_group_claims = {
+            str(key): tuple(value)
+            for key, value in raw.get("execution_group_claims", {}).items()
+            if isinstance(value, (list, tuple))
+        }
+        self._position_owners = {
+            str(key): str(value)
+            for key, value in raw.get("position_owners", {}).items()
+        }
+        self._position_transfer_claimed = {
+            str(value) for value in raw.get("position_transfer_claimed", ())
+        }
+
     def setup_for(self, lifecycle_id: str) -> Any | None:
         return self._state(lifecycle_id).setup
 

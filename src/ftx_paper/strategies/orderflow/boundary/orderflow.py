@@ -38,7 +38,7 @@ class OrderflowStrategy:
             execution_adapter=execution_adapter,
         )
         if coordinator is not None:
-            self._engine.observation_owner = coordinator
+            self._engine.bind_observation_owner(coordinator)
         if execution_adapter is not None:
             self._engine.execution_adapter = execution_adapter
         self._coordinator = self._engine.observation_owner

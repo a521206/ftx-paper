@@ -357,6 +357,126 @@ class LocationInteraction:
             reference_generation=reference_generation,
         )
 
+    @classmethod
+    def from_snapshot(
+        cls,
+        raw: Mapping[str, Any],
+        *,
+        source_candles: Mapping[str, list[Aggregate]] | None = None,
+    ) -> "LocationInteraction":
+        """Restore mutable detector state from an evaluation snapshot."""
+        def aggregate(value: Mapping[str, Any]) -> Aggregate:
+            return Aggregate(
+                time=coerce_timestamp(value["time"]),
+                end_time=coerce_timestamp(value["end_time"]),
+                available_at=coerce_timestamp(value["available_at"]),
+                timeframe=str(value["timeframe"]),
+                source_bar_count=int(value["source_bar_count"]),
+                open=float(value["open"]), high=float(value["high"]),
+                low=float(value["low"]), close=float(value["close"]),
+                volume=int(value["volume"]), symbol=str(value["symbol"]),
+                expiry=str(value.get("expiry", "")),
+                session_date=str(value["session_date"]),
+                source_fingerprint=str(value["source_fingerprint"]),
+            )
+
+        creation_raw = raw.get("creation_candle")
+        if not isinstance(creation_raw, Mapping):
+            raise ValueError("interaction snapshot is missing its creation candle")
+        creation = aggregate(creation_raw)
+        candles = [
+            InteractionCandle(
+                aggregate(item["candle"]),
+                CandleClassification(item["classification"]),
+                bool(item.get("is_terminal", False)),
+            )
+            for item in raw.get("candles", ())
+            if isinstance(item, Mapping) and isinstance(item.get("candle"), Mapping)
+        ]
+        projections: dict[str, SyntheticProjection] = {}
+        available_sources = source_candles or {}
+        raw_projections = raw.get("synthetic_snapshots", {})
+        if isinstance(raw_projections, list):
+            raw_projections = {
+                str(item[0]): item[1]
+                for item in raw_projections
+                if isinstance(item, list) and len(item) == 2
+            }
+        if isinstance(raw_projections, Mapping):
+            for timeframe, values in raw_projections.items():
+                projection = SyntheticProjection(str(timeframe))
+                snapshots: list[ProjectionSnapshot] = []
+                source_ids: set[str] = set()
+                for item in values:
+                    if not isinstance(item, Mapping):
+                        continue
+                    snapshot = ProjectionSnapshot(
+                        timeframe=str(item["timeframe"]),
+                        open=float(item["open"]), high=float(item["high"]),
+                        low=float(item["low"]), close=float(item["close"]),
+                        volume=float(item["volume"]),
+                        source_candle_ids=tuple(item.get("source_candle_ids", ())),
+                        first_source_start=coerce_timestamp(item["first_source_start"]),
+                        last_source_end=coerce_timestamp(item["last_source_end"]),
+                        available_at=coerce_timestamp(item["available_at"]),
+                    )
+                    snapshots.append(snapshot)
+                    source_ids.update(snapshot.source_candle_ids)
+                projection.snapshots = snapshots
+                projection.candles = [
+                    candle for candle in available_sources.get(str(timeframe), ())
+                    if candle_identity(candle) in source_ids
+                ]
+                projection.source_candle_ids = [
+                    candle_identity(candle) for candle in projection.candles
+                ]
+                projections[str(timeframe)] = projection
+
+        pre_contact = raw.get("pre_contact_side")
+        initial_side = pre_contact or _close_side(
+            creation.close, float(raw["band"]["low"]), float(raw["band"]["high"]),
+        )
+        restored = cls(
+            interaction_id=str(raw["interaction_id"]),
+            instrument=str(raw.get("instrument", "")),
+            session_date=str(raw.get("session_date", creation.session_date)),
+            location=str(raw["location"]), timeframe=str(raw["timeframe"]),
+            template_version=str(raw.get("template_version", "1")),
+            creation_candle=creation, reference_level=float(raw["reference_level"]),
+            atr=float(raw.get("atr", 0.0)), band=LocationBand(
+                float(raw["band"]["low"]), float(raw["band"]["high"]),
+            ), reference_provenance=dict(raw.get("reference_provenance", {})),
+            initial_close_side=CloseSide(raw.get("initial_close_side", initial_side)),
+            pre_contact_side=CloseSide(pre_contact) if pre_contact else None,
+            interaction_started_at=coerce_timestamp(raw["interaction_started_at"]),
+            created_at=coerce_timestamp(raw.get("created_at", raw["interaction_started_at"])),
+            available_at=coerce_timestamp(raw["available_at"]),
+            reference_generation=int(raw.get("reference_generation", 0)),
+            sessions_carried=int(raw.get("sessions_carried", 0)),
+            status=InteractionStatus(raw.get("status", InteractionStatus.ACTIVE)),
+            departure_direction=(
+                DepartureDirection(raw["departure_direction"])
+                if raw.get("departure_direction") else None
+            ),
+            terminal_close_side=(
+                CloseSide(raw["terminal_close_side"])
+                if raw.get("terminal_close_side") else None
+            ),
+            terminal_candle_id=raw.get("terminal_candle_id"),
+            close_reason=(
+                InteractionCloseReason(raw["close_reason"])
+                if raw.get("close_reason") else None
+            ),
+            synthetic=projections, candles=candles,
+            pd_role=raw.get("pd_role"),
+        )
+        restored.source_cursors = {
+            timeframe: ids[-1]
+            for timeframe, projection in projections.items()
+            if (ids := projection.source_candle_ids)
+        }
+        return restored
+
     def initial_close_classification(self) -> CandleClassification:
         return _classify_close(
             self.creation_candle.close, self.band_low, self.band_high

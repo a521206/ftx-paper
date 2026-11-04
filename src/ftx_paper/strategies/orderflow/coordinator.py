@@ -16,10 +16,11 @@ from .evidence_publication import AtrPublication
 from .interaction_detector import InteractionDetector, InteractionTransition
 from .location_observation import LocationObservation
 from .orderflow_common import Aggregate
-from .timestamps import nifty_label
+from .timestamps import coerce_timestamp, nifty_label
 from .state_machine_types import LocationRegistry, SessionLevels
-from .value_publication import ValuePublication
+from .value_publication import PriorSessionValueReference, ValuePublication
 from .vwap_location import VwapMeasurement
+from .snapshot_codec import restore_aggregate
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +64,88 @@ class OrderflowCoordinator:
     def __post_init__(self) -> None:
         self.detector = InteractionDetector(self.location_registry)
 
+    @staticmethod
+    def input_identity(item: OrderflowInput) -> str:
+        return f"aggregate:{item.one_minute.timeframe}:{nifty_label(item.one_minute.time)}"
+
+    def has_seen(self, item: OrderflowInput) -> bool:
+        return self.input_identity(item) in self._seen
+
+    def bind_registry(self, registry: LocationRegistry) -> None:
+        """Rebind the coordinator and detector to one restored registry."""
+        self.location_registry = registry
+        self.detector.registry = registry
+
+    def snapshot_state(self) -> dict[str, Any]:
+        """Return coordinator-owned chronological state for recovery."""
+        return {
+            "one_minute": [item.to_dict() for item in self._one_minute],
+            "five_minute": [item.to_dict() for item in self._five_minute],
+            "seen": sorted(self._seen),
+            "levels_published": sorted(self._levels_published),
+            "vwap_published": [list(item) for item in sorted(self._vwap_published)],
+            "latest_atr": self.latest_atr,
+            "latest_prior_value": self.latest_prior_value,
+            "detector": self.detector.snapshot_state(),
+        }
+
+    def restore_state(self, raw: Mapping[str, Any]) -> None:
+        """Restore coordinator-owned state without exposing mutable internals."""
+        self._one_minute = [restore_aggregate(item) for item in raw.get("one_minute", ())]
+        self._five_minute = [restore_aggregate(item) for item in raw.get("five_minute", ())]
+        self._seen = {str(item) for item in raw.get("seen", ())}
+        self._levels_published = {str(item) for item in raw.get("levels_published", ())}
+        self._vwap_published = {
+            (str(item[0]), str(item[1]))
+            for item in raw.get("vwap_published", ())
+            if isinstance(item, list) and len(item) == 2
+        }
+        latest_atr = raw.get("latest_atr")
+        self.latest_atr = self._restore_atr(latest_atr)
+        latest_value = raw.get("latest_prior_value")
+        self.latest_prior_value = self._restore_value(latest_value)
+        self.detector.restore_state(
+            raw.get("detector", {}),
+            source_candles={"1m": self._one_minute, "5m": self._five_minute},
+        )
+
+    @staticmethod
+    def _restore_atr(raw: Any) -> AtrPublication | None:
+        if not isinstance(raw, Mapping):
+            return None
+        return AtrPublication(
+            value=float(raw["value"]) if raw.get("value") is not None else None,
+            observed_at=(coerce_timestamp(raw["observed_at"]) if raw.get("observed_at") else None),
+            available_at=(coerce_timestamp(raw["available_at"]) if raw.get("available_at") else None),
+            source_observation_id=raw.get("source_observation_id"),
+            lineage=tuple(raw.get("lineage", ())),
+            unavailable_reason=raw.get("unavailable_reason"),
+        )
+
+    @staticmethod
+    def _restore_value(raw: Any) -> ValuePublication | None:
+        if not isinstance(raw, Mapping):
+            return None
+        reference = raw.get("reference")
+        restored_reference = None
+        if isinstance(reference, Mapping):
+            restored_reference = PriorSessionValueReference(
+                session_date=str(reference["session_date"]),
+                value_area_low=float(reference["value_area_low"]),
+                point_of_control=float(reference["point_of_control"]),
+                value_area_high=float(reference["value_area_high"]),
+                observed_at=coerce_timestamp(reference["observed_at"]),
+                available_at=coerce_timestamp(reference["available_at"]),
+                lineage=tuple(reference.get("lineage", ())),
+            )
+        return ValuePublication(
+            reference=restored_reference,
+            observed_at=(coerce_timestamp(raw["observed_at"]) if raw.get("observed_at") else None),
+            available_at=(coerce_timestamp(raw["available_at"]) if raw.get("available_at") else None),
+            lineage=tuple(raw.get("lineage", ())),
+            unavailable_reason=raw.get("unavailable_reason"),
+        )
+
     @property
     def five_minute_aggregates(self) -> tuple[Aggregate, ...]:
         """Completed 5m evidence available to the execution boundary."""
@@ -82,7 +165,7 @@ class OrderflowCoordinator:
         unavailable instead of being inferred from the final snapshot.
         """
         one = item.one_minute
-        source_id = f"aggregate:{one.timeframe}:{nifty_label(one.time)}"
+        source_id = self.input_identity(item)
         if source_id in self._seen:
             return OrderflowAdvance()
         self._seen.add(source_id)

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
+from typing import Any, Mapping
 
 from .interactions import (
     candle_identity,
@@ -34,6 +34,36 @@ class InteractionDetector:
     def __init__(self, registry: LocationRegistry) -> None:
         self.registry = registry
         self.interactions_by_timeframe = {"5m": {}, "1m": {}}
+
+    def snapshot_state(self) -> dict[str, Any]:
+        """Return mutable detector state through the public recovery contract."""
+        return {
+            timeframe: [
+                interaction.evaluation_snapshot()
+                for interaction in interactions.values()
+            ]
+            for timeframe, interactions in self.interactions_by_timeframe.items()
+        }
+
+    def restore_state(
+        self,
+        raw: Mapping[str, Any],
+        *,
+        source_candles: Mapping[str, list[Aggregate]] | None = None,
+    ) -> None:
+        """Restore detector state without replacing its registry owner."""
+        restored: dict[str, dict[str, Any]] = {"5m": {}, "1m": {}}
+        for timeframe, values in raw.items():
+            if timeframe not in restored or not isinstance(values, list):
+                continue
+            for value in values:
+                if not isinstance(value, Mapping):
+                    continue
+                interaction = LocationInteraction.from_snapshot(
+                    value, source_candles=source_candles,
+                )
+                restored[timeframe][interaction.interaction_id] = interaction
+        self.interactions_by_timeframe = restored
 
     @property
     def interactions(self) -> dict[str, LocationInteraction]:

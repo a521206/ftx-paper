@@ -16,6 +16,11 @@ from ftx_paper.strategies.orderflow.market_observation import observe_market
 from ftx_paper.strategies.orderflow.vwap_location import causal_vwap_prefix
 from ftx_paper.strategies.orderflow.providers import OrderflowInputStream
 from ftx_paper.strategies.orderflow.timestamps import nifty_label, parse_nifty_label
+from ftx_paper.strategies.orderflow.orderflow_common import Aggregate
+from ftx_paper.strategies.orderflow.coordinator import OrderflowInput
+from ftx_paper.strategies.orderflow.state_machine_types import LocationRegistry
+from ftx_paper.strategies.orderflow.interactions import LocationInteraction
+from ftx_paper.strategies.orderflow.location_geometry import LocationBand
 from ftx_paper.strategies.orderflow.transition import OrderflowEngine
 
 
@@ -39,6 +44,85 @@ def test_bounded_replay_uses_fresh_owner_and_is_idempotent() -> None:
     assert first.engine.parity_streams == retry.engine.parity_streams
     assert first.engine.clock == retry.engine.clock
     assert PaperOrderflowRuntime().replay((bundle,), cancelled=lambda: True) == ()
+
+
+def _orderflow_input(minute: int, session_date: str) -> OrderflowInput:
+    timestamp = datetime(2026, 10, 1, 4, minute, tzinfo=timezone.utc)
+    return OrderflowInput(Aggregate(
+        time=timestamp,
+        end_time=timestamp + timedelta(minutes=1),
+        available_at=timestamp + timedelta(minutes=1),
+        timeframe="1m",
+        source_bar_count=1,
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        volume=10,
+        symbol="NIFTY",
+        expiry="",
+        session_date=session_date,
+        source_fingerprint=f"source-{session_date}-{minute}",
+    ))
+
+
+def test_transition_duplicate_is_a_true_noop() -> None:
+    engine = OrderflowEngine(LocationRegistry("test"))
+    item = _orderflow_input(0, "2026-10-01")
+
+    first = engine.advance(item)
+    events_before = list(engine.context.events)
+    second = engine.advance(item)
+
+    assert second.observation.events == ()
+    assert second.host_proposals == ()
+    assert engine.context.events == events_before
+    assert engine.clock == item.one_minute.available_at
+    assert first.execution == second.execution
+
+
+def test_transition_emits_session_boundary_before_new_session_processing() -> None:
+    engine = OrderflowEngine(LocationRegistry("test"))
+    engine.advance(_orderflow_input(0, "2026-10-01"))
+    engine.advance(_orderflow_input(1, "2026-10-02"))
+
+    boundaries = [
+        event for event in engine.context.events
+        if event.get("kind") == "session_boundary"
+    ]
+    assert len(boundaries) == 1
+    assert boundaries[0]["previous_session"] == "2026-10-01"
+    assert boundaries[0]["session_date"] == "2026-10-02"
+
+
+def test_snapshot_restores_observation_owner_and_detector_registry() -> None:
+    engine = OrderflowEngine(LocationRegistry("test"))
+    item = _orderflow_input(0, "2026-10-01")
+    interaction = LocationInteraction.create(
+        instrument="NIFTY",
+        session_date="2026-10-01",
+        location="OR_HIGH",
+        template_version="1",
+        candle=item.one_minute,
+        reference_level=100.0,
+        atr=1.0,
+        band=LocationBand(99.5, 100.5),
+        created_at=item.one_minute.available_at,
+        available_at=item.one_minute.available_at,
+    )
+    assert interaction is not None
+    engine.observation_owner.detector.interactions_for("1m")[
+        interaction.interaction_id
+    ] = interaction
+    engine.context.interactions[interaction.interaction_id] = interaction.evaluation_snapshot()
+    engine.advance(item)
+
+    restored = OrderflowEngine(LocationRegistry("other"))
+    restored.restore_snapshot(engine.snapshot())
+
+    assert restored.observation_owner.one_minute_aggregates == (item.one_minute,)
+    assert restored.observation_owner.detector.registry is restored.location_registry
+    assert interaction.interaction_id in restored.observation_owner.detector.interactions
 
 
 def test_live_and_replay_advance_one_shared_owner_per_completed_input(monkeypatch) -> None:
