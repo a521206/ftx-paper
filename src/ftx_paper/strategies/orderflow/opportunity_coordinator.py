@@ -106,6 +106,8 @@ class OpportunityReplayHost(Protocol):
 
     def structure_interactions(self) -> tuple[InteractionSnapshot, ...]: ...
 
+    def sync_interaction_snapshot(self, interaction: InteractionSnapshot) -> None: ...
+
 
 class OpportunityCoordinator:
     """Own opportunity identification, formation, and invalidation decisions."""
@@ -113,18 +115,25 @@ class OpportunityCoordinator:
     def __init__(self, host: OpportunityReplayHost) -> None:
         self.host = host
         self._last_invalidation_5m_available_at: datetime | None = None
-        self._formations: list[LifecycleFormation] = []
 
-    def formations_for(self, clock: datetime | str) -> tuple[LifecycleFormation, ...]:
-        """Return owner-published formations causally available at ``clock``."""
-        known = {item.lifecycle_id for item in self._formations}
+    def new_formations_for(
+        self, clock: datetime | str, *, emitted: set[str],
+    ) -> tuple[LifecycleFormation, ...]:
+        """Return only formations not emitted by an earlier transition."""
+        available = coerce_timestamp(clock)
+        formations: list[LifecycleFormation] = []
         for life in self.host.context.opportunities.values():
-            if life.lifecycle_id in known:
-                continue
             setup = self.host.execution.engine.setup_for(life.lifecycle_id)
             if setup is None:
                 continue
-            self._formations.append(LifecycleFormation(
+            if coerce_timestamp(life.formation_available_at) > available:
+                continue
+            formation_key = (
+                f"{life.lifecycle_id}:{serialize_utc(life.formation_available_at)}"
+            )
+            if formation_key in emitted:
+                continue
+            formations.append(LifecycleFormation(
                 identity=life.causal_identity or life.lifecycle_id,
                 lifecycle_id=life.lifecycle_id,
                 values={},
@@ -133,11 +142,7 @@ class OpportunityCoordinator:
                 lifecycle=life,
                 setup=setup,
             ))
-        available = coerce_timestamp(clock)
-        return tuple(
-            item for item in self._formations
-            if coerce_timestamp(item.available_at) <= available
-        )
+        return tuple(formations)
 
     def publish_interaction_context(
         self, interaction: InteractionSnapshot, bar_events: list[dict[str, Any]],
@@ -237,11 +242,7 @@ class OpportunityCoordinator:
                 long_score=scores[0] if scores is not None else None,
                 short_score=scores[1] if scores is not None else None,
             )
-            self.host.context.interactions[interaction.interaction_id] = (
-                self.host.interaction_detector.interactions_for(
-                    interaction.timeframe,
-                )[interaction.interaction_id].evaluation_snapshot()
-            )
+            self.host.sync_interaction_snapshot(interaction)
 
     def _register_candidate(
         self, life: SetupOpportunity, bar_events: list[dict[str, Any]],
@@ -278,7 +279,6 @@ class OpportunityCoordinator:
             lifecycle=life,
             setup=setup,
         )
-        self._formations.append(formation)
         self.host.execution.attach_setup(formation)
 
     def _seed_or_directional_episode(
@@ -692,9 +692,9 @@ class OpportunityCoordinator:
                         interaction_context, latest,
                         confirmation_evidence, latest.available_at,
                         row, next_time, bar_events, arbitration=evaluation,
-                    )
+                )
                 if interaction_state is not None:
-                    ctx.interactions[interaction.interaction_id] = interaction_state.evaluation_snapshot()
+                    self.host.sync_interaction_snapshot(interaction)
                     transition_at = interaction_state.pd_role_transition_available_at
                     if (
                         transition_at is not None
@@ -727,7 +727,7 @@ class OpportunityCoordinator:
                                     "boundary": life.failure_boundary,
                                 }, bar_events)
                         interaction_state.pd_role_transition_processed_at = latest.available_at
-                        ctx.interactions[interaction.interaction_id] = interaction_state.evaluation_snapshot()
+                        self.host.sync_interaction_snapshot(interaction)
                 continue
             # All standard-location arms see one identical, causally bounded
             # window. Arbitration is explicit and independent of mapping order.

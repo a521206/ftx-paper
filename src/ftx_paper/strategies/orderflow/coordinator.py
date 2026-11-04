@@ -164,14 +164,8 @@ class OrderflowCoordinator:
         """Completed 1m source aggregates in causal order."""
         return tuple(self._one_minute)
 
-    def advance(self, item: OrderflowInput) -> OrderflowAdvance:
-        """Advance state at one completed bar's availability boundary.
-
-        Duplicate aggregate identities are ignored.  A 5m detector transition is
-        attempted only when the caller supplies a causally complete 5m aggregate
-        and its child observations, allowing unavailable evidence to remain
-        unavailable instead of being inferred from the final snapshot.
-        """
+    def ingest(self, item: OrderflowInput) -> OrderflowAdvance:
+        """Ingest one completed source bar without evaluating interactions."""
         one = item.one_minute
         source_id = self.input_identity(item)
         if source_id in self._seen:
@@ -194,12 +188,10 @@ class OrderflowCoordinator:
                 )
                 self._levels_published.add(key)
         events: list[dict[str, Any]] = []
-        new_five_minute = False
         if item.five_minute is not None:
             five = item.five_minute
             five_id = f"aggregate:{five.timeframe}:{nifty_label(five.time)}"
             if five_id not in {f"aggregate:5m:{nifty_label(bar.time)}" for bar in self._five_minute}:
-                new_five_minute = True
                 self._five_minute.append(five)
                 if atr is not None:
                     self.location_registry.publish_session_extrema(
@@ -225,6 +217,18 @@ class OrderflowCoordinator:
                     atr=atr,
                 )
                 self._vwap_published.add(vwap_identity)
+        return OrderflowAdvance(tuple(events), ())
+
+    def observe_interactions(
+        self,
+        item: OrderflowInput,
+        *,
+        new_five_minute: bool,
+    ) -> OrderflowAdvance:
+        """Evaluate location interactions after permission/context processing."""
+        one = item.one_minute
+        atr = item.atr.value if item.atr is not None else None
+        events: list[dict[str, Any]] = []
         current_observations_1m = tuple(
             observation
             for observation in item.observations_1m

@@ -566,22 +566,10 @@ class CanonicalFormationProvider:
 
     def __init__(
         self,
-        owner: object | None = None,
         *,
         formations: Iterable[LifecycleFormation] = (),
         source: Callable[[OrderflowInput], Iterable[LifecycleFormation]] | None = None,
     ) -> None:
-        if source is None and owner is not None:
-            candidate = getattr(owner, "formations_for", None)
-            if callable(candidate):
-                owner_formations = cast(
-                    Callable[[object], Iterable[LifecycleFormation]], candidate,
-                )
-
-                def owner_source(clock: OrderflowInput) -> Iterable[LifecycleFormation]:
-                    return owner_formations(clock.one_minute.available_at)
-
-                source = owner_source
         self._source = source
         self._formations = tuple(formations)
         self._seen: set[str] = set()

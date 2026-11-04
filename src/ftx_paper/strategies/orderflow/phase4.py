@@ -1,11 +1,8 @@
-"""Context and source publication for the shared orderflow clock."""
+"""Narrow Phase-4 recording and context publication owners."""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Protocol
-
-from .contextual import build_context_scores
 from .coordinator import OrderflowCoordinator, OrderflowInput
 from .hierarchy import MarketContext
 from .orderflow_common import Aggregate
@@ -13,27 +10,21 @@ from .state_machine_types import OrderflowState
 from .timestamps import nifty_label
 
 
-class PublicationOwner(Protocol):
-    context: OrderflowState
-    observation_owner: OrderflowCoordinator
+class Phase4Recorder:
+    """Record explicit source and context/location facts once per identity."""
 
-
-class TransitionPublisher:
-    """Publish causal context, source, and location facts for an engine."""
-
-    def __init__(self, engine: PublicationOwner) -> None:
-        self.engine = engine
-
-    @property
-    def context(self) -> OrderflowState:
-        return self.engine.context
+    def __init__(
+        self, context: OrderflowState, observation_owner: OrderflowCoordinator,
+    ) -> None:
+        self.context = context
+        self.observation_owner = observation_owner
 
     def source_observations(self, aggregates: Sequence[Aggregate]) -> None:
         known = {
             str(fact.get("identity"))
             for fact in self.context.parity_streams.get("source_observation", ())
         }
-        one_minute = self.engine.observation_owner.one_minute_aggregates
+        one_minute = self.observation_owner.one_minute_aggregates
         for aggregate in aggregates:
             identity = f"aggregate:{aggregate.timeframe}:{nifty_label(aggregate.time)}"
             if identity in known:
@@ -71,22 +62,18 @@ class TransitionPublisher:
             self.context.market_contexts.resolve(self.context.market_contexts.ordinary_context)
             if self.context.market_contexts.ordinary_context is not None else None
         )
-        observations_by_timeframe = {
-            "1m": tuple(
-                observation for observation in item.observations_1m
-                if observation.timeframe == "1m"
-                and observation.source_aggregate_id == nifty_label(item.one_minute.time)
-                and observation.reference_source_timeframe in {None, "1m"}
-            ),
-        }
-        aggregates = [(item.one_minute, observations_by_timeframe["1m"])]
+        aggregates = [(item.one_minute, tuple(
+            observation for observation in item.observations_1m
+            if observation.timeframe == "1m"
+            and observation.source_aggregate_id == nifty_label(item.one_minute.time)
+            and observation.reference_source_timeframe in {None, "1m"}
+        ))]
         if item.five_minute is not None:
-            observations_by_timeframe["5m"] = tuple(
+            aggregates.append((item.five_minute, tuple(
                 observation for observation in item.observations_5m
                 if observation.timeframe == "5m"
                 and observation.source_aggregate_id == nifty_label(item.five_minute.time)
-            )
-            aggregates.append((item.five_minute, observations_by_timeframe["5m"]))
+            )))
         known = {
             str(fact.get("identity"))
             for fact in self.context.parity_streams.get("context_location", ())
@@ -104,7 +91,7 @@ class TransitionPublisher:
                 "causal_parent_id": f"aggregate:{aggregate.timeframe}:{nifty_label(aggregate.time)}",
                 "values": {
                     "timeframe": aggregate.timeframe,
-                    "source_observation_id": f"aggregate:{aggregate.timeframe}:{nifty_label(aggregate.time)}",
+                    "source_observation_id": identity.replace("context-location:", "aggregate:"),
                     "context": {
                         "context_id": ordinary.context_id,
                         "version": ordinary.version,
@@ -121,15 +108,20 @@ class TransitionPublisher:
             })
             known.add(identity)
 
+
+class ContextPublisher:
+    """Publish the ordinary decision context consumed by permission policy."""
+
+    def __init__(self, context: OrderflowState) -> None:
+        self.context = context
+
     def ordinary_context(
-        self, latest: Aggregate, *, market_state: str | None = None,
+        self,
+        latest: Aggregate,
+        scores: tuple[float | None, float | None] | None,
+        *,
+        market_state: str | None = None,
     ) -> None:
-        scores = build_context_scores(
-            latest,
-            raw_rows=self.context.rows,
-            aggregates=self.context.aggregates,
-            atr=self.context.atr_by_session.get(latest.session_date),
-        )
         long_score, short_score = scores if scores is not None else (None, None)
         context_id = f"5m-context-{latest.symbol}-{latest.session_date}-1m_5m"
         published = MarketContext(
@@ -138,9 +130,7 @@ class TransitionPublisher:
             timestamp=latest.time,
             available_at=latest.available_at,
             location=None,
-            market_state=(
-                self.context.market_state if market_state is None else market_state
-            ),
+            market_state=self.context.market_state if market_state is None else market_state,
             definition_version="1m_5m",
             source_timeframe="5m",
             long_score=long_score,
@@ -153,4 +143,4 @@ class TransitionPublisher:
         self.context.market_contexts.ordinary_context = self.context.publish_context(published)
 
 
-__all__ = ["TransitionPublisher"]
+__all__ = ["ContextPublisher", "Phase4Recorder"]

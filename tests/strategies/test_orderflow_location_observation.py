@@ -69,7 +69,7 @@ def test_location_observation_uses_canonical_band_intersection() -> None:
     )
 
 
-def test_coordinator_advances_five_minute_clock_without_observations() -> None:
+def test_coordinator_observes_five_minute_clock_without_observations() -> None:
     one_minute = _aggregate(0)
     five_minute = _aggregate(0, timeframe="5m")
     coordinator = OrderflowCoordinator(LocationRegistry("test"))
@@ -87,6 +87,8 @@ def test_coordinator_advances_five_minute_clock_without_observations() -> None:
 
     detector = Detector()
     coordinator.detector = detector  # type: ignore[assignment]
-    coordinator.advance(OrderflowInput(one_minute, five_minute=five_minute))
+    item = OrderflowInput(one_minute, five_minute=five_minute)
+    coordinator.ingest(item)
+    coordinator.observe_interactions(item, new_five_minute=True)
 
     assert detector.called is True

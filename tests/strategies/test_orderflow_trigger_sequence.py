@@ -8,6 +8,7 @@ from ftx_paper.strategies.orderflow.state_machine_types import ExecutionConstrai
 from ftx_paper.strategies.orderflow.templates import Direction, TRADE_TEMPLATES
 from ftx_paper.strategies.orderflow.coordinator import OrderflowInput
 from ftx_paper.strategies.orderflow.transition import OrderflowEngine
+from ftx_paper.strategies.orderflow.phase4 import ContextPublisher
 
 
 def _row(*, open_: float, high: float, low: float, close: float, volume: float = 100.0) -> dict[str, object]:
@@ -68,8 +69,13 @@ def test_opening_seed_remains_provisional(monkeypatch) -> None:
         "2026-10-01": transition.context.rows,
     }
     coordinator = build_opportunity_coordinator(
-        transition,
+        context=transition.context,
+        execution=transition.execution_owner,
+        location_registry=transition.location_registry,
         detector=InteractionDetector(registry),
+        selected_context=transition.selected_interaction_context,
+        structure_interactions=transition.structure_interactions,
+        sync_interaction=transition.sync_interaction_snapshot,
         templates=TRADE_TEMPLATES,
     )
     events: list[dict[str, object]] = []
@@ -117,7 +123,7 @@ def test_ordinary_context_publication_does_not_advance_confirmation_context_time
     transition.context.aggregates = {"1m": [], "5m": [candle]}
     transition.context.rows = [_row(open_=100.0, high=102.0, low=99.0, close=101.0)]
 
-    transition._publisher.ordinary_context(candle)
+    ContextPublisher(transition.context).ordinary_context(candle, None)
 
     assert transition.context.last_confirmation_context_time is None
 
@@ -149,6 +155,15 @@ def test_transition_publishes_ordinary_context_before_structure(monkeypatch) -> 
     transition = OrderflowEngine(LocationRegistry("test"))
     calls: list[str] = []
 
+    coordinator_type = type(transition.observation_owner)
+    original_observe = coordinator_type.observe_interactions
+
+    def observe_interactions(*args, **kwargs):
+        calls.append("interactions")
+        return original_observe(*args, **kwargs)
+
+    monkeypatch.setattr(coordinator_type, "observe_interactions", observe_interactions)
+
     def handle_structure(*_args: object) -> None:
         calls.append("structure")
 
@@ -158,14 +173,27 @@ def test_transition_publishes_ordinary_context_before_structure(monkeypatch) -> 
         handle_structure,
     )
     monkeypatch.setattr(
-        transition._publisher,
+        type(transition._context_publisher),
         "ordinary_context",
         lambda *_args, **_kwargs: calls.append("ordinary_context"),
+    )
+    monkeypatch.setattr(
+        type(transition._phase4),
+        "source_observations",
+        lambda *_args, **_kwargs: calls.append("source_observations"),
+    )
+    monkeypatch.setattr(
+        type(transition._phase4),
+        "context_location",
+        lambda *_args, **_kwargs: calls.append("context_location"),
     )
 
     transition.advance(OrderflowInput(one_minute, five_minute=five_minute))
 
-    assert calls.index("ordinary_context") < calls.index("structure")
+    assert calls.index("ordinary_context") < calls.index("interactions")
+    assert calls.index("interactions") < calls.index("source_observations")
+    assert calls.index("source_observations") < calls.index("context_location")
+    assert calls.index("interactions") < calls.index("structure")
 
 
 def test_episode_promotion_is_idempotent_and_invalidates_competitor() -> None:

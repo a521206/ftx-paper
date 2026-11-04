@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from copy import deepcopy
 from datetime import datetime
 from types import SimpleNamespace
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence, cast
 
 from ftx_paper.contracts import Instrument
 from ftx_paper.execution.events import ExecutionNotification
@@ -19,6 +19,7 @@ from ftx_paper.execution.events import ExecutionNotification
 from .coordinator import OrderflowAdvance, OrderflowInput, OrderflowCoordinator
 from .execution import (
     AdmissionStatus,
+    ExecutionHost,
     ExecutionCoordinator,
     ExecutionState,
     IntentStatus,
@@ -26,10 +27,7 @@ from .execution import (
 from .execution_adapter import OrderflowExecutionAdapter, PaperOrderProposal
 from .contextual import build_context_scores
 from .context_access import DecisionContextAccess
-from .hierarchy import (
-    Permission,
-    TriggerObservation,
-)
+from .hierarchy import Permission, TriggerObservation
 from .lifecycle import SetupOpportunity
 from .opportunity_coordinator import LifecycleFormation, OpportunityCoordinator
 from .opportunity_timeout import advance_opportunity_timeout
@@ -47,9 +45,9 @@ from .timestamps import coerce_timestamp, nifty_label, serialize_utc
 from . import snapshot_codec
 from .session_policy import classify_opening_gap
 from .proposal_buffer import ProposalBuffer
-from .publication import TransitionPublisher
 from .opening_gap import OpeningGapOwner
 from .execution_clock import ExecutionClock
+from .phase4 import ContextPublisher, Phase4Recorder
 
 
 def _execution_trace_state(state: Any) -> dict[str, Any]:
@@ -93,6 +91,46 @@ class TransitionAdvance:
     host_proposals: tuple[PaperOrderProposal, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class _ExecutionHost:
+    """Narrow execution boundary detached from the transition owner."""
+
+    context: OrderflowState
+    location_registry: LocationRegistry
+    _scores_for_context_ref: Callable[[Any | None], tuple[float | None, float | None]]
+    _decision_context_for_life: Callable[[Any, str], Any | None]
+    _context_relation_for_life: Callable[[Any, Any], Any]
+    _decision_context_for_location: Callable[..., Any | None]
+    _record_exit_decision_context: Callable[..., Any | None]
+    _promote_episode: Callable[..., None]
+
+    def scores_for_context_ref(
+        self, reference: Any | None,
+    ) -> tuple[float | None, float | None]:
+        return self._scores_for_context_ref(reference)
+
+    def decision_context_for_life(self, life: Any, as_of: str) -> Any | None:
+        return self._decision_context_for_life(life, as_of)
+
+    def context_relation_for_life(self, life: Any, context: Any) -> Any:
+        return self._context_relation_for_life(life, context)
+
+    def decision_context_for_location(
+        self, location: str | None, *, as_of: str,
+    ) -> Any | None:
+        return self._decision_context_for_location(location, as_of=as_of)
+
+    def record_exit_decision_context(
+        self, life: Any, rule: Any, *, timestamp: str, reason: str,
+    ) -> Any | None:
+        return self._record_exit_decision_context(
+            life, rule, timestamp=timestamp, reason=reason,
+        )
+
+    def promote_episode(self, life: Any, **kwargs: Any) -> None:
+        self._promote_episode(life, **kwargs)
+
+
 @dataclass(slots=True)
 class OrderflowEngine:
     """Own the single chronological state boundary used by both modes."""
@@ -107,11 +145,14 @@ class OrderflowEngine:
     context: OrderflowState = field(init=False)
     _clock: datetime | None = field(default=None, init=False, repr=False)
     _execution_notifications: set[str] = field(default_factory=set, init=False, repr=False)
+    _formation_cursor: set[str] = field(default_factory=set, init=False, repr=False)
     _proposal_buffer: ProposalBuffer = field(default_factory=ProposalBuffer, init=False, repr=False)
-    _publisher: TransitionPublisher = field(init=False, repr=False)
     _context_access: DecisionContextAccess = field(init=False, repr=False)
     _opening_gap: OpeningGapOwner = field(init=False, repr=False)
     _execution_clock: ExecutionClock = field(init=False, repr=False)
+    _execution_host: ExecutionHost = field(init=False, repr=False)
+    _phase4: Phase4Recorder = field(init=False, repr=False)
+    _context_publisher: ContextPublisher = field(init=False, repr=False)
 
     @staticmethod
     def _intent_allows_requalification(state: Any) -> bool:
@@ -139,17 +180,22 @@ class OrderflowEngine:
         )
         if self.context.execution_engine is not self.execution_owner.engine:
             raise RuntimeError("orderflow execution ownership is not shared")
-        # OrderflowState and the coordinator are constructed around one engine.
-        # The coordinator remains a facade, while the state owns the reference.
-        self.execution_owner.machine = self
-        self._publisher = TransitionPublisher(self)
         self._context_access = DecisionContextAccess(self)
+        self._phase4 = Phase4Recorder(self.context, self.observation_owner)
+        self._context_publisher = ContextPublisher(self.context)
+        self._execution_host = self._build_execution_host()
+        self.execution_owner.host = self._execution_host
         self._opening_gap = OpeningGapOwner(self)
         self._execution_clock = ExecutionClock(self)
         from .opportunity_replay_host import build_opportunity_coordinator
         self.opportunity_owner = build_opportunity_coordinator(
-            self,
+            context=self.context,
+            execution=self.execution_owner,
+            location_registry=self.location_registry,
             detector=self.observation_owner.detector,
+            selected_context=self.selected_interaction_context,
+            structure_interactions=self.structure_interactions,
+            sync_interaction=self.sync_interaction_snapshot,
         )
 
     def bind_observation_owner(self, owner: OrderflowCoordinator) -> None:
@@ -158,10 +204,30 @@ class OrderflowEngine:
         self.observation_owner = owner
         self.location_registry = owner.location_registry
         self.context.location_registry = owner.location_registry
+        self._phase4 = Phase4Recorder(self.context, owner)
+        self._execution_host = self._build_execution_host()
+        self.execution_owner.host = self._execution_host
         self.opportunity_owner = build_opportunity_coordinator(
-            self,
+            context=self.context,
+            execution=self.execution_owner,
+            location_registry=self.location_registry,
             detector=owner.detector,
+            selected_context=self.selected_interaction_context,
+            structure_interactions=self.structure_interactions,
+            sync_interaction=self.sync_interaction_snapshot,
         )
+
+    def _build_execution_host(self) -> ExecutionHost:
+        return cast(ExecutionHost, _ExecutionHost(
+            context=self.context,
+            location_registry=self.location_registry,
+            _scores_for_context_ref=self.scores_for_context_ref,
+            _decision_context_for_life=self.decision_context_for_life,
+            _context_relation_for_life=self.context_relation_for_life,
+            _decision_context_for_location=self.decision_context_for_location,
+            _record_exit_decision_context=self.record_exit_decision_context,
+            _promote_episode=self.promote_episode,
+        ))
 
     def promote_episode(
         self,
@@ -275,6 +341,7 @@ class OrderflowEngine:
                 ),
                 "published_intents": list(self._proposal_buffer.published_intents()),
                 "execution_notifications": sorted(self._execution_notifications),
+                "formation_cursor": sorted(self._formation_cursor),
             },
             "events": deepcopy(context.events),
             "transitions": deepcopy(context.transitions),
@@ -302,7 +369,7 @@ class OrderflowEngine:
         if canonical is not None and not isinstance(canonical, Mapping):
             raise ValueError("orderflow snapshot canonical_state is invalid")
         if isinstance(canonical, Mapping):
-            for name in ("published_intents", "execution_notifications"):
+            for name in ("published_intents", "execution_notifications", "formation_cursor"):
                 value = canonical.get(name, [])
                 if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
                     raise ValueError(f"orderflow snapshot {name} is invalid")
@@ -463,6 +530,7 @@ class OrderflowEngine:
             self.context.setup_number = canonical["setup_number"]
         self._proposal_buffer.restore(canonical.get("published_intents", ()))
         self._execution_notifications = set(canonical.get("execution_notifications", ()))
+        self._formation_cursor = set(canonical.get("formation_cursor", ()))
 
     @property
     def engine(self) -> Any:
@@ -521,6 +589,11 @@ class OrderflowEngine:
             life = formation.lifecycle
             if life is None:
                 continue
+            formation_key = (
+                f"{life.lifecycle_id}:{serialize_utc(life.formation_available_at)}"
+            )
+            if formation_key in self._formation_cursor:
+                continue
             existing = self.context.opportunities.get(life.lifecycle_id)
             if existing is None and not self.context.register_opportunity(life):
                 continue
@@ -530,6 +603,7 @@ class OrderflowEngine:
                 life.lifecycle_id
             ) is None:
                 self.attach_setup(formation)
+            self._formation_cursor.add(formation_key)
             accepted.append(formation)
         return tuple(accepted)
 
@@ -581,7 +655,7 @@ class OrderflowEngine:
                 **self.context.atr_by_session,
                 item.one_minute.session_date: item.atr.value,
             }
-        observation, row, available5 = self._advance_observation(item)
+        source, row, available5 = self._advance_observation(item)
         if regime is not None:
             self.context.regime = regime
         if constraints is not None:
@@ -590,7 +664,7 @@ class OrderflowEngine:
         next_time = nifty_label(item.one_minute.available_at)
         if item.prior_value is not None and self.context.continuous is not None:
             self.context.continuous.publish_prior_value(item.prior_value)
-        bar_events = list(observation.events)
+        bar_events = list(source.events)
         if previous_session is not None and previous_session != item.one_minute.session_date:
             self.handle_session_boundary(
                 previous_session,
@@ -611,18 +685,6 @@ class OrderflowEngine:
             events=pre_execution_events,
         )
         self.context.pending_bar_events.extend(pre_execution_events)
-        for transition in observation.transitions:
-            self.context.interactions[transition.interaction.interaction_id] = (
-                transition.interaction
-            )
-            self.opportunity_owner.publish_interaction_context(
-                transition.interaction, bar_events,
-            )
-        for event in observation.events:
-            self.context.record_event(event)
-        self._publisher.source_observations(
-            (*self.observation_owner.one_minute_aggregates, *available5),
-        )
         new_5m = bool(
             available5
             and (
@@ -664,6 +726,18 @@ class OrderflowEngine:
                     if isinstance(event, dict) and event.get("kind") is not None
                 ],
             })
+        interaction = self.observation_owner.observe_interactions(
+            item,
+            new_five_minute=new_5m,
+        )
+        for transition in interaction.transitions:
+            self._apply_interaction_transition(transition, bar_events)
+        for event in interaction.events:
+            self.context.record_event(event)
+        self._phase4.source_observations(
+            (*self.observation_owner.one_minute_aggregates, *available5),
+        )
+        self._phase4.context_location(item)
         timeout_events: list[dict[str, Any]] = []
         self.advance_opportunity_timeouts(timestamp, available5, timeout_events)
         self.context.pending_bar_events.extend(timeout_events)
@@ -716,8 +790,10 @@ class OrderflowEngine:
         self.opportunity_owner.handle_opening_interaction(
             row, timestamp, next_time, bar_events,
         )
-        self._publisher.context_location(item)
-        generated_formations = self.opportunity_owner.formations_for(next_time)
+        generated_formations = self.opportunity_owner.new_formations_for(
+            next_time,
+            emitted=self._formation_cursor,
+        )
         accepted_formations = self._accept_formations(
             (*formations, *generated_formations),
         )
@@ -759,7 +835,10 @@ class OrderflowEngine:
         host_proposals = self._proposal_buffer.drain()
         self._clock = available_at
         return TransitionAdvance(
-            observation=observation,
+            observation=OrderflowAdvance(
+                (*source.events, *interaction.events),
+                interaction.transitions,
+            ),
             execution={
                 name: tuple(values)
                 for name, values in self.context.parity_snapshot().items()
@@ -770,8 +849,8 @@ class OrderflowEngine:
     def _advance_observation(
         self, item: OrderflowInput,
     ) -> tuple[OrderflowAdvance, dict[str, Any], list[Aggregate]]:
-        """Advance source observations and expose completed aggregate evidence."""
-        observation = self.observation_owner.advance(item)
+        """Ingest source evidence and expose completed aggregate evidence."""
+        source = self.observation_owner.ingest(item)
         row = item.one_minute.to_dict()
         if not any(
             str(existing.get("time")) == str(item.one_minute.time)
@@ -781,7 +860,49 @@ class OrderflowEngine:
         available5 = list(self.observation_owner.five_minute_aggregates)
         self.context.aggregates["1m"] = list(self.observation_owner.one_minute_aggregates)
         self.context.aggregates["5m"] = available5
-        return observation, row, available5
+        return source, row, available5
+
+    def _apply_interaction_transition(
+        self,
+        transition: Any,
+        bar_events: list[dict[str, Any]],
+    ) -> None:
+        """Apply one detector transition before opportunity evaluation."""
+        interaction = transition.interaction
+        self.opportunity_owner.publish_interaction_context(interaction, bar_events)
+        self.sync_interaction_snapshot(interaction)
+
+    def sync_interaction_snapshot(self, interaction: Any) -> None:
+        """Project detector-owned interaction state into the context snapshot."""
+        detector_state = self.observation_owner.detector.interactions_for(
+            interaction.timeframe,
+        ).get(interaction.interaction_id)
+        self.context.interactions[interaction.interaction_id] = (
+            detector_state.evaluation_snapshot()
+            if detector_state is not None else interaction
+        )
+
+    def selected_interaction_context(
+        self, interaction_id: str, *, as_of: datetime | str,
+    ) -> Any | None:
+        available_at = coerce_timestamp(as_of)
+        return max(
+            (
+                item for item in self.context.market_contexts.versions.get(
+                    f"interaction:{interaction_id}", (),
+                )
+                if item.available_at <= available_at
+            ),
+            key=lambda item: item.available_at,
+            default=None,
+        )
+
+    def structure_interactions(self) -> tuple[Any, ...]:
+        return tuple(
+            state.evaluation_snapshot()
+            for state in self.observation_owner.detector.interactions.values()
+            if state.timeframe == "5m"
+        )
 
     def handle_session_boundary(
         self,
@@ -826,7 +947,7 @@ class OrderflowEngine:
                 ),
             )
             if updated.status is InteractionStatus.ENDED:
-                context.interactions[updated.interaction_id] = updated
+                self.sync_interaction_snapshot(updated)
                 context.emit(
                     {
                         "kind": "interaction_ended",
@@ -852,7 +973,7 @@ class OrderflowEngine:
         """Publish the completed-5m permission regime (canonical handle_permission)."""
         context = self.context
         context.previous5_available_at = latest.available_at
-        self._publisher.ordinary_context(latest)
+        self._context_publisher.ordinary_context(latest, (long_score, short_score))
         current = self._opening_gap.current(latest.session_date)
         ordinary_reference = context.market_contexts.ordinary_context
         context.regime = context.opening_gap_policy.regime_for(

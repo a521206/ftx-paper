@@ -66,12 +66,11 @@ class PaperOrderflowRuntime:
         execution_adapter: OrderflowExecutionAdapter | None = None,
         clock_input_provider: Callable[[object], OrderflowInput] | None = None,
         formation_provider: Callable[[OrderflowInput], Sequence[LifecycleFormation]] | None = None,
-        formation_owner: object | None = None,
     ) -> None:
         if strategy is not None and any(
             value is not None
             for value in (config, engine, execution_adapter, clock_input_provider,
-                          formation_provider, formation_owner)
+                          formation_provider)
         ):
             raise ValueError("strategy cannot be combined with construction overrides")
         self.execution_adapter = (
@@ -94,7 +93,7 @@ class PaperOrderflowRuntime:
             engine=self.engine,
             execution_adapter=self.execution_adapter,
             clock_input_provider=clock_input_provider,
-            formation_provider=formation_provider or CanonicalFormationProvider(owner=formation_owner),
+            formation_provider=formation_provider or CanonicalFormationProvider(),
         )
 
     @classmethod

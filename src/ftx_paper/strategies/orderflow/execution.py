@@ -128,12 +128,12 @@ class ExecutionHost(Protocol):
 
 
 def _target_interaction(
-    machine: Any, location: str, as_of: str, *, not_before: str | None = None
+    host: ExecutionHost, location: str, as_of: str, *, not_before: str | None = None
 ) -> Any:
     as_of_at = coerce_timestamp(as_of, field="interaction as_of")
     candidates = [
         item
-        for item in machine.context.interactions.values()
+        for item in host.context.interactions.values()
         if item.location == location
         and item.timeframe == "1m"
         and item.available_at <= as_of_at
@@ -157,17 +157,17 @@ def _target_interaction(
 
 
 def evaluate_exit_rule(
-    machine: Any,
+    host: ExecutionHost,
     life: SetupOpportunity,
     rule: ResolvedExitRule,
     *,
     timestamp: str,
     rule_valid: bool = True,
 ) -> str | None:
-    position = machine.context.execution_engine.state_for(life.lifecycle_id).position
+    position = host.context.execution_engine.state_for(life.lifecycle_id).position
     if position is None or position.status is not PositionStatus.OPEN:
         return "position_not_open"
-    context = machine.decision_context_for_location(rule.location, as_of=timestamp)
+    context = host.decision_context_for_location(rule.location, as_of=timestamp)
     scores = (context.long_score, context.short_score) if context is not None else None
     from .intent_policy import exit_admission_reason
 
@@ -177,7 +177,7 @@ def evaluate_exit_rule(
         decision_scores=scores,
         rule_valid=rule_valid and context is not None,
     )
-    machine.record_exit_decision_context(
+    host.record_exit_decision_context(
         life, rule, timestamp=timestamp, reason=reason or "exit_admission_evaluated"
     )
     return reason
@@ -1392,7 +1392,7 @@ def failed_continuation(
 class ExecutionCoordinator:
     """Canonical execution lifecycle coordinator."""
 
-    machine: ExecutionHost | None = None
+    host: ExecutionHost | None = None
     engine: ExecutionEngine = field(default_factory=ExecutionEngine)
     active_position_gate: ActivePositionGate = field(default_factory=ActivePositionGate)
 
@@ -1483,11 +1483,11 @@ class ExecutionCoordinator:
 
     @property
     def context(self) -> OrderflowState:
-        if self.machine is None:
+        if self.host is None:
             raise RuntimeError(
                 "execution coordinator is not attached to a transition owner"
             )
-        return self.machine.context
+        return self.host.context
 
     def attach_setup(self, formation: Any) -> None:
         life, setup = formation.lifecycle, formation.setup
@@ -1497,11 +1497,11 @@ class ExecutionCoordinator:
             )
         self.engine.register(life.lifecycle_id)
         self.engine.attach_setup(life, setup, available_at=str(life.formation_available_at))
-        if self.machine is not None:
+        if self.host is not None:
             self.engine.freeze_exit_plan(
                 life,
                 resolve_setup_exit_plan(
-                    self.machine, life, as_of=str(life.formation_available_at)
+                    self.host, life, as_of=str(life.formation_available_at)
                 ),
                 available_at=str(life.formation_available_at),
             )
@@ -1725,9 +1725,9 @@ class ExecutionCoordinator:
         life: SetupOpportunity,
     ) -> None:
         intent = self.engine.state_for(life.lifecycle_id).intent
-        if intent is None or self.machine is None:
+        if intent is None or self.host is None:
             return
-        long_score, short_score = self.machine.scores_for_context_ref(
+        long_score, short_score = self.host.scores_for_context_ref(
             intent.formation_context
         )
         event = {
@@ -1920,13 +1920,13 @@ class ExecutionCoordinator:
             bar_events.append(event)
             return
         if setup is not None and not execution.exit_plan_frozen:
-            if self.machine is None:
+            if self.host is None:
                 raise RuntimeError(
                     "execution coordinator is not attached to a transition owner"
                 )
             self.engine.freeze_exit_plan(
                 life,
-                resolve_setup_exit_plan(self.machine, life, as_of=timestamp),
+                resolve_setup_exit_plan(self.host, life, as_of=timestamp),
                 available_at=timestamp,
             )
             setup = self.engine.setup_for(life.lifecycle_id)
@@ -2469,7 +2469,7 @@ class ExecutionCoordinator:
         state = self.engine.state_for(life.lifecycle_id)
         if not life.active and state.position is None:
             return
-        if self.machine is None or not evaluate_entries:
+        if self.host is None or not evaluate_entries:
             if (
                 state.pending_entry is not None
                 and state.position is None
@@ -2534,9 +2534,9 @@ class ExecutionCoordinator:
             and coerce_timestamp(timestamp) <= coerce_timestamp(life.formation_available_at)
         ):
             return
-        decision_context = self.machine.decision_context_for_life(life, next_time)
+        decision_context = self.host.decision_context_for_life(life, next_time)
         decision_relation = (
-            self.machine.context_relation_for_life(life, decision_context)
+            self.host.context_relation_for_life(life, decision_context)
             if decision_context is not None
             else None
         )
@@ -2636,8 +2636,8 @@ class ExecutionCoordinator:
         self.context.record_event(event)
         bar_events.append(event)
         if observation.eligible:
-            if not life.episode_confirmed and self.machine is not None:
-                self.machine.promote_episode(
+            if not life.episode_confirmed and self.host is not None:
+                self.host.promote_episode(
                     life,
                     observed_at=timestamp,
                     available_at=next_time,
@@ -2953,8 +2953,8 @@ class ExecutionCoordinator:
                         index, timestamp, next_time, row, available5, bar_events, life
                     )
                 admission = (
-                    evaluate_exit_rule(self.machine, life, rule, timestamp=timestamp)
-                    if self.machine is not None
+                    evaluate_exit_rule(self.host, life, rule, timestamp=timestamp)
+                    if self.host is not None
                     else None
                 )
                 if admission is not None:
@@ -3426,12 +3426,12 @@ class ExecutionCoordinator:
         for rule in state.position.exit_plan:
             interaction = (
                 _target_interaction(
-                    self.machine,
+                    self.host,
                     rule.location,
                     timestamp,
                     not_before=str(state.entry_at or life.formation_available_at),
                 )
-                if self.machine is not None
+                if self.host is not None
                 else None
             )
             if rule.interaction_id is not None:
@@ -3535,8 +3535,8 @@ class ExecutionCoordinator:
                     bar_events.append(event)
                     existing = intent
                 admission = (
-                    evaluate_exit_rule(self.machine, life, rule, timestamp=timestamp)
-                    if self.machine is not None
+                    evaluate_exit_rule(self.host, life, rule, timestamp=timestamp)
+                    if self.host is not None
                     else None
                 )
                 if admission is not None:

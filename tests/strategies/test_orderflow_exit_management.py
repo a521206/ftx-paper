@@ -175,7 +175,7 @@ def _open_lifecycle() -> tuple[OrderflowState, ExecutionEngine, ExecutionCoordin
         protective_stop=99.0,
     )
     coordinator = ExecutionCoordinator(
-        machine=SimpleNamespace(context=context), engine=engine
+        host=SimpleNamespace(context=context), engine=engine
     )
     return context, engine, coordinator, life
 
@@ -295,7 +295,7 @@ def test_same_call_activation_reflects_same_call_fixed_target_exit() -> None:
     context.opportunities[life.lifecycle_id] = life
     _filled_lifecycle(context, engine, life)
     coordinator = ExecutionCoordinator(
-        machine=SimpleNamespace(context=context), engine=engine
+        host=SimpleNamespace(context=context), engine=engine
     )
     context.market_state = LIQUIDITY_PROBE
     bar_events: list[dict[str, Any]] = []
@@ -324,7 +324,7 @@ def test_activated_3r_preempts_same_call_fixed_target_exit() -> None:
         life, replace(position, post_3r_activated=True)
     )
     coordinator = ExecutionCoordinator(
-        machine=SimpleNamespace(context=context), engine=engine
+        host=SimpleNamespace(context=context), engine=engine
     )
     context.market_state = LIQUIDITY_PROBE
     bar_events: list[dict[str, Any]] = []
