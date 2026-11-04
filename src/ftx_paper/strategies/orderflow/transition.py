@@ -563,6 +563,7 @@ class OrderflowEngine:
             )
         if self._clock is not None and available_at < self._clock:
             raise ValueError("orderflow transition clock cannot move backwards")
+        ordinary_market_state = self.context.market_state
         self._proposal_buffer.begin_transition()
         previous_session = self.context.current_session_date
         self.context.input_diagnostics.append({
@@ -629,10 +630,6 @@ class OrderflowEngine:
                 or available5[-1].available_at > self.context.previous5_available_at
             )
         )
-        if item.five_minute is not None:
-            latest = item.five_minute
-            if self.context.last_confirmation_context_time != latest.time:
-                self._publisher.ordinary_context(latest)
         self.update_gap_state(
             item.one_minute.session_date,
             list(self.observation_owner.one_minute_aggregates),
@@ -657,6 +654,12 @@ class OrderflowEngine:
         self.opportunity_owner.handle_opening_interaction(
             row, timestamp, next_time, bar_events,
         )
+        if item.five_minute is not None:
+            latest = item.five_minute
+            if self.context.last_confirmation_context_time != latest.time:
+                self._publisher.ordinary_context(
+                    latest, market_state=ordinary_market_state,
+                )
         self._publisher.context_location(item)
         generated_formations = self.opportunity_owner.formations_for(next_time)
         accepted_formations = self._accept_formations(

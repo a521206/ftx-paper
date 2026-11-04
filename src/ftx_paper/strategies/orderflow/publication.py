@@ -121,7 +121,9 @@ class TransitionPublisher:
             })
             known.add(identity)
 
-    def ordinary_context(self, latest: Aggregate) -> None:
+    def ordinary_context(
+        self, latest: Aggregate, *, market_state: str | None = None,
+    ) -> None:
         scores = build_context_scores(
             latest,
             raw_rows=self.context.rows,
@@ -136,7 +138,9 @@ class TransitionPublisher:
             timestamp=latest.time,
             available_at=latest.available_at,
             location=None,
-            market_state=self.context.market_state,
+            market_state=(
+                self.context.market_state if market_state is None else market_state
+            ),
             definition_version="1m_5m",
             source_timeframe="5m",
             long_score=long_score,

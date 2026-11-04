@@ -36,10 +36,22 @@ from .state_machine_types import (
 from .timestamps import coerce_timestamp, serialize_utc
 from .templates import Direction, LocationTemplate, TRADE_TEMPLATES
 from .value_publication import PriorSessionValueReference, ValuePublication
+from ftx_paper.risk.trail_stop import TrailConfig, TrailTracker
 
 
 def snapshot_value(value: Any) -> Any:
     """Convert canonical mutable state to deterministic persistence values."""
+    if isinstance(value, TrailTracker):
+        return {
+            "entry": value._entry,
+            "is_short": value._is_short,
+            "hard_stop_dist": value._hard_stop_dist,
+            "config": snapshot_value(value._config),
+            "best_rel": value._best_rel,
+            "activated": value._activated,
+            "bar_count": value._bar_count,
+            "exited": value._exited,
+        }
     if isinstance(value, datetime):
         return serialize_utc(value)
     if isinstance(value, Enum):
@@ -469,6 +481,20 @@ def restore_execution_state(raw: Mapping[str, Any]) -> ExecutionState:
             exit_intent=restore_exit_intent(position.get("exit_intent")),
             partial_exit_taken=bool(position.get("partial_exit_taken", False)), post_3r_activated=bool(position.get("post_3r_activated", False)),
         )
+    trail_raw = raw.get("trail_tracker")
+    restored_trail = None
+    if isinstance(trail_raw, Mapping):
+        config_raw = trail_raw.get("config", {})
+        config = TrailConfig(**config_raw) if isinstance(config_raw, Mapping) else TrailConfig()
+        direction = "short" if trail_raw.get("is_short", False) else "long"
+        restored_trail = TrailTracker(
+            float(trail_raw["entry"]), direction,
+            float(trail_raw["hard_stop_dist"]) * 10000.0, config,
+        )
+        restored_trail._best_rel = float(trail_raw.get("best_rel", 1.0))
+        restored_trail._activated = bool(trail_raw.get("activated", False))
+        restored_trail._bar_count = int(trail_raw.get("bar_count", 0))
+        restored_trail._exited = bool(trail_raw.get("exited", False))
     return ExecutionState(
         opportunity_id=str(raw["opportunity_id"]), setup=restore_setup(raw.get("setup")),
         setup_available_at=raw.get("setup_available_at"), exit_plan_frozen=bool(raw.get("exit_plan_frozen", False)),
@@ -489,6 +515,7 @@ def restore_execution_state(raw: Mapping[str, Any]) -> ExecutionState:
         entry_attempted=bool(raw.get("entry_attempted", False)), entry_aliases=tuple(raw.get("entry_aliases", ())),
         retest_touched=bool(raw.get("retest_touched", False)), retest_touch_observed_at=raw.get("retest_touch_observed_at"),
         retest_touch_available_at=raw.get("retest_touch_available_at"), retest_touch_evidence=raw.get("retest_touch_evidence"),
+        trail_tracker=restored_trail,
     )
 
 

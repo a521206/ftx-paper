@@ -99,6 +99,40 @@ def test_transition_publishes_current_one_minute_aggregates_to_context() -> None
     assert transition.context.aggregates["1m"] == [one_minute]
 
 
+def test_transition_handles_structure_before_publishing_ordinary_context(monkeypatch) -> None:
+    one_minute = Aggregate(
+        "2026-10-01T09:20", "2026-10-01T09:20", "2026-10-01T09:21",
+        "1m", 1, 100.0, 101.0, 99.0, 100.5, 100,
+        "NIFTY", "", "2026-10-01", "one-minute",
+    )
+    five_minute = Aggregate(
+        "2026-10-01T09:15", "2026-10-01T09:19", "2026-10-01T09:20",
+        "5m", 5, 100.0, 102.0, 99.0, 101.0, 500,
+        "NIFTY", "", "2026-10-01", "five-minute",
+    )
+    transition = OrderflowEngine(LocationRegistry("test"))
+    calls: list[str] = []
+
+    def handle_structure(*_args: object) -> None:
+        calls.append("structure")
+        assert transition.context.last_confirmation_context_time is None
+
+    monkeypatch.setattr(
+        transition.opportunity_owner,
+        "handle_structure",
+        handle_structure,
+    )
+    monkeypatch.setattr(
+        transition._publisher,
+        "ordinary_context",
+        lambda *_args, **_kwargs: calls.append("ordinary_context"),
+    )
+
+    transition.advance(OrderflowInput(one_minute, five_minute=five_minute))
+
+    assert calls.index("structure") < calls.index("ordinary_context")
+
+
 def test_episode_promotion_is_idempotent_and_invalidates_competitor() -> None:
     events: list[dict[str, object]] = []
     invalidations: list[tuple[object, str]] = []
