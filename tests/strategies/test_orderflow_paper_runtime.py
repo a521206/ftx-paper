@@ -50,11 +50,12 @@ def test_input_stream_reports_selected_bundle_route_and_observation_counts() -> 
     )
 
     provider = OrderflowInputStream()
+    provider.append_continuous_bars((bar,))
     bundle_input = provider(
         SimpleNamespace(bars={MarketRole.FUTURES: bar}),
     )
 
-    assert bundle_input.input_diagnostic["input_source"] == "stream_appended_bar"
+    assert bundle_input.input_diagnostic["input_source"] == "stream_envelope"
     assert bundle_input.input_diagnostic["observations_1m"] == 0
     assert bundle_input.input_diagnostic["observations_5m"] == 0
     assert "eligible_location_records" in bundle_input.input_diagnostic
@@ -121,7 +122,11 @@ def test_live_inputs_publish_opening_range_only_when_first_five_minute_completes
     assert inputs[-1].session_levels.opening_range_available_at == inputs[-1].one_minute.available_at
     assert inputs[-1].five_minute is not None
     assert len(inputs[-1].vwap_measurements) == 6
-    assert all(not item.observations_1m for item in inputs[:-1])
+    assert all(
+        {item.location for item in input.observations_1m} == {"PD_LOW", "PD_HIGH"}
+        for input in inputs[:-1]
+    )
+    assert {item.location for item in inputs[-1].observations_1m} > {"PD_LOW", "PD_HIGH"}
     assert inputs[-1].observations_5m
     rows = [
         {
@@ -269,6 +274,25 @@ def test_orderflow_stream_rejects_duplicate_live_bar_without_advancing() -> None
     with pytest.raises(ValueError, match="strictly ordered"):
         stream.append_continuous_bars((bar,))
 
+    assert len(stream.envelopes) == 1
+
+
+def test_live_ingress_consumes_already_appended_bar_without_reappending() -> None:
+    instrument = Instrument("NIFTY", "NFO", "FUTURES")
+    bar = MarketBar(
+        instrument=instrument,
+        timestamp=datetime(2026, 10, 1, 3, 45, tzinfo=timezone.utc),
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        volume=10,
+    )
+    stream = OrderflowInputStream.from_continuous_bars((bar,))
+
+    observed = stream(SimpleNamespace(bars={MarketRole.FUTURES: bar}))
+
+    assert observed.one_minute.time == stream.envelopes[-1].input.one_minute.time
     assert len(stream.envelopes) == 1
 
 

@@ -119,6 +119,37 @@ class OrderflowInputStream:
             prior_session_levels=self._prior_session_levels,
         )
 
+    def _build_session_levels(self, session_date: str) -> SessionLevels | None:
+        """Derive one-bar opening range and prior-day extremes (canonical derive_session_levels).
+
+        The opening range is taken from the session's first completed 5m aggregate.
+        Returns None when the opening range is not yet derivable from loaded rows.
+        """
+        rows = self._feature_store.rows_by_date.get(session_date, ())
+        session_rows = [
+            row for row in rows
+            if "09:15" <= str(row["time"])[-5:] <= "15:30"
+        ]
+        if len(session_rows) < 5:
+            return None
+        opening = build_aggregate_result(session_rows[:5], 5).aggregates
+        if not opening:
+            return None
+        first = opening[0]
+        prior_levels = (self._prior_session_levels or {}).get(session_date, {})
+        return SessionLevels(
+            opening_range_low=first.low,
+            opening_range_high=first.high,
+            prior_day_low=(
+                float(prior_levels["low"]) if "low" in prior_levels else None
+            ),
+            prior_day_high=(
+                float(prior_levels["high"]) if "high" in prior_levels else None
+            ),
+            opening_range_available_at=first.available_at,
+            prior_day_available_at=parse_nifty_label(f"{session_date}T09:15"),
+        )
+
     def _append_row(self, row: Mapping[str, Any]) -> CanonicalInputEnvelope | None:
         source = dict(row)
         session_date = str(source["session_date"])
@@ -144,7 +175,7 @@ class OrderflowInputStream:
             self._location_registry = LocationRegistry(
                 f"{source.get('symbol', 'NIFTY')}:{source.get('expiry', '')}:1m"
             )
-            self._session_levels = None
+            self._session_levels = self._build_session_levels(session_date)
             self._published_session_levels = False
             self._session_high = None
             self._session_low = None
@@ -477,13 +508,22 @@ class OrderflowInputStream:
         if bar is not None and timestamp is not None:
             timestamp = coerce_timestamp(timestamp)
             identity = f"aggregate:1m:{nifty_label(timestamp)}"
-            if identity in self._by_identity:
-                return replace(self._by_identity[identity], input_source="stream_envelope")
-            self.append_continuous_bars((bar,))
-            if identity in self._by_identity:
-                return replace(self._by_identity[identity], input_source="stream_appended_bar")
-            raise ValueError(f"completed futures bar was not published: {identity}")
+            source = self._append_bundle_ingress(bar, identity)
+            if identity not in self._by_identity:
+                raise ValueError(f"completed futures bar was not published: {identity}")
+            return replace(self._by_identity[identity], input_source=source)
         raise ValueError("bundle has no canonical orderflow clock input")
+
+    def _append_bundle_ingress(self, bar: object, identity: str) -> str:
+        """Observe a bundle bar that no feature-append callback published.
+
+        Live hosts append completed bars before observation; bounded replay has
+        no such callback, so its bundle bar enters the same stream here.
+        """
+        if identity in self._by_identity:
+            return "stream_envelope"
+        self.append_continuous_bars((bar,))
+        return "stream_appended_bar"
 
     def from_evidence(self, evidence: object) -> CanonicalInputEnvelope:
         """Consume an explicit completed-bar evidence envelope from live ingress."""

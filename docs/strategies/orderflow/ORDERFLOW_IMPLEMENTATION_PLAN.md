@@ -193,7 +193,10 @@ production parity or completion claim is allowed until Phase 8 is accepted.
   artifact contract;
 - retain `transition.py`, context/location replay, and comparison harnesses only
   as implementation seams or diagnostics, not parallel production owners; and
-- remove the production Phase 4 -> interaction -> Phase 4 double pass.
+- remove the production Phase 4 -> interaction -> Phase 4 double pass;
+- remove obsolete compatibility shims (e.g., the unused `state_machine.py`
+  `ReplayState` alias) and confirm the `_record_phase4_*` parity-fact recorders
+  are single-pass within the shared owner, not a second Phase 4 owner.
 
 ### 9C. Complete Snapshot And Recovery
 
@@ -202,9 +205,12 @@ generations, interaction and opportunity state, intents, reservations, pending
 exits, positions, causal cursors, parity state, and idempotency identities.
 Recovery must resume an explicit suffix without rereading future bars. An
 unrecoverable interrupted session becomes `STOPPED` with one audit event.
-The current owner restore also omits serialized pending execution proposals;
-restore must reproduce those pending inputs or explicitly establish that they
-are not part of recoverable state before this phase can be accepted.
+Pending execution proposals are established as not part of recoverable state:
+`context.execution_proposals` is a within-transition scratch buffer, cleared at
+the start of each bar and consumed by selection and host publication within the
+same synchronous `process_execution_bar` call, so it is always empty at snapshot
+boundaries. Document that invariant (assertion/comment) rather than serializing
+a transient buffer.
 
 ### 9D. Bind Paper Execution
 
@@ -214,12 +220,17 @@ account. Broker integrations remain market-data only.
 
 ### 9E. Persist And Serve Facts
 
-Persist canonical events, snapshots, notifications, and artifacts idempotently.
-Expose read-only API/CLI projections. API and persistence code must not
-recompute decisions from trades, counters, reports, or terminal snapshots.
-The unified artifact builder is currently exercised by bounded replay; the live
-path persists runtime/orderflow facts but does not yet emit and persist the same
-unified artifact contract.
+Persist canonical events, snapshots, and notifications idempotently, and expose
+read-only API/CLI projections. API and persistence code must not recompute
+decisions from trades, counters, reports, or terminal snapshots. Live fact
+capture is the per-fact persistence of producer-owned streams and layers as
+`ORDERFLOW_FACT` rows (idempotent per source/category/stream/identity), served
+read-only by the orderflow facts API. The unified parity artifact is replay-gate
+tooling: it is built and persisted for bounded replay only, has no live consumer
+(canonical comparison and the API parity endpoint read replay runs), and must
+not be emitted or persisted at write time on the live path. A future live parity
+report would be built on demand from the persisted facts, not captured as a
+parallel artifact.
 
 ## Phase 10: Close Live/Replay Execution Parity
 
@@ -233,8 +244,8 @@ Live and bounded replay may differ in the following host concerns only:
 - input transport: broker-normalized incremental bars versus stored bounded bars;
 - clock driving: feed completion and wall-clock deadlines versus deterministic
   historical timestamps;
-- capture and persistence: runtime event storage versus run-scoped replay
-  artifacts;
+- capture and persistence: live per-fact `ORDERFLOW_FACT` runtime event storage
+  versus run-scoped replay artifacts that include the unified parity artifact;
 - recovery: persistent runtime recovery versus fresh isolated replay state;
 - Paper execution adapter: live PaperBroker/execution-service submission versus
   deterministic in-process replay settlement. Both adapters consume the same
@@ -263,20 +274,27 @@ items, not separate tasks.
    and replay input through the same strategy transition/execution owner. Keep
    Paper execution, account mutation, persistence, and artifact construction in
    host adapters; remove duplicate production orchestration only after the
-   shared path passes its focused gates.
+   shared path passes its focused gates. Add a focused test proving live and
+   replay produce identical parity-stream prefixes for the same completed
+   inputs through that owner, with execution/account mutation occurring only in
+   the host adapter.
 3. **Pass execution-bearing parity and complete fact capture.** Rerun eligible
    source-matched sessions after UTC normalization. Compare no-trade and
    execution-bearing decision, execution/settlement, and portfolio-ledger
    streams against canonical output. Accept only the documented ATR/prior-value
    variance, explicitly classified as `INPUT_VARIANCE`. Persist DB-backed live
-   and replay facts and emit the same unified artifact contract on live as on
-   bounded replay. Resolve lifecycle and execution mismatches before accepting
-   the parity gate.
+   and replay facts. The unified parity artifact is emitted and persisted for
+   bounded replay only; live captures the same producer-owned facts as
+   idempotent `ORDERFLOW_FACT` rows, and a live parity report would be built on
+   demand from those facts rather than persisted as a parallel artifact.
+   Resolve lifecycle and execution mismatches before accepting the parity gate.
 4. **Complete snapshot recovery.** Persist and restore the complete canonical
-   mutable graph, including pending execution proposals and idempotency
-   identities. Prove recovery resumes the same causal prefix without rereading
-   future bars; retain the existing `STOPPED` plus one audit event behavior for
-   unrecoverable interrupted sessions.
+   mutable graph and idempotency identities, and establish that pending
+   execution proposals are not part of recoverable state (`execution_proposals`
+   is a within-transition buffer that is always empty at snapshot boundaries).
+   Prove recovery resumes the same causal prefix without rereading future bars;
+   retain the existing `STOPPED` plus one audit event behavior for unrecoverable
+   interrupted sessions.
 5. **Migrate production replay and retire the harness.** Reduce `ReplayWorker`
    to bounded loading, cancellation, clock advancement, capture, and fresh owner
    construction; route each observation through the shared owner. Delete

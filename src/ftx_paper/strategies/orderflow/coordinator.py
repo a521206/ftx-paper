@@ -238,7 +238,9 @@ class OrderflowCoordinator:
                 "reference_level": transition.interaction.reference_level,
                 "band_low": transition.interaction.band_low,
                 "band_high": transition.interaction.band_high,
-                "source_aggregate_id": provenance.source_aggregate_id if provenance else None,
+                "source_aggregate_id": (
+                    provenance.reference_source_aggregate_id if provenance else None
+                ),
                 "source_observation_id": provenance.source_observation_id if provenance else None,
                 "stage": "OBSERVING_LOCATION",
                 "evidence": [clock.to_dict()],
