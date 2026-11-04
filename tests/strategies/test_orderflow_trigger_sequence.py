@@ -174,8 +174,9 @@ def test_transition_publishes_ordinary_context_before_structure(monkeypatch) -> 
     original_observe = coordinator_type.observe_interactions
 
     def observe_interactions(*args, **kwargs):
-        calls.append("interactions")
-        return original_observe(*args, **kwargs)
+        calls.append("observe")
+        observed = original_observe(*args, **kwargs)
+        return SimpleNamespace(events=observed.events, transitions=(object(),))
 
     monkeypatch.setattr(coordinator_type, "observe_interactions", observe_interactions)
 
@@ -186,6 +187,11 @@ def test_transition_publishes_ordinary_context_before_structure(monkeypatch) -> 
         transition.opportunity_owner,
         "handle_structure",
         handle_structure,
+    )
+    monkeypatch.setattr(
+        transition.opportunity_owner,
+        "apply_interaction_transition",
+        lambda *_args, **_kwargs: calls.append("interactions"),
     )
     monkeypatch.setattr(
         type(transition._context_publisher),
@@ -205,9 +211,9 @@ def test_transition_publishes_ordinary_context_before_structure(monkeypatch) -> 
 
     transition.advance(OrderflowInput(one_minute, five_minute=five_minute))
 
-    assert calls.index("ordinary_context") < calls.index("interactions")
-    assert calls.index("interactions") < calls.index("source_observations")
-    assert calls.index("interactions") < calls.index("context_location")
+    assert calls.index("source_observations") < calls.index("observe")
+    assert calls.index("context_location") < calls.index("observe")
+    assert calls.index("observe") < calls.index("interactions")
     assert calls.index("interactions") < calls.index("structure")
 
 

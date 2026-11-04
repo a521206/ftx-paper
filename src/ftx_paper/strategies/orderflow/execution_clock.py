@@ -66,6 +66,7 @@ class ExecutionClock:
 
     def __init__(self, engine: Any) -> None:
         self.engine = engine
+        self._pre_managed_ids: set[str] = set()
 
     def advance(
         self,
@@ -136,10 +137,11 @@ class ExecutionClock:
                 life, session_date=str(life.session_date),
                 timestamp=timestamp, bar_events=events,
             )
-            owner.handle_management(
-                index, timestamp, next_time, dict(row), list(available5), events, life,
-                defer_discretionary_execution=True,
-            )
+            if life.lifecycle_id not in self._pre_managed_ids:
+                owner.handle_management(
+                    index, timestamp, next_time, dict(row), list(available5), events, life,
+                    defer_discretionary_execution=True,
+                )
             if life.active:
                 owner.handle_execution(
                     index, timestamp, next_time, dict(row), [], events, life,
@@ -174,8 +176,17 @@ class ExecutionClock:
         row: Mapping[str, Any], events: list[dict[str, Any]],
     ) -> None:
         owner = self.engine.execution_owner
+        self._pre_managed_ids = set()
+        available5 = list(self.engine.observation_owner.five_minute_aggregates)
         for life in tuple(self.engine.context.opportunities.values()):
             if life.active or self.engine.context.position_is_open(life):
+                state = owner.engine.state_for(life.lifecycle_id)
+                if state.position is not None:
+                    owner.handle_management(
+                        index, timestamp, next_time, dict(row), available5, events, life,
+                        defer_discretionary_execution=True,
+                    )
+                    self._pre_managed_ids.add(life.lifecycle_id)
                 owner.handle_execution(
                     index, timestamp, next_time, dict(row), [], events, life,
                     evaluate_entries=False,

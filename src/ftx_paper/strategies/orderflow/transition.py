@@ -738,6 +738,12 @@ class OrderflowEngine:
         timestamp: str,
         bar_events: list[dict[str, Any]],
     ) -> OrderflowAdvance:
+        # Phase 4 facts are visible before interaction evaluation and transition
+        # publication. Interaction context publication consumes this snapshot.
+        self._phase4.source_observations(
+            (*self.observation_owner.one_minute_aggregates, *available5),
+        )
+        self._phase4.context_location(item)
         interaction = self.observation_owner.observe_interactions(
             item,
             new_five_minute=new_5m,
@@ -746,10 +752,6 @@ class OrderflowEngine:
             self.opportunity_owner.apply_interaction_transition(transition, bar_events)
         for event in interaction.events:
             self.context.record_event(event)
-        self._phase4.source_observations(
-            (*self.observation_owner.one_minute_aggregates, *available5),
-        )
-        self._phase4.context_location(item)
         timeout_events: list[dict[str, Any]] = []
         self.opportunity_owner.advance_timeouts(timestamp, available5, timeout_events)
         self.context.pending_bar_events.extend(timeout_events)
