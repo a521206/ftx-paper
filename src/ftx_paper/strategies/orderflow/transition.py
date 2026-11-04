@@ -1121,8 +1121,6 @@ class OrderflowTransitionOwner:
             for existing in self.context.rows
         ):
             self.context.rows.append(row)
-        for event in observation.events:
-            self.context.record_event(event)
         if regime is not None:
             self.context.regime = regime
         if constraints is not None:
@@ -1142,6 +1140,15 @@ class OrderflowTransitionOwner:
             )
         available5 = list(self.observation_owner.five_minute_aggregates)
         self.context.aggregates["5m"] = available5
+        for transition in observation.transitions:
+            self.context.interactions[transition.interaction.interaction_id] = (
+                transition.interaction
+            )
+            self.opportunity_owner.publish_interaction_context(
+                transition.interaction, bar_events,
+            )
+        for event in observation.events:
+            self.context.record_event(event)
         self._record_phase4_source_observations(
             (*self.observation_owner.one_minute_aggregates, *available5),
         )

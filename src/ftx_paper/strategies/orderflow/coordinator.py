@@ -43,6 +43,7 @@ class OrderflowAdvance:
     """Facts emitted by one idempotent coordinator transition."""
 
     events: tuple[dict[str, Any], ...] = ()
+    transitions: tuple[InteractionTransition, ...] = ()
 
 
 @dataclass(slots=True)
@@ -188,7 +189,7 @@ class OrderflowCoordinator:
             ))
         for transition in transitions:
             events.extend(self._transition_events(transition, one))
-        return OrderflowAdvance(tuple(events))
+        return OrderflowAdvance(tuple(events), tuple(transitions))
 
     @staticmethod
     def _transition_events(transition: InteractionTransition, clock: Aggregate) -> tuple[dict[str, Any], ...]:
