@@ -224,6 +224,7 @@ class OrderflowCoordinator:
         item: OrderflowInput,
         *,
         new_five_minute: bool,
+        input_diagnostics: list[dict[str, Any]] | None = None,
     ) -> OrderflowAdvance:
         """Evaluate location interactions after permission/context processing."""
         one = item.one_minute
@@ -235,12 +236,21 @@ class OrderflowCoordinator:
             if observation.timeframe == "1m"
             and observation.source_aggregate_id == nifty_label(one.time)
         )
-        transitions = self.detector.observe_1m(
-            current=one,
-            available=list(self._one_minute),
-            atr=atr,
-            observations=current_observations_1m,
+        visible_1m = tuple(
+            location for location in self.location_registry.available_as_of(one.available_at)
+            if not location.timeframe or location.timeframe == "1m"
         )
+        if input_diagnostics is not None:
+            input_diagnostics.append({
+                "kind": "location_observation_input",
+                "input_source": "canonical_location_registry",
+                "timeframe": "1m",
+                "aggregate_id": one.time,
+                "available_at": one.available_at,
+                "visible_location_records": len(visible_1m),
+                "observations_emitted": len(current_observations_1m),
+            })
+        transitions: tuple[InteractionTransition, ...] = ()
         if new_five_minute:
             assert item.five_minute is not None
             five = item.five_minute
@@ -250,11 +260,41 @@ class OrderflowCoordinator:
                 if observation.timeframe == "5m"
                 and observation.source_aggregate_id == nifty_label(five.time)
             )
+            visible_5m = tuple(
+                location for location in self.location_registry.available_as_of(five.available_at)
+                if not location.timeframe or location.timeframe == "5m"
+            )
+            if input_diagnostics is not None:
+                input_diagnostics.append({
+                    "kind": "location_observation_input",
+                    "input_source": "canonical_location_registry",
+                    "timeframe": "5m",
+                    "aggregate_id": five.time,
+                    "available_at": five.available_at,
+                    "visible_location_records": len(visible_5m),
+                    "observations_emitted": len(current_observations_5m),
+                    "location_observation_gaps": max(
+                        0,
+                        len(visible_5m) - len({
+                            (observation.location_id, observation.reference_generation)
+                            for observation in current_observations_5m
+                        }),
+                    ),
+                })
             valid_5m_keys = {
                 (observation.location_id, observation.reference_generation)
                 for observation in current_observations_5m
                 if observation.timeframe == "5m"
             }
+            current_5m_child_ids = {
+                child_id
+                for observation in current_observations_5m
+                for child_id in observation.child_observation_ids
+            }
+            current_5m_observations_1m = tuple(
+                observation for observation in item.observations_1m
+                if observation.observation_id in current_5m_child_ids
+            ) + current_observations_1m
             for location in self.location_registry.available_as_of(five.available_at):
                 if location.timeframe and location.timeframe != "5m":
                     continue
@@ -274,13 +314,26 @@ class OrderflowCoordinator:
                     "available_at": five.available_at,
                     "reason": "incomplete_or_misaligned_1m_references",
                 })
+            transitions = tuple(self.detector.observe_1m(
+                current=one,
+                available=list(self._one_minute),
+                atr=atr,
+                observations=current_observations_1m,
+            ))
             transitions += tuple(self.detector.observe(
                 current=five,
                 available5=list(self._five_minute),
                 available1=list(self._one_minute),
                 atr=atr,
                 observations5=current_observations_5m,
-                observations1=item.observations_1m,
+                observations1=current_5m_observations_1m,
+            ))
+        else:
+            transitions = tuple(self.detector.observe_1m(
+                current=one,
+                available=list(self._one_minute),
+                atr=atr,
+                observations=current_observations_1m,
             ))
         for transition in transitions:
             events.extend(self._transition_events(transition, one))
@@ -343,6 +396,7 @@ class OrderflowCoordinator:
                 "available_at": clock.available_at,
             })
         if transition.departed:
+            provenance = transition.interaction.reference_provenance
             events.append({
                 "kind": "interaction_ended",
                 "interaction_id": interaction_id,
@@ -350,7 +404,7 @@ class OrderflowCoordinator:
                 "timeframe": transition.interaction.timeframe,
                 "reference_generation": transition.interaction.reference_generation,
                 "reason": snapshot.get("close_reason"),
-                "source_observation_id": provenance.source_observation_id if provenance else None,
+                "source_observation_id": provenance.get("source_observation_id") if provenance else None,
                 "observed_at": clock.end_time,
                 "available_at": clock.available_at,
             })

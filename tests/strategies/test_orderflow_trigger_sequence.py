@@ -170,15 +170,22 @@ def test_transition_publishes_ordinary_context_before_structure(monkeypatch) -> 
     transition = OrderflowEngine(LocationRegistry("test"))
     calls: list[str] = []
 
-    coordinator_type = type(transition.observation_owner)
-    original_observe = coordinator_type.observe_interactions
+    detector_type = type(transition.observation_owner.detector)
+    original_observe_1m = detector_type.observe_1m
 
-    def observe_interactions(*args, **kwargs):
+    def observe_1m(self, *args, **kwargs):
         calls.append("observe")
-        observed = original_observe(*args, **kwargs)
-        return SimpleNamespace(events=observed.events, transitions=(object(),))
+        return original_observe_1m(self, *args, **kwargs)
 
-    monkeypatch.setattr(coordinator_type, "observe_interactions", observe_interactions)
+    monkeypatch.setattr(detector_type, "observe_1m", observe_1m)
+
+    original_observe_5m = detector_type.observe
+
+    def observe_5m(self, *args, **kwargs):
+        calls.append("observe")
+        return original_observe_5m(self, *args, **kwargs)
+
+    monkeypatch.setattr(detector_type, "observe", observe_5m)
 
     def handle_structure(*_args: object) -> None:
         calls.append("structure")
@@ -187,11 +194,6 @@ def test_transition_publishes_ordinary_context_before_structure(monkeypatch) -> 
         transition.opportunity_owner,
         "handle_structure",
         handle_structure,
-    )
-    monkeypatch.setattr(
-        transition.opportunity_owner,
-        "apply_interaction_transition",
-        lambda *_args, **_kwargs: calls.append("interactions"),
     )
     monkeypatch.setattr(
         type(transition._context_publisher),
@@ -208,13 +210,21 @@ def test_transition_publishes_ordinary_context_before_structure(monkeypatch) -> 
         "context_location",
         lambda *_args, **_kwargs: calls.append("context_location"),
     )
+    monkeypatch.setattr(
+        transition.opportunity_owner,
+        "advance_timeouts",
+        lambda *_args, **_kwargs: calls.append("timeouts"),
+    )
 
     transition.advance(OrderflowInput(one_minute, five_minute=five_minute))
 
-    assert calls.index("source_observations") < calls.index("observe")
-    assert calls.index("context_location") < calls.index("observe")
-    assert calls.index("observe") < calls.index("interactions")
-    assert calls.index("interactions") < calls.index("structure")
+    assert calls.index("observe") < calls.index("source_observations")
+    assert calls.index("observe") < calls.index("context_location")
+    assert calls.index("source_observations") < calls.index("structure")
+    assert calls.index("context_location") < calls.index("structure")
+    assert calls.index("context_location") < calls.index("timeouts")
+    assert calls.index("timeouts") < calls.index("structure")
+    assert calls.index("observe") < calls.index("structure")
 
 
 def test_episode_promotion_is_idempotent_and_invalidates_competitor() -> None:

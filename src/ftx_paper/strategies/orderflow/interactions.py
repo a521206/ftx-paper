@@ -149,6 +149,7 @@ class InteractionSnapshot:
     candles: tuple[InteractionCandle, ...]
     synthetic_snapshots: tuple[tuple[str, tuple[ProjectionSnapshot, ...]], ...]
     pd_role: str | None = None
+    reference_provenance: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def band_low(self) -> float:
@@ -183,6 +184,7 @@ class InteractionSnapshot:
             if self.pre_contact_side
             else None,
             "pd_role": self.pd_role,
+            "reference_provenance": dict(self.reference_provenance),
             "synthetic_snapshots": {
                 key: [item.to_dict() for item in values]
                 for key, values in self.synthetic_snapshots
@@ -670,6 +672,7 @@ class LocationInteraction:
             tuple(self.candles),
             tuple((tf, tuple(p.snapshots)) for tf, p in sorted(self.synthetic.items())),
             self.pd_role,
+            dict(self.reference_provenance),
         )
 
 

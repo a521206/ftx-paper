@@ -47,8 +47,7 @@ _INTERACTION_RESPONSE_KINDS = frozenset({
 })
 
 OPPORTUNITY_LIFECYCLE_KINDS = frozenset({
-    "lifecycle_formed", "setup_invalidated", "setup_expired",
-    "setup_superseded", "opportunity_timeout",
+    "lifecycle_formed",
 })
 
 _EXECUTION_TRANSITION_KINDS = frozenset({
@@ -543,6 +542,7 @@ class OrderflowState:
         *,
         record_lifecycle: bool = True,
     ) -> None:
+        previous_state = self.market_state
         self.emit(
             {**event, "market_state": market_state},
             bar_events,
@@ -550,6 +550,23 @@ class OrderflowState:
             record_lifecycle=record_lifecycle,
         )
         self.market_state = market_state
+        if previous_state != market_state:
+            emitted = self.events[-1] if self.events else event
+            self.input_diagnostics.append({
+                "kind": "market_state_transition",
+                "market_state_before": previous_state,
+                "market_state_after": market_state,
+                "event_kind": emitted.get("kind"),
+                "event_id": emitted.get("event_id"),
+                "sequence": emitted.get("sequence"),
+                "lifecycle_id": emitted.get("lifecycle_id"),
+                "observed_at": emitted.get("observed_at", emitted.get("time")),
+                "available_at": emitted.get("available_at", emitted.get("observed_at", emitted.get("time"))),
+                "causal_parent_id": emitted.get("causal_parent_id"),
+                "reason": emitted.get("reason"),
+                "owner": emitted.get("owner"),
+                "evidence_timeframe": emitted.get("evidence_timeframe"),
+            })
 
     def __post_init__(self) -> None:
         if self.execution_engine is None:

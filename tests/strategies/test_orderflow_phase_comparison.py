@@ -373,6 +373,21 @@ def test_phase7_preserves_fill_identity_and_kind() -> None:
     assert projection["execution_fills"][0]["kind"] == "partial_exit"
 
 
+def test_lifecycle_parity_stream_contains_formations_only() -> None:
+    context = OrderflowState(
+        location_registry=LocationRegistry("test"),
+        execution_engine=ExecutionEngine(),
+    )
+    events: list[dict[str, Any]] = []
+
+    context.emit({"kind": "lifecycle_formed", "observed_at": "09:20", "available_at": "09:20"}, events)
+    context.emit({"kind": "setup_expired", "observed_at": "09:25", "available_at": "09:25"}, events)
+
+    assert [item["kind"] for item in context.parity_streams["opportunity_lifecycle"]] == [
+        "lifecycle_formed",
+    ]
+
+
 def test_phase7_fill_identity_uses_fill_id_when_identity_is_transport_metadata() -> None:
     projection = build_phase7_projection({
         "parity_phase_facts": {

@@ -57,56 +57,71 @@ class Phase4Recorder:
             })
             known.add(identity)
 
-    def context_location(self, item: OrderflowInput) -> None:
+    def context_location(self, item: OrderflowInput, *, timeframe: str) -> None:
         ordinary = (
             self.context.market_contexts.resolve(self.context.market_contexts.ordinary_context)
             if self.context.market_contexts.ordinary_context is not None else None
         )
-        aggregates = [(item.one_minute, tuple(
-            observation for observation in item.observations_1m
-            if observation.timeframe == "1m"
-            and observation.source_aggregate_id == nifty_label(item.one_minute.time)
-            and observation.reference_source_timeframe in {None, "1m"}
-        ))]
-        if item.five_minute is not None:
-            aggregates.append((item.five_minute, tuple(
+        if timeframe == "1m":
+            aggregate = item.one_minute
+            observations = tuple(
+                observation for observation in item.observations_1m
+                if observation.timeframe == "1m"
+                and observation.source_aggregate_id == nifty_label(aggregate.time)
+                and observation.reference_source_timeframe in {None, "1m"}
+            )
+        elif timeframe == "5m" and item.five_minute is not None:
+            aggregate = item.five_minute
+            observations = tuple(
                 observation for observation in item.observations_5m
                 if observation.timeframe == "5m"
-                and observation.source_aggregate_id == nifty_label(item.five_minute.time)
-            )))
+                and observation.source_aggregate_id == nifty_label(aggregate.time)
+            )
+        else:
+            return
         known = {
             str(fact.get("identity"))
             for fact in self.context.parity_streams.get("context_location", ())
         }
-        for aggregate, observations in aggregates:
-            identity = f"context-location:{aggregate.timeframe}:{nifty_label(aggregate.time)}"
-            if identity in known:
-                continue
-            self.context.record_parity_fact("context_location", {
-                "kind": "context_location_observed",
-                "occurred_at": aggregate.end_time,
-                "observed_at": aggregate.end_time,
-                "available_at": aggregate.available_at,
-                "identity": identity,
-                "causal_parent_id": f"aggregate:{aggregate.timeframe}:{nifty_label(aggregate.time)}",
-                "values": {
-                    "timeframe": aggregate.timeframe,
-                    "source_observation_id": identity.replace("context-location:", "aggregate:"),
-                    "context": {
-                        "context_id": ordinary.context_id,
-                        "version": ordinary.version,
-                        "location": ordinary.location,
-                        "market_state": ordinary.market_state,
-                        "available_at": ordinary.available_at,
-                        "parent_context_id": ordinary.parent_context_id,
-                        "definition_version": ordinary.definition_version,
-                        "source_provenance": list(ordinary.source_provenance),
-                    } if ordinary is not None else None,
-                    "locations": [observation.to_dict() for observation in observations],
-                },
-                "unavailable": [] if ordinary is not None and observations else ["missing_context"],
-            })
-            known.add(identity)
+        identity = f"context-location:{aggregate.timeframe}:{nifty_label(aggregate.time)}"
+        if identity in known:
+            return
+        self.context.input_diagnostics.append({
+            "kind": "phase4_context_recorded",
+            "identity": identity,
+            "timeframe": aggregate.timeframe,
+            "aggregate_time": nifty_label(aggregate.time),
+            "aggregate_available_at": aggregate.available_at,
+            "context_id": ordinary.context_id if ordinary is not None else None,
+            "context_version": ordinary.version if ordinary is not None else None,
+            "context_market_state": ordinary.market_state if ordinary is not None else None,
+            "current_market_state": self.context.market_state,
+            "observation_count": len(observations),
+        })
+        self.context.record_parity_fact("context_location", {
+            "kind": "context_location_observed",
+            "occurred_at": aggregate.end_time,
+            "observed_at": aggregate.end_time,
+            "available_at": aggregate.available_at,
+            "identity": identity,
+            "causal_parent_id": f"aggregate:{aggregate.timeframe}:{nifty_label(aggregate.time)}",
+            "values": {
+                "timeframe": aggregate.timeframe,
+                "source_observation_id": identity.replace("context-location:", "aggregate:"),
+                "context": {
+                    "context_id": ordinary.context_id,
+                    "version": ordinary.version,
+                    "location": ordinary.location,
+                    "market_state": ordinary.market_state,
+                    "available_at": ordinary.available_at,
+                    "parent_context_id": ordinary.parent_context_id,
+                    "definition_version": ordinary.definition_version,
+                    "source_provenance": list(ordinary.source_provenance),
+                } if ordinary is not None else None,
+                "locations": [observation.to_dict() for observation in observations],
+            },
+            "unavailable": [] if ordinary is not None and observations else ["missing_context"],
+        })
 
 
 class ContextPublisher:
@@ -122,6 +137,7 @@ class ContextPublisher:
         *,
         market_state: str | None = None,
     ) -> None:
+        state_before = self.context.market_state
         long_score, short_score = scores if scores is not None else (None, None)
         context_id = f"5m-context-{latest.symbol}-{latest.session_date}-1m_5m"
         published = MarketContext(
@@ -141,6 +157,23 @@ class ContextPublisher:
                                 "available_at": latest.available_at},),
         )
         self.context.market_contexts.ordinary_context = self.context.publish_context(published)
+        self.context.input_diagnostics.append({
+            "kind": "ordinary_context_publication",
+            "context_id": published.context_id,
+            "context_version": published.version,
+            "context_available_at": published.available_at,
+            "market_state_argument": market_state,
+            "market_state_current": state_before,
+            "market_state_before_publication": state_before,
+            "market_state_after_publication": self.context.market_state,
+            "published_market_state": published.market_state,
+            "publication_matches_runtime_state": (
+                published.market_state == self.context.market_state
+            ),
+            "publication_caller_phase": "permission",
+            "phase4_snapshot_caller_phase": "context_location",
+        })
+
 
 
 __all__ = ["ContextPublisher", "Phase4Recorder"]

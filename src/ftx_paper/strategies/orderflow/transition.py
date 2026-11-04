@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from copy import deepcopy
 from datetime import datetime
 from types import SimpleNamespace
-from typing import Any, Callable, Mapping, Sequence, cast
+from typing import Any, Callable, Mapping, Sequence, TypeVar, cast
 
 from ftx_paper.contracts import Instrument
 from ftx_paper.execution.events import ExecutionNotification
@@ -38,6 +38,37 @@ from .execution_clock import ExecutionClock
 from .phase4 import ContextPublisher, Phase4Recorder
 from .permission import PermissionOwner
 from .session_boundary import SessionBoundaryOwner
+
+
+T = TypeVar("T")
+
+
+def _execution_lifecycle_snapshot(state: Any) -> dict[str, Any]:
+    def value(item: Any) -> Any:
+        return getattr(item, "value", item)
+
+    position = state.position
+    pending_exit = state.pending_exit
+    intent = state.intent
+    return {
+        "intent": {
+            "status": value(intent.status),
+            "triggered_at": getattr(intent, "triggered_at", None),
+        } if intent is not None else None,
+        "pending_exit": {
+            "reason": pending_exit.reason,
+            "available_at": pending_exit.available_at,
+            "quantity": pending_exit.quantity,
+        } if pending_exit is not None else None,
+        "position": {
+            "status": value(position.status),
+            "quantity": position.quantity,
+            "fill_price": position.fill_price,
+            "protective_stop": position.protective_stop,
+            "post_3r_activated": position.post_3r_activated,
+            "partial_exit_taken": position.partial_exit_taken,
+        } if position is not None else None,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -563,9 +594,19 @@ class OrderflowEngine:
         interaction = self._process_interactions(
             item,
             new_5m=new_5m,
-            available5=available5,
             timestamp=timestamp,
             bar_events=bar_events,
+        )
+        self._record_phase4(
+            item,
+            available5=available5,
+            timestamp=timestamp,
+            available_at=next_time,
+        )
+        self._process_timeouts(
+            timestamp=timestamp,
+            available_at=next_time,
+            available5=available5,
         )
         self._advance_structure(
             timestamp=timestamp,
@@ -582,20 +623,25 @@ class OrderflowEngine:
             (*formations, *generated_formations),
             emitted=self._formation_cursor,
         )
-        self._advance_execution(
-            accepted_formations,
-            regime=regime,
-            regime_publications=regime_publications,
-            triggers=triggers,
-            bar_opens=bar_opens,
-            decision_scores=decision_scores,
-            constraints=constraints,
-            instrument=instrument,
-            index=bar_index,
-            timestamp=timestamp,
-            next_time=next_time,
-            row=row,
-            available5=available5,
+        self._trace_phase(
+            "post_structure_execution",
+            timestamp,
+            next_time,
+            lambda: self._advance_execution(
+                accepted_formations,
+                regime=regime,
+                regime_publications=regime_publications,
+                triggers=triggers,
+                bar_opens=bar_opens,
+                decision_scores=decision_scores,
+                constraints=constraints,
+                instrument=instrument,
+                index=bar_index,
+                timestamp=timestamp,
+                next_time=next_time,
+                row=row,
+                available5=available5,
+            ),
         )
         self._record_execution_result(
             timestamp=timestamp,
@@ -677,13 +723,13 @@ class OrderflowEngine:
         bar_events: list[dict[str, Any]],
     ) -> bool:
         pre_execution_events: list[dict[str, Any]] = []
-        self._execution_clock.settle_pending(
+        self._trace_phase("pending_execution_settlement", timestamp, next_time, lambda: self._execution_clock.settle_pending(
             index=bar_index,
             timestamp=timestamp,
             next_time=next_time,
             row=row,
             events=pre_execution_events,
-        )
+        ))
         self.context.pending_bar_events.extend(pre_execution_events)
         new_5m = bool(
             available5
@@ -692,13 +738,13 @@ class OrderflowEngine:
                 or available5[-1].available_at > self.context.previous5_available_at
             )
         )
-        self._opening_gap.advance(
+        self._trace_phase("opening_gap_update", timestamp, next_time, lambda: self._opening_gap.advance(
             item.one_minute.session_date,
             list(self.observation_owner.one_minute_aggregates),
             timestamp,
             bar_events,
-        )
-        self.execution_owner.active_position_gate.update(self.context, timestamp)
+        ))
+        self._trace_phase("active_position_gate", timestamp, next_time, lambda: self.execution_owner.active_position_gate.update(self.context, timestamp))
         if new_5m and available5:
             market_state_before_permission = self.context.market_state
             permission_event_start = len(bar_events)
@@ -709,7 +755,7 @@ class OrderflowEngine:
                 atr=self.context.atr_by_session.get(available5[-1].session_date),
             )
             long_score, short_score = scores if scores is not None else (None, None)
-            self._permission.publish(available5[-1], long_score, short_score, bar_events)
+            self._trace_phase("permission", timestamp, next_time, lambda: self._permission.publish(available5[-1], long_score, short_score, bar_events))
             permission_events = bar_events[permission_event_start:]
             self.context.input_diagnostics.append({
                 "kind": "orderflow_permission_result",
@@ -734,28 +780,75 @@ class OrderflowEngine:
         item: OrderflowInput,
         *,
         new_5m: bool,
-        available5: list[Aggregate],
         timestamp: str,
         bar_events: list[dict[str, Any]],
     ) -> OrderflowAdvance:
-        # Phase 4 facts are visible before interaction evaluation and transition
-        # publication. Interaction context publication consumes this snapshot.
-        self._phase4.source_observations(
-            (*self.observation_owner.one_minute_aggregates, *available5),
+        available_at = nifty_label(item.one_minute.available_at)
+        def handle_interactions() -> OrderflowAdvance:
+            interaction = self.observation_owner.observe_interactions(
+                item,
+                new_five_minute=new_5m,
+                input_diagnostics=self.context.input_diagnostics,
+            )
+            for transition in interaction.transitions:
+                self.opportunity_owner.apply_interaction_transition(transition, bar_events)
+            for event in interaction.events:
+                self.context.record_event(event)
+            return interaction
+
+        interaction = self._trace_phase(
+            "interaction_handling", timestamp, available_at, handle_interactions,
         )
-        self._phase4.context_location(item)
-        interaction = self.observation_owner.observe_interactions(
-            item,
-            new_five_minute=new_5m,
-        )
-        for transition in interaction.transitions:
-            self.opportunity_owner.apply_interaction_transition(transition, bar_events)
-        for event in interaction.events:
-            self.context.record_event(event)
-        timeout_events: list[dict[str, Any]] = []
-        self.opportunity_owner.advance_timeouts(timestamp, available5, timeout_events)
-        self.context.pending_bar_events.extend(timeout_events)
+
         return interaction
+
+    def _process_timeouts(
+        self,
+        *,
+        timestamp: str,
+        available_at: str,
+        available5: list[Aggregate],
+    ) -> None:
+        timeout_events: list[dict[str, Any]] = []
+        self._trace_phase(
+            "timeout_processing",
+            timestamp,
+            available_at,
+            lambda: self.opportunity_owner.advance_timeouts(
+                timestamp, available5, timeout_events,
+            ),
+        )
+        self.context.pending_bar_events.extend(timeout_events)
+
+    def _record_phase4(
+        self,
+        item: OrderflowInput,
+        *,
+        available5: list[Aggregate],
+        timestamp: str,
+        available_at: str,
+    ) -> None:
+        self._trace_phase(
+            "phase4_source_observations",
+            timestamp,
+            available_at,
+            lambda: self._phase4.source_observations(
+                (*self.observation_owner.one_minute_aggregates, *available5),
+            ),
+        )
+        self._trace_phase(
+            "phase4_context_location",
+            timestamp,
+            available_at,
+            lambda: self._phase4.context_location(item, timeframe="1m"),
+        )
+        if available5 and item.five_minute is not None:
+            self._trace_phase(
+                "phase4_context_location",
+                timestamp,
+                available_at,
+                lambda: self._phase4.context_location(item, timeframe="5m"),
+            )
 
     def _advance_structure(
         self,
@@ -782,9 +875,9 @@ class OrderflowEngine:
         })
         market_state_before_structure = self.context.market_state
         structure_event_start = len(bar_events)
-        self.opportunity_owner.handle_structure(
+        self._trace_phase("structure", timestamp, next_time, lambda: self.opportunity_owner.handle_structure(
             timestamp, next_time, row, available5, bar_events,
-        )
+        ))
         structure_events = bar_events[structure_event_start:]
         self.context.input_diagnostics.append({
             "kind": "orderflow_structure_result",
@@ -812,9 +905,80 @@ class OrderflowEngine:
                 set(self.context.opportunities) - opportunities_before_structure
             ),
         })
-        self.opportunity_owner.handle_opening_interaction(
+        self._trace_phase("opening_interaction", timestamp, next_time, lambda: self.opportunity_owner.handle_opening_interaction(
             row, timestamp, next_time, bar_events,
+        ))
+
+    def _trace_phase(
+        self,
+        phase: str,
+        observed_at: str,
+        available_at: str,
+        action: Callable[[], T],
+    ) -> T:
+        if phase not in {
+            "permission", "interaction_handling", "pending_execution_settlement",
+            "timeout_processing", "phase4_source_observations",
+            "phase4_context_location", "structure", "post_structure_execution",
+        }:
+            return action()
+        before = self._trace_snapshot()
+        event_start = len(self.context.events)
+        result = action()
+        after = self._trace_snapshot()
+        self.context.input_diagnostics.append({
+            "kind": "phase4_clock_trace",
+            "ordinal": sum(
+                1 for item in self.context.input_diagnostics
+                if item.get("kind") == "phase4_clock_trace"
+            ),
+            "phase": phase,
+            "observed_at": observed_at,
+            "available_at": available_at,
+            "before": before,
+            "after": after,
+            "event_range": [event_start, len(self.context.events)],
+            "event_kinds": sorted({
+                str(event.get("kind")) for event in self.context.events[event_start:]
+                if event.get("kind")
+            }),
+        })
+        return result
+
+    def _trace_snapshot(self) -> dict[str, Any]:
+        ordinary_ref = self.context.market_contexts.ordinary_context
+        ordinary = (
+            self.context.market_contexts.resolve(ordinary_ref)
+            if ordinary_ref is not None else None
         )
+        return {
+            "market_state": self.context.market_state,
+            "ordinary_context": (
+                {"context_id": ordinary.context_id, "version": ordinary.version,
+                 "available_at": ordinary.available_at,
+                 "market_state": ordinary.market_state}
+                if ordinary is not None else None
+            ),
+            "active_interaction_count": sum(
+                1 for interaction in self.context.interactions.values()
+                if str(getattr(interaction, "status", "")) in {"ACTIVE", "InteractionStatus.ACTIVE"}
+            ),
+            "opportunity_count": len(self.context.opportunities),
+            "execution_lifecycles": {
+                life.lifecycle_id: {
+                    "active": life.active,
+                    "episode_confirmed": getattr(life, "episode_confirmed", None),
+                    "state": _execution_lifecycle_snapshot(
+                        self.execution_owner.engine.state_for(life.lifecycle_id),
+                    ),
+                }
+                for life in self.context.opportunities.values()
+            },
+            "parity_counts": {
+                stream: len(self.context.parity_streams.get(stream, ()))
+                for stream in ("context_location", "interaction_response", "opportunity_lifecycle")
+            },
+        }
 
     def _advance_execution(
         self,
