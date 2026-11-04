@@ -209,7 +209,10 @@ class OrderflowInputStream:
                     previous,
                     source,
                 )
-                raise ValueError(f"conflicting canonical input row: {session_date} {source['time']}")
+                # Startup/history rows are the canonical stream. A live callback
+                # can replay the same minute with a different broker snapshot;
+                # keep the first row and avoid mutating already-published state.
+                return self._by_identity.get(f"aggregate:1m:{source['time']}")
             return self._by_identity.get(f"aggregate:1m:{source['time']}")
         timestamp = coerce_timestamp(session_minute(session_date, source["time"]))
         if self._last_row_timestamp is not None and timestamp <= self._last_row_timestamp:

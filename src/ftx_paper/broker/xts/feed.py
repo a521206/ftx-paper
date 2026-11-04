@@ -103,6 +103,8 @@ class XTSFeed:
         self._running = False
         self._attempts = 0
         self._current: dict[str, MarketBar] = {}
+        self._last_volume: dict[str, float] = {}
+        self._last_open_interest: dict[str, float] = {}
         self._stop_event = Event()
         self._supervisor: Thread | None = None
         self._started_at = 0.0
@@ -186,10 +188,25 @@ class XTSFeed:
                 logger.debug("Normalize skipped payload: %s", exc)
                 return
 
+            key = f"{bar.instrument.exchange}:{bar.instrument.symbol}"
+            volume = bar.volume
+            if volume is not None:
+                previous_volume = self._last_volume.get(key)
+                self._last_volume[key] = volume
+                volume = 0.0 if previous_volume is None else max(0.0, volume - previous_volume)
+            open_interest = bar.open_interest
+            if open_interest is None:
+                open_interest = self._last_open_interest.get(key)
+            else:
+                self._last_open_interest[key] = open_interest
+            bar = MarketBar(
+                bar.instrument, bar.timestamp, bar.open, bar.high, bar.low, bar.close,
+                volume, open_interest,
+            )
+
             if self.on_tick is not None:
                 self.on_tick(bar)
 
-            key = f"{bar.instrument.exchange}:{bar.instrument.symbol}"
             health = self._health.setdefault(
                 key,
                 {
@@ -218,7 +235,7 @@ class XTSFeed:
                     max(current.high, bar.high),
                     min(current.low, bar.low),
                     bar.close,
-                    bar.volume,
+                    (current.volume or 0.0) + (bar.volume or 0.0),
                     bar.open_interest,
                 )
             elif bar.timestamp.replace(second=0, microsecond=0) > current.timestamp:

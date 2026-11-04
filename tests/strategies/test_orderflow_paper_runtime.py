@@ -343,7 +343,7 @@ def test_orderflow_stream_deduplicates_history_and_target_overlap() -> None:
     assert len(stream.envelopes) == 1
 
 
-def test_orderflow_stream_logs_conflicting_incremental_row(caplog) -> None:
+def test_orderflow_stream_logs_and_ignores_conflicting_incremental_row(caplog) -> None:
     instrument = Instrument("NIFTY", "NFO", "FUTURES")
     bar = MarketBar(
         instrument=instrument,
@@ -367,14 +367,14 @@ def test_orderflow_stream_logs_conflicting_incremental_row(caplog) -> None:
     stream = OrderflowInputStream.from_continuous_bars((bar,))
 
     with caplog.at_level("WARNING"):
-        with pytest.raises(ValueError, match="conflicting canonical input row"):
-            stream.append_continuous_bars((conflicting,))
+        stream.append_continuous_bars((conflicting,))
 
     message = " ".join(caplog.messages)
     assert "identity=('2026-10-01', '2026-10-01T09:15')" in message
     assert "previous_origin=startup_seed" in message
     assert "incoming_origin=incremental_append" in message
     assert "'close': (100.5, 101.5)" in message
+    assert stream.envelopes[-1].input.one_minute.close == 100.5
 
 
 def test_live_ingress_consumes_already_appended_bar_without_reappending() -> None:

@@ -257,3 +257,4 @@ def test_market_normalizer_owns_raw_payload_conversion():
     assert bar.instrument.symbol == "NIFTYFUT"
     assert bar.timestamp.tzinfo is not None
     assert bar.close == 101.5
+    assert bar.open_interest is None

@@ -45,8 +45,6 @@ class LiveMarketNormalizer:
             option_type=OptionType(instrument_type) if instrument_type in {"CE", "PE"} else None,
         )
         open_interest = payload.get("oi")
-        if instrument_type == "FUT" and open_interest is None:
-            open_interest = 0.0
         raw_price = payload["last_price"]
         if not isinstance(raw_price, (int, float, str)):
             raise ValueError("market payload last_price is invalid")
