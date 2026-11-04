@@ -667,7 +667,8 @@ class SqliteRuntimeStore:
                 "INSERT INTO strategy_snapshots(strategy_id, schema_version, payload, revision, updated_at) "
                 "VALUES (?, ?, ?, ?, ?) ON CONFLICT(strategy_id) DO UPDATE SET "
                 "schema_version=excluded.schema_version, payload=excluded.payload, "
-                "revision=excluded.revision, updated_at=excluded.updated_at",
+                "revision=excluded.revision, updated_at=excluded.updated_at "
+                "WHERE excluded.revision >= strategy_snapshots.revision",
                 (
                     strategy_id, schema_version,
                     json.dumps(_json_safe(snapshot, path="strategy snapshot"), separators=(",", ":")),

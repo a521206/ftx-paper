@@ -54,6 +54,7 @@ from .opening_gap_policy import OpeningGapPolicy
 from .opportunity_coordinator import LifecycleFormation, OpportunityCoordinator
 from .opportunity_timeout import advance_opportunity_timeout
 from .state_machine_types import (
+    ContinuousState,
     ExecutionConstraints,
     LocationRecord,
     LocationRegistry,
@@ -61,6 +62,7 @@ from .state_machine_types import (
     MarketContextStore,
     OrderflowState,
 )
+from .value_publication import PriorSessionValueReference, ValuePublication
 from .location_geometry import LocationBand
 from .interactions import (
     CandleClassification,
@@ -125,6 +127,24 @@ def _execution_claims_snapshot(engine: ExecutionEngine) -> dict[str, Any]:
         "execution_group_claims": _snapshot_value(engine._execution_group_claims),
         "position_owners": _snapshot_value(engine._position_owners),
         "position_transfer_claimed": _snapshot_value(engine._position_transfer_claimed),
+    }
+
+
+def _tuple_mapping_snapshot(values: Mapping[tuple[str, ...], Any]) -> list[dict[str, Any]]:
+    return [
+        {"key": list(key), "value": _snapshot_value(value)}
+        for key, value in values.items()
+    ]
+
+
+def _tuple_mapping_restore(raw: Any) -> dict[tuple[str, ...], Any]:
+    if not isinstance(raw, list):
+        return {}
+    return {
+        tuple(str(item) for item in entry["key"]): deepcopy(entry.get("value"))
+        for entry in raw
+        if isinstance(entry, Mapping)
+        and isinstance(entry.get("key"), list)
     }
 
 
@@ -218,6 +238,39 @@ def _restore_aggregate(raw: Mapping[str, Any] | None) -> Aggregate | None:
         expiry=str(raw.get("expiry", "")),
         session_date=str(raw["session_date"]),
         source_fingerprint=str(raw["source_fingerprint"]),
+    )
+
+
+def _restore_continuous(raw: Mapping[str, Any], registry: LocationRegistry) -> ContinuousState:
+    prior_values: list[ValuePublication] = []
+    for item in raw.get("prior_values", ()):
+        if not isinstance(item, Mapping):
+            continue
+        reference_raw = item.get("reference")
+        reference = None
+        if isinstance(reference_raw, Mapping):
+            reference = PriorSessionValueReference(
+                session_date=str(reference_raw["session_date"]),
+                value_area_low=float(reference_raw["value_area_low"]),
+                point_of_control=float(reference_raw["point_of_control"]),
+                value_area_high=float(reference_raw["value_area_high"]),
+                observed_at=coerce_timestamp(reference_raw["observed_at"]),
+                available_at=coerce_timestamp(reference_raw["available_at"]),
+                lineage=tuple(str(value) for value in reference_raw["lineage"]),
+            )
+        prior_values.append(ValuePublication(
+            reference=reference,
+            observed_at=(coerce_timestamp(item["observed_at"]) if item.get("observed_at") else None),
+            available_at=(coerce_timestamp(item["available_at"]) if item.get("available_at") else None),
+            lineage=tuple(str(value) for value in item.get("lineage", ())),
+            unavailable_reason=item.get("unavailable_reason"),
+        ))
+    return ContinuousState(
+        registry=registry,
+        prior_values=prior_values,
+        last_completed_bar=_restore_aggregate(raw.get("last_completed_bar")),
+        last_close=(float(raw["last_close"]) if raw.get("last_close") is not None else None),
+        open_gaps=[dict(item) for item in raw.get("open_gaps", ()) if isinstance(item, Mapping)],
     )
 
 
@@ -788,6 +841,11 @@ class OrderflowEngine:
     def snapshot(self) -> dict[str, Any]:
         """Return the complete canonical mutable state and producer prefix."""
         context = self.context
+        # Execution proposals are a synchronous transition buffer.  They are
+        # drained by the host before a completed-input checkpoint is written;
+        # persisting them would make recovery depend on a transient proposal.
+        if context.execution_proposals or self._host_proposals:
+            raise RuntimeError("cannot snapshot orderflow state with pending execution proposals")
         return {
             "schema_version": 2,
             "clock": serialize_utc(self._clock) if self._clock is not None else None,
@@ -806,7 +864,6 @@ class OrderflowEngine:
                 "opportunities": _snapshot_value(context.opportunities),
                 "execution_states": _snapshot_value(context.execution_engine.snapshot()),
                 "execution_claims": _execution_claims_snapshot(context.execution_engine),
-                "execution_proposals": _snapshot_value(context.execution_proposals),
                 "regime": _snapshot_value(context.regime),
                 "execution_constraints": _snapshot_value(context.execution_constraints),
                 "opening_context": _snapshot_value(context.opening_context),
@@ -830,11 +887,13 @@ class OrderflowEngine:
                 "published_resolved_responses": _snapshot_value(
                     context.published_resolved_responses,
                 ),
-                "opportunity_outcomes": _snapshot_value(context.opportunity_outcomes),
-                "or_seed_candles": _snapshot_value(context.or_seed_candles),
+                "opportunity_outcomes": _tuple_mapping_snapshot(context.opportunity_outcomes),
+                "or_seed_candles": [serialize_utc(value) for value in context.or_seed_candles],
+                "input_diagnostics": _snapshot_value(context.input_diagnostics),
+                "previous5_available_at": _snapshot_value(context.previous5_available_at),
                 "setup_number": context.setup_number,
-                "neutral_event_ordinals": _snapshot_value(context.neutral_event_ordinals),
-                "neutral_keys_by_causal_id": _snapshot_value(
+                "neutral_event_ordinals": _tuple_mapping_snapshot(context.neutral_event_ordinals),
+                "neutral_keys_by_causal_id": _tuple_mapping_snapshot(
                     context.neutral_keys_by_causal_id,
                 ),
                 "published_intents": sorted(self._published_intents),
@@ -909,6 +968,15 @@ class OrderflowEngine:
             value = canonical.get(name)
             if value is not None:
                 setattr(self.context, name, deepcopy(value))
+        if "input_diagnostics" in canonical:
+            self.context.input_diagnostics = deepcopy(canonical["input_diagnostics"])
+        for name in ("opportunity_outcomes", "neutral_event_ordinals", "neutral_keys_by_causal_id"):
+            if isinstance(canonical.get(name), list):
+                setattr(self.context, name, _tuple_mapping_restore(canonical[name]))
+        raw_previous5 = canonical.get("previous5_available_at")
+        self.context.previous5_available_at = (
+            coerce_timestamp(raw_previous5) if isinstance(raw_previous5, str) else raw_previous5
+        )
         raw_interactions = canonical.get("interactions")
         if isinstance(raw_interactions, Mapping):
             self.context.interactions = {
@@ -959,12 +1027,19 @@ class OrderflowEngine:
                 self.context.execution_engine._position_transfer_claimed = set(transferred)
         if isinstance(canonical.get("opening_context"), Mapping):
             self.context.opening_context = deepcopy(canonical["opening_context"])
-        raw_proposals = canonical.get("execution_proposals")
-        if isinstance(raw_proposals, list):
-            self.context.execution_proposals = []
-        for name in ("continuous", "session", "regime_gate"):
+        if isinstance(canonical.get("continuous"), Mapping):
+            self.context.continuous = _restore_continuous(
+                canonical["continuous"], self.location_registry,
+            )
+        for name in ("session", "regime_gate"):
             if name in canonical:
                 setattr(self.context, name, _restore_namespace(canonical[name]))
+        session = self.context.session
+        if session is not None:
+            for name in ("failed_reversal_counts", "failed_reversal_locked_at"):
+                value = getattr(session, name, None)
+                if isinstance(value, SimpleNamespace):
+                    setattr(session, name, vars(value))
         regime = canonical.get("regime")
         if isinstance(regime, Mapping):
             self.context.regime = _restore_regime(regime)
@@ -1008,7 +1083,11 @@ class OrderflowEngine:
                 if isinstance(item, list) and len(item) == 2
             }
         if isinstance(canonical.get("or_seed_candles"), list):
-            self.context.or_seed_candles = set(canonical["or_seed_candles"])
+            self.context.or_seed_candles = {
+                coerce_timestamp(value)
+                for value in canonical["or_seed_candles"]
+                if isinstance(value, str)
+            }
         if isinstance(canonical.get("setup_number"), int):
             self.context.setup_number = canonical["setup_number"]
         self._published_intents = set(canonical.get("published_intents", ()))

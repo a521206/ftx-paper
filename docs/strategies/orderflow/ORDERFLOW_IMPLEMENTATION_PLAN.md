@@ -219,6 +219,9 @@ complete recovery, or production replay migration gates.
 
 ### 9C. Complete Snapshot And Recovery
 
+**Status: Complete for the Paper runtime implementation; cross-repository
+parity acceptance remains governed by Phase 10.**
+
 Persist and restore the complete canonical mutable graph: context and location
 generations, interaction and opportunity state, intents, reservations, pending
 exits, positions, causal cursors, parity state, and idempotency identities.
@@ -230,6 +233,15 @@ the start of each bar and consumed by selection and host publication within the
 same synchronous `process_execution_bar` call, so it is always empty at snapshot
 boundaries. Document that invariant (assertion/comment) rather than serializing
 a transient buffer.
+
+The Paper runtime now checkpoints the restored strategy graph and causal input
+cursor after each completed live bar. Checkpoints are revision-monotonic and
+include the input identity, instrument, timestamp, and session date. Startup
+restores the strategy instance and skips already checkpointed bars before any
+transport, account, or aggregation mutation. Snapshot recovery is covered by
+prefix/suffix equivalence tests, transient-proposal rejection tests, and
+idempotent interrupted-session audit tests. Unrecoverable interrupted sessions
+retain the existing `STOPPED` state and one idempotent recovery event.
 
 ### 9D. Bind Paper Execution
 
@@ -309,7 +321,8 @@ items, not separate tasks.
    idempotent `ORDERFLOW_FACT` rows, and a live parity report would be built on
    demand from those facts rather than persisted as a parallel artifact.
    Resolve lifecycle and execution mismatches before accepting the parity gate.
-4. **Complete snapshot recovery.** Persist and restore the complete canonical
+4. **Complete snapshot recovery.** **Implemented for the Paper runtime; the
+   cross-repository acceptance proof remains open.** Persist and restore the complete canonical
    mutable graph and idempotency identities, and establish that pending
    execution proposals are not part of recoverable state (`execution_proposals`
    is a within-transition buffer that is always empty at snapshot boundaries).

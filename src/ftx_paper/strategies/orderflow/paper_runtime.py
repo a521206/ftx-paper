@@ -203,7 +203,9 @@ class PaperOrderflowRuntime:
         return snapshot
 
     @classmethod
-    def from_snapshot(cls, snapshot: Mapping[str, Any]) -> "PaperOrderflowRuntime":
+    def from_snapshot(
+        cls, snapshot: Mapping[str, Any], **_: object,
+    ) -> "PaperOrderflowRuntime":
         """Construct an isolated runtime restored from a canonical snapshot."""
         if snapshot.get("runtime_schema_version") != 1:
             raise ValueError("unsupported orderflow runtime snapshot")

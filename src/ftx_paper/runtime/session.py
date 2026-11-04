@@ -110,6 +110,7 @@ class RuntimeSession:
         self.capital_profile = capital_profile
         self.engine = engine or PaperEngine()
         self._strategy_snapshot_revision = 0
+        self._recovery_cursor: dict[str, str] | None = None
         self._restore_strategy_state()
         self.portfolio = portfolio or PortfolioState(self.capital_profile.initial_capital)
         self.capital_context = capital_context or CapitalRuntimeContext(
@@ -181,6 +182,14 @@ class RuntimeSession:
         read_snapshots = getattr(self.store, "read_strategy_snapshots", None)
         stored_snapshots = read_snapshots() if callable(read_snapshots) else {}
         if isinstance(stored_snapshots, Mapping) and stored_snapshots:
+            self._strategy_snapshot_revision = max(
+                (
+                    int(record["revision"])
+                    for record in stored_snapshots.values()
+                    if isinstance(record, Mapping) and isinstance(record.get("revision"), int)
+                ),
+                default=0,
+            )
             instances = {
                 str(strategy_id): {"strategy": record.get("payload", {})}
                 for strategy_id, record in stored_snapshots.items()
@@ -188,9 +197,31 @@ class RuntimeSession:
             }
             if instances:
                 raw_snapshot = {"schema_version": 1, "instances": instances}
+                first_payload = next(iter(stored_snapshots.values()), {})
+                if isinstance(first_payload, Mapping):
+                    payload = first_payload.get("payload")
+                    if isinstance(payload, Mapping) and isinstance(payload.get("recovery"), Mapping):
+                        self._recovery_cursor = {
+                            str(key): str(value)
+                            for key, value in payload["recovery"].items()
+                            if value is not None
+                        }
+        if self._recovery_cursor is None and isinstance(raw_snapshot, Mapping):
+            recovery = raw_snapshot.get("recovery")
+            if isinstance(recovery, Mapping):
+                self._recovery_cursor = {
+                    str(key): str(value)
+                    for key, value in recovery.items()
+                    if value is not None
+                }
         if callable(restore_many) and isinstance(raw_snapshot, Mapping) and self.capital_profile is not None:
             restore_many(raw_snapshot, capital_profile=self.capital_profile)
             return
+        if isinstance(raw_snapshot, Mapping) and isinstance(raw_snapshot.get("instances"), Mapping):
+            strategy_id = getattr(getattr(strategy, "metadata", None), "name", None)
+            entry = raw_snapshot["instances"].get(strategy_id) if strategy_id else None
+            if isinstance(entry, Mapping) and isinstance(entry.get("strategy"), Mapping):
+                raw_snapshot = entry["strategy"]
         if not callable(restore) or not isinstance(raw_snapshot, Mapping) or self.capital_profile is None:
             return
         restored = restore(raw_snapshot, capital_profile=self.capital_profile)
@@ -224,13 +255,15 @@ class RuntimeSession:
         )
         self._orderflow_setup_dates.add(session_date)
 
-    def _persist_strategy_state(self) -> None:
+    def _persist_strategy_state(self, *, recovery: Mapping[str, object] | None = None) -> None:
         snapshot = getattr(self.engine, "snapshot", None)
         if not callable(snapshot):
             strategy = getattr(self.engine, "strategy", None)
             snapshot = getattr(strategy, "snapshot", None)
         if callable(snapshot):
             value = snapshot()
+            if recovery is not None and isinstance(value, Mapping):
+                value = {**value, "recovery": dict(recovery)}
             self.store.patch_status({"strategy_snapshot": value})
             self._strategy_snapshot_revision += 1
             write_snapshot = getattr(self.store, "write_strategy_snapshot", None)
@@ -242,6 +275,8 @@ class RuntimeSession:
                             continue
                         payload = entry.get("strategy")
                         if isinstance(payload, Mapping):
+                            if recovery is not None:
+                                payload = {**payload, "recovery": dict(recovery)}
                             write_snapshot(
                                 strategy_id, dict(payload),
                                 revision=self._strategy_snapshot_revision,
@@ -744,8 +779,11 @@ class RuntimeSession:
 
         def form_opportunity(_turn) -> Mapping[str, Any]:
             result_holder.append(evaluate_turn(active_engine, DecisionTurn(bundle, source, context)))
-            proposals = active_engine.drain_execution_proposals()
-            active_engine.authorize_execution_proposals(proposals, timestamp=timestamp)
+            drain_proposals = getattr(active_engine, "drain_execution_proposals", None)
+            proposals = drain_proposals() if callable(drain_proposals) else ()
+            authorize_proposals = getattr(active_engine, "authorize_execution_proposals", None)
+            if callable(authorize_proposals):
+                authorize_proposals(proposals, timestamp=timestamp)
             return {"proposal_count": len(result_holder[0].orders)}
 
         def arbitrate(_turn) -> Mapping[str, Any]:
@@ -1296,6 +1334,16 @@ class RuntimeSession:
         with self._lock:
             if self._stopping or self.store.read_status().get("state") != "RUNNING":
                 return
+            bar_key = f"{bar.instrument.exchange}:{bar.instrument.symbol}:{bar.timestamp.isoformat()}"
+            if self._recovery_cursor is not None:
+                recovered_timestamp = self._recovery_cursor.get("timestamp")
+                recovered_instrument = self._recovery_cursor.get("instrument")
+                if (
+                    recovered_timestamp is not None
+                    and recovered_instrument == f"{bar.instrument.exchange}:{bar.instrument.symbol}"
+                    and bar.timestamp.isoformat() <= recovered_timestamp
+                ):
+                    return
             if isinstance(self.broker, PaperBroker):
                 self.broker.update_price(bar.instrument.symbol, bar.close)
             now = datetime.now(timezone.utc).isoformat()
@@ -1318,7 +1366,6 @@ class RuntimeSession:
                 append_feature_bar(virtual_continuous_bar(bar))
             self.store.patch_status({"last_bar_at": bar.timestamp.isoformat(), "last_heartbeat_at": now,
                                      "bars_seen": self.engine.bars_seen + 1})
-            bar_key = f"{bar.instrument.exchange}:{bar.instrument.symbol}:{bar.timestamp.isoformat()}"
             self.store.append_event("BAR_CLOSED", {
                 "exchange": bar.instrument.exchange,
                 "symbol": bar.instrument.symbol,
@@ -1327,6 +1374,18 @@ class RuntimeSession:
                 "close": bar.close,
             }, f"bar_closed:{bar_key}", timestamp=bar.timestamp.isoformat())
             if self._aggregator is None:
+                self._persist_strategy_state(recovery={
+                    "input_identity": bar_key,
+                    "instrument": f"{bar.instrument.exchange}:{bar.instrument.symbol}",
+                    "timestamp": bar.timestamp.isoformat(),
+                    "session_date": session_date,
+                })
+                self._recovery_cursor = {
+                    "input_identity": bar_key,
+                    "instrument": f"{bar.instrument.exchange}:{bar.instrument.symbol}",
+                    "timestamp": bar.timestamp.isoformat(),
+                    "session_date": session_date,
+                }
                 return
             expired = tuple(self._aggregator.expire(now=time.monotonic()))
             bundle = self._aggregator.ingest(bar)
@@ -1443,6 +1502,18 @@ class RuntimeSession:
                         ExecutionPhase.EVENT_RECORDING: record_exit_events,
                     },
                 )
+            self._persist_strategy_state(recovery={
+                "input_identity": bar_key,
+                "instrument": f"{bar.instrument.exchange}:{bar.instrument.symbol}",
+                "timestamp": bar.timestamp.isoformat(),
+                "session_date": session_date,
+            })
+            self._recovery_cursor = {
+                "input_identity": bar_key,
+                "instrument": f"{bar.instrument.exchange}:{bar.instrument.symbol}",
+                "timestamp": bar.timestamp.isoformat(),
+                "session_date": session_date,
+            }
             self._refresh_pending_status()
 
     def on_tick(self, bar: MarketBar) -> None:

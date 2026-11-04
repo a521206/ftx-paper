@@ -90,6 +90,31 @@ def test_runtime_store_round_trips_versioned_strategy_snapshots(tmp_path):
     assert store.read_strategy_snapshots()["ftx-paper-orderflow"]["payload"] == snapshot
 
 
+def test_runtime_store_does_not_replace_newer_strategy_checkpoint(tmp_path):
+    store = RuntimeStore(tmp_path)
+    store.write_strategy_snapshot("ftx-paper-orderflow", {"schema_version": 1, "cursor": "new"}, revision=2)
+    store.write_strategy_snapshot("ftx-paper-orderflow", {"schema_version": 1, "cursor": "old"}, revision=1)
+
+    restored = store.read_strategy_snapshot("ftx-paper-orderflow")
+    assert restored is not None
+    assert restored["revision"] == 2
+    assert restored["payload"]["cursor"] == "new"
+
+
+def test_runtime_store_interrupted_recovery_is_stopped_and_audited_once(tmp_path):
+    store = RuntimeStore(tmp_path)
+    store.write_status({"state": "RUNNING"})
+
+    assert store.recover_interrupted() is True
+    assert store.recover_interrupted() is False
+    assert store.read_status()["state"] == "STOPPED"
+    recovery_events = [
+        event for event in store.read_events()
+        if event["event_type"] == "RUNTIME_RECOVERY"
+    ]
+    assert len(recovery_events) == 1
+
+
 def test_runtime_store_canonicalizes_index_exchange_and_rejects_bad_vix(tmp_path):
     store = RuntimeStore(tmp_path)
     timestamp = datetime(2026, 10, 6, 4, 0, tzinfo=ZoneInfo("UTC"))

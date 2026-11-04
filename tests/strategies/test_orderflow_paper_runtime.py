@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole
+from ftx_paper.market import CompletedBarAggregator
 from ftx_paper.runtime.engine import PaperEngine
 from ftx_paper.runtime.session import RuntimeSession
 from ftx_paper.runtime import RuntimeStore
@@ -87,6 +88,58 @@ def test_live_and_replay_advance_one_shared_owner_per_completed_input(monkeypatc
     assert live.engine.parity_streams == replay.engine.parity_streams
 
 
+def test_snapshot_recovery_continues_same_causal_suffix() -> None:
+    instrument = Instrument("NIFTY", "NFO", "FUTURES")
+    bars = tuple(
+        MarketBar(
+            instrument=instrument,
+            timestamp=datetime(2026, 10, 1, 4, minute, tzinfo=timezone.utc),
+            open=100.0 + minute,
+            high=101.0 + minute,
+            low=99.0 + minute,
+            close=100.5 + minute,
+            volume=10,
+        )
+        for minute in (0, 1)
+    )
+    bundles = tuple(SimpleNamespace(bars={MarketRole.FUTURES: bar}) for bar in bars)
+
+    uninterrupted = PaperOrderflowRuntime()
+    for bundle in bundles:
+        uninterrupted.on_bundle(bundle)
+
+    prefix = PaperOrderflowRuntime()
+    prefix.on_bundle(bundles[0])
+    recovered = PaperOrderflowRuntime.from_snapshot(prefix.snapshot())
+    recovered.on_bundle(bundles[1])
+
+    assert recovered.engine.clock == uninterrupted.engine.clock
+    assert recovered.engine.parity_streams == uninterrupted.engine.parity_streams
+
+
+def test_snapshot_recovery_preserves_datetime_and_idempotency_state() -> None:
+    runtime = PaperOrderflowRuntime()
+    seed_time = datetime(2026, 10, 1, 4, 0, tzinfo=timezone.utc)
+    runtime.engine.context.or_seed_candles.add(seed_time)
+    runtime.engine.context.neutral_event_ordinals[("life-1", "event")] = 3
+    runtime.engine.context.neutral_keys_by_causal_id[("life-1", "cause")] = "event-3"
+    runtime.engine.context.session = SimpleNamespace(
+        failed_reversal_counts={"SESSION_LOW": 2},
+        failed_reversal_locked={"SESSION_LOW"},
+        failed_reversal_locked_at={"SESSION_LOW": "2026-10-01T04:00:00+00:00"},
+    )
+
+    restored = PaperOrderflowRuntime.from_snapshot(runtime.snapshot())
+
+    assert restored.engine.context.or_seed_candles == {seed_time}
+    assert restored.engine.context.neutral_event_ordinals == {("life-1", "event"): 3}
+    assert restored.engine.context.neutral_keys_by_causal_id == {
+        ("life-1", "cause"): "event-3",
+    }
+    assert restored.engine.context.session.failed_reversal_counts == {"SESSION_LOW": 2}
+    assert restored.engine.context.session.failed_reversal_locked == {"SESSION_LOW"}
+
+
 def test_execution_proposals_are_drained_by_host_not_transition_owner() -> None:
     runtime = PaperOrderflowRuntime()
     proposal = PaperOrderProposal(
@@ -112,6 +165,56 @@ def test_snapshot_restore_connects_runtime_execution_adapter() -> None:
 
     assert restored.strategy.execution_adapter is restored.execution_adapter
     assert restored.engine.execution_adapter is restored.execution_adapter
+
+
+def test_orderflow_snapshot_rejects_transient_execution_proposals() -> None:
+    runtime = PaperOrderflowRuntime()
+    runtime.engine.context.execution_proposals.append(object())
+
+    with pytest.raises(RuntimeError, match="pending execution proposals"):
+        runtime.snapshot()
+
+    runtime.engine.context.execution_proposals.clear()
+    runtime.engine._host_proposals = (object(),)
+    with pytest.raises(RuntimeError, match="pending execution proposals"):
+        runtime.snapshot()
+    runtime.engine._host_proposals = ()
+    assert "execution_proposals" not in runtime.snapshot()["canonical"]
+
+
+def test_live_checkpoint_restores_cursor_and_skips_replayed_bar(tmp_path) -> None:
+    instrument = Instrument("NIFTY", "NFO", "FUTURES")
+    bar = MarketBar(
+        instrument=instrument,
+        timestamp=datetime(2026, 10, 1, 4, 0, tzinfo=timezone.utc),
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        volume=10,
+    )
+    store = RuntimeStore(tmp_path)
+    store.write_status({"state": "RUNNING"})
+    runtime = PaperOrderflowRuntime()
+    session = RuntimeSession(store, None, [], engine=PaperEngine(runtime.strategy))
+    session._aggregator = CompletedBarAggregator(
+        {(("NFO"), "NIFTY"): MarketRole.FUTURES},
+        required_roles=(MarketRole.FUTURES,),
+        deadline_seconds=0,
+    )
+    session.on_closed_bar(bar)
+
+    stored = store.read_strategy_snapshot("ftx-paper-orderflow")
+    assert stored is not None
+    assert stored["payload"]["recovery"]["input_identity"].endswith(bar.timestamp.isoformat())
+
+    restored = RuntimeSession(
+        store, None, [], engine=PaperEngine(PaperOrderflowRuntime().strategy),
+    )
+    assert restored._recovery_cursor is not None
+    restored._aggregator = session._aggregator
+    restored.on_closed_bar(bar)
+    assert restored.engine.bars_seen == 0
 
 
 def test_input_stream_reports_selected_bundle_route_and_observation_counts() -> None:
