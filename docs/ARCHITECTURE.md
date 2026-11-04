@@ -97,6 +97,16 @@ and `PnlManager`. They delegate to the existing runtime owner and aggregate;
 `PnlManager` is read-only. The UI remains separate and facades must not create
 another runtime owner.
 
+### Orderflow Startup And Live Overlap
+
+Orderflow startup/history bars seed the canonical input stream before live
+callbacks begin. A live callback may therefore replay a minute that was already
+published during startup. The canonical stream deduplicates by session date and
+minute; the first published row remains authoritative for strategy state, and a
+later row with different values is ignored and logged as a conflict. This keeps
+causal state immutable and prevents a duplicate decision. The conflict log is a
+data-quality diagnostic, not a correction or replay mechanism.
+
 ## Strategy Extension
 
 ### Multiple Strategy Instances
