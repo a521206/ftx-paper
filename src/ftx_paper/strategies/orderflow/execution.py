@@ -41,7 +41,7 @@ from .response import (
     evaluate_response_window,
 )
 from .interactions import InteractionSnapshot
-from .state_machine_evidence import acceptance_trigger_evidence
+from .state_machine_evidence import acceptance_trigger_evidence, failed_continuation
 from .state_machine_types import (
     DISPLACEMENT_RULES,
     ORDERFLOW_TRAIL_ACTIVATE_BP,
@@ -49,6 +49,12 @@ from .state_machine_types import (
 )
 from .orderflow_common import EXHAUSTION_RISK, build_aggregate_result
 from ftx_paper.risk.trail_stop import TrailConfig, TrailTracker
+from ftx_paper.execution.entry_fill import (
+    EntryFillDecision,
+    entry_fill_decision,
+    protective_stop_price,
+    risk_adjustment,
+)
 
 SESSION_EXIT_DEADLINE = "15:10"
 STRUCTURE_TIMEFRAME = "5m"
@@ -577,6 +583,15 @@ class ExecutionEngine:
             or (position.intent_id != state.intent.intent_id and not transferred_owner)
         ):
             raise ValueError("position does not belong to the lifecycle opportunity")
+        previous = state.position
+        if previous is not None and (
+            previous.position_id != position.position_id
+            or (
+                previous.status is PositionStatus.CLOSED
+                and position.status is PositionStatus.OPEN
+            )
+        ):
+            raise ValueError("invalid position transition")
         state.position = position
 
     def update_intent(self, life: SetupOpportunity, intent: TradeIntent) -> None:
@@ -1046,27 +1061,6 @@ class ExecutionEngine:
         return state.realized_points
 
 
-@dataclass(frozen=True, slots=True)
-class EntryFillDecision:
-    fill_price: float
-    hard_stop: float | None
-    hard_stop_source: str
-    quantity: float
-    risk_metrics: dict[str, float]
-
-
-def protective_stop_price(
-    direction: str, entry_price: float, failure_boundary: float
-) -> tuple[float | None, str]:
-    if (
-        failure_boundary < entry_price
-        if direction == "long"
-        else failure_boundary > entry_price
-    ) and entry_price != failure_boundary:
-        return float(failure_boundary), "failure_boundary"
-    return None, "trail_distance_fallback"
-
-
 def protective_stop_distance_bp(
     direction: str,
     entry_price: float,
@@ -1077,43 +1071,6 @@ def protective_stop_distance_bp(
     if stop is not None:
         return abs(entry_price - stop) / entry_price * 10000.0, source
     return fallback_bp, "trail_distance_fallback"
-
-
-def risk_adjustment(
-    *, trigger_price: float, fill_price: float, hard_stop: float | None
-) -> tuple[float, dict[str, float]]:
-    if hard_stop is None or trigger_price <= 0 or fill_price <= 0:
-        return 0.0, {}
-    actual = abs(hard_stop - fill_price) / fill_price * 10000.0
-    trigger = abs(hard_stop - trigger_price) / trigger_price * 10000.0
-    quantity = 0.0 if actual == 0 else min(1.0, 20.0 / actual)
-    return quantity, {
-        "trigger_risk_bp": trigger,
-        "actual_risk_bp": actual,
-        "risk_budget_bp": 20.0,
-        "risk_adjusted_quantity": quantity,
-        "effective_risk_bp": actual * quantity,
-    }
-
-
-def entry_fill_decision(
-    *,
-    direction: str,
-    trigger_price: float,
-    requested_fill_price: float,
-    bar_open: float,
-    failure_boundary: float,
-) -> EntryFillDecision:
-    fill = (
-        max(requested_fill_price, bar_open)
-        if direction == "long"
-        else min(requested_fill_price, bar_open)
-    )
-    stop, source = protective_stop_price(direction, fill, failure_boundary)
-    quantity, metrics = risk_adjustment(
-        trigger_price=trigger_price, fill_price=fill, hard_stop=stop
-    )
-    return EntryFillDecision(fill, stop, source, quantity, metrics)
 
 
 def validate_exit_plan(
@@ -1302,90 +1259,6 @@ def update_position_stop(
         source if tightens else "existing_stop_retained",
         tightens,
     )
-
-
-def failed_continuation(
-    prior: list[dict[str, Any]],
-    completed1: list[Any],
-    completed5: list[Any],
-    *,
-    direction: str,
-    entry_price: float,
-    failure_boundary: float,
-    entry_time: str | None,
-    synthetic: list[Any] | None = None,
-) -> dict[str, Any] | None:
-    """Detect canonical post-entry continuation failure from causal evidence."""
-    if direction not in {"long", "short"} or entry_time is None or len(prior) < 2:
-        return None
-    risk = abs(entry_price - failure_boundary)
-    if risk <= 0:
-        return None
-    post_entry = [item for item in prior if str(item["time"]) >= entry_time]
-    if not post_entry:
-        return None
-    favorable = (
-        max(float(item["high"]) for item in post_entry) - entry_price
-        if direction == "long"
-        else entry_price - min(float(item["low"]) for item in post_entry)
-    )
-    if favorable < risk:
-        return None
-    if synthetic is not None:
-        if len(synthetic) < 2:
-            return None
-        previous, latest = synthetic[-2], synthetic[-1]
-        boundary = previous.high if direction == "short" else previous.low
-        broke = (
-            latest.close > boundary if direction == "short" else latest.close < boundary
-        )
-        if not broke:
-            return None
-        return {
-            "direction": direction,
-            "synthetic_boundary": boundary,
-            "synthetic_break": broke,
-            "synthetic_close": latest.close,
-            "favorable_excursion": favorable,
-            "risk": risk,
-            "evidence_time": str(latest.last_source_end),
-            "evidence_available_at": str(latest.available_at),
-        }
-    if len(completed1) < 2 or len(completed5) < 2:
-        return None
-    previous1, latest1 = completed1[-2], completed1[-1]
-    previous5, latest5 = completed5[-2], completed5[-1]
-    if len(completed1) >= 3:
-        previous1 = completed1[-3]
-    if len(completed5) >= 3:
-        previous5 = completed5[-3]
-    one_boundary = previous1.high if direction == "short" else previous1.low
-    five_boundary = previous5.high if direction == "short" else previous5.low
-    one_break = (
-        latest1.close > one_boundary
-        if direction == "short"
-        else latest1.close < one_boundary
-    )
-    five_break = (
-        latest5.close > five_boundary
-        if direction == "short"
-        else latest5.close < five_boundary
-    )
-    if not (one_break and five_break):
-        return None
-    return {
-        "direction": direction,
-        "one_minute_boundary": one_boundary,
-        "one_minute_break": one_break,
-        "one_minute_close": latest1.close,
-        "five_minute_boundary": five_boundary,
-        "five_minute_break": five_break,
-        "five_minute_close": latest5.close,
-        "favorable_excursion": favorable,
-        "risk": risk,
-        "evidence_time": str(latest5.available_at),
-        "evidence_available_at": str(latest5.available_at),
-    }
 
 
 @dataclass
@@ -1701,6 +1574,31 @@ class ExecutionCoordinator:
                     "transfer_reason": "same_direction_candidate_available",
                 }, record_lifecycle=False)
                 bar_events.append(self.context.events[-1])
+                execution_group_id = life.execution_group_id
+                claim = self.engine.execution_group_claim(execution_group_id)
+                if execution_group_id is not None and claim is not None:
+                    claim_event = {
+                        "kind": "execution_group_claim_consumed",
+                        "execution_group_id": execution_group_id,
+                        "response_episode_id": life.response_episode_id,
+                        "winning_lifecycle_id": claim[0],
+                        "claim_time": claim[1],
+                        "claim_consumption": "fill",
+                        "position_id": transferred_position.position_id,
+                        "observed_at": life.formation_at,
+                        "available_at": life.formation_available_at,
+                    }
+                    self.context.record_event(claim_event)
+                    bar_events.append(claim_event)
+                for sibling_life in self.context.unfilled_execution_group_siblings(life):
+                    self.invalidate_opportunity(
+                        sibling_life,
+                        timestamp=str(life.formation_available_at),
+                        observed_at=str(life.formation_at),
+                        available_at=str(life.formation_available_at),
+                        bar_events=bar_events,
+                        reason="execution_group_claimed",
+                    )
 
     def record_admission(
         self,

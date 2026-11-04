@@ -6,8 +6,9 @@ from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
 
 from ftx_paper.contracts import Instrument
+from ftx_paper.execution.entry_fill import entry_fill_decision
 
-from .execution import AdmissionStatus, IntentStatus, entry_fill_decision
+from .execution import AdmissionStatus, IntentStatus
 from .opportunity_coordinator import LifecycleFormation
 from .timestamps import coerce_timestamp
 
