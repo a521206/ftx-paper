@@ -25,6 +25,7 @@ from .execution import (
 )
 from .execution_adapter import OrderflowExecutionAdapter, PaperOrderProposal
 from .contextual import build_context_scores
+from .context_access import DecisionContextAccess
 from .hierarchy import (
     Permission,
     TriggerObservation,
@@ -47,6 +48,8 @@ from . import snapshot_codec
 from .session_policy import classify_opening_gap
 from .proposal_buffer import ProposalBuffer
 from .publication import TransitionPublisher
+from .opening_gap import OpeningGapOwner
+from .execution_clock import ExecutionClock
 
 
 def _execution_trace_state(state: Any) -> dict[str, Any]:
@@ -106,6 +109,9 @@ class OrderflowEngine:
     _execution_notifications: set[str] = field(default_factory=set, init=False, repr=False)
     _proposal_buffer: ProposalBuffer = field(default_factory=ProposalBuffer, init=False, repr=False)
     _publisher: TransitionPublisher = field(init=False, repr=False)
+    _context_access: DecisionContextAccess = field(init=False, repr=False)
+    _opening_gap: OpeningGapOwner = field(init=False, repr=False)
+    _execution_clock: ExecutionClock = field(init=False, repr=False)
 
     @staticmethod
     def _intent_allows_requalification(state: Any) -> bool:
@@ -137,6 +143,9 @@ class OrderflowEngine:
         # The coordinator remains a facade, while the state owns the reference.
         self.execution_owner.machine = self
         self._publisher = TransitionPublisher(self)
+        self._context_access = DecisionContextAccess(self)
+        self._opening_gap = OpeningGapOwner(self)
+        self._execution_clock = ExecutionClock(self)
         from .opportunity_replay_host import build_opportunity_coordinator
         self.opportunity_owner = build_opportunity_coordinator(
             self,
@@ -592,11 +601,13 @@ class OrderflowEngine:
             )
         else:
             self.context.current_session_date = item.one_minute.session_date
-        pre_execution_events = self._settle_pending_execution(
+        pre_execution_events: list[dict[str, Any]] = []
+        self._execution_clock.settle_pending(
             index=0,
             timestamp=timestamp,
             next_time=next_time,
             row=row,
+            events=pre_execution_events,
         )
         self.context.pending_bar_events.extend(pre_execution_events)
         for transition in observation.transitions:
@@ -662,7 +673,7 @@ class OrderflowEngine:
                 constraints=constraints,
                 decision_at=next_time,
             )
-        self.process_execution_bar(
+        self._execution_clock.advance(
             tuple(accepted_formations),
             index=0,
             timestamp=timestamp,
@@ -753,7 +764,7 @@ class OrderflowEngine:
                     },
                     bar_events,
                 )
-        self._start_opening_gap({
+        self._opening_gap.start({
             **context.opening_context,
             "session_date": session_date,
         })
@@ -768,7 +779,7 @@ class OrderflowEngine:
         """Publish the completed-5m permission regime (canonical handle_permission)."""
         context = self.context
         context.previous5_available_at = latest.available_at
-        current = self._current_opening_gap(latest.session_date)
+        current = self._opening_gap.current(latest.session_date)
         ordinary_reference = context.market_contexts.ordinary_context
         context.regime = context.opening_gap_policy.regime_for(
             state=str(current.get("state")) if current is not None else None,
@@ -823,28 +834,6 @@ class OrderflowEngine:
                     bar_events,
                 )
 
-    def _start_opening_gap(self, opening: Mapping[str, Any]) -> None:
-        continuous = self.context.continuous
-        if continuous is None or opening.get("direction") not in {"up", "down"}:
-            return
-        continuous.open_gaps.append({
-            **opening,
-            "state": opening.get("state", opening.get("classification")),
-            "completed_bars": 0,
-        })
-
-    def _current_opening_gap(self, session_date: str) -> Mapping[str, Any] | None:
-        continuous = self.context.continuous
-        if continuous is None:
-            return None
-        return next(
-            (
-                gap for gap in reversed(continuous.open_gaps)
-                if gap.get("session_date") == session_date
-            ),
-            None,
-        )
-
     def update_gap_state(
         self,
         session_date: str,
@@ -853,95 +842,7 @@ class OrderflowEngine:
         bar_events: list[dict[str, Any]],
     ) -> None:
         """Advance the current opening gap from completed one-minute evidence."""
-        continuous = self.context.continuous
-        if continuous is None:
-            return
-        current = [item for item in available1 if item.session_date == session_date]
-        if not current:
-            return
-        latest = current[-1]
-        for gap in reversed(continuous.open_gaps):
-            if gap.get("session_date", session_date) != session_date or gap.get("state") in {
-                "GAP_DOWN_RECLAIMED", "GAP_UP_RECLAIMED", "RETURN_TO_VALUE", "EXPIRED",
-            }:
-                continue
-            if gap.get("last_evaluated") == latest.available_at:
-                continue
-            gap["last_evaluated"] = latest.available_at
-            gap["completed_bars"] = int(gap.get("completed_bars", 0)) + 1
-            reference = float(gap["reference_level"])
-            prior_value = continuous.prior_value_as_of(latest.available_at)
-            prior_reference = getattr(prior_value, "reference", None)
-            state = self.context.opening_gap_policy.transition(
-                direction=str(gap["direction"]),
-                completed_bars=int(gap["completed_bars"]),
-                close=latest.close,
-                reference_level=reference,
-                prior_value_low=(
-                    prior_reference.value_area_low
-                    if prior_reference is not None else None
-                ),
-                prior_value_high=(
-                    prior_reference.value_area_high
-                    if prior_reference is not None else None
-                ),
-            )
-            if state is None or state == gap.get("state"):
-                continue
-            previous_state = str(gap.get("state", "GAP_CANDIDATE"))
-            gap["state"] = state
-            reference_id = getattr(prior_reference, "reference_id", None)
-            reference_scope = getattr(prior_reference, "scope", None)
-            reference_identity = (
-                {"value_reference_id": reference_id, "value_scope": reference_scope}
-                if reference_id is not None else {}
-            )
-            self.context.emit({
-                "kind": "opening_gap_transition",
-                "session_date": session_date,
-                "from_state": previous_state,
-                "state": state,
-                "observed_at": timestamp,
-                "available_at": latest.available_at,
-                "reference_level": reference,
-                **reference_identity,
-            }, bar_events)
-            self._publish_opening_gap_regime(
-                state=state,
-                direction=str(gap["direction"]),
-                available_at=latest.available_at,
-                bar_events=bar_events,
-            )
-            break
-
-    def _publish_opening_gap_regime(
-        self,
-        *,
-        state: str,
-        direction: str,
-        available_at: Any,
-        bar_events: list[dict[str, Any]],
-    ) -> None:
-        context = self.context
-        context.regime = context.opening_gap_policy.regime_for(
-            state=state,
-            direction=direction,
-            version=f"opening-gap-permission-{available_at}",
-            context="opening_gap",
-            restrictions=("causal_opening_gap",),
-        )
-        context.emit(
-            {
-                "kind": "opening_gap_permission",
-                "state": state,
-                "direction": direction,
-                "available_at": available_at,
-                "version": context.regime.version,
-                "long": context.regime.long.value,
-                "short": context.regime.short.value,
-            },
-            bar_events,
-        )
+        self._opening_gap.advance(session_date, available1, timestamp, bar_events)
 
     def advance_opportunity_timeouts(
         self,
@@ -978,238 +879,28 @@ class OrderflowEngine:
                     },
                 )
 
-    def process_execution_bar(
-        self,
-        formations: Sequence[LifecycleFormation],
-        *,
-        index: int,
-        timestamp: str,
-        next_time: str,
-        row: Mapping[str, Any],
-        available5: Sequence[Any] = (),
-        instrument: Instrument | None = None,
-        pre_execution_done: bool = False,
-    ) -> Mapping[str, tuple[dict[str, Any], ...]]:
-        """Run the canonical execution clock for one completed 1m bar.
-
-        Pending fills are settled before position management.  New trigger
-        observations are evaluated only after that pass and are selected for
-        the next bar, preventing same-bar trigger/fill transitions.
-        """
-        # The gate and position-management policies consume the same completed
-        # 5m evidence that drove this execution clock. Keep it visible on the
-        # shared context before any proposal is evaluated.
-        if available5:
-            self.context.aggregates["5m"] = list(available5)
-        self.execution_owner.active_position_gate.update(self.context, timestamp)
-        events = list(self.context.pending_bar_events)
-        self.context.pending_bar_events.clear()
-        self.context.execution_proposals.clear()
-        row_dict = dict(row)
-        if not pre_execution_done:
-            self._settle_pending_execution(
-                index=index,
-                timestamp=timestamp,
-                next_time=next_time,
-                row=row_dict,
-                events=events,
-            )
-        managed: list[Any] = list(formations)
-        formation_ids = {
-            item.lifecycle.lifecycle_id
-            for item in formations
-            if item.lifecycle is not None
-        }
-        managed.extend(
-            SimpleNamespace(
-                lifecycle=life,
-                setup=self.execution_owner.engine.setup_for(life.lifecycle_id),
-                available_at=life.formation_available_at,
-            )
-            for life in self.context.opportunities.values()
-            if life.lifecycle_id not in formation_ids
-        )
-        for formation in managed:
-            life = formation.lifecycle
-            if life is None:
-                continue
-            if coerce_timestamp(timestamp) < coerce_timestamp(life.formation_available_at):
-                continue
-            state = self.execution_owner.engine.state_for(life.lifecycle_id)
-            if not life.active and state.position is None:
-                continue
-            self.execution_owner.apply_session_deadline(
-                life,
-                session_date=str(life.session_date),
-                timestamp=timestamp,
-                bar_events=events,
-            )
-            state = self.execution_owner.engine.state_for(life.lifecycle_id)
-            if (
-                life.active
-                and self.context.regime is not None
-                and self._intent_allows_requalification(state)
-                and not self.execution_owner.opportunity_expired(
-                    life, timestamp=timestamp
-                )
-            ):
-                self.execution_owner.admit_opportunity(life, next_time, events)
-            trace_before = _execution_trace_state(
-                self.execution_owner.engine.state_for(life.lifecycle_id)
-            )
-            self.execution_owner.handle_management(
-                index, timestamp, next_time, dict(row), list(available5), events, life,
-                defer_discretionary_execution=True,
-            )
-            if life.active:
-                self.execution_owner.handle_execution(
-                    index, timestamp, next_time, dict(row), [], events, life,
-                    evaluate_entries=True,
-                )
-            self.context.execution_diagnostics.append({
-                "kind": "execution_lifecycle_tick",
-                "lifecycle_id": life.lifecycle_id,
-                "observed_at": timestamp,
-                "available_at": next_time,
-                "bar": {
-                    "time": row.get("time"), "open": row.get("open"),
-                    "high": row.get("high"), "low": row.get("low"),
-                    "close": row.get("close"),
-                },
-                "available_5m": [
-                    {"time": item.time, "available_at": item.available_at}
-                    for item in available5[-2:]
-                ],
-                "before": trace_before,
-                "after": _execution_trace_state(
-                    self.execution_owner.engine.state_for(life.lifecycle_id)
-                ),
-            })
-        self.execution_owner.select_execution_proposals(timestamp, next_time, events)
-        if self.execution_adapter is not None and instrument is not None:
-            self._publish_execution_proposals(
-                managed, row=dict(row), timestamp=timestamp,
-                next_time=next_time, instrument=instrument,
-            )
-        return {
-            name: tuple(values)
-            for name, values in self.context.parity_snapshot().items()
-        }
-
-    def _settle_pending_execution(
-        self,
-        *,
-        index: int,
-        timestamp: str,
-        next_time: str,
-        row: Mapping[str, Any],
-        events: list[dict[str, Any]] | None = None,
-    ) -> list[dict[str, Any]]:
-        """Settle existing execution state before phase4 publication."""
-        emitted = events if events is not None else []
-        for life in tuple(self.context.opportunities.values()):
-            if life.active or self.context.position_is_open(life):
-                self.execution_owner.handle_execution(
-                    index,
-                    timestamp,
-                    next_time,
-                    dict(row),
-                    [],
-                    emitted,
-                    life,
-                    evaluate_entries=False,
-                )
-        return emitted
-
-    def _publish_execution_proposals(
-        self,
-        formations: Sequence[LifecycleFormation],
-        *,
-        row: Mapping[str, Any],
-        timestamp: str,
-        next_time: str,
-        instrument: Instrument,
-    ) -> None:
-        from .execution import entry_fill_decision
-
-        for formation in formations:
-            life = formation.lifecycle
-            if life is None:
-                continue
-            state = self.execution_owner.engine.state_for(life.lifecycle_id)
-            intent = state.intent
-            if (
-                intent is None
-                or intent.status.value != "TRIGGERED"
-                or self._proposal_buffer.contains_intent(intent.intent_id)
-            ):
-                continue
-            decision = entry_fill_decision(
-                direction=life.direction.value,
-                trigger_price=intent.trigger_price,
-                requested_fill_price=intent.trigger_price,
-                bar_open=float(row["open"]),
-                failure_boundary=intent.failure_boundary,
-            )
-            if decision.quantity <= 0:
-                continue
-            adapter = self.execution_adapter
-            assert adapter is not None
-            proposal = adapter.proposal(
-                intent,
-                instrument=instrument,
-                quantity=decision.quantity,
-                observed_at=timestamp,
-                available_at=next_time,
-            )
-            self._proposal_buffer.publish(intent.intent_id, proposal)
-
     def decision_context_for_life(self, life: Any, as_of: str) -> Any | None:
-        reference = getattr(life, "parent_context", None)
-        context = self.context.context(reference) if reference is not None else None
-        if context is not None and context.available_at <= coerce_timestamp(as_of):
-            return context
-        reference = self.context.market_contexts.ordinary_context
-        context = self.context.market_contexts.resolve(reference) if reference is not None else None
-        return context if context is not None and context.available_at <= coerce_timestamp(as_of) else None
+        return self._context_access.for_life(life, as_of)
 
     def decision_context_for_location(
         self, location: str | None, *, as_of: str
     ) -> Any | None:
-        if location is None:
-            return None
-        return self.context.market_contexts.latest_as_of(
-            str(location), coerce_timestamp(as_of)
-        )
+        return self._context_access.for_location(location, as_of=as_of)
 
     def scores_for_context_ref(
         self, reference: Any | None
     ) -> tuple[float | None, float | None]:
-        context = self.context.context(reference) if reference is not None else None
-        return (
-            getattr(context, "long_score", None),
-            getattr(context, "short_score", None),
-        )
+        return self._context_access.scores_for(reference)
 
     def context_relation_for_life(self, life: Any, context: Any) -> Any:
-        setup = self.execution_owner.engine.setup_for(life.lifecycle_id)
-        return getattr(setup, "context_relation", getattr(context, "relation", "neutral"))
+        return self._context_access.relation_for(life, context)
 
     def record_exit_decision_context(
         self, life: Any, rule: Any, *, timestamp: str, reason: str
     ) -> Any | None:
-        reference = self.decision_context_for_location(
-            getattr(rule, "location", None), as_of=timestamp
+        return self._context_access.record_exit(
+            life, rule, timestamp=timestamp, reason=reason,
         )
-        self.context.record_decision_context(
-            {
-                "lifecycle_id": life.lifecycle_id,
-                "rule_id": getattr(rule, "rule_id", None),
-                "observed_at": timestamp,
-                "reason": reason,
-            }
-        )
-        return getattr(reference, "reference", None)
 
 
 __all__ = ["OrderflowEngine", "TransitionAdvance"]
