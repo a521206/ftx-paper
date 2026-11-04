@@ -1,3 +1,4 @@
+from ftx_paper.runtime.orderflow_setup import validate_atr_artifact_source
 from ftx_paper.runtime.replay_input import ReplayInput
 import pytest
 
@@ -79,7 +80,7 @@ def test_atr_artifact_source_validation_rejects_invalid_lineage_and_late_source_
         },
     }
 
-    assert ReplayInput.validate_atr_artifact_source(
+    assert validate_atr_artifact_source(
         artifact, "2026-01-05",
     ) == artifact["payload"]
 
@@ -88,7 +89,7 @@ def test_atr_artifact_source_validation_rejects_invalid_lineage_and_late_source_
         "source": {**artifact["source"], "sessions": []},
     }
     with pytest.raises(ValueError, match="source lineage is invalid"):
-        ReplayInput.validate_atr_artifact_source(
+        validate_atr_artifact_source(
             invalid_lineage, "2026-01-05",
         )
 
@@ -97,6 +98,6 @@ def test_atr_artifact_source_validation_rejects_invalid_lineage_and_late_source_
         "payload": {**artifact["payload"], "observed_at": "2026-01-02T10:09:00Z"},
     }
     with pytest.raises(ValueError, match="session bounds"):
-        ReplayInput.validate_atr_artifact_source(
+        validate_atr_artifact_source(
             late_source, "2026-01-05",
         )

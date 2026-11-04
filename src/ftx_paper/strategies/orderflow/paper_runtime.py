@@ -15,13 +15,14 @@ from .coordinator import OrderflowClockInput
 from .execution import ExecutionCoordinator
 from .execution_adapter import OrderflowExecutionAdapter
 from .evidence.serialization import evidence_payload
-from .evidence_publication import publish_phase4a_evidence
+from .evidence_publication import AtrPublication, publish_phase4a_evidence
 from .opportunity_coordinator import LifecycleFormation
 from .state_machine_types import LocationRegistry
 from .transition import OrderflowTransitionOwner
-from .providers import CanonicalInputProvider, CanonicalFormationProvider
+from .providers import OrderflowInputStream, CanonicalFormationProvider
 from .state_machine_reporting import build_replay_payload
 from .vwap_location import VwapMeasurement
+from .value_publication import ValuePublication
 
 
 def _published_vwap_measurements(locations: Iterable[Any]) -> tuple[VwapMeasurement, ...]:
@@ -88,7 +89,7 @@ class PaperOrderflowRuntime:
         execution_adapter: OrderflowExecutionAdapter | None = None,
     ) -> "PaperOrderflowRuntime":
         """Construct an isolated bounded runtime from canonical source rows."""
-        input_provider = CanonicalInputProvider.from_rows(rows, rows_by_date=rows_by_date)
+        input_provider = OrderflowInputStream.from_rows(rows, rows_by_date=rows_by_date)
         formation_provider = CanonicalFormationProvider(formations=formations)
         return cls(
             config=config,
@@ -124,7 +125,7 @@ class PaperOrderflowRuntime:
     ) -> None:
         """Install target-session input with validated setup publications."""
         self.strategy.bind_input_provider(
-            CanonicalInputProvider.from_market_bars(
+            OrderflowInputStream.from_continuous_bars(
                 bars,
                 feature_history_bars=feature_history_bars,
                 prior_values=prior_values,
@@ -135,13 +136,27 @@ class PaperOrderflowRuntime:
 
     def bind_live_bars(self, bars: Sequence[Any]) -> None:
         """Seed the shared provider with startup historical bars."""
-        self.strategy.bind_input_provider(CanonicalInputProvider.from_market_bars(bars))
+        self.strategy.bind_input_provider(OrderflowInputStream.from_continuous_bars(bars))
 
     def append_feature_bar(self, bar: Any) -> None:
-        """Append one completed live bar to the shared canonical provider."""
-        provider = self.strategy._clock_input_provider
-        if isinstance(provider, CanonicalInputProvider):
-            provider.append_market_bars((bar,))
+        """Append one selected completed live bar to the input stream."""
+        self.strategy.append_feature_bar(bar)
+
+    def publish_setup(
+        self,
+        session_date: str,
+        *,
+        atr: AtrPublication | None = None,
+        prior_value: ValuePublication | None = None,
+        prior_session_levels: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Publish validated setup artifacts to the same live/replay input stream."""
+        self.strategy.publish_setup(
+            session_date,
+            atr=atr,
+            prior_value=prior_value,
+            prior_session_levels=prior_session_levels,
+        )
 
     def replay(
         self,

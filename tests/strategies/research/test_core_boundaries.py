@@ -631,6 +631,26 @@ def test_futures_source_resolver_reuses_loaded_rows() -> None:
 
     assert source is not None
     assert source.symbol == "NIFTY26OCTFUT"
+    canonical_bar = source.canonical_bars()[0]
+    assert canonical_bar.instrument.symbol == "NIFTY"
+    assert canonical_bar.instrument.expiry is None
+
+
+def test_live_futures_identity_rolls_by_session_expiry() -> None:
+    instruments = (
+        {"symbol": "NIFTY26OCTFUT", "exchange": "NFO", "instrument_type": "FUTURES", "expiry": "2026-10-29"},
+        {"symbol": "NIFTY26NOVFUT", "exchange": "NFO", "instrument_type": "FUTURES", "expiry": "2026-11-26"},
+    )
+
+    expiry_session = FuturesSessionSourceResolver.resolve_instrument_identity(
+        "2026-10-29", instruments,
+    )
+    after_expiry = FuturesSessionSourceResolver.resolve_instrument_identity(
+        "2026-10-30", instruments,
+    )
+
+    assert expiry_session is not None and expiry_session.symbol == "NIFTY26OCTFUT"
+    assert after_expiry is not None and after_expiry.symbol == "NIFTY26NOVFUT"
 
 
 def test_exit_state_machine_forces_exit_at_canonical_1510_close() -> None:

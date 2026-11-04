@@ -20,6 +20,8 @@ from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.runtime.engine import PaperEngine
 from ftx_paper.runtime.decision_turn import DecisionTurn, evaluate_turn
 from ftx_paper.runtime.replay_input import ReplayInput
+from ftx_paper.runtime.orderflow_setup import load_orderflow_setup
+from ftx_paper.runtime.futures_source import FuturesSessionSourceResolver
 from ftx_paper.runtime.replay_projection import (
     build_summary, canonical_events, is_parity_decision_event, normalize_decision, normalize_trade,
 )
@@ -29,7 +31,7 @@ from ftx_paper.runtime.replay_runners import (
     ResearchReplayRunner,
     StrategyReplayRunner,
 )
-from ftx_paper.infrastructure.artifacts import SetupArtifactStore, deserialize_atr_publication, deserialize_value_publication
+from ftx_paper.infrastructure.artifacts import SetupArtifactStore
 from ftx_paper.execution.lifecycle import (
     ExecutionLifecycleCoordinator,
     ExecutionPhase,
@@ -1075,84 +1077,15 @@ class ReplayWorker:
             bar for bar in replay_bars
             if is_observation_minute(session_date, nifty_label(bar.timestamp))
         )
-        prior_values: dict[str, Any] = {}
-        atr_values: dict[str, Any] = {}
-        prior_session_levels: dict[str, Mapping[str, Any]] = {}
-        artifact_store = self.artifact_store
-        artifact_identity = {
-            "strategy_id": "ftx-paper-orderflow", "task_id": "prior-session-value",
-            "algorithm_version": "orderflow.prior-session-value.v1",
-            "config_fingerprint": "value-profile-default", "instrument": "NIFTY",
-        }
-        try:
-            artifact = artifact_store.read(artifact_identity, session_date)
-            if artifact is not None:
-                source_sessions = artifact.get("source", {}).get("sessions", [])
-                prior_provenance = self.inputs.prior_source_provenance(session_date)
-                source_fingerprints = artifact.get("source", {}).get("source_fingerprints", [])
-                if (
-                    not isinstance(source_sessions, list)
-                    or not source_sessions
-                    or not isinstance(source_fingerprints, list)
-                    or not source_fingerprints
-                    or prior_provenance is None
-                    or source_fingerprints[-1] != prior_provenance.get("source_fingerprint")
-                ):
-                    raise ValueError("setup artifact source coverage is unavailable")
-                expected_prior = sorted(str(item) for item in self.store.read_dates() if str(item) < session_date)
-                if not expected_prior or str(source_sessions[-1]) != expected_prior[-1]:
-                    raise ValueError("setup artifact source session is stale")
-                prior_values[session_date] = deserialize_value_publication(artifact["payload"])
-        except (OSError, ValueError):
-            from ftx_paper.strategies.orderflow.value_publication import ValuePublication
-            prior_values[session_date] = ValuePublication(None, None, None, (), "derived_artifact_unavailable")
-        if session_date not in prior_values:
-            from ftx_paper.strategies.orderflow.value_publication import ValuePublication
-            prior_values[session_date] = ValuePublication(None, None, None, (), "derived_artifact_unavailable")
-        try:
-            levels_identity = {
-                "strategy_id": "ftx-paper-orderflow", "task_id": "prior-session-levels",
-                "algorithm_version": "orderflow.prior-session-levels.v1",
-                "config_fingerprint": "prior-session-levels-NIFTY", "instrument": "NIFTY",
-            }
-            levels_artifact = artifact_store.read(levels_identity, session_date)
-            expected_prior = max((str(item) for item in self.store.read_dates() if str(item) < session_date), default=None)
-            if levels_artifact is not None and levels_artifact.get("status") == "available":
-                payload = levels_artifact["payload"]
-                prior_provenance = self.inputs.prior_source_provenance(session_date)
-                source_fingerprints = levels_artifact.get("source", {}).get("source_fingerprints", [])
-                if (
-                    payload.get("target_session") != session_date
-                    or payload.get("source_session") != expected_prior
-                    or levels_artifact.get("source", {}).get("sessions") != [expected_prior]
-                    or prior_provenance is None
-                    or not source_fingerprints
-                    or source_fingerprints[-1] != prior_provenance.get("source_fingerprint")
-                ):
-                    raise ValueError("prior-session-levels source is stale")
-                prior_session_levels[session_date] = payload
-        except (OSError, KeyError, TypeError, ValueError):
-            prior_session_levels.clear()
-        if session_date not in prior_session_levels:
-            prior_session_levels[session_date] = {}
-        try:
-            atr_identity = {
-                "strategy_id": "ftx-paper-orderflow", "task_id": "daily-atr",
-                "algorithm_version": "orderflow.daily-atr.wilder.v1",
-                "config_fingerprint": "daily-atr-NIFTY-14", "instrument": "NIFTY",
-            }
-            atr_artifact = artifact_store.read(atr_identity, session_date)
-            if atr_artifact is None or atr_artifact.get("status") != "available":
-                from ftx_paper.strategies.orderflow.evidence_publication import AtrPublication
-                atr_values[session_date] = AtrPublication.unavailable("derived_artifact_unavailable")
-            else:
-                payload = self.inputs.validate_atr_artifact_source(
-                    atr_artifact, session_date,
-                )
-                atr_values[session_date] = deserialize_atr_publication(payload)
-        except (OSError, KeyError, TypeError, ValueError):
-            from ftx_paper.strategies.orderflow.evidence_publication import AtrPublication
-            atr_values[session_date] = AtrPublication.unavailable("derived_artifact_unavailable")
+        setup = load_orderflow_setup(
+            self.store,
+            self.artifact_store,
+            FuturesSessionSourceResolver(self.store),
+            session_date,
+        )
+        prior_values = {session_date: setup.prior_value}
+        atr_values = {session_date: setup.atr}
+        prior_session_levels = {session_date: setup.prior_session_levels}
         aggregator = ReplayInput.aggregator(replay_bars)
         runtime = self.strategy_selector.create(
             "ftx-paper-orderflow",
@@ -1160,10 +1093,7 @@ class ReplayWorker:
         )
         bind_replay_bars = getattr(runtime, "bind_replay_bars", None)
         if callable(bind_replay_bars):
-            prior_date = max(
-                (str(value) for value in self.store.read_dates() if str(value) < session_date),
-                default=None,
-            )
+            prior_date = setup.prior_session
             feature_history_bars = ()
             if prior_date is not None:
                 prior_rows = self.store.read_market_bars(prior_date)

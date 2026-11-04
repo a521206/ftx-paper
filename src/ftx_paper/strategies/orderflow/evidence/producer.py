@@ -25,6 +25,21 @@ class EvidenceAdapter(Protocol):
     def prior_value(self, session_date: str) -> ValuePublication: ...
 
 
+def unavailable_evidence_reasons(
+    atr: AtrPublication, *, session_levels_available: bool,
+) -> tuple[str, ...]:
+    reasons: list[str] = []
+    if atr.value is None:
+        reasons.append(atr.unavailable_reason or "missing_atr")
+    if not session_levels_available:
+        reasons.append("missing_session_levels")
+    elif atr.value is None:
+        reasons.append("session_levels_waiting_for_atr")
+    if atr.value is None:
+        reasons.append("vwap_locations_waiting_for_atr")
+    return tuple(reasons)
+
+
 
 def _text(value: object, field: str) -> str:
     if not isinstance(value, str):
@@ -124,21 +139,14 @@ def produce_evidence(
     if first is None:
         raise ValueError("aggregate artifact has no aggregates")
     atr = adapter.atr(session_date, first.symbol)
-    unavailable: list[str] = []
-    if atr.value is None:
-        unavailable.append(atr.unavailable_reason or "missing_atr")
-
     registry = LocationRegistry(f"{first.symbol}:{first.expiry}:1m")
     levels = adapter.session_levels(session_date)
     prior_session = adapter.prior_session(session_date)
-    if levels is None:
-        unavailable.append("missing_session_levels")
-    elif atr.value is not None:
+    unavailable = list(unavailable_evidence_reasons(atr, session_levels_available=levels is not None))
+    if levels is not None and atr.value is not None:
         registry.publish_session_levels(
             levels, source_session=session_date, prior_session=prior_session, atr=atr.value,
         )
-    else:
-        unavailable.append("session_levels_waiting_for_atr")
 
     measurements: list[VwapMeasurement] = []
     if atr.value is not None:

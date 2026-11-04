@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 
 from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.execution.service import ExecutionService
@@ -15,7 +16,9 @@ from ftx_paper.strategies.orderflow.state_machine_types import LocationRegistry
 from ftx_paper.strategies.orderflow.transition import OrderflowTransitionOwner
 from ftx_paper.strategies.orderflow.opportunity_coordinator import LifecycleFormation
 from ftx_paper.strategies.orderflow.timestamps import serialize_utc
-from ftx_paper.strategies.orderflow.providers import CanonicalInputProvider
+from ftx_paper.strategies.orderflow.providers import OrderflowInputStream
+from ftx_paper.strategies.orderflow.evidence_publication import AtrPublication
+from ftx_paper.strategies.orderflow.value_publication import ValuePublication
 
 from .orderflow_config import ORDERFLOW_NAME, ORDERFLOW_VERSION, OrderflowConfig
 
@@ -37,7 +40,7 @@ class OrderflowStrategy:
         self._coordinator = self._transition_owner.observation_owner
         self._execution_adapter = execution_adapter
         self._execution_owner = self._transition_owner.execution_owner
-        self._clock_input_provider = clock_input_provider or CanonicalInputProvider()
+        self._clock_input_provider = clock_input_provider or OrderflowInputStream()
         self._formation_provider = formation_provider
 
     @property
@@ -49,6 +52,29 @@ class OrderflowStrategy:
 
     def evaluate(self, bundle: object, context: object) -> tuple[object, ...]:
         return self._source_observation(bundle)
+
+    def append_feature_bar(self, bar: Any) -> None:
+        """Append one selected completed bar through the shared input stream."""
+        if not isinstance(self._clock_input_provider, OrderflowInputStream):
+            raise TypeError("orderflow feature bars require the incremental input stream")
+        self._clock_input_provider.append_continuous_bars((bar,))
+
+    def publish_setup(
+        self,
+        session_date: str,
+        *,
+        atr: AtrPublication | None = None,
+        prior_value: ValuePublication | None = None,
+        prior_session_levels: Mapping[str, object] | None = None,
+    ) -> None:
+        if not isinstance(self._clock_input_provider, OrderflowInputStream):
+            raise TypeError("orderflow setup requires the incremental input stream")
+        self._clock_input_provider.publish_setup(
+            session_date,
+            atr=atr,
+            prior_value=prior_value,
+            prior_session_levels=prior_session_levels,
+        )
 
     def _source_observation(self, bundle: object) -> tuple[object, ...]:
         bars = getattr(bundle, "bars", {})

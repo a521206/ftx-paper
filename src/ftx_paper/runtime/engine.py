@@ -92,6 +92,11 @@ class PaperEngine:
         if callable(handler):
             handler(bar)
 
+    def publish_orderflow_setup(self, session_date: str, **publications: Any) -> None:
+        handler = getattr(self.strategy, "publish_setup", None)
+        if callable(handler):
+            handler(session_date, **publications)
+
     def record_exit(self, **kwargs: object) -> None:
         """Forward a settled exit to strategies that maintain risk-gate state."""
         record_exit = getattr(self.strategy, "record_exit", None)
@@ -331,6 +336,16 @@ class MultiStrategyEngine:
                     self._engines[item.strategy_id].append_feature_bar(bar)
                 except Exception as exc:
                     self._disable_strategy(item, exc, phase="feature_append")
+
+    def publish_orderflow_setup(self, session_date: str, **publications: Any) -> None:
+        for item in self.instances:
+            if item.enabled:
+                try:
+                    self._engines[item.strategy_id].publish_orderflow_setup(
+                        session_date, **publications,
+                    )
+                except Exception as exc:
+                    self._disable_strategy(item, exc, phase="setup_publication")
 
     def on_execution_event(self, event: ExecutionNotification) -> None:
         if event.strategy_id is None:

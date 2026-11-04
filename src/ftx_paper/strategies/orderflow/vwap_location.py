@@ -62,23 +62,40 @@ def causal_vwap_prefix(
     timeframes = {item.timeframe for item in ordered}
     if len(timeframes) > 1:
         raise ValueError("VWAP prefix requires one source timeframe")
-    numerator = 0.0
-    denominator = 0.0
-    measurements: list[VwapMeasurement] = []
+    accumulator = CausalVwapAccumulator(session_date=session_date, config=config)
     for aggregate in ordered:
-        if config.price_formula != "(high+low+close)/3":
-            raise ValueError(f"unsupported VWAP price formula: {config.price_formula}")
+        accumulator.append(aggregate)
+    return tuple(accumulator.measurements)
+
+
+class CausalVwapAccumulator:
+    """Incremental equivalent of ``causal_vwap_prefix`` for one timeframe."""
+
+    def __init__(self, *, session_date: str, config: VwapCalculationConfig = VwapCalculationConfig()) -> None:
+        self.session_date = session_date
+        self.config = config
+        self.numerator = 0.0
+        self.denominator = 0.0
+        self.measurements: list[VwapMeasurement] = []
+
+    def append(self, aggregate: Aggregate) -> VwapMeasurement:
+        if aggregate.session_date != self.session_date:
+            raise ValueError("VWAP accumulator received another session")
+        if aggregate.available_at < aggregate.end_time:
+            raise ValueError("VWAP aggregate is not causally available")
+        if self.config.price_formula != "(high+low+close)/3":
+            raise ValueError(f"unsupported VWAP price formula: {self.config.price_formula}")
         typical_price = (float(aggregate.high) + float(aggregate.low) + float(aggregate.close)) / 3.0
-        volume = max(0.0, float(getattr(aggregate, config.volume_field)))
-        numerator += typical_price * volume
-        denominator += volume
-        value = numerator / denominator if denominator else typical_price
-        # Keep causal timestamps as UTC datetimes; this label is identity-only.
+        volume = max(0.0, float(getattr(aggregate, self.config.volume_field)))
+        self.numerator += typical_price * volume
+        self.denominator += volume
+        value = self.numerator / self.denominator if self.denominator else typical_price
         timestamp_identity = nifty_label(aggregate.time)
-        source_identity = f"{aggregate.source_fingerprint}:{session_date}:{aggregate.timeframe}:{timestamp_identity}:{config.version}:{value:.12g}:{volume:.12g}"
-        source_observation_id = hashlib.sha256(source_identity.encode("utf-8")).hexdigest()[:24]
-        measurements.append(VwapMeasurement(
-            aggregate.timeframe, session_date, nifty_label(aggregate.time), aggregate.end_time,
-            aggregate.available_at, value, source_observation_id, config.version,
-        ))
-    return tuple(measurements)
+        source_identity = f"{aggregate.source_fingerprint}:{self.session_date}:{aggregate.timeframe}:{timestamp_identity}:{self.config.version}:{value:.12g}:{volume:.12g}"
+        measurement = VwapMeasurement(
+            aggregate.timeframe, self.session_date, timestamp_identity, aggregate.end_time,
+            aggregate.available_at, value,
+            hashlib.sha256(source_identity.encode("utf-8")).hexdigest()[:24], self.config.version,
+        )
+        self.measurements.append(measurement)
+        return measurement

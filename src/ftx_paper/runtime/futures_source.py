@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from datetime import date as date_type
 import hashlib
 import json
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from ftx_paper.config import IST, SESSION_DATA_END_MINUTES, SESSION_OPEN_MINUTES
@@ -25,6 +26,15 @@ class SessionSourceIdentity:
     instrument_type: str
     expiry: str
     policy_version: str
+
+    def matches_bar(self, bar: MarketBar) -> bool:
+        """Match a completed bar against this selected futures identity."""
+        instrument = bar.instrument
+        return (
+            instrument.instrument_type.upper() in {"FUT", "FUTURES"}
+            and instrument.symbol == self.symbol
+            and str(instrument.expiry or "")[:10] == self.expiry
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,12 +111,63 @@ class FuturesSessionSource:
             "rollover_decision": self.rollover_decision,
         }
 
+    def canonical_bars(self) -> tuple[MarketBar, ...]:
+        """Project this selected storage contract into continuous strategy bars."""
+        return tuple(
+            MarketBar(
+                instrument=Instrument(
+                    symbol="NIFTY", exchange=self.identity.exchange,
+                    instrument_type="FUT", expiry=None,
+                ),
+                timestamp=parse_utc(str(row["minute"]), field="futures source minute"),
+                open=float(row["open"]),
+                high=float(row["high"]),
+                low=float(row["low"]),
+                close=float(row["close"]),
+                volume=row.get("volume"),
+                open_interest=row.get("open_interest"),
+            )
+            for row in self.bars
+        )
+
 
 class FuturesSessionSourceResolver:
     """Resolve one deterministic storage contract for the virtual source."""
 
     def __init__(self, store: Any) -> None:
         self.store = store
+
+    @staticmethod
+    def resolve_instrument_identity(
+        session_date: str, instruments: Iterable[Mapping[str, Any]],
+    ) -> SessionSourceIdentity | None:
+        """Select the live contract for a date using the storage rollover rule."""
+        session_day = date_type.fromisoformat(session_date)
+        contracts = []
+        exchanges_by_contract: dict[tuple[str, str], set[str]] = {}
+        for item in instruments:
+            if str(item.get("instrument_type", "")).upper() not in {"FUT", "FUTURES"}:
+                continue
+            expiry = parse_expiry(item.get("expiry"))
+            symbol = str(item.get("symbol") or item.get("tradingsymbol") or "")
+            if expiry is not None and symbol:
+                key = (symbol, expiry.isoformat())
+                exchanges_by_contract.setdefault(key, set()).add(str(item.get("exchange", "")))
+                contracts.append(FuturesContract(symbol, expiry, item))
+        ambiguous = [key for key, exchanges in exchanges_by_contract.items() if len(exchanges) > 1]
+        if ambiguous:
+            raise ValueError(f"ambiguous futures source exchanges: {ambiguous}")
+        selection = select_front_futures_contract(contracts, session_date=session_day)
+        if selection is None:
+            return None
+        payload = selection.payload
+        return SessionSourceIdentity(
+            symbol=selection.symbol,
+            exchange=str(payload.get("exchange", "")),
+            instrument_type="FUT",
+            expiry=selection.expiry.isoformat(),
+            policy_version=selection.policy_version,
+        )
 
     def resolve(
         self, session_date: str, *, rows: list[dict[str, Any]] | None = None,

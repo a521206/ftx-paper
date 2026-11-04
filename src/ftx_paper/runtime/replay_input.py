@@ -13,7 +13,7 @@ from ftx_paper.config import (
     IST, SESSION_DATA_END, SESSION_DATA_END_MINUTES, SESSION_OPEN_MINUTES,
 )
 from ftx_paper.strategies.research.config import AFTERNOON_ENTRY_MINUTES, MORNING_ENTRY_MINUTES
-from ftx_paper.strategies.orderflow.timestamps import parse_nifty_label, parse_utc
+from ftx_paper.strategies.orderflow.timestamps import parse_utc
 
 
 class ReplayInput:
@@ -51,56 +51,6 @@ class ReplayInput:
                 )
         return self._prior_source_cache[session_date]
 
-    @staticmethod
-    def validate_atr_artifact_source(
-        artifact: Mapping[str, Any], session_date: str,
-    ) -> Mapping[str, Any]:
-        """Validate a materialized ATR's source lineage and causal session bounds."""
-        source = artifact.get("source")
-        payload = artifact.get("payload")
-        if not isinstance(source, Mapping) or not isinstance(payload, Mapping):
-            raise ValueError("daily ATR setup artifact is incomplete")
-        source_sessions = source.get("sessions")
-        source_fingerprints = source.get("source_fingerprints")
-        source_session = payload.get("source_session")
-        if (
-            not isinstance(source_sessions, list)
-            or not source_sessions
-            or not all(isinstance(item, str) for item in source_sessions)
-            or source_sessions != sorted(set(source_sessions))
-            or not isinstance(source_fingerprints, list)
-            or not source_fingerprints
-            or not all(isinstance(item, str) and item for item in source_fingerprints)
-            or payload.get("target_session") != session_date
-            or not isinstance(source_session, str)
-            or source_sessions[-1] != source_session
-            or source_session >= session_date
-            or not isinstance(source.get("source_bar_count"), int)
-            or source.get("source_bar_count", 0) <= 0
-        ):
-            raise ValueError("daily ATR setup artifact source lineage is invalid")
-        observed_value = payload.get("observed_at")
-        available_value = payload.get("available_at")
-        if not isinstance(observed_value, str):
-            raise ValueError("daily ATR setup artifact timestamps are invalid")
-        if not isinstance(available_value, str):
-            raise ValueError("daily ATR setup artifact timestamps are invalid")
-        try:
-            observed_at = parse_utc(observed_value)
-            available_at = parse_utc(available_value)
-            expected_available_at = parse_nifty_label(f"{session_date}T09:15")
-        except (TypeError, ValueError) as exc:
-            raise ValueError("daily ATR setup artifact timestamps are invalid") from exc
-        local_observed_at = observed_at.astimezone(IST)
-        observed_minute = local_observed_at.hour * 60 + local_observed_at.minute
-        if (
-            local_observed_at.date().isoformat() != source_session
-            or not SESSION_OPEN_MINUTES <= observed_minute <= SESSION_DATA_END_MINUTES
-            or available_at != expected_available_at
-        ):
-            raise ValueError("daily ATR setup artifact timestamps violate source session bounds")
-        return payload
-
     def bars(
         self, session_date: str, *, rows: list[dict[str, Any]] | None = None,
         futures_source: Any | None = None,
@@ -134,8 +84,11 @@ class ReplayInput:
                 continue
             selected = source is not None and kind in {"FUT", "FUTURES"} and (
                 str(row.get("symbol")) == source.symbol
+                and str(row.get("exchange", "")) == source.exchange
                 and str(row.get("expiry", ""))[:10] == source.expiry
             )
+            if kind in {"FUT", "FUTURES"} and not selected:
+                continue
             bar = MarketBar(
                 instrument=Instrument(
                     symbol=str(row["symbol"]), exchange=str(row["exchange"]),

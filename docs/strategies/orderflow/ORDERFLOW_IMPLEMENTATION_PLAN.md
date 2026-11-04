@@ -16,6 +16,20 @@ Live and bounded replay must use the same canonical transition and execution
 owners. They may differ only in input, clock, capture, persistence, recovery,
 and the selected Paper execution adapter. Neither mode submits broker orders.
 
+NiftyZoning is the behavioral reference and its `ReplayMachine` is a
+session-oriented replay harness, not Paper's live runtime API. Paper is
+live-first: one in-memory owner advances incrementally for each completed input.
+Bounded replay constructs the same owner and drives the same per-input
+advancement contract from stored data. Paper ports canonical behavior into its
+own repository; NiftyZoning is not a runtime dependency.
+
+Paper's host adapter may normalize a completed bar and attach explicitly
+available, provenance-bearing references. It must not rebuild current-session
+strategy inputs from the full session on each live bar, infer missing
+publications, or own strategy policy. Canonical transition ownership includes
+causal observation through execution/settlement; persistence and Paper account
+mutation remain host responsibilities after canonical transitions.
+
 ## Current Status
 
 Implemented in the Paper source tree:
@@ -31,14 +45,22 @@ Implemented in the Paper source tree:
 These are implementation seams and deterministic contract coverage. They do not
 prove production parity.
 
-Still open:
+Still open (the items below are not implied complete by existing contracts,
+scaffolding, or same-class live/replay composition):
 
 - cross-repository parity for the unified artifact, including execution-bearing
   sessions;
 - one complete canonical owner for context through settlement;
 - complete canonical snapshot restore and recovery;
 - production replay migration away from the temporary harness;
-- DB-backed live/replay parity and retirement of transitional production paths.
+- DB-backed live/replay parity and retirement of transitional production paths;
+- incremental live input preparation and proof that no future session rows
+  influence a transition;
+- one-input-at-a-time parity between live advancement, bounded replay, and the
+  pinned NiftyZoning behavior;
+- live ATR, prior-value, and prior-session-level publication for startup;
+- unified parity-artifact capture and persistence on the live path, equivalent
+  in contract to bounded replay.
 
 The temporary script `scripts/orderflow/orderflow_replay.py` is comparison
 tooling only. It must not be called by live callbacks or become the production
@@ -56,6 +78,11 @@ Every phase requires all of these checks:
 5. Live and replay call the same ported implementation.
 6. Canonical tests, focused Paper tests, static checks, and a cross-repository
    comparison pass where applicable.
+7. Live input preparation consumes only the current completed input plus
+   explicitly published causal references; replay drives that same advancement
+   API rather than a parallel strategy path.
+8. Obsolete production providers, duplicate transition owners, and replay-only
+   strategy paths are removed when their replacements pass the relevant gates.
 
 Bounded `INPUT_VARIANCE` is acceptable only for the existing documented
 ATR/prior-value input rule. It must be recorded explicitly and must not hide a
@@ -68,73 +95,65 @@ remain failures for the relevant gate.
 
 **Status: Complete.**
 
-The old Paper-specific orderflow policy and behavior tests were removed. The
-strategy package retains the minimal boundary and canonical-support modules.
-No deleted lifecycle, producer, replay, or reporting path is part of the
-production scaffold.
+Paper-specific orderflow policy has been removed from the production scaffold.
 
 ## Phase 2: Define The Runtime Boundary
 
-**Status: Complete for the host-neutral contract.**
+**Status: Contract scaffold exists; production live-first ownership is open.**
 
 `runtime_boundary.py` defines one-observation transition, live/replay adapters,
 event envelopes, and a versioned snapshot shape. Prefix replay and incremental
-feeding produce the same boundary state/event prefix. This phase does not claim
-behavioral parity or complete canonical restore.
+feeding produce the same boundary state/event prefix. This only validates that
+boundary scaffold; it does not prove that production uses one incremental
+canonical owner, that live preparation avoids full-session rebuilds, that
+behavior matches NiftyZoning, or that canonical state can be fully restored.
 
 ## Phase 3: Source And Observation
 
-**Status: Complete for the ported contract.**
+**Status: Incremental input and source preparation implemented; canonical
+parity remains open.**
 
-The port covers source identity, ordering, duplicate rejection, session bounds,
-completed aggregates, gaps, availability, and lineage. Paper adapters project
-the canonical input shape and do not calculate parallel policy or aggregates.
+Live and bounded replay use the incremental stream, selected continuous futures
+source, and shared validated setup loader. Per-prefix canonical comparison,
+proof against future-row influence, and live refresh for artifacts created after
+startup remain open.
 
 ## Phase 4: Context And Locations
 
 **Status: Complete for deterministic/runtime-neutral contracts.**
 
-The port covers value publication, opening-gap policy, immutable context
-versions, location generations, causal VWAP, permissions, and explicit
-unavailable evidence. Runtime ownership and DB-backed parity remain open.
+Deterministic context and location contracts are implemented. Runtime ownership
+and DB-backed parity remain open.
 
 ## Phase 5: Interactions And Responses
 
 **Status: Complete for deterministic contract and replay comparison.**
 
-Independent 1m/5m interaction state, frozen provenance, response windows,
-policy dispatch, arbitration, invalidation, expiry, and retry idempotence are
-ported. No terminal snapshot may be used to invent a response outcome.
+The interaction and response contracts are implemented; production ownership
+and parity remain open.
 
 ## Phase 6: Opportunities And Setup Lifecycle
 
 **Status: Complete for deterministic contract.**
 
-Opportunity identity, formation, timeout, retest, invalidation, supersession,
-execution-group eligibility, and causal evidence are covered. Runtime/database
-parity is not complete.
+The opportunity lifecycle contract is implemented. Runtime/database parity
+remains open.
 
 ## Phase 7: Intent, Admission, Allocation, And Execution
 
 **Status: Contract implementation complete; parity gate open.**
 
-The port contains canonical admission, allocation, intent, reservation, trigger,
-fill, exit, settlement, and orderflow-ledger contracts. Paper accounting is
-updated only through the host adapter after canonical transitions.
-
-The phase is not accepted until both a no-trade session and an
-execution-bearing session match canonical streams for admission, trigger/exit,
-fills, transitions, and ledger mutations. Current execution differences remain
-downstream mismatches or accepted input variance and must not be called parity.
+The deterministic execution contracts are implemented, with Paper accounting
+updated by the host after canonical transitions. The phase remains open until
+no-trade and execution-bearing sessions pass canonical stream comparison;
+execution differences are not parity.
 
 ## Phase 8: Unified Reporting And Parity Artifacts
 
 **Status: Artifact contract implemented; cross-repository gate open.**
 
-`parity_artifacts.py` defines the canonical artifact envelope, six decision
-substreams, four final layers, coverage states, validation, hashing, JSON/JSONL
-persistence, and bounded reads. The former Phase 4/Phase 7 comparison helpers
-are diagnostics only.
+The unified artifact contract is implemented. Cross-repository parity remains
+the acceptance gate; legacy comparison helpers are diagnostics only.
 
 The unified artifact must map all execution facts explicitly:
 
@@ -157,7 +176,8 @@ comparison result explicitly says so; downstream lifecycle or execution
 
 ## Phase 9: Complete The Paper Host
 
-**Status: In progress. Preparation is implemented; production integration is not.**
+**Status: In progress. Incremental source preparation is implemented; complete
+production integration is not.**
 
 Phase 9 work may prepare interfaces and tests before the Phase 8 gate, but no
 production parity or completion claim is allowed until Phase 8 is accepted.
@@ -183,6 +203,9 @@ generations, interaction and opportunity state, intents, reservations, pending
 exits, positions, causal cursors, parity state, and idempotency identities.
 Recovery must resume an explicit suffix without rereading future bars. An
 unrecoverable interrupted session becomes `STOPPED` with one audit event.
+The current owner restore also omits serialized pending execution proposals;
+restore must reproduce those pending inputs or explicitly establish that they
+are not part of recoverable state before this phase can be accepted.
 
 ### 9D. Migrate Replay And Retire The Harness
 
@@ -203,11 +226,14 @@ account. Broker integrations remain market-data only.
 Persist canonical events, snapshots, notifications, and artifacts idempotently.
 Expose read-only API/CLI projections. API and persistence code must not
 recompute decisions from trades, counters, reports, or terminal snapshots.
+The unified artifact builder is currently exercised by bounded replay; the live
+path persists runtime/orderflow facts but does not yet emit and persist the same
+unified artifact contract.
 
 ## Phase 10: Close Live/Replay Execution Parity
 
-**Status: Not started. The canonical strategy boundary is shared, but the host
-execution paths still contain unresolved causal and ownership differences.**
+**Status: In progress. The live/replay input owner is shared; execution,
+recovery, and cross-repository parity gates remain open.**
 
 ### 10A. Accepted operational differences
 
@@ -229,23 +255,41 @@ contract requires it.
 
 ### 10B. Implementation gaps to close
 
-1. `ReplayWorker` currently performs host-level entry deferral, authorization,
+1. Verify live setup publication. Startup backfill may contain multiple
+   contracts by design; raw bars remain retained while the runtime resolves one
+   canonical futures source per session and binds only its continuous bars to
+   orderflow. Live and replay now load ATR, prior value, and prior-session levels
+   through the same source-validated setup loader, or publish explicit
+   unavailable states. Verify valid/stale/missing artifact cases through live
+   startup and the subsequent update path.
+2. The former provider's append operation rebuilt the
+   observation artifact, aggregates, evidence, and published envelope history
+   for the session after every appended bar. `OrderflowInputStream` now
+   publishes one completed input incrementally. Verify its output against the
+   pinned canonical replay at every input prefix and against live production
+   ingress before accepting the replacement; per-session behavior remains a
+   ported responsibility, not Paper policy.
+3. Test live setup artifact publication against bounded replay for valid,
+   stale, missing, and unavailable artifacts. Do not derive or infer them inside
+   strategy policy.
+4. `ReplayWorker` currently performs host-level entry deferral, authorization,
    reservation, fills, exits, settlement, notifications, and ledger projection.
    Reduce it to bounded loading, cancellation, clock advancement, capture, and
    fresh owner construction; route execution through the same canonical owner
    and Paper host adapter used by live.
-2. Live uses the current bundle timestamp while replay advances
+5. Live uses the current bundle timestamp while replay advances
    `available_at`/`decision_at` to the next futures bar. Define and test one
    causal availability contract so this cannot alter admission, timeout,
    trigger, or settlement ordering.
-3. Live uses a ten-second supporting-bar deadline while replay uses a zero-second
+6. Live uses a ten-second supporting-bar deadline while replay uses a zero-second
    deadline. Align the resulting canonical bundle/evidence behavior or record a
    formally accepted clock/input variance with proof that decision streams are
    unchanged.
-4. Complete the canonical owner from context publication through settlement and
+7. Complete the canonical owner from context publication through settlement and
    remove transitional duplicate orchestration paths.
-5. Complete DB-backed live/replay fact capture, snapshot/recovery of the mutable
-   canonical graph, and retirement of the temporary replay harness.
+8. Complete DB-backed live/replay fact and unified-artifact capture, snapshot /
+   recovery of the mutable canonical graph (including pending execution
+   proposals), and retirement of the temporary replay harness.
 
 ### 10C. Acceptance criteria
 

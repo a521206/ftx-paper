@@ -20,12 +20,17 @@ from ftx_paper.contracts import (
     role_to_key,
 )
 from ftx_paper.market import AggregatorConfig, CompletedBarAggregator, InstrumentKey, LiveMarketNormalizer
+from ftx_paper.infrastructure.artifacts import SetupArtifactStore
 from ftx_paper.domain import AccountAggregate
 from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.strategies.shared.protocol import Strategy
 from ftx_paper.execution.cost import futures_cost
 from ftx_paper.execution.settlement import ExitValidationError, validate_exit_order
 from .engine import MultiStrategyEngine, PaperEngine
+from .futures_source import (
+    FuturesSessionSourceResolver, SessionSourceIdentity, virtual_continuous_bar,
+)
+from .orderflow_setup import load_orderflow_setup
 from .decision_turn import DecisionTurn, evaluate_turn
 from .facades import FeedController, FeedManager, OrderManager, PnlManager, StrategyRunner
 from .event_bus import EventBus
@@ -157,6 +162,11 @@ class RuntimeSession:
         self._started = threading.Event()
         self._market_wait = threading.Event()
         self._aggregator: CompletedBarAggregator | None = None
+        self._orderflow_source_identities: dict[str, SessionSourceIdentity] = {}
+        self._orderflow_instruments: tuple[dict[str, Any], ...] = ()
+        self._orderflow_setup_dates: set[str] = set()
+        self._orderflow_source_resolver: FuturesSessionSourceResolver | None = None
+        self._orderflow_setup_store: SetupArtifactStore | None = None
         self._last_execution_fill: LastExecutionFill | None = None
         self._feed_lease_id: str | None = None
         self._event_sequence = 0
@@ -186,6 +196,33 @@ class RuntimeSession:
         restored = restore(raw_snapshot, capital_profile=self.capital_profile)
         if isinstance(self.engine, PaperEngine):
             self.engine.strategy = cast(Strategy, restored)
+
+    def _orderflow_setup_sources(self) -> tuple[FuturesSessionSourceResolver, SetupArtifactStore]:
+        """Create once: the source resolver and artifact store for setup loading."""
+        source_resolver = self._orderflow_source_resolver
+        setup_store = self._orderflow_setup_store
+        if source_resolver is None or setup_store is None:
+            source_resolver = FuturesSessionSourceResolver(self.store)
+            setup_store = SetupArtifactStore(self.store.root.parent)
+            self._orderflow_source_resolver = source_resolver
+            self._orderflow_setup_store = setup_store
+        return source_resolver, setup_store
+
+    def _publish_orderflow_setup(self, session_date: str) -> None:
+        if session_date in self._orderflow_setup_dates:
+            return
+        publish_setup = getattr(self.engine, "publish_orderflow_setup", None)
+        if not callable(publish_setup):
+            return
+        source_resolver, setup_store = self._orderflow_setup_sources()
+        setup = load_orderflow_setup(self.store, setup_store, source_resolver, session_date)
+        publish_setup(
+            session_date,
+            atr=setup.atr,
+            prior_value=setup.prior_value,
+            prior_session_levels=setup.prior_session_levels,
+        )
+        self._orderflow_setup_dates.add(session_date)
 
     def _persist_strategy_state(self) -> None:
         snapshot = getattr(self.engine, "snapshot", None)
@@ -370,9 +407,36 @@ class RuntimeSession:
                 return
             _validate_required_backfill(cast(Sequence[Mapping[str, Any]], resolved), backfill)
             self.store.append_market_bars(backfill, source="historical_backfill")
+            self._orderflow_instruments = tuple(
+                dict(item) for item in cast(Sequence[Mapping[str, Any]], resolved)
+            )
+            source_resolver = self._orderflow_setup_sources()[0]
             bind_feature_bars = getattr(self.engine, "bind_feature_bars", None)
             if callable(bind_feature_bars):
-                bind_feature_bars(backfill)
+                sources = {
+                    str(session_date): source
+                    for session_date in self.store.read_dates()
+                    if (source := source_resolver.resolve(str(session_date))) is not None
+                }
+                feature_bars = tuple(
+                    bar
+                    for session_date in sorted(sources)
+                    for bar in sources[session_date].canonical_bars()
+                )
+                if feature_bars:
+                    current_date = self.market_clock().astimezone(IST).date().isoformat()
+                    self._orderflow_source_identities.update({
+                        session_date: source.identity
+                        for session_date, source in sources.items()
+                    })
+                    if current_date not in self._orderflow_source_identities:
+                        identity = FuturesSessionSourceResolver.resolve_instrument_identity(
+                            current_date, self._orderflow_instruments,
+                        )
+                        if identity is not None:
+                            self._orderflow_source_identities[current_date] = identity
+                    bind_feature_bars(feature_bars)
+                    self._publish_orderflow_setup(current_date)
             access_token = self._wait_for_session_readiness(is_nse_market_open)
             if access_token is None:
                 self._release_feed_lease()
@@ -1235,8 +1299,21 @@ class RuntimeSession:
             now = datetime.now(timezone.utc).isoformat()
             self.store.append_market_bars((bar,), source="live")
             append_feature_bar = getattr(self.engine, "append_feature_bar", None)
-            if callable(append_feature_bar):
-                append_feature_bar(bar)
+            session_date = bar.timestamp.astimezone(IST).date().isoformat()
+            source_identity = self._orderflow_source_identities.get(session_date)
+            if source_identity is None:
+                source_identity = FuturesSessionSourceResolver.resolve_instrument_identity(
+                    session_date, self._orderflow_instruments,
+                )
+                if source_identity is not None:
+                    self._orderflow_source_identities[session_date] = source_identity
+            self._publish_orderflow_setup(session_date)
+            if (
+                callable(append_feature_bar)
+                and source_identity is not None
+                and source_identity.matches_bar(bar)
+            ):
+                append_feature_bar(virtual_continuous_bar(bar))
             self.store.patch_status({"last_bar_at": bar.timestamp.isoformat(), "last_heartbeat_at": now,
                                      "bars_seen": self.engine.bars_seen + 1})
             bar_key = f"{bar.instrument.exchange}:{bar.instrument.symbol}:{bar.timestamp.isoformat()}"
