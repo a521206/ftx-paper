@@ -1161,6 +1161,7 @@ class OrderflowTransitionOwner:
                 observation for observation in item.observations_1m
                 if observation.timeframe == "1m"
                 and observation.source_aggregate_id == nifty_label(item.one_minute.time)
+                and observation.reference_source_timeframe in {None, "1m"}
             ),
         }
         aggregates = [(item.one_minute, observations_by_timeframe["1m"])]
