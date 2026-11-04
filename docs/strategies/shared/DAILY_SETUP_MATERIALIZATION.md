@@ -467,8 +467,11 @@ the task policy marks the artifact as required.
 
 ### Stale
 
-Stale artifacts are treated as unavailable. Scheduled setup runs rebuild them
-when finalized source data is available. Replay never silently rebuilds.
+Stale artifacts are treated as unavailable when the reader revalidates source
+lineage at load. Where load-time revalidation is intentionally skipped to avoid
+a full-history scan, the setup worker still detects a source change while
+materializing and rebuilds, and an operator can force the same with
+`--mode rebuild`. Replay never silently rebuilds.
 
 ### Corrupt
 

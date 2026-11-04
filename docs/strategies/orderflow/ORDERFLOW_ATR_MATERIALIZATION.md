@@ -262,6 +262,13 @@ affected session and all later ATR values whose recursive state depends on it.
 The setup worker writes replacement immutable artifacts and publishes the new
 catalog only after validation succeeds.
 
+Startup and replay do not recompute the history fingerprint on every load. That
+recomputation rescans the complete completed-session history, and the source
+rarely changes, so load validates the artifact's structural source lineage and
+causal timestamps instead. The setup worker still detects a source change when
+it materializes, and an operator can force replacement with
+`--mode rebuild`.
+
 ## Parity Acceptance
 
 For every eligible comparison date, the canonical and Paper artifacts must

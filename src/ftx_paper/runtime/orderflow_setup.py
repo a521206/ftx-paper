@@ -127,17 +127,6 @@ def load_orderflow_setup(
         if artifact is None or artifact.get("status") != "available":
             raise ValueError("daily ATR artifact is unavailable")
         payload = validate_atr_artifact_source(artifact, session_date)
-        source_session = str(payload["source_session"])
-        source = source_resolver.resolve(source_session)
-        source_provenance_value = source_provenance(source_session)
-        source_fingerprints = artifact["source"].get("source_fingerprints", [])
-        if (
-            source is None
-            or source_provenance_value is None
-            or not source_fingerprints
-            or source_fingerprints[-1] != source_provenance_value["source_fingerprint"]
-        ):
-            raise ValueError("daily ATR source fingerprint is stale")
         atr = deserialize_atr_publication(payload)
     except (KeyError, OSError, TypeError, ValueError):
         pass
