@@ -1,10 +1,11 @@
 from threading import Event
 
-from ftx_paper.runtime.replay_runners import OrderflowReplayRunner, ResearchReplayRunner
+from ftx_paper.runtime.replay_runners import ResearchReplayRunner
+from ftx_paper.strategies.orderflow.replay_runner import OrderflowReplayRunner
 
 
 class _Worker:
-    def _execute_orderflow_impl(self, request, cancel, *, session_date, vehicles, include_parity_layers):
+    def execute_orderflow(self, request, cancel, *, session_date, vehicles, include_parity_layers):
         return {
             "runner": "orderflow", "request": request, "cancel": cancel,
             "session_date": session_date, "vehicles": vehicles,

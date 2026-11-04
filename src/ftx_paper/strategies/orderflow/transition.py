@@ -17,7 +17,7 @@ from typing import Any, Mapping, Sequence
 
 from ftx_paper.execution.events import ExecutionNotification
 
-from .coordinator import OrderflowAdvance, OrderflowClockInput, OrderflowCoordinator
+from .coordinator import OrderflowAdvance, OrderflowInput, OrderflowCoordinator
 from .execution import (
     AdmissionStatus,
     EntryOrder,
@@ -59,7 +59,7 @@ from .state_machine_types import (
     LocationRegistry,
     LocationStatus,
     MarketContextStore,
-    ReplayContext,
+    OrderflowState,
 )
 from .location_geometry import LocationBand
 from .interactions import (
@@ -99,7 +99,7 @@ def _snapshot_value(value: Any) -> Any:
     return value
 
 
-def _context_snapshot(context: ReplayContext) -> dict[str, Any]:
+def _context_snapshot(context: OrderflowState) -> dict[str, Any]:
     store = context.market_contexts
     return {
         "versions": _snapshot_value(store.versions),
@@ -685,7 +685,7 @@ class TransitionAdvance:
 
 
 @dataclass(slots=True)
-class OrderflowTransitionOwner:
+class OrderflowEngine:
     """Own the single chronological state boundary used by both modes."""
 
     location_registry: LocationRegistry
@@ -695,7 +695,7 @@ class OrderflowTransitionOwner:
     execution_adapter: Any | None = None
     rows_by_date: Mapping[str, Sequence[Mapping[str, object]]] = field(default_factory=dict, repr=False)
     atr_by_session: Mapping[str, float | None] | None = field(default=None, repr=False)
-    context: ReplayContext = field(init=False)
+    context: OrderflowState = field(init=False)
     _clock: datetime | None = field(default=None, init=False, repr=False)
     _published_intents: set[str] = field(default_factory=set, init=False, repr=False)
     _execution_notifications: set[str] = field(default_factory=set, init=False, repr=False)
@@ -718,13 +718,13 @@ class OrderflowTransitionOwner:
 
     def __post_init__(self) -> None:
         self.observation_owner = OrderflowCoordinator(self.location_registry)
-        self.context = ReplayContext(
+        self.context = OrderflowState(
             rows_by_date=self.rows_by_date,
             atr_by_session=self.atr_by_session or {},
             location_registry=self.location_registry,
             execution_engine=ExecutionEngine(),
         )
-        # ReplayContext is the canonical mutable execution owner.  The
+        # OrderflowState is the canonical mutable execution owner.  The
         # coordinator is only a service facade over that same instance.
         self.execution_owner.engine = self.context.execution_engine
         self.execution_owner.machine = self
@@ -1077,7 +1077,7 @@ class OrderflowTransitionOwner:
 
     def advance(
         self,
-        item: OrderflowClockInput,
+        item: OrderflowInput,
         *,
         formations: Sequence[LifecycleFormation] = (),
         regime: Any = None,
@@ -1139,6 +1139,7 @@ class OrderflowTransitionOwner:
                 bar_events,
             )
         available5 = list(self.observation_owner.five_minute_aggregates)
+        self.context.aggregates["1m"] = list(self.observation_owner.one_minute_aggregates)
         self.context.aggregates["5m"] = available5
         for transition in observation.transitions:
             self.context.interactions[transition.interaction.interaction_id] = (
@@ -1221,7 +1222,7 @@ class OrderflowTransitionOwner:
             },
         )
 
-    def _record_phase4_context_location(self, item: OrderflowClockInput) -> None:
+    def _record_phase4_context_location(self, item: OrderflowInput) -> None:
         """Publish canonical context/location facts for completed aggregates."""
         context = self.context
         ordinary = (
@@ -1855,4 +1856,4 @@ class OrderflowTransitionOwner:
         return getattr(reference, "reference", None)
 
 
-__all__ = ["OrderflowTransitionOwner", "TransitionAdvance"]
+__all__ = ["OrderflowEngine", "TransitionAdvance"]

@@ -9,7 +9,7 @@ from ftx_paper.strategies.shared.protocol import Strategy
 from .orderflow_config import OrderflowConfig
 from ..execution_adapter import OrderflowExecutionAdapter
 from ..paper_runtime import PaperOrderflowRuntime
-from ..coordinator import OrderflowClockInput
+from ..coordinator import OrderflowInput
 from ..opportunity_coordinator import LifecycleFormation
 
 
@@ -20,8 +20,8 @@ class OrderflowStrategyFactory:
         self,
         config: OrderflowConfig | None = None,
         *,
-        clock_input_provider: Callable[[object], OrderflowClockInput] | None = None,
-        formation_provider: Callable[[OrderflowClockInput], Sequence[LifecycleFormation]] | None = None,
+        clock_input_provider: Callable[[object], OrderflowInput] | None = None,
+        formation_provider: Callable[[OrderflowInput], Sequence[LifecycleFormation]] | None = None,
         formation_owner: object | None = None,
         execution_adapter: OrderflowExecutionAdapter | None = None,
     ) -> None:

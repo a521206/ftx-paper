@@ -14,7 +14,7 @@ from typing import cast
 
 from ftx_paper.contracts import MarketBar, MarketRole
 
-from .coordinator import OrderflowClockInput
+from .coordinator import OrderflowInput
 from .evidence.features_adapter import PaperFeatureAdapter
 from .evidence.producer import unavailable_evidence_reasons
 from .orderflow_common import Aggregate, build_aggregate_result
@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 class CanonicalInputEnvelope:
     """One published orderflow clock input and its causal lineage."""
 
-    input: OrderflowClockInput
+    input: OrderflowInput
     source_ids: tuple[str, ...]
     unavailable: tuple[str, ...] = ()
     input_source: str = "stream_envelope"
@@ -438,7 +438,7 @@ class OrderflowInputStream:
         )
         source_id = f"aggregate:1m:{nifty_label(one.time)}"
         envelope = CanonicalInputEnvelope(
-            OrderflowClockInput(
+            OrderflowInput(
                 one_minute=one,
                 five_minute=latest5,
                 atr=atr,
@@ -459,7 +459,7 @@ class OrderflowInputStream:
         self._by_identity[source_id] = envelope
         return envelope
 
-    def __call__(self, bundle: object) -> OrderflowClockInput:
+    def __call__(self, bundle: object) -> OrderflowInput:
         envelope = self.from_bundle(bundle)
         return replace(
             envelope.input,
@@ -569,7 +569,7 @@ class CanonicalFormationProvider:
         owner: object | None = None,
         *,
         formations: Iterable[LifecycleFormation] = (),
-        source: Callable[[OrderflowClockInput], Iterable[LifecycleFormation]] | None = None,
+        source: Callable[[OrderflowInput], Iterable[LifecycleFormation]] | None = None,
     ) -> None:
         if source is None and owner is not None:
             candidate = getattr(owner, "formations_for", None)
@@ -578,7 +578,7 @@ class CanonicalFormationProvider:
                     Callable[[object], Iterable[LifecycleFormation]], candidate,
                 )
 
-                def owner_source(clock: OrderflowClockInput) -> Iterable[LifecycleFormation]:
+                def owner_source(clock: OrderflowInput) -> Iterable[LifecycleFormation]:
                     return owner_formations(clock.one_minute.available_at)
 
                 source = owner_source
@@ -586,7 +586,7 @@ class CanonicalFormationProvider:
         self._formations = tuple(formations)
         self._seen: set[str] = set()
 
-    def __call__(self, clock: OrderflowClockInput) -> tuple[LifecycleFormation, ...]:
+    def __call__(self, clock: OrderflowInput) -> tuple[LifecycleFormation, ...]:
         supplied = self._source(clock) if self._source is not None else self._formations
         result: list[LifecycleFormation] = []
         for item in supplied:

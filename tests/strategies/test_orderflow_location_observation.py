@@ -5,7 +5,7 @@ from ftx_paper.strategies.orderflow.location_observation import (
     location_observation,
 )
 from ftx_paper.strategies.orderflow.coordinator import (
-    OrderflowClockInput,
+    OrderflowInput,
     OrderflowCoordinator,
 )
 from ftx_paper.strategies.orderflow.location_geometry import LocationBand
@@ -87,6 +87,6 @@ def test_coordinator_advances_five_minute_clock_without_observations() -> None:
 
     detector = Detector()
     coordinator.detector = detector  # type: ignore[assignment]
-    coordinator.advance(OrderflowClockInput(one_minute, five_minute=five_minute))
+    coordinator.advance(OrderflowInput(one_minute, five_minute=five_minute))
 
     assert detector.called is True

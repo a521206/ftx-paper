@@ -22,7 +22,7 @@ from ftx_paper.strategies.orderflow.parity_artifacts import (
     write_parity_artifact,
 )
 from ftx_paper.strategies.orderflow.state_machine_reporting import build_replay_payload
-from ftx_paper.strategies.orderflow.state_machine_types import ReplayContext
+from ftx_paper.strategies.orderflow.state_machine_types import OrderflowState
 
 
 def test_contract_requires_every_phase_stream_and_layer() -> None:
@@ -187,7 +187,7 @@ def test_unified_artifact_rejects_invalid_layer_kind_and_tampering() -> None:
 
 
 def test_producer_emits_execution_and_ledger_layer_facts() -> None:
-    context = ReplayContext(execution_engine=object())
+    context = OrderflowState(execution_engine=object())
     context.emit(
         {
             "kind": "filled",

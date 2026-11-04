@@ -27,7 +27,6 @@ from ftx_paper.runtime.replay_projection import (
 )
 from ftx_paper.runtime.state import ReplayRuntimeState
 from ftx_paper.runtime.replay_runners import (
-    OrderflowReplayRunner,
     ResearchReplayRunner,
     StrategyReplayRunner,
 )
@@ -46,6 +45,8 @@ from ftx_paper.strategies.shared.factory import StrategyContext, StrategySelecto
 from ftx_paper.config import NIFTY_LOT_SIZE
 from ftx_paper.strategies.orderflow.timestamps import nifty_label
 from ftx_paper.strategies.orderflow.market_observation import is_observation_minute
+from ftx_paper.strategies.orderflow.paper_runtime import PaperOrderflowRuntime
+from ftx_paper.strategies.orderflow.feature_store import PriorSessionLevels
 
 _EXECUTION_EVENT_TYPES = frozenset({
     "ORDER_INTENT", "ORDER_AUTHORIZED", "ORDER_ACK", "FILL",
@@ -143,7 +144,6 @@ class ReplayWorker:
         self.setup_worker = setup_worker
         self.inputs = ReplayInput(store, futures_source_resolver)
         self.runners: dict[str, StrategyReplayRunner] = {
-            "ftx-paper-orderflow": OrderflowReplayRunner(self),
             "ftx-paper-research": ResearchReplayRunner(self),
         }
         self._queue: Queue[tuple[str, dict[str, Any], Event]] = Queue(maxsize=max_queue_size)
@@ -151,6 +151,12 @@ class ReplayWorker:
         self._cancel: dict[str, Event] = {}
         self._thread: Thread | None = None
         self._stopped = Event()
+
+    def register_runner(self, strategy_id: str, runner: StrategyReplayRunner) -> None:
+        """Register a strategy replay adapter at the composition boundary."""
+        if not strategy_id.strip():
+            raise ValueError("strategy_id must not be empty")
+        self.runners[strategy_id] = runner
 
     def _ensure_started(self) -> None:
         with self._lock:
@@ -1046,7 +1052,7 @@ class ReplayWorker:
         )
         return canonical.to_dict()
 
-    def _execute_orderflow_impl(
+    def execute_orderflow(
         self,
         request: dict[str, Any],
         cancel: Event,
@@ -1085,33 +1091,35 @@ class ReplayWorker:
         )
         prior_values = {session_date: setup.prior_value}
         atr_values = {session_date: setup.atr}
-        prior_session_levels = {session_date: setup.prior_session_levels}
+        prior_session_levels = {
+            session_date: cast(PriorSessionLevels, setup.prior_session_levels),
+        }
         aggregator = ReplayInput.aggregator(replay_bars)
         runtime = self.strategy_selector.create(
             "ftx-paper-orderflow",
             StrategyContext(enabled_vehicles=vehicles),
         )
-        bind_replay_bars = getattr(runtime, "bind_replay_bars", None)
-        if callable(bind_replay_bars):
-            prior_date = setup.prior_session
-            feature_history_bars = ()
-            if prior_date is not None:
-                prior_rows = self.store.read_market_bars(prior_date)
-                prior_source = self.inputs.resolve_source(prior_date, rows=prior_rows)
-                prior_futures_rows = [
-                    row for row in prior_rows
-                    if str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
-                ]
-                feature_history_bars = self.inputs.bars(
-                    prior_date, rows=prior_futures_rows, futures_source=prior_source,
-                )
-            bind_replay_bars(
-                replay_bars,
-                feature_history_bars=feature_history_bars,
-                prior_values=prior_values,
-                atr_values=atr_values,
-                prior_session_levels=prior_session_levels,
+        if not isinstance(runtime, PaperOrderflowRuntime):
+            raise TypeError("orderflow replay selector returned an invalid runtime")
+        prior_date = setup.prior_session
+        feature_history_bars = ()
+        if prior_date is not None:
+            prior_rows = self.store.read_market_bars(prior_date)
+            prior_source = self.inputs.resolve_source(prior_date, rows=prior_rows)
+            prior_futures_rows = [
+                row for row in prior_rows
+                if str(row.get("instrument_type", "")).upper() in {"FUT", "FUTURES"}
+            ]
+            feature_history_bars = self.inputs.bars(
+                prior_date, rows=prior_futures_rows, futures_source=prior_source,
             )
+        runtime.bind_replay_bars(
+            replay_bars,
+            feature_history_bars=feature_history_bars,
+            prior_values=prior_values,
+            atr_values=atr_values,
+            prior_session_levels=prior_session_levels,
+        )
         # The selector composes the same PaperOrderflowRuntime used by live
         # hosting.  Replay owns only the bounded clock and capture loop.
         engine = PaperEngine(runtime)
@@ -1135,7 +1143,7 @@ class ReplayWorker:
                 for event in result.events
             )
 
-        snapshot = getattr(runtime, "snapshot", lambda: {})()
+        snapshot = runtime.snapshot()
         input_manifest = self.input_manifest(
             session_date, rows=rows, bars=replay_bars, futures_source=futures_source,
         )
@@ -1190,10 +1198,7 @@ class ReplayWorker:
             "metrics": summary,
             "extensions": {},
         }
-        parity_payload = getattr(runtime, "parity_payload", None)
-        if not callable(parity_payload):
-            raise RuntimeError("orderflow runtime does not expose canonical parity facts")
-        orderflow_payload = dict(cast(dict[str, Any], parity_payload(replay_rows)))
+        orderflow_payload = dict(cast(dict[str, Any], runtime.parity_payload(replay_rows)))
         orderflow_payload["records"] = list(events)
         orderflow_payload["replay_records"] = _source_replay_records(
             replay_bars, session_date,

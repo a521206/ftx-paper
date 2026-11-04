@@ -23,7 +23,7 @@ from .vwap_location import VwapMeasurement
 
 
 @dataclass(frozen=True, slots=True)
-class OrderflowClockInput:
+class OrderflowInput:
     """One completed decision-clock input and point-in-time publications."""
 
     one_minute: Aggregate
@@ -73,7 +73,7 @@ class OrderflowCoordinator:
         """Completed 1m source aggregates in causal order."""
         return tuple(self._one_minute)
 
-    def advance(self, item: OrderflowClockInput) -> OrderflowAdvance:
+    def advance(self, item: OrderflowInput) -> OrderflowAdvance:
         """Advance state at one completed bar's availability boundary.
 
         Duplicate aggregate identities are ignored.  A 5m detector transition is
@@ -262,4 +262,4 @@ class OrderflowCoordinator:
         return tuple(events)
 
 
-__all__ = ["OrderflowAdvance", "OrderflowClockInput", "OrderflowCoordinator"]
+__all__ = ["OrderflowAdvance", "OrderflowInput", "OrderflowCoordinator"]

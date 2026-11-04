@@ -29,7 +29,7 @@ from .hierarchy import (
 )
 from .lifecycle import OpportunityStatus, SetupOpportunity
 from .templates import Direction, OpeningInteractionKind, StopPolicy
-from .state_machine_types import CanonicalExecutionProposal, ReplayContext
+from .state_machine_types import CanonicalExecutionProposal, OrderflowState
 from .timestamps import coerce_timestamp, nifty_label, parse_session_timestamp
 from .allocation import entry_block_reason
 from .active_position_gate import ActivePositionGate
@@ -73,7 +73,7 @@ def _diagnostic_value(value: Any) -> Any:
 
 
 def _opposite_open_exposure(
-    context: ReplayContext, direction: Direction
+    context: OrderflowState, direction: Direction
 ) -> SetupOpportunity | None:
     return next(
         (
@@ -1442,7 +1442,7 @@ class ExecutionCoordinator:
         return result
 
     @property
-    def context(self) -> ReplayContext:
+    def context(self) -> OrderflowState:
         if self.machine is None:
             raise RuntimeError(
                 "execution coordinator is not attached to a transition owner"

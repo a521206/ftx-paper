@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 from ftx_paper.contracts import Instrument, MarketBar, MarketRole
 from ftx_paper.market.bundles import DecisionBundle
@@ -24,7 +24,10 @@ def replay_rows(
     if any(str(row.get("session_date")) != session_date for row in rows):
         raise ValueError("replay rows contain a session mismatch")
 
-    runtime = PaperOrderflowRuntime.from_rows(rows, rows_by_date=rows_by_date)
+    runtime = PaperOrderflowRuntime.from_rows(
+        cast(Any, rows),
+        rows_by_date=cast(Any, rows_by_date),
+    )
     results = runtime.replay(_bundles(rows))
     payload = dict(runtime.parity_payload([dict(row) for row in rows]))
     payload["records"] = [

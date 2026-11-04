@@ -28,7 +28,7 @@ from ftx_paper.strategies.orderflow.opportunity import (
 from ftx_paper.strategies.orderflow.parity_artifacts import normalize_phase_record
 from ftx_paper.strategies.orderflow.phase7_projection import build_phase7_projection
 from ftx_paper.strategies.orderflow.state_machine_reporting import build_replay_payload
-from ftx_paper.strategies.orderflow.state_machine_types import LocationRegistry, ReplayContext
+from ftx_paper.strategies.orderflow.state_machine_types import LocationRegistry, OrderflowState
 from ftx_paper.strategies.orderflow.templates import (
     DEFAULT_TEMPLATES,
     Direction,
@@ -509,7 +509,7 @@ def test_execution_trace_diagnostics_fails_closed_when_stream_is_unavailable() -
 
 
 def test_replay_context_records_interactions_and_explicit_phase_facts() -> None:
-    context = ReplayContext(execution_engine=ExecutionEngine())
+    context = OrderflowState(execution_engine=ExecutionEngine())
     context.record_event({
         "kind": "interaction_created",
         "identity": "interaction:NIFTY:2026-10-05:OR_HIGH:1m:09:19",
@@ -542,7 +542,7 @@ def test_replay_context_records_interactions_and_explicit_phase_facts() -> None:
 
 
 def test_interaction_response_phase_fact_keeps_direct_fields_and_session_date() -> None:
-    context = ReplayContext(execution_engine=ExecutionEngine())
+    context = OrderflowState(execution_engine=ExecutionEngine())
     context.current_session_date = "2026-10-05"
     context.record_event({
         "kind": "location_interaction_observed",
@@ -560,7 +560,7 @@ def test_interaction_response_phase_fact_keeps_direct_fields_and_session_date() 
 
 
 def test_interaction_response_phase_fact_serializes_datetime_causal_times() -> None:
-    context = ReplayContext(execution_engine=ExecutionEngine())
+    context = OrderflowState(execution_engine=ExecutionEngine())
     observed_at = datetime(2026, 10, 5, 3, 49, tzinfo=timezone.utc)
     available_at = datetime(2026, 10, 5, 3, 50, tzinfo=timezone.utc)
     context.record_event({
@@ -577,7 +577,7 @@ def test_interaction_response_phase_fact_serializes_datetime_causal_times() -> N
 
 def test_opening_interaction_is_published_as_a_lifecycle_event_only() -> None:
     registry = LocationRegistry("test")
-    context = ReplayContext(
+    context = OrderflowState(
         location_registry=registry,
         execution_engine=ExecutionEngine(),
     )
@@ -672,7 +672,7 @@ def _aggregate(
 
 
 def test_pd_role_context_uses_post_contact_evidence_and_has_context_identity() -> None:
-    context = ReplayContext(execution_engine=ExecutionEngine())
+    context = OrderflowState(execution_engine=ExecutionEngine())
     creation = _aggregate(
         "5m",
         "2026-10-01T03:45:00+00:00",

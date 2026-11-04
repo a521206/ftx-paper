@@ -12,7 +12,7 @@ from .opportunity_coordinator import OpportunityCoordinator, OpportunityReplayHo
 from .state_machine_types import LocationRegistry
 from .templates import DEFAULT_TEMPLATES, TradeTemplate
 from .timestamps import coerce_timestamp
-from .transition import OrderflowTransitionOwner
+from .transition import OrderflowEngine
 
 
 class OrderflowOpportunityHost:
@@ -20,7 +20,7 @@ class OrderflowOpportunityHost:
 
     def __init__(
         self,
-        transition: OrderflowTransitionOwner,
+        transition: OrderflowEngine,
         *,
         detector: InteractionDetector,
         templates: Mapping[str, TradeTemplate] | None = None,
@@ -73,7 +73,7 @@ class OrderflowOpportunityHost:
 
 
 def build_opportunity_coordinator(
-    transition: OrderflowTransitionOwner,
+    transition: OrderflowEngine,
     *,
     detector: InteractionDetector,
     templates: Mapping[str, TradeTemplate] | None = None,

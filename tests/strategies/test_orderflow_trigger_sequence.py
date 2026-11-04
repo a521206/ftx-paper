@@ -6,7 +6,8 @@ from ftx_paper.strategies.orderflow.interaction_detector import InteractionDetec
 from ftx_paper.strategies.orderflow.state_machine_evidence import acceptance_trigger_evidence
 from ftx_paper.strategies.orderflow.state_machine_types import ExecutionConstraints, LocationRegistry
 from ftx_paper.strategies.orderflow.templates import Direction, TRADE_TEMPLATES
-from ftx_paper.strategies.orderflow.transition import OrderflowTransitionOwner
+from ftx_paper.strategies.orderflow.coordinator import OrderflowInput
+from ftx_paper.strategies.orderflow.transition import OrderflowEngine
 
 
 def _row(*, open_: float, high: float, low: float, close: float, volume: float = 100.0) -> dict[str, object]:
@@ -55,7 +56,7 @@ def test_opening_seed_remains_provisional(monkeypatch) -> None:
     monkeypatch.setattr(module, "build_context_scores", lambda *args, **kwargs: (1.0, 0.0))
     registry = LocationRegistry("test")
     registry.register_opening_range(99.0, 101.0, candle.available_at, atr=1.0)
-    transition = OrderflowTransitionOwner(registry)
+    transition = OrderflowEngine(registry)
     transition.context.execution_constraints = ExecutionConstraints(
         fill_permission_margin=None,
     )
@@ -85,6 +86,19 @@ def test_opening_seed_remains_provisional(monkeypatch) -> None:
     assert next(iter(transition.context.opportunities.values())).episode_confirmed is False
 
 
+def test_transition_publishes_current_one_minute_aggregates_to_context() -> None:
+    one_minute = Aggregate(
+        "2026-10-01T09:20", "2026-10-01T09:20", "2026-10-01T09:21",
+        "1m", 1, 100.0, 101.0, 99.0, 100.5, 100,
+        "NIFTY", "", "2026-10-01", "one-minute",
+    )
+    transition = OrderflowEngine(LocationRegistry("test"))
+
+    transition.advance(OrderflowInput(one_minute))
+
+    assert transition.context.aggregates["1m"] == [one_minute]
+
+
 def test_episode_promotion_is_idempotent_and_invalidates_competitor() -> None:
     events: list[dict[str, object]] = []
     invalidations: list[tuple[object, str]] = []
@@ -108,14 +122,14 @@ def test_episode_promotion_is_idempotent_and_invalidates_competitor() -> None:
     )
     bar_events: list[dict[str, object]] = []
 
-    OrderflowTransitionOwner.promote_episode(
+    OrderflowEngine.promote_episode(
         owner,
         life,
         observed_at="2026-10-01T03:50:00Z",
         available_at="2026-10-01T03:51:00Z",
         bar_events=bar_events,
     )
-    OrderflowTransitionOwner.promote_episode(
+    OrderflowEngine.promote_episode(
         owner,
         life,
         observed_at="2026-10-01T03:52:00Z",

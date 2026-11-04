@@ -27,7 +27,7 @@ from ftx_paper.strategies.orderflow.orderflow_common import LIQUIDITY_PROBE
 from ftx_paper.strategies.orderflow.state_machine_types import (
     BALANCE,
     EXHAUSTION_RISK,
-    ReplayContext,
+    OrderflowState,
 )
 from ftx_paper.strategies.orderflow.templates import Direction, ExitExecutionTiming
 
@@ -123,9 +123,9 @@ def _interaction() -> InteractionSnapshot:
     )
 
 
-def _open_lifecycle() -> tuple[ReplayContext, ExecutionEngine, ExecutionCoordinator, SetupOpportunity]:
+def _open_lifecycle() -> tuple[OrderflowState, ExecutionEngine, ExecutionCoordinator, SetupOpportunity]:
     engine = ExecutionEngine()
-    context = ReplayContext(execution_engine=engine)
+    context = OrderflowState(execution_engine=engine)
     context.interactions["ix-1"] = _interaction()
     life = _opportunity()
     context.opportunities[life.lifecycle_id] = life
@@ -227,7 +227,7 @@ def test_pending_conditional_exit_at_entry_blocks_partial_3r() -> None:
 
 
 def _filled_lifecycle(
-    context: ReplayContext, engine: ExecutionEngine, life: SetupOpportunity
+    context: OrderflowState, engine: ExecutionEngine, life: SetupOpportunity
 ) -> ExecutionEngine:
     engine.register(life.lifecycle_id)
     intent = TradeIntent(
@@ -270,7 +270,7 @@ def _filled_lifecycle(
 
 def test_same_call_activation_reflects_same_call_fixed_target_exit() -> None:
     engine = ExecutionEngine()
-    context = ReplayContext(execution_engine=engine)
+    context = OrderflowState(execution_engine=engine)
     context.interactions["ix-1"] = _interaction()
     life = _opportunity()
     context.opportunities[life.lifecycle_id] = life
@@ -294,7 +294,7 @@ def test_same_call_activation_reflects_same_call_fixed_target_exit() -> None:
 
 def test_activated_3r_preempts_same_call_fixed_target_exit() -> None:
     engine = ExecutionEngine()
-    context = ReplayContext(execution_engine=engine)
+    context = OrderflowState(execution_engine=engine)
     context.interactions["ix-1"] = _interaction()
     life = _opportunity()
     context.opportunities[life.lifecycle_id] = life

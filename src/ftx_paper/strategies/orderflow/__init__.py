@@ -32,15 +32,14 @@ from .host_adapter import (
 )
 from .state_machine_types import CanonicalExecutionProposal
 from .opportunity_coordinator import LifecycleFormation, OpportunityCoordinator
-from .coordinator import OrderflowAdvance, OrderflowClockInput, OrderflowCoordinator
+from .coordinator import OrderflowAdvance, OrderflowInput, OrderflowCoordinator
 from .execution import ExecutionCoordinator
-from .transition import OrderflowTransitionOwner, TransitionAdvance
+from .transition import OrderflowEngine, TransitionAdvance
 from .paper_runtime import PaperOrderflowRuntime
 from .providers import CanonicalFormationProvider, CanonicalInputEnvelope, OrderflowInputStream
 from .feature_store import FeatureStore
 from .evidence_publication import AtrPublication, EvidencePublication, publish_phase4a_evidence
 from .evidence import EvidenceAdapter, PaperFeatureAdapter, SerializedEvidenceAdapter, evidence_payload, produce_evidence, serialize_evidence
-from .state_machine import ReplayState
 from .state_machine_reporting import build_replay_payload
 from .timestamps import NIFTY_ZONE, UTC, nifty_label, parse_nifty_label, parse_utc, require_utc, serialize_utc
 
@@ -56,13 +55,13 @@ __all__ = [
     "HostOutputEnvelope", "LAYERS", "LEDGER_KINDS", "LifecycleFormation",
     "LiveHostInputAdapter", "LiveInputAdapter", "LiveSourceAdapter", "MarketEvidence",
     "MarketObservation", "NIFTY_ZONE", "ObservationGap", "OpportunityCoordinator",
-    "OrderflowAdvance", "OrderflowClockInput", "OrderflowConfig", "OrderflowCoordinator",
+    "OrderflowAdvance", "OrderflowInput", "OrderflowConfig", "OrderflowCoordinator",
     "OrderflowExecutionAdapter", "OrderflowInputStream", "OrderflowStrategy",
-    "OrderflowStrategyFactory", "OrderflowTransitionOwner", "ORDERFLOW_NAME",
+    "OrderflowStrategyFactory", "OrderflowEngine", "ORDERFLOW_NAME",
     "ORDERFLOW_VERSION", "PARITY_PAYLOAD_KEYS", "PHASE7_STREAMS", "PHASE_STREAMS",
     "PaperFeatureAdapter", "PaperOrderProposal", "PaperOrderflowRuntime",
     "PriorSessionValueReference", "ReplayHostInputAdapter", "ReplayInputAdapter",
-    "ReplaySourceAdapter", "ReplayState", "RuntimeBoundaryArtifact", "SCHEMA_VERSION",
+    "ReplaySourceAdapter", "RuntimeBoundaryArtifact", "SCHEMA_VERSION",
     "STRATEGY_ID", "SerializedEvidenceAdapter", "TransitionAdvance", "UTC",
     "ValuePublication", "build_parity_artifact", "build_parity_artifact_from_payload",
     "build_phase4_artifact", "build_phase7_projection", "build_replay_payload",

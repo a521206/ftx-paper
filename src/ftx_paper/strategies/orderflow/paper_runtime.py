@@ -3,23 +3,24 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 from ftx_paper.domain.decision_context import DecisionContext
 from ftx_paper.execution.events import ExecutionNotification
 from ftx_paper.execution.service import ExecutionService
 from ftx_paper.contracts import MarketBar
+from ftx_paper.market.bundles import DecisionBundle
 
 from .boundary.orderflow import OrderflowStrategy
 from .boundary.orderflow_config import OrderflowConfig
-from .coordinator import OrderflowClockInput
+from .coordinator import OrderflowInput
 from .execution import ExecutionCoordinator
 from .execution_adapter import OrderflowExecutionAdapter
 from .evidence.serialization import evidence_payload
 from .evidence_publication import AtrPublication, publish_phase4a_evidence
 from .opportunity_coordinator import LifecycleFormation
 from .state_machine_types import LocationRegistry
-from .transition import OrderflowTransitionOwner
+from .transition import OrderflowEngine
 from .feature_store import CanonicalInputRow
 from .providers import OrderflowInputStream, CanonicalFormationProvider, PriorSessionLevels
 from .state_machine_reporting import build_replay_payload
@@ -60,21 +61,37 @@ class PaperOrderflowRuntime:
         self,
         *,
         config: OrderflowConfig | None = None,
-        transition_owner: OrderflowTransitionOwner | None = None,
+        strategy: OrderflowStrategy | None = None,
+        engine: OrderflowEngine | None = None,
         execution_adapter: OrderflowExecutionAdapter | None = None,
-        clock_input_provider: Callable[[object], OrderflowClockInput] | None = None,
-        formation_provider: Callable[[OrderflowClockInput], Sequence[LifecycleFormation]] | None = None,
+        clock_input_provider: Callable[[object], OrderflowInput] | None = None,
+        formation_provider: Callable[[OrderflowInput], Sequence[LifecycleFormation]] | None = None,
         formation_owner: object | None = None,
     ) -> None:
-        self.execution_adapter = execution_adapter or OrderflowExecutionAdapter()
-        self.transition_owner = transition_owner or OrderflowTransitionOwner(
+        if strategy is not None and any(
+            value is not None
+            for value in (config, engine, execution_adapter, clock_input_provider,
+                          formation_provider, formation_owner)
+        ):
+            raise ValueError("strategy cannot be combined with construction overrides")
+        self.execution_adapter = (
+            strategy.execution_adapter if strategy is not None and strategy.execution_adapter is not None
+            else execution_adapter or OrderflowExecutionAdapter()
+        )
+        if strategy is not None:
+            if strategy.execution_adapter is None:
+                strategy.bind_execution_adapter(self.execution_adapter)
+            self.engine = strategy.engine
+            self.strategy = strategy
+            return
+        self.engine = engine or OrderflowEngine(
             LocationRegistry("NIFTY::1m"),
             execution_owner=ExecutionCoordinator(),
             execution_adapter=self.execution_adapter,
         )
         self.strategy = OrderflowStrategy(
             config=config,
-            transition_owner=self.transition_owner,
+            engine=self.engine,
             execution_adapter=self.execution_adapter,
             clock_input_provider=clock_input_provider,
             formation_provider=formation_provider or CanonicalFormationProvider(owner=formation_owner),
@@ -104,10 +121,10 @@ class PaperOrderflowRuntime:
     def metadata(self):
         return self.strategy.metadata
 
-    def on_bundle(self, bundle: object) -> tuple[object, ...]:
+    def on_bundle(self, bundle: DecisionBundle) -> tuple[object, ...]:
         return self.strategy.on_bundle(bundle)
 
-    def evaluate(self, bundle: object, context: DecisionContext) -> tuple[object, ...]:
+    def evaluate(self, bundle: DecisionBundle, context: DecisionContext) -> tuple[object, ...]:
         return self.strategy.evaluate(bundle, context)
 
     def on_execution_event(self, event: ExecutionNotification) -> None:
@@ -162,7 +179,7 @@ class PaperOrderflowRuntime:
 
     def replay(
         self,
-        bundles: Iterable[object],
+        bundles: Iterable[DecisionBundle],
         *,
         cancelled: Callable[[], bool] | None = None,
     ) -> tuple[tuple[object, ...], ...]:
@@ -192,34 +209,30 @@ class PaperOrderflowRuntime:
             raise ValueError("unsupported orderflow runtime snapshot")
         strategy_snapshot = dict(snapshot)
         strategy_snapshot.pop("runtime_schema_version", None)
-        strategy = OrderflowStrategy.from_snapshot(strategy_snapshot)
-        return cls(
-            transition_owner=strategy._transition_owner,
-            execution_adapter=strategy._execution_adapter,
-        )
+        return cls(strategy=OrderflowStrategy.from_snapshot(strategy_snapshot))
 
     def parity_payload(self, rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
         """Project only producer-owned facts emitted by the canonical owner."""
         payload = build_replay_payload(
-            self.transition_owner, [], [], [dict(row) for row in rows], capture_mode="replay",
+            self.engine, [], [], [dict(row) for row in rows], capture_mode="replay",
         )
-        provider = self.strategy._clock_input_provider
-        envelopes = getattr(provider, "envelopes", ())
+        stream = self.strategy.input_stream
+        envelopes = stream.envelopes if stream is not None else ()
         if envelopes:
             latest = envelopes[-1].input
-            locations = tuple(self.transition_owner.location_registry.records.values())
+            locations = tuple(self.engine.location_registry.records.values())
             publication = publish_phase4a_evidence(
-                atr=latest.atr,
+                atr=cast(AtrPublication, latest.atr),
                 locations=locations,
                 vwap_measurements=_published_vwap_measurements(locations),
                 prior_value=latest.prior_value,
                 contexts=tuple(
                     context
-                    for versions in self.transition_owner.context.market_contexts.versions.values()
+                    for versions in self.engine.context.market_contexts.versions.values()
                     for context in versions
                 ),
                 unavailable=envelopes[-1].unavailable,
-                location_stream_id=self.transition_owner.location_registry.stream_id,
+                location_stream_id=self.engine.location_registry.stream_id,
             )
             payload["evidence"] = evidence_payload({
                 "session_date": rows[0].get("session_date") if rows else None,

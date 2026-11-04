@@ -48,7 +48,7 @@ from .orderflow_common import (
 )
 from .policies import PDPolicy, LocationPolicy, StandardLocationPolicy
 from .policies.base import HypothesisEvaluation
-from .state_machine_types import LocationRegistry, ReplayContext
+from .state_machine_types import LocationRegistry, OrderflowState
 from .templates import (
     OpeningInteractionKind,
     TradeTemplate,
@@ -86,7 +86,7 @@ def policy_for(location: LocationTemplate) -> LocationPolicy:
 
 class OpportunityReplayHost(Protocol):
     @property
-    def context(self) -> ReplayContext: ...
+    def context(self) -> OrderflowState: ...
 
     @property
     def execution(self) -> ExecutionCoordinator: ...

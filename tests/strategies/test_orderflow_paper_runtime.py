@@ -33,9 +33,18 @@ def test_bounded_replay_uses_fresh_owner_and_is_idempotent() -> None:
     retry = PaperOrderflowRuntime()
     retry.replay((bundle,))
 
-    assert first.transition_owner.parity_streams == retry.transition_owner.parity_streams
-    assert first.transition_owner.clock == retry.transition_owner.clock
+    assert first.engine.parity_streams == retry.engine.parity_streams
+    assert first.engine.clock == retry.engine.clock
     assert PaperOrderflowRuntime().replay((bundle,), cancelled=lambda: True) == ()
+
+
+def test_snapshot_restore_connects_runtime_execution_adapter() -> None:
+    runtime = PaperOrderflowRuntime()
+
+    restored = PaperOrderflowRuntime.from_snapshot(runtime.snapshot())
+
+    assert restored.strategy.execution_adapter is restored.execution_adapter
+    assert restored.engine.execution_adapter is restored.execution_adapter
 
 
 def test_input_stream_reports_selected_bundle_route_and_observation_counts() -> None:
@@ -442,7 +451,7 @@ def test_execution_notifications_are_recorded_by_canonical_owner_once() -> None:
     runtime.on_execution_event(notification)
     runtime.on_execution_event(notification)
 
-    streams = runtime.transition_owner.parity_streams
+    streams = runtime.engine.parity_streams
     assert len(streams["execution_transitions"]) == 1
     assert streams["execution_transitions"][0]["kind"] == "filled"
 

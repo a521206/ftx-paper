@@ -43,6 +43,7 @@ def api_main() -> None:
     from ftx_paper.broker.shoonya import ShoonyaAuth
     from ftx_paper.broker.xts import XTSAuth
     from ftx_paper.broker.zerodha import ZerodhaAuth
+    from ftx_paper.strategies.orderflow.replay_runner import OrderflowReplayRunner
     from ftx_paper.config import PaperConfig
     from ftx_paper.domain.capital import CapitalRuntimeContext, RESEARCH_CAPITAL_PROFILE
     from ftx_paper.domain.portfolio import PortfolioState
@@ -146,6 +147,9 @@ def api_main() -> None:
             parity_projector=build_parity_artifact,
             artifact_store=artifact_store,
             setup_worker=setup_worker,
+        )
+        replay_worker.register_runner(
+            "ftx-paper-orderflow", OrderflowReplayRunner(replay_worker),
         )
         operations = RuntimeOperations(session, replay_worker)
         if auth is not None and auth.access_token() is not None:

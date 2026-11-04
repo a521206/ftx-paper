@@ -305,7 +305,7 @@ MARKET_STATE_RULES = MarketStateRules()
 
 
 @dataclass
-class ContinuousReplayContext:
+class ContinuousState:
     registry: LocationRegistry
     prior_values: list[Any] = field(default_factory=list)
     last_completed_bar: Aggregate | None = None
@@ -360,7 +360,7 @@ class MarketContextStore:
 
 
 @dataclass
-class ReplayContext:
+class OrderflowState:
     rows: list[dict[str, Any]] = field(default_factory=list)
     rows_by_date: Mapping[str, Sequence[Mapping[str, object]]] = field(default_factory=dict)
     atr_by_session: Mapping[str, float | None] = field(default_factory=dict)
@@ -553,12 +553,12 @@ class ReplayContext:
 
     def __post_init__(self) -> None:
         if self.execution_engine is None:
-            raise ValueError("ReplayContext requires an injected execution engine")
+            raise ValueError("OrderflowState requires an injected execution engine")
         if self.opening_gap_policy is None:
             from .opening_gap_policy import OpeningGapPolicy
             self.opening_gap_policy = OpeningGapPolicy()
         if self.continuous is None and self.location_registry is not None:
-            self.continuous = ContinuousReplayContext(registry=self.location_registry)
+            self.continuous = ContinuousState(registry=self.location_registry)
 
     def register_opportunity(self, opportunity: SetupOpportunity) -> bool:
         if opportunity.causal_identity is not None:
