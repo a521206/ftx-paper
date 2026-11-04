@@ -120,7 +120,7 @@ def test_transition_publishes_current_one_minute_aggregates_to_context() -> None
     assert transition.context.aggregates["1m"] == [one_minute]
 
 
-def test_transition_handles_structure_before_publishing_ordinary_context(monkeypatch) -> None:
+def test_transition_publishes_ordinary_context_before_structure(monkeypatch) -> None:
     one_minute = Aggregate(
         "2026-10-01T09:20", "2026-10-01T09:20", "2026-10-01T09:21",
         "1m", 1, 100.0, 101.0, 99.0, 100.5, 100,
@@ -136,7 +136,6 @@ def test_transition_handles_structure_before_publishing_ordinary_context(monkeyp
 
     def handle_structure(*_args: object) -> None:
         calls.append("structure")
-        assert transition.context.last_confirmation_context_time is None
 
     monkeypatch.setattr(
         transition.opportunity_owner,
@@ -151,7 +150,7 @@ def test_transition_handles_structure_before_publishing_ordinary_context(monkeyp
 
     transition.advance(OrderflowInput(one_minute, five_minute=five_minute))
 
-    assert calls.index("structure") < calls.index("ordinary_context")
+    assert calls.index("ordinary_context") < calls.index("structure")
 
 
 def test_episode_promotion_is_idempotent_and_invalidates_competitor() -> None:

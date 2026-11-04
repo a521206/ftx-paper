@@ -563,7 +563,6 @@ class OrderflowEngine:
             )
         if self._clock is not None and available_at < self._clock:
             raise ValueError("orderflow transition clock cannot move backwards")
-        ordinary_market_state = self.context.market_state
         self._proposal_buffer.begin_transition()
         previous_session = self.context.current_session_date
         self.context.input_diagnostics.append({
@@ -681,24 +680,6 @@ class OrderflowEngine:
         self.opportunity_owner.handle_opening_interaction(
             row, timestamp, next_time, bar_events,
         )
-        if item.five_minute is not None:
-            latest = item.five_minute
-            if self.context.last_confirmation_context_time != latest.time:
-                self.context.input_diagnostics.append({
-                    "kind": "ordinary_context_boundary",
-                    "time": timestamp,
-                    "available_at": next_time,
-                    "context_time": nifty_label(latest.time),
-                    "market_state_argument": ordinary_market_state,
-                    "market_state_current": self.context.market_state,
-                    "last_confirmation_context_time": (
-                        nifty_label(self.context.last_confirmation_context_time)
-                        if self.context.last_confirmation_context_time is not None else None
-                    ),
-                })
-                self._publisher.ordinary_context(
-                    latest, market_state=ordinary_market_state,
-                )
         self._publisher.context_location(item)
         generated_formations = self.opportunity_owner.formations_for(next_time)
         accepted_formations = self._accept_formations(
@@ -835,6 +816,7 @@ class OrderflowEngine:
         """Publish the completed-5m permission regime (canonical handle_permission)."""
         context = self.context
         context.previous5_available_at = latest.available_at
+        self._publisher.ordinary_context(latest)
         current = self._opening_gap.current(latest.session_date)
         ordinary_reference = context.market_contexts.ordinary_context
         context.regime = context.opening_gap_policy.regime_for(
