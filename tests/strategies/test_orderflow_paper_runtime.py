@@ -230,7 +230,7 @@ def test_execution_proposals_are_drained_by_host_not_transition_owner() -> None:
         None, "life-1", "intent-1", 1.0,
         "2026-10-01T09:15:00+05:30", "2026-10-01T09:16:00+05:30", True,
     )
-    runtime.engine._host_proposals = (proposal,)
+    runtime.engine._proposal_buffer.publish("intent-1", proposal)
     authorized: list[object] = []
     runtime.execution_adapter.authorize = lambda value, *, timestamp: authorized.append(value)
 
@@ -259,10 +259,10 @@ def test_orderflow_snapshot_rejects_transient_execution_proposals() -> None:
         runtime.snapshot()
 
     runtime.engine.context.execution_proposals.clear()
-    runtime.engine._host_proposals = (object(),)
+    runtime.engine._proposal_buffer.publish("pending", object())
     with pytest.raises(RuntimeError, match="pending execution proposals"):
         runtime.snapshot()
-    runtime.engine._host_proposals = ()
+    runtime.engine.drain_host_proposals()
     assert "execution_proposals" not in runtime.snapshot()["canonical"]
 
 

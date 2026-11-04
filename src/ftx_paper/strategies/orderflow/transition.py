@@ -13,19 +13,19 @@ from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
 
+from ftx_paper.contracts import Instrument
 from ftx_paper.execution.events import ExecutionNotification
 
 from .coordinator import OrderflowAdvance, OrderflowInput, OrderflowCoordinator
 from .execution import (
     AdmissionStatus,
     ExecutionCoordinator,
-    ExecutionEngine,
     ExecutionState,
     IntentStatus,
 )
+from .execution_adapter import OrderflowExecutionAdapter, PaperOrderProposal
 from .contextual import build_context_scores
 from .hierarchy import (
-    MarketContext,
     Permission,
     TriggerObservation,
 )
@@ -45,6 +45,8 @@ from .orderflow_common import Aggregate
 from .timestamps import coerce_timestamp, nifty_label, serialize_utc
 from . import snapshot_codec
 from .session_policy import classify_opening_gap
+from .proposal_buffer import ProposalBuffer
+from .publication import TransitionPublisher
 
 
 def _execution_trace_state(state: Any) -> dict[str, Any]:
@@ -85,7 +87,7 @@ class TransitionAdvance:
 
     observation: OrderflowAdvance
     execution: Mapping[str, tuple[dict[str, Any], ...]]
-    host_proposals: tuple[Any, ...] = ()
+    host_proposals: tuple[PaperOrderProposal, ...] = ()
 
 
 @dataclass(slots=True)
@@ -96,14 +98,14 @@ class OrderflowEngine:
     observation_owner: OrderflowCoordinator = field(init=False)
     opportunity_owner: OpportunityCoordinator = field(init=False)
     execution_owner: ExecutionCoordinator = field(default_factory=ExecutionCoordinator)
-    execution_adapter: Any | None = None
+    execution_adapter: OrderflowExecutionAdapter | None = None
     rows_by_date: Mapping[str, Sequence[Mapping[str, object]]] = field(default_factory=dict, repr=False)
     atr_by_session: Mapping[str, float | None] | None = field(default=None, repr=False)
     context: OrderflowState = field(init=False)
     _clock: datetime | None = field(default=None, init=False, repr=False)
-    _published_intents: set[str] = field(default_factory=set, init=False, repr=False)
     _execution_notifications: set[str] = field(default_factory=set, init=False, repr=False)
-    _host_proposals: tuple[Any, ...] = field(default=(), init=False, repr=False)
+    _proposal_buffer: ProposalBuffer = field(default_factory=ProposalBuffer, init=False, repr=False)
+    _publisher: TransitionPublisher = field(init=False, repr=False)
 
     @staticmethod
     def _intent_allows_requalification(state: Any) -> bool:
@@ -127,12 +129,14 @@ class OrderflowEngine:
             rows_by_date=self.rows_by_date,
             atr_by_session=self.atr_by_session or {},
             location_registry=self.location_registry,
-            execution_engine=ExecutionEngine(),
+            execution_engine=self.execution_owner.engine,
         )
-        # OrderflowState is the canonical mutable execution owner.  The
-        # coordinator is only a service facade over that same instance.
-        self.execution_owner.engine = self.context.execution_engine
+        if self.context.execution_engine is not self.execution_owner.engine:
+            raise RuntimeError("orderflow execution ownership is not shared")
+        # OrderflowState and the coordinator are constructed around one engine.
+        # The coordinator remains a facade, while the state owns the reference.
         self.execution_owner.machine = self
+        self._publisher = TransitionPublisher(self)
         from .opportunity_replay_host import build_opportunity_coordinator
         self.opportunity_owner = build_opportunity_coordinator(
             self,
@@ -193,11 +197,9 @@ class OrderflowEngine:
     def parity_streams(self) -> dict[str, list[dict[str, Any]]]:
         return self.context.parity_snapshot()
 
-    def drain_host_proposals(self) -> tuple[Any, ...]:
+    def drain_host_proposals(self) -> tuple[PaperOrderProposal, ...]:
         """Return host proposals emitted by the most recent transition."""
-        proposals = self._host_proposals
-        self._host_proposals = ()
-        return proposals
+        return self._proposal_buffer.drain()
 
     def snapshot(self) -> dict[str, Any]:
         """Return the complete canonical mutable state and producer prefix."""
@@ -205,7 +207,7 @@ class OrderflowEngine:
         # Execution proposals are a synchronous transition buffer.  They are
         # drained by the host before a completed-input checkpoint is written;
         # persisting them would make recovery depend on a transient proposal.
-        if context.execution_proposals or self._host_proposals:
+        if context.execution_proposals or self._proposal_buffer.has_pending():
             raise RuntimeError("cannot snapshot orderflow state with pending execution proposals")
         return {
             "schema_version": 2,
@@ -262,7 +264,7 @@ class OrderflowEngine:
                 "neutral_keys_by_causal_id": snapshot_codec.tuple_mapping_snapshot(
                     context.neutral_keys_by_causal_id,
                 ),
-                "published_intents": sorted(self._published_intents),
+                "published_intents": list(self._proposal_buffer.published_intents()),
                 "execution_notifications": sorted(self._execution_notifications),
             },
             "events": deepcopy(context.events),
@@ -287,6 +289,14 @@ class OrderflowEngine:
         observed = snapshot.get("parity_observed", [])
         if not isinstance(observed, list) or any(not isinstance(item, str) for item in observed):
             raise ValueError("orderflow snapshot parity_observed is invalid")
+        canonical = snapshot.get("canonical_state")
+        if canonical is not None and not isinstance(canonical, Mapping):
+            raise ValueError("orderflow snapshot canonical_state is invalid")
+        if isinstance(canonical, Mapping):
+            for name in ("published_intents", "execution_notifications"):
+                value = canonical.get(name, [])
+                if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+                    raise ValueError(f"orderflow snapshot {name} is invalid")
         self._clock = coerce_timestamp(raw_clock) if raw_clock else None
         self.context.events = deepcopy(snapshot.get("events", []))
         self.context.transitions = deepcopy(snapshot.get("transitions", []))
@@ -442,7 +452,7 @@ class OrderflowEngine:
             }
         if isinstance(canonical.get("setup_number"), int):
             self.context.setup_number = canonical["setup_number"]
-        self._published_intents = set(canonical.get("published_intents", ()))
+        self._proposal_buffer.restore(canonical.get("published_intents", ()))
         self._execution_notifications = set(canonical.get("execution_notifications", ()))
 
     @property
@@ -525,7 +535,7 @@ class OrderflowEngine:
         bar_opens: Mapping[str, float] | None = None,
         decision_scores: Mapping[str, tuple[float | None, float | None]] | None = None,
         constraints: ExecutionConstraints | None = None,
-        instrument: Any | None = None,
+        instrument: Instrument | None = None,
     ) -> TransitionAdvance:
         """Advance one completed bar through the shared causal lifecycle.
 
@@ -544,7 +554,7 @@ class OrderflowEngine:
             )
         if self._clock is not None and available_at < self._clock:
             raise ValueError("orderflow transition clock cannot move backwards")
-        self._host_proposals = ()
+        self._proposal_buffer.begin_transition()
         previous_session = self.context.current_session_date
         self.context.input_diagnostics.append({
             "kind": "orderflow_clock_input",
@@ -562,13 +572,7 @@ class OrderflowEngine:
                 **self.context.atr_by_session,
                 item.one_minute.session_date: item.atr.value,
             }
-        observation = self.observation_owner.advance(item)
-        row = item.one_minute.to_dict()
-        if not any(
-            str(existing.get("time")) == str(item.one_minute.time)
-            for existing in self.context.rows
-        ):
-            self.context.rows.append(row)
+        observation, row, available5 = self._advance_observation(item)
         if regime is not None:
             self.context.regime = regime
         if constraints is not None:
@@ -588,9 +592,6 @@ class OrderflowEngine:
             )
         else:
             self.context.current_session_date = item.one_minute.session_date
-        available5 = list(self.observation_owner.five_minute_aggregates)
-        self.context.aggregates["1m"] = list(self.observation_owner.one_minute_aggregates)
-        self.context.aggregates["5m"] = available5
         pre_execution_events = self._settle_pending_execution(
             index=0,
             timestamp=timestamp,
@@ -607,7 +608,7 @@ class OrderflowEngine:
             )
         for event in observation.events:
             self.context.record_event(event)
-        self._record_phase4_source_observations(
+        self._publisher.source_observations(
             (*self.observation_owner.one_minute_aggregates, *available5),
         )
         new_5m = bool(
@@ -620,7 +621,7 @@ class OrderflowEngine:
         if item.five_minute is not None:
             latest = item.five_minute
             if self.context.last_confirmation_context_time != latest.time:
-                self._publish_ordinary_context(latest)
+                self._publisher.ordinary_context(latest)
         self.update_gap_state(
             item.one_minute.session_date,
             list(self.observation_owner.one_minute_aggregates),
@@ -645,7 +646,7 @@ class OrderflowEngine:
         self.opportunity_owner.handle_opening_interaction(
             row, timestamp, next_time, bar_events,
         )
-        self._record_phase4_context_location(item)
+        self._publisher.context_location(item)
         generated_formations = self.opportunity_owner.formations_for(next_time)
         accepted_formations = self._accept_formations(
             (*formations, *generated_formations),
@@ -671,7 +672,7 @@ class OrderflowEngine:
             instrument=instrument,
             pre_execution_done=True,
         )
-        host_proposals = self._host_proposals
+        host_proposals = self._proposal_buffer.drain()
         self._clock = available_at
         return TransitionAdvance(
             observation=observation,
@@ -682,147 +683,21 @@ class OrderflowEngine:
             host_proposals=host_proposals,
         )
 
-    def _record_phase4_context_location(self, item: OrderflowInput) -> None:
-        """Publish canonical context/location facts for completed aggregates."""
-        context = self.context
-        ordinary = (
-            context.market_contexts.resolve(context.market_contexts.ordinary_context)
-            if context.market_contexts.ordinary_context is not None else None
-        )
-        observations_by_timeframe = {
-            "1m": tuple(
-                observation for observation in item.observations_1m
-                if observation.timeframe == "1m"
-                and observation.source_aggregate_id == nifty_label(item.one_minute.time)
-                and observation.reference_source_timeframe in {None, "1m"}
-            ),
-        }
-        aggregates = [(item.one_minute, observations_by_timeframe["1m"])]
-        if item.five_minute is not None:
-            observations_by_timeframe["5m"] = tuple(
-                observation for observation in item.observations_5m
-                if observation.timeframe == "5m"
-                and observation.source_aggregate_id == nifty_label(item.five_minute.time)
-            )
-            aggregates.append((item.five_minute, observations_by_timeframe["5m"]))
-        known = {
-            str(fact.get("identity"))
-            for fact in context.parity_streams.get("context_location", ())
-        }
-        for aggregate, observations in aggregates:
-            identity = f"context-location:{aggregate.timeframe}:{nifty_label(aggregate.time)}"
-            if identity in known:
-                continue
-            context.record_parity_fact("context_location", {
-                "kind": "context_location_observed",
-                "occurred_at": aggregate.end_time,
-                "observed_at": aggregate.end_time,
-                "available_at": aggregate.available_at,
-                "identity": identity,
-                "causal_parent_id": f"aggregate:{aggregate.timeframe}:{nifty_label(aggregate.time)}",
-                "values": {
-                    "timeframe": aggregate.timeframe,
-                    "source_observation_id": f"aggregate:{aggregate.timeframe}:{nifty_label(aggregate.time)}",
-                    "context": {
-                        "context_id": ordinary.context_id,
-                        "version": ordinary.version,
-                        "location": ordinary.location,
-                        "market_state": ordinary.market_state,
-                        "available_at": ordinary.available_at,
-                        "parent_context_id": ordinary.parent_context_id,
-                        "definition_version": ordinary.definition_version,
-                        "source_provenance": list(ordinary.source_provenance),
-                    } if ordinary is not None else None,
-                    "locations": [observation.to_dict() for observation in observations],
-                },
-                "unavailable": [] if ordinary is not None and observations else ["missing_context"],
-            })
-            known.add(identity)
-
-    def _record_phase4_source_observations(
-        self, aggregates: Sequence[Aggregate],
-    ) -> None:
-        """Record source facts once, at the owner that advances causal time."""
-        known = {
-            str(fact.get("identity"))
-            for fact in self.context.parity_streams.get("source_observation", ())
-        }
-        one_minute = self.observation_owner.one_minute_aggregates
-        for aggregate in aggregates:
-            identity = f"aggregate:{aggregate.timeframe}:{nifty_label(aggregate.time)}"
-            if identity in known:
-                continue
-            children = tuple(
-                child for child in one_minute
-                if aggregate.timeframe == "5m"
-                and aggregate.time <= child.time <= aggregate.end_time
-                and child.available_at <= aggregate.available_at
-            )
-            self.context.record_parity_fact("source_observation", {
-                "kind": "source_observation",
-                "occurred_at": aggregate.end_time,
-                "observed_at": aggregate.end_time,
-                "available_at": aggregate.available_at,
-                "sequence": len(self.context.parity_streams.get("source_observation", ())),
-                "identity": identity,
-                "causal_parent_id": (
-                    f"aggregate:1m:{nifty_label(children[-1].time)}"
-                    if children else None
-                ),
-                "values": {
-                    "aggregate": aggregate.to_dict(),
-                    "source_fingerprint": aggregate.source_fingerprint,
-                },
-                "unavailable": [],
-                "lineage": [
-                    f"aggregate:1m:{nifty_label(child.time)}" for child in children
-                ],
-            })
-            known.add(identity)
-
-    def _publish_ordinary_context(self, latest: Aggregate) -> None:
-        """Publish the canonical 5m decision context at bar availability."""
-        context = self.context
-        scores = build_context_scores(
-            latest,
-            raw_rows=context.rows,
-            aggregates=context.aggregates,
-            atr=context.atr_by_session.get(latest.session_date),
-        )
-        long_score, short_score = scores if scores is not None else (None, None)
-        context_id = (
-            f"5m-context-{latest.symbol}-{latest.session_date}-1m_5m"
-        )
-        published = MarketContext(
-            context_id=context_id,
-            version=f"v{len(context.market_contexts.versions.get(context_id, ())) + 1}",
-            timestamp=latest.time,
-            available_at=latest.available_at,
-            location=None,
-            market_state=context.market_state,
-            definition_version="1m_5m",
-            source_timeframe="5m",
-            long_score=long_score,
-            short_score=short_score,
-            evidence=(
-                {
-                    "completed_bar": True,
-                    "open": latest.open,
-                    "high": latest.high,
-                    "low": latest.low,
-                    "close": latest.close,
-                },
-            ),
-            source_provenance=(
-                {
-                    "source_candle_id": nifty_label(latest.time),
-                    "available_at": latest.available_at,
-                },
-            ),
-        )
-        reference = context.publish_context(published)
-        context.market_contexts.ordinary_context = reference
-        context.last_confirmation_context_time = latest.time
+    def _advance_observation(
+        self, item: OrderflowInput,
+    ) -> tuple[OrderflowAdvance, dict[str, Any], list[Aggregate]]:
+        """Advance source observations and expose completed aggregate evidence."""
+        observation = self.observation_owner.advance(item)
+        row = item.one_minute.to_dict()
+        if not any(
+            str(existing.get("time")) == str(item.one_minute.time)
+            for existing in self.context.rows
+        ):
+            self.context.rows.append(row)
+        available5 = list(self.observation_owner.five_minute_aggregates)
+        self.context.aggregates["1m"] = list(self.observation_owner.one_minute_aggregates)
+        self.context.aggregates["5m"] = available5
+        return observation, row, available5
 
     def handle_session_boundary(
         self,
@@ -1112,7 +987,7 @@ class OrderflowEngine:
         next_time: str,
         row: Mapping[str, Any],
         available5: Sequence[Any] = (),
-        instrument: Any | None = None,
+        instrument: Instrument | None = None,
         pre_execution_done: bool = False,
     ) -> Mapping[str, tuple[dict[str, Any], ...]]:
         """Run the canonical execution clock for one completed 1m bar.
@@ -1253,7 +1128,7 @@ class OrderflowEngine:
         row: Mapping[str, Any],
         timestamp: str,
         next_time: str,
-        instrument: Any,
+        instrument: Instrument,
     ) -> None:
         from .execution import entry_fill_decision
 
@@ -1266,7 +1141,7 @@ class OrderflowEngine:
             if (
                 intent is None
                 or intent.status.value != "TRIGGERED"
-                or intent.intent_id in self._published_intents
+                or self._proposal_buffer.contains_intent(intent.intent_id)
             ):
                 continue
             decision = entry_fill_decision(
@@ -1287,8 +1162,7 @@ class OrderflowEngine:
                 observed_at=timestamp,
                 available_at=next_time,
             )
-            self._host_proposals = (*self._host_proposals, proposal)
-            self._published_intents.add(intent.intent_id)
+            self._proposal_buffer.publish(intent.intent_id, proposal)
 
     def decision_context_for_life(self, life: Any, as_of: str) -> Any | None:
         reference = getattr(life, "parent_context", None)
