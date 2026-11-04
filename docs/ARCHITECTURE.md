@@ -57,6 +57,27 @@ must reach runtime health and stop the affected path. Optional observers such
 as diagnostics and UI projections may be isolated, but must not mutate account
 state or issue orders.
 
+### Strategy Host Runners
+
+The runtime has one `RuntimeSession`, one shared `PortfolioState`, one account
+owner, and one Paper execution service. Strategies may nevertheless require
+different host processing contracts. The host runner is the strategy-specific
+adapter that connects a completed `DecisionBundle` to the shared runtime
+services; it is not a second runtime or account engine.
+
+The generic research path evaluates a strategy, collects `OrderIntent` values,
+arbitrates them against shared reservations, and performs Paper settlement. An
+owner-driven strategy such as orderflow advances its canonical transition owner
+once, drains the owner's execution proposals, and delegates authorization to
+its execution adapter. The generic order arbitration and settlement path must
+not run a second time for that strategy.
+
+Both host runners remain inside `RuntimeSession` and share transport, account
+context, portfolio, PaperBroker, persistence, recovery, and notifications.
+Host-runner selection is an injected composition capability, not a strategy-name
+branch in generic runtime code. Live and bounded replay select the corresponding
+host runner but call the same strategy transition for each completed input.
+
 SQLite writes follow in-memory mutations; they are not a rollback for engine,
 portfolio, broker, or execution changes. Do not blindly resubmit after a
 persistence or notification failure because a simulated fill may already have
@@ -200,8 +221,9 @@ The shared processing path is:
 
 ```text
 broker/input adapter -> normalized MarketBar -> market decision clock
-    -> strategy-neutral DecisionBundle -> Strategy
-    -> DecisionEvent / OrderIntent -> runtime authorization and reservation
+    -> strategy-neutral DecisionBundle -> strategy host runner
+    -> Strategy transition -> DecisionEvent / OrderIntent or owner proposal
+    -> runtime authorization and reservation through the selected host runner
     -> PaperExecutionCoordinator / PaperBroker -> PortfolioState
     -> runtime events, persistence, and API projections
 ```
@@ -223,7 +245,15 @@ Ownership is divided as follows:
 - `runtime` owns feed lifecycle, bar ingestion, bundle dispatch, account
   context, shared portfolio state, authorization, execution, settlement,
   persistence, recovery, and health. It must not branch on strategy names or
-  instantiate strategy-specific producers, context stores, or report builders.
+  instantiate strategy-specific producers, context stores, report builders, or
+  host policy. It may invoke an injected strategy host runner capability.
+- strategy host runners own the adapter-specific processing contract between a
+  strategy transition and shared runtime services. The generic runner handles
+  `OrderIntent` arbitration and settlement. An owner-driven runner, such as the
+  orderflow runner, only drains canonical proposals, delegates account-facing
+  authorization to the strategy execution adapter, and returns execution
+  outcomes to the owner. Neither runner owns a second portfolio, broker,
+  persistence store, or runtime lifecycle.
 - `replay` is a bounded host operation that drives the same bundle and strategy
   transition as live processing. It owns input scope, deterministic clock
   control, isolated replay state, generic capture, and comparison only.
@@ -248,6 +278,16 @@ prefix processed incrementally and through bounded replay must produce the same
 decision prefix. Strategy-specific ATR, context materialization, source
 preparation, and reporting belong to the strategy or an explicit strategy
 adapter, never to generic market or runtime helpers.
+
+The owner-driven orderflow path is intentionally distinct from the generic
+research order path. This is a host-boundary distinction, not a second runtime:
+orderflow's canonical owner performs lifecycle, admission, trigger, and
+execution-state transitions before publishing proposals; the host then performs
+Paper authorization, account mutation, persistence, and notification delivery.
+The generic research path may continue to collect and arbitrate `OrderIntent`
+values. A strategy must select exactly one host contract per completed input;
+running both contracts would create duplicate lifecycle or execution
+orchestration.
 
 The architectural removal test is mandatory: deleting a strategy package and its
 composition registration must leave generic market aggregation, runtime

@@ -203,6 +203,13 @@ remains governed by Phase 8 and Phase 10.**
 - use the same owner and per-input advancement contract in live and bounded
   replay. Capture both owner facts and Paper execution outcomes in the same
   artifact contract;
+- route strategy-specific host processing through an explicit host runner: the
+  research strategy may retain the generic `OrderIntent` arbitration path,
+  while orderflow uses an owner-driven proposal path that drains canonical
+  proposals and delegates authorization to `OrderflowExecutionAdapter`;
+- keep these host runners inside the shared `RuntimeSession` ownership model.
+  They must not create separate runtime sessions, portfolios, account owners,
+  brokers, persistence paths, or recovery owners;
 - retain `transition.py`, context/location replay, and comparison harnesses only
   as implementation seams or diagnostics, not parallel production owners; and
 - remove the production Phase 4 -> interaction -> Phase 4 double pass;
@@ -213,9 +220,13 @@ remains governed by Phase 8 and Phase 10.**
 The live `RuntimeSession` and bounded `ReplayWorker` now advance the same
 orderflow owner once per completed input. The owner emits Paper execution
 proposals without authorizing them; host adapters drain and authorize those
-proposals, with replay remaining diagnostic-only. Focused live/replay prefix
-and host-ownership tests pass. This does not close the cross-repository parity,
-or production replay migration gates.
+proposals, with replay remaining diagnostic-only. The remaining production
+integration is to make this host split explicit: research continues through the
+generic order path, while orderflow bypasses generic lifecycle arbitration and
+settlement after its owner transition. Both runners remain children of the one
+runtime/account owner. Focused live/replay prefix and host-ownership tests pass.
+This does not close the cross-repository parity, execution-bearing parity, or
+production replay migration gates.
 
 ### 9C. Complete Snapshot And Recovery
 
@@ -307,15 +318,22 @@ accepted.
    Reconcile availability/decision timestamps and the supporting-bar deadline;
    any accepted input variance must be documented and shown not to alter
    decisions.
-2. **Complete the shared strategy owner and host boundary.** **Implemented for
-   the current Paper boundary; parity acceptance remains open.** Route every live
-   and replay input through the same strategy transition/execution owner. Keep
-   Paper execution, account mutation, persistence, and artifact construction in
-   host adapters; remove duplicate production orchestration only after the
-   shared path passes its focused gates. Add a focused test proving live and
-   replay produce identical parity-stream prefixes for the same completed
-   inputs through that owner, with execution/account mutation occurring only in
-   the host adapter.
+2. **Complete the shared strategy owner and host boundary.** **Owner
+   implementation exists; explicit production host routing and parity acceptance
+   remain open.** Route every live and replay input through the same orderflow
+   transition/execution owner. Keep Paper execution, account mutation,
+   persistence, and artifact construction in host adapters. Use separate
+   strategy host runners within the shared `RuntimeSession`: research may use
+   generic `OrderIntent` arbitration and settlement, while orderflow must use an
+   owner-driven proposal runner that only drains canonical proposals,
+   authorizes them through `OrderflowExecutionAdapter`, and feeds outcomes back
+   to the owner. Do not create separate runtime sessions, portfolios, brokers,
+   persistence owners, or recovery owners. Remove the generic orderflow
+   lifecycle/arbitration path rather than allowing it to remain as a second
+   production orchestration path. Add focused tests proving live and replay
+   produce identical parity-stream prefixes for the same completed inputs
+   through the owner, and that execution/account mutation occurs only in the
+   selected host runner.
 3. **Pass execution-bearing parity and complete fact capture.** Rerun eligible
    source-matched sessions after UTC normalization. Compare no-trade and
    execution-bearing decision, execution/settlement, and portfolio-ledger
