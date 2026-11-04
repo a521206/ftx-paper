@@ -1,4 +1,4 @@
-"""Regression tests for canonical market-state latching and 3R exit preemption."""
+"""Regression tests for canonical market-state publication and 3R exit preemption."""
 
 from __future__ import annotations
 
@@ -33,6 +33,25 @@ from ftx_paper.strategies.orderflow.templates import Direction, ExitExecutionTim
 
 TIMESTAMP = "2026-10-01T03:49:00Z"
 NEXT_TIME = "2026-10-01T03:50:00Z"
+
+
+def test_market_event_keeps_context_state_in_sync_with_event() -> None:
+    context = OrderflowState(execution_engine=ExecutionEngine())
+    events: list[dict[str, Any]] = []
+
+    context.emit_market_event(
+        {"kind": "exit_signal", "owner": "position_management"},
+        EXHAUSTION_RISK,
+        events,
+    )
+    context.emit_market_event(
+        {"kind": "setup_candidate", "owner": "5m"},
+        LIQUIDITY_PROBE,
+        events,
+    )
+
+    assert context.market_state == LIQUIDITY_PROBE
+    assert events[-1]["market_state"] == LIQUIDITY_PROBE
 
 
 def _opportunity() -> SetupOpportunity:

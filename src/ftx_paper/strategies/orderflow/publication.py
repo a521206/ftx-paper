@@ -151,7 +151,6 @@ class TransitionPublisher:
                                 "available_at": latest.available_at},),
         )
         self.context.market_contexts.ordinary_context = self.context.publish_context(published)
-        self.context.last_confirmation_context_time = latest.time
 
 
 __all__ = ["TransitionPublisher"]

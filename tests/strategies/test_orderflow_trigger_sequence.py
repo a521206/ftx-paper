@@ -107,6 +107,21 @@ def test_structure_does_not_advance_confirmation_context_time() -> None:
     assert transition.context.last_confirmation_context_time is None
 
 
+def test_ordinary_context_publication_does_not_advance_confirmation_context_time() -> None:
+    candle = Aggregate(
+        "2026-10-01T09:15", "2026-10-01T09:19", "2026-10-01T09:20",
+        "5m", 5, 100.0, 102.0, 99.0, 101.0, 100,
+        "NIFTY", "", "2026-10-01", "ordinary-context",
+    )
+    transition = OrderflowEngine(LocationRegistry("test"))
+    transition.context.aggregates = {"1m": [], "5m": [candle]}
+    transition.context.rows = [_row(open_=100.0, high=102.0, low=99.0, close=101.0)]
+
+    transition._publisher.ordinary_context(candle)
+
+    assert transition.context.last_confirmation_context_time is None
+
+
 def test_transition_publishes_current_one_minute_aggregates_to_context() -> None:
     one_minute = Aggregate(
         "2026-10-01T09:20", "2026-10-01T09:20", "2026-10-01T09:21",
