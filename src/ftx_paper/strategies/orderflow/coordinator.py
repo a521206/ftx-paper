@@ -91,8 +91,16 @@ class OrderflowCoordinator:
 
     def restore_state(self, raw: Mapping[str, Any]) -> None:
         """Restore coordinator-owned state without exposing mutable internals."""
-        self._one_minute = [restore_aggregate(item) for item in raw.get("one_minute", ())]
-        self._five_minute = [restore_aggregate(item) for item in raw.get("five_minute", ())]
+        self._one_minute = [
+            aggregate
+            for item in raw.get("one_minute", ())
+            if (aggregate := restore_aggregate(item)) is not None
+        ]
+        self._five_minute = [
+            aggregate
+            for item in raw.get("five_minute", ())
+            if (aggregate := restore_aggregate(item)) is not None
+        ]
         self._seen = {str(item) for item in raw.get("seen", ())}
         self._levels_published = {str(item) for item in raw.get("levels_published", ())}
         self._vwap_published = {
