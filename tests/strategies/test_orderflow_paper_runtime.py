@@ -150,6 +150,42 @@ def test_live_inputs_publish_opening_range_only_when_first_five_minute_completes
     assert inputs[-1].vwap_measurements == expected_vwap
 
 
+def test_live_restart_rederives_prior_levels_when_setup_follows_seeding() -> None:
+    instrument = Instrument("NIFTY", "NFO", "FUTURES")
+
+    def bar(minute: int) -> MarketBar:
+        return MarketBar(
+            instrument=instrument,
+            timestamp=datetime(2026, 10, 1, 3, 45 + minute, tzinfo=timezone.utc),
+            open=100.0 + minute,
+            high=101.0 + minute,
+            low=99.0 + minute,
+            close=100.5 + minute,
+            volume=10,
+        )
+
+    atr = AtrPublication(
+        2.0,
+        parse_nifty_label("2026-10-01T09:00"),
+        parse_nifty_label("2026-10-01T09:00"),
+        "atr:2026-10-01",
+        ("atr-source",),
+    )
+
+    provider = OrderflowInputStream.from_continuous_bars(tuple(bar(m) for m in range(5)))
+    provider.publish_setup(
+        "2026-10-01",
+        atr=atr,
+        prior_session_levels={"low": 95.0, "high": 105.0},
+    )
+    clock = provider(SimpleNamespace(bars={MarketRole.FUTURES: bar(5)}))
+
+    assert clock.session_levels is not None
+    assert clock.session_levels.prior_day_low == 95.0
+    assert clock.session_levels.prior_day_high == 105.0
+    assert {item.location for item in clock.observations_1m} > {"PD_LOW", "PD_HIGH"}
+
+
 def test_live_input_prefix_does_not_depend_on_future_bars() -> None:
     instrument = Instrument("NIFTY", "NFO", "FUTURES")
     bars = tuple(

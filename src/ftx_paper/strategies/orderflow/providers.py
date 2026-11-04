@@ -112,6 +112,8 @@ class OrderflowInputStream:
             if self._prior_session_levels is None:
                 self._prior_session_levels = {}
             self._prior_session_levels[session_date] = dict(prior_session_levels)
+            if self._session_date == session_date:
+                self._session_levels = self._build_session_levels(session_date)
         self._adapter = PaperFeatureAdapter(
             self._feature_store.rows_by_date,
             prior_values=self._prior_values,
