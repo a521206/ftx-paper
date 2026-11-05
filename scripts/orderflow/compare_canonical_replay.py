@@ -54,7 +54,7 @@ _CAUSAL_TIMESTAMP_KEYS = frozenset({
     "response_observed_at", "causal_available_at", "causal_observed_at",
     "context_candle_available_at", "time",
     "filled_at", "reserved_at", "released_at", "decided_at", "effective_at",
-    "triggered_at",
+    "triggered_at", "pivot_time",
 })
 _TRANSPORT_METADATA_KEYS = frozenset({
     "identity", "neutral_event_key", "event_id", "sequence", "stream_sequence",

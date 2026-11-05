@@ -543,6 +543,8 @@ class OrderflowState:
         self.events.append(dict(event_data))
         bar_events.append(dict(event_data))
         stream = event_data.get("parity_stream")
+        if stream is None and event_data.get("kind") in _EXECUTION_TRANSITION_KINDS:
+            stream = "execution_transitions"
         if stream is None and event_data.get("kind") == "lifecycle_formed":
             stream = "opportunity_lifecycle"
         if stream is not None:

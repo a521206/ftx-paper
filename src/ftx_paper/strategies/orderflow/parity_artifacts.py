@@ -48,6 +48,7 @@ _CONTRACT_METADATA_FIELDS = frozenset({
 _NON_COMPARABLE_FIELDS = frozenset({
     "identity", "causal_parent_key", "parent_id",
     "event_id", "neutral_event_key", "sequence", "stream_sequence",
+    "lifecycle_sequence",
     "comparison_key", "producer_extensions", "contract_type", "_publication_available_at",
     "parity_stream", "terminal_candle_id", "terminal_close_side",
 })

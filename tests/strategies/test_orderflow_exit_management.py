@@ -7,13 +7,14 @@ from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 
+from ftx_paper.strategies.orderflow.context_access import DecisionContextAccess
 from ftx_paper.strategies.orderflow.execution import (
     EntryOrder,
     ExecutionCoordinator,
     ExecutionEngine,
     ExitOrder,
 )
-from ftx_paper.strategies.orderflow.hierarchy import IntentStatus, ResolvedExitRule, TradeIntent
+from ftx_paper.strategies.orderflow.hierarchy import IntentStatus, MarketContext, ResolvedExitRule, TradeIntent
 from ftx_paper.strategies.orderflow.interactions import (
     CandleClassification,
     InteractionCandle,
@@ -339,3 +340,69 @@ def test_activated_3r_preempts_same_call_fixed_target_exit() -> None:
         item["reason"] for item in bar_events if item["kind"] == "exit_signal"
     ]
     assert reasons == ["partial_3r"]
+
+
+
+def test_conditional_exit_binds_target_and_uses_causal_location_context() -> None:
+    context, engine, _, life = _open_lifecycle()
+    position = engine.state_for(life.lifecycle_id).position
+    assert position is not None
+    target = context.interactions["ix-1"]
+    rule = ResolvedExitRule(
+        rule_id="conditional-test",
+        location=target.location,
+        mode="conditional",
+        level=102.0,
+        source_context=None,
+        execution=ExitExecutionTiming(),
+        score_direction="short",
+        score_margin=0.0,
+    )
+    engine.update_position(life, replace(position, exit_plan=(rule,)))
+    structure = replace(target, interaction_id="structure", timeframe="5m")
+    context.interactions[structure.interaction_id] = structure
+    scores = MarketContext(
+        context_id="interaction:structure",
+        version="v1",
+        timestamp=structure.available_at,
+        available_at=structure.available_at,
+        location=structure.location,
+        market_state=BALANCE,
+        long_score=0.0,
+        short_score=1.0,
+    )
+    context.market_contexts.interaction_contexts[structure.interaction_id] = (
+        context.market_contexts.publish(scores)
+    )
+    host = SimpleNamespace(context=context)
+    access = DecisionContextAccess(host)
+    host.decision_context_for_location = access.for_location
+    host.record_exit_decision_context = access.record_exit
+    coordinator = ExecutionCoordinator(host=host, engine=engine)
+    events: list[dict[str, Any]] = []
+
+    coordinator.evaluate_position_exit_plan(
+        life=life, timestamp=TIMESTAMP, next_time=NEXT_TIME, row=_row(), bar_events=events,
+    )
+    state = engine.state_for(life.lifecycle_id)
+    assert state.position is not None
+    assert state.position.exit_intent is not None
+    assert state.position.exit_intent.interaction_id == target.interaction_id
+    assert state.position.exit_intent.decision_context == (
+        context.market_contexts.interaction_contexts[structure.interaction_id]
+    )
+    assert state.pending_exit is None
+
+    fill_time = "2026-10-01T03:51:00Z"
+    coordinator.evaluate_position_exit_plan(
+        life=life, timestamp=NEXT_TIME, next_time=fill_time, row=_row(), bar_events=events,
+    )
+    pending = engine.state_for(life.lifecycle_id).pending_exit
+    assert pending is not None
+    assert (pending.reason, pending.available_at) == ("conditional_exit", fill_time)
+    assert pending.requested_price == target.band_high
+    assert [(event["kind"], event["lifecycle_id"]) for event in events] == [
+        ("exit_intent_created", life.lifecycle_id),
+        ("exit_trigger_observed", life.lifecycle_id),
+        ("exit_decision", life.lifecycle_id),
+    ]

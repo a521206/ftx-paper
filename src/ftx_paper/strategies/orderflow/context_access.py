@@ -22,21 +22,33 @@ class DecisionContextAccess:
         return self.for_location(getattr(life, "location", None), as_of=as_of)
 
     def for_location(self, location: str | None, *, as_of: str) -> Any | None:
-        if location is None:
-            reference = self.context.market_contexts.ordinary_context
-            ordinary = (
-                self.context.market_contexts.resolve(reference)
-                if reference is not None else None
-            )
-            clock = coerce_timestamp(as_of)
-            return (
-                ordinary
-                if ordinary is not None and ordinary.available_at <= clock
-                else None
-            )
-        return self.context.market_contexts.latest_as_of(
-            str(location), coerce_timestamp(as_of)
-        )
+        store = self.context.market_contexts
+        clock = coerce_timestamp(as_of)
+        if location is not None:
+            candidates = []
+            for interaction_id in store.interaction_contexts:
+                interaction = self.context.interactions.get(interaction_id)
+                if (
+                    interaction is None
+                    or interaction.location != location
+                    or interaction.timeframe != "5m"
+                ):
+                    continue
+                candidate = store.latest_as_of(f"interaction:{interaction_id}", clock)
+                if candidate is not None:
+                    candidates.append(candidate)
+            if candidates:
+                return max(candidates, key=lambda item: item.available_at)
+
+        reference = store.ordinary_context
+        ordinary = store.resolve(reference) if reference is not None else None
+        if (
+            ordinary is not None
+            and ordinary.available_at <= clock
+            and (location is None or ordinary.location in (None, location))
+        ):
+            return ordinary
+        return None
 
     def scores_for(self, reference: Any | None) -> tuple[float | None, float | None]:
         context = self.context.context(reference) if reference is not None else None
