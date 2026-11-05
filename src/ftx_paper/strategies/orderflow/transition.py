@@ -582,13 +582,14 @@ class OrderflowEngine:
                 constraints=constraints,
             )
         )
+        next_available_at = coerce_timestamp(next_time)
         available5 = [
             aggregate for aggregate in available5
-            if coerce_timestamp(aggregate.available_at) <= coerce_timestamp(timestamp)
+            if aggregate.available_at <= next_available_at
         ]
         available1 = [
             aggregate for aggregate in self.observation_owner.one_minute_aggregates
-            if coerce_timestamp(aggregate.available_at) <= coerce_timestamp(timestamp)
+            if aggregate.available_at <= next_available_at
         ]
         new_5m = self._advance_pre_structure(
             item,
@@ -667,6 +668,18 @@ class OrderflowEngine:
             interaction=interaction,
         )
 
+    def finalize_terminal_evidence(self, item: OrderflowInput) -> None:
+        """Publish the final candle that becomes available after the last decision clock."""
+        self._phase4.source_observations((item.one_minute,))
+        self._phase4.context_location(
+            item, timeframe="1m", observations=item.observations_1m,
+        )
+        if item.five_minute is not None:
+            self._phase4.source_observations((item.five_minute,))
+            self._phase4.context_location(
+                item, timeframe="5m", observations=item.observations_5m,
+            )
+
     def _prepare_transition(
         self,
         item: OrderflowInput,
@@ -701,13 +714,23 @@ class OrderflowEngine:
                 **self.context.atr_by_session,
                 item.one_minute.session_date: item.atr.value,
             }
-        timestamp = nifty_label(item.one_minute.time)
+        timestamp = nifty_label(item.one_minute.available_at)
         source, row, available5 = self._ingest_observation(item)
         if regime is not None:
             self.context.regime = regime
         if constraints is not None:
             self.context.execution_constraints = constraints
-        next_time = nifty_label(item.one_minute.available_at)
+        next_aggregate = next(
+            (
+                aggregate for aggregate in self.observation_owner.one_minute_aggregates
+                if aggregate.available_at > available_at
+            ),
+            None,
+        )
+        next_time = (
+            nifty_label(next_aggregate.available_at)
+            if next_aggregate is not None else timestamp
+        )
         if item.prior_value is not None and self.context.continuous is not None:
             self.context.continuous.publish_prior_value(item.prior_value)
         bar_events = list(source.events)
@@ -866,14 +889,18 @@ class OrderflowEngine:
             "phase4_context_location",
             timestamp,
             available_at,
-            lambda: self._phase4.context_location(item, timeframe="1m"),
+            lambda: self._phase4.context_location(
+                item, timeframe="1m", observations=item.observations_1m,
+            ),
         )
         if available5 and item.five_minute is not None:
             self._trace_phase(
                 "phase4_context_location",
                 timestamp,
                 available_at,
-                lambda: self._phase4.context_location(item, timeframe="5m"),
+                lambda: self._phase4.context_location(
+                    item, timeframe="5m", observations=item.observations_5m,
+                ),
             )
 
     def _advance_structure(

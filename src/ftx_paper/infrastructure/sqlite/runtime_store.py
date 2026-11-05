@@ -252,6 +252,8 @@ class SqliteRuntimeStore:
                 );
                 CREATE INDEX IF NOT EXISTS ix_market_bars_session_minute
                     ON market_bars(substr(minute, 1, 10), minute, exchange, symbol);
+                CREATE INDEX IF NOT EXISTS ix_market_bars_type_session_minute
+                    ON market_bars(substr(minute, 1, 10), instrument_type, minute, exchange, symbol);
                 CREATE INDEX IF NOT EXISTS ix_runtime_events_event_type
                     ON runtime_events(event_type);
                 CREATE INDEX IF NOT EXISTS ix_runtime_events_decision_id

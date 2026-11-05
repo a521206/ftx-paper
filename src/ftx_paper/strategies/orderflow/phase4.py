@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from .coordinator import OrderflowCoordinator, OrderflowInput
 from .hierarchy import MarketContext
+from .location_observation import LocationObservation
 from .orderflow_common import Aggregate
 from .state_machine_types import OrderflowState
 from .timestamps import nifty_label
@@ -29,6 +30,9 @@ class Phase4Recorder:
             identity = f"aggregate:{aggregate.timeframe}:{nifty_label(aggregate.time)}"
             if identity in known:
                 continue
+            aggregate_values = aggregate.to_dict()
+            aggregate_values.pop("time_label", None)
+            aggregate_values.pop("end_time_label", None)
             children = tuple(
                 child for child in one_minute
                 if aggregate.timeframe == "5m"
@@ -47,7 +51,7 @@ class Phase4Recorder:
                     if children else None
                 ),
                 "values": {
-                    "aggregate": aggregate.to_dict(),
+                    "aggregate": aggregate_values,
                     "source_fingerprint": aggregate.source_fingerprint,
                 },
                 "unavailable": [],
@@ -57,14 +61,17 @@ class Phase4Recorder:
             })
             known.add(identity)
 
-    def context_location(self, item: OrderflowInput, *, timeframe: str) -> None:
+    def context_location(
+        self, item: OrderflowInput, *, timeframe: str,
+        observations: Sequence[LocationObservation] | None = None,
+    ) -> None:
         ordinary = (
             self.context.market_contexts.resolve(self.context.market_contexts.ordinary_context)
             if self.context.market_contexts.ordinary_context is not None else None
         )
         if timeframe == "1m":
             aggregate = item.one_minute
-            observations = tuple(
+            selected_observations = tuple(
                 observation for observation in item.observations_1m
                 if observation.timeframe == "1m"
                 and observation.source_aggregate_id == nifty_label(aggregate.time)
@@ -72,13 +79,25 @@ class Phase4Recorder:
             )
         elif timeframe == "5m" and item.five_minute is not None:
             aggregate = item.five_minute
-            observations = tuple(
+            selected_observations = tuple(
                 observation for observation in item.observations_5m
                 if observation.timeframe == "5m"
                 and observation.source_aggregate_id == nifty_label(aggregate.time)
             )
         else:
             return
+        if observations is None:
+            observations = selected_observations
+        else:
+            observations = tuple(
+                observation for observation in observations
+                if observation.timeframe == aggregate.timeframe
+                and observation.source_aggregate_id == nifty_label(aggregate.time)
+                and (
+                    aggregate.timeframe != "1m"
+                    or observation.reference_source_timeframe in {None, "1m"}
+                )
+            )
         known = {
             str(fact.get("identity"))
             for fact in self.context.parity_streams.get("context_location", ())

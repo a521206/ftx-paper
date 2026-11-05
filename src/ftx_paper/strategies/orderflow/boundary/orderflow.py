@@ -138,6 +138,13 @@ class OrderflowStrategy:
                 proposal, timestamp=proposal.available_at or timestamp,
             )
 
+    def finalize_terminal_evidence(self) -> None:
+        """Publish producer-owned evidence after the final decision clock."""
+        stream = self.input_stream
+        if stream is None or not stream.envelopes:
+            return
+        self._engine.finalize_terminal_evidence(stream.envelopes[-1].input)
+
     def bind_execution_service(self, service: ExecutionService, *, diagnostic: bool = False) -> None:
         """Attach the existing Paper execution owner without adding policy."""
         if self._execution_adapter is None:

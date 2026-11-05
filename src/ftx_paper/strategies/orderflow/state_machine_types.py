@@ -458,6 +458,65 @@ class OrderflowState:
                 "sequence": len(self.execution_diagnostics),
                 **dict(event_data),
             })
+        causal_ids = tuple(
+            (name, str(event_data[name]))
+            for name in (
+                "interaction_id", "lifecycle_id", "candidate_id", "setup_id",
+                "opportunity_id", "intent_id", "reservation_id", "order_id",
+                "position_id", "fill_id", "event_id",
+            )
+            if event_data.get(name) is not None
+            and not (
+                name == "event_id"
+                and str(event_data[name]).startswith("replay:")
+            )
+        )
+        event_basis = {
+            "kind": str(event_data.get("kind", "")),
+            "session_date": event_data.get("session_date"),
+            "observed_at": _parity_safe(observed_at),
+            "available_at": _parity_safe(available_at),
+            "causal_ids": causal_ids,
+            "causal_parent_id": event_data.get("causal_parent_id") or event_data.get("parent_id"),
+            "level": event_data.get("level"),
+            "reason": event_data.get("reason") or event_data.get("reason_code"),
+        }
+        ordinal_key = tuple(
+            str(event_basis[key]) for key in (
+                "kind", "observed_at", "available_at", "level", "reason",
+                "causal_parent_id",
+            )
+        ) + tuple(value for pair in causal_ids for value in pair)
+        ordinal = self.neutral_event_ordinals.get(ordinal_key, 0)
+        self.neutral_event_ordinals[ordinal_key] = ordinal + 1
+        if str(event_data["event_id"]).startswith("replay:"):
+            neutral_event_key = "niftyzoning:derived:" + hashlib.sha256(
+                json.dumps(event_basis, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+            ).hexdigest()
+        else:
+            neutral_event_key = "niftyzoning:event:" + hashlib.sha256(
+                json.dumps(
+                    {"event_id": event_data["event_id"], "basis": event_basis},
+                    sort_keys=True, separators=(",", ":"), default=str,
+                ).encode("utf-8")
+            ).hexdigest()
+        if ordinal:
+            neutral_event_key = f"{neutral_event_key}:occurrence-{ordinal}"
+        event_data.setdefault("neutral_event_key", neutral_event_key)
+        parent_ref = next(
+            ((name, event_data.get(name)) for name in (
+                "causal_parent_id", "parent_id", "lifecycle_id", "setup_id",
+                "opportunity_id", "position_id", "intent_id", "interaction_id",
+            ) if event_data.get(name) is not None),
+            None,
+        )
+        event_data.setdefault(
+            "causal_parent_key",
+            self.neutral_keys_by_causal_id.get((parent_ref[0], str(parent_ref[1])))
+            if parent_ref is not None else None,
+        )
+        for name, value in causal_ids:
+            self.neutral_keys_by_causal_id.setdefault((name, value), neutral_event_key)
         self.events.append(dict(event_data))
         bar_events.append(dict(event_data))
         stream = event_data.get("parity_stream")
@@ -466,7 +525,10 @@ class OrderflowState:
         if stream is not None:
             parent = (
                 event_data.get("causal_parent_id")
-                or event_data.get("interaction_id")
+                or (
+                    event_data.get("lifecycle_id")
+                    if stream == "opportunity_lifecycle" else event_data.get("interaction_id")
+                )
                 or (lifecycle.lifecycle_id if lifecycle is not None else None)
             )
             identity, values = (
@@ -488,7 +550,7 @@ class OrderflowState:
                 "available_at": _parity_safe(available_at),
                 "sequence": len(self.parity_streams.get(str(stream), [])),
                 "identity": identity,
-                "causal_parent_id": parent,
+                "causal_parent_id": event_data.get("causal_parent_key") or parent,
                 "values": values,
                 "unavailable": [],
             })
@@ -663,9 +725,13 @@ class OrderflowState:
             for name in (
                 "interaction_id", "lifecycle_id", "candidate_id", "setup_id",
                 "opportunity_id", "intent_id", "reservation_id", "order_id",
-                "position_id", "fill_id",
+                "position_id", "fill_id", "event_id",
             )
             if payload.get(name) is not None
+            and not (
+                name == "event_id"
+                and str(payload[name]).startswith("replay:")
+            )
         )
         event_basis = {
             "kind": str(payload.get("kind", "")),
@@ -684,12 +750,34 @@ class OrderflowState:
         ) + tuple(value for pair in causal_ids for value in pair)
         ordinal = self.neutral_event_ordinals.get(ordinal_key, 0)
         self.neutral_event_ordinals[ordinal_key] = ordinal + 1
-        neutral_event_key = "niftyzoning:derived:" + hashlib.sha256(
-            json.dumps(event_basis, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
-        ).hexdigest()
+        if str(payload["event_id"]).startswith("replay:"):
+            neutral_event_key = "niftyzoning:derived:" + hashlib.sha256(
+                json.dumps(event_basis, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+            ).hexdigest()
+        else:
+            neutral_event_key = "niftyzoning:event:" + hashlib.sha256(
+                json.dumps(
+                    {"event_id": payload["event_id"], "basis": event_basis},
+                    sort_keys=True, separators=(",", ":"), default=str,
+                ).encode("utf-8")
+            ).hexdigest()
         if ordinal:
             neutral_event_key = f"{neutral_event_key}:occurrence-{ordinal}"
         payload.setdefault("neutral_event_key", neutral_event_key)
+        parent_ref = next(
+            ((name, payload.get(name)) for name in (
+                "causal_parent_id", "parent_id", "lifecycle_id", "setup_id",
+                "opportunity_id", "position_id", "intent_id", "interaction_id",
+            ) if payload.get(name) is not None),
+            None,
+        )
+        payload.setdefault(
+            "causal_parent_key",
+            self.neutral_keys_by_causal_id.get((parent_ref[0], str(parent_ref[1])))
+            if parent_ref is not None else None,
+        )
+        for name, value in causal_ids:
+            self.neutral_keys_by_causal_id.setdefault((name, value), neutral_event_key)
         parity_stream = payload.get("parity_stream")
         if parity_stream is None and payload.get("kind") in _EXECUTION_TRANSITION_KINDS:
             parity_stream = "execution_transitions"
@@ -711,7 +799,7 @@ class OrderflowState:
                 "available_at": _parity_safe(available_at),
                 "sequence": len(self.parity_streams.get(str(parity_stream), [])),
                 "identity": identity,
-                "causal_parent_id": lifecycle_id,
+                "causal_parent_id": payload.get("causal_parent_key") or lifecycle_id,
                 "values": values,
                 "unavailable": [],
             })

@@ -203,6 +203,69 @@ def test_producer_emits_execution_and_ledger_layer_facts() -> None:
     assert context.parity_layers["portfolio_ledger"][0]["kind"] == "fill"
 
 
+def test_distinct_producer_event_ids_have_distinct_neutral_keys() -> None:
+    context = OrderflowState(execution_engine=object())
+    events: list[dict[str, object]] = []
+    base = {
+        "kind": "producer_fact",
+        "observed_at": "2026-10-01T09:20:00+05:30",
+        "available_at": "2026-10-01T09:20:00+05:30",
+    }
+
+    context.emit({**base, "event_id": "producer-a"}, events)
+    context.emit({**base, "event_id": "producer-b"}, events)
+
+    assert events[0]["neutral_event_key"] != events[1]["neutral_event_key"]
+    assert all(
+        str(event["neutral_event_key"]).startswith("niftyzoning:event:")
+        for event in events
+    )
+
+
+def test_interaction_facts_retain_canonical_parent_key() -> None:
+    context = OrderflowState(execution_engine=object())
+    events: list[dict[str, object]] = []
+    context.emit(
+        {
+            "kind": "interaction_created",
+            "interaction_id": "interaction-1",
+            "observed_at": "2026-10-01T09:20:00+05:30",
+            "available_at": "2026-10-01T09:20:00+05:30",
+        },
+        events,
+    )
+    context.emit(
+        {
+            "kind": "location_interaction_observed",
+            "interaction_id": "interaction-1",
+            "observed_at": "2026-10-01T09:21:00+05:30",
+            "available_at": "2026-10-01T09:21:00+05:30",
+        },
+        events,
+    )
+
+    created, observed = context.parity_streams["interaction_response"]
+    assert observed["causal_parent_id"] == created["identity"]
+
+
+def test_lifecycle_formation_is_published_as_a_phase_fact() -> None:
+    context = OrderflowState(execution_engine=object())
+    context.emit(
+        {
+            "kind": "lifecycle_formed",
+            "lifecycle_id": "lifecycle-1",
+            "causal_identity": "candidate-1",
+            "observed_at": "2026-10-01T09:20:00+05:30",
+            "available_at": "2026-10-01T09:20:00+05:30",
+        },
+        [],
+    )
+
+    record = context.parity_streams["opportunity_lifecycle"][0]
+    assert record["kind"] == "lifecycle_formed"
+    assert record["causal_parent_id"] == "lifecycle-1"
+
+
 def test_unified_comparison_reports_first_causal_record_field() -> None:
     coverage = {"phase_streams": _empty_coverage(PHASE_STREAMS), "layers": _empty_coverage(LAYERS)}
     record = {

@@ -1146,6 +1146,7 @@ class ReplayWorker:
                 {"event_type": event.get("event_type", "ORDERFLOW_FACT"), **event}
                 for event in result.events
             )
+        runtime.finalize_terminal_evidence()
 
         snapshot = runtime.snapshot()
         input_manifest = self.input_manifest(

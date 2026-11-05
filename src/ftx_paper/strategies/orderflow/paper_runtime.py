@@ -160,6 +160,10 @@ class PaperOrderflowRuntime:
         """Append one selected completed live bar to the input stream."""
         self.strategy.append_feature_bar(bar)
 
+    def finalize_terminal_evidence(self) -> None:
+        """Publish the last candle's evidence after replay clock processing."""
+        self.strategy.finalize_terminal_evidence()
+
     def publish_setup(
         self,
         session_date: str,
