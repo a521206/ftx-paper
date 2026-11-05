@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -483,6 +484,9 @@ def test_parity_artifact_jsonl_round_trip_and_bounded_page(tmp_path: Path) -> No
     }
     artifact = build_parity_artifact_from_payload(payload, run_id="run-1", producer={"name": "paper"})
     write_parity_artifact(tmp_path, artifact)
+    persisted = json.loads((tmp_path / "parity_artifact.json").read_text(encoding="utf-8"))
+    assert "decision_substreams" not in persisted
+    assert "layers" not in persisted
     assert read_parity_artifact(tmp_path) == artifact
     page = read_parity_page(tmp_path, "decision", offset=0, limit=1)
     assert page == {"stream": "decision", "offset": 0, "limit": 1, "total_count": 0, "records": []}

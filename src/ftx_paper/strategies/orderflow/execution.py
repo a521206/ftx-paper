@@ -3433,7 +3433,7 @@ class ExecutionCoordinator:
                     }
                     self.context.record_event(event)
                     bar_events.append(event)
-                    existing = intent
+                    return
                 admission = (
                     evaluate_exit_rule(self.host, life, rule, timestamp=timestamp)
                     if self.host is not None

@@ -32,7 +32,7 @@ from ftx_paper.strategies.orderflow.parity_artifacts import (
     compare_parity_artifacts,
     compare_phase7_manifests,
 )
-from ftx_paper.strategies.orderflow.phase7_projection import PHASE7_STREAMS, build_phase7_projection
+from ftx_paper.strategies.orderflow.phase7_projection import PHASE7_STREAMS
 from ftx_paper.strategies.orderflow.timestamps import parse_session_timestamp, parse_utc, serialize_utc
 
 PHASE35_FIELDS = (
@@ -759,28 +759,32 @@ def _compare_phase7(canonical_path: Path, paper: dict[str, Any], session_date: s
         canonical_replay = canonical_session.get("replay")
         if not isinstance(canonical_replay, Mapping):
             return {"status": "INCOMPLETE", "stream": PHASE7_STREAMS[0], "reason": "canonical_replay_missing"}
+        def phase7_records(
+            source: Mapping[str, Any], stream: str,
+        ) -> tuple[list[dict[str, Any]] | None, dict[str, Any] | None]:
+            if stream in {"intent_admission", "trigger_exit"}:
+                return _explicit_phase_records(source, stream)
+            records = source.get(stream)
+            if not isinstance(records, list):
+                return None, {"status": "INCOMPLETE", "reason": f"missing_{stream}_facts"}
+            normalized = [dict(item) for item in records if isinstance(item, Mapping)]
+            if len(normalized) != len(records):
+                return None, {"status": "INCOMPLETE", "reason": f"invalid_{stream}_record"}
+            return normalized, None
+
         for stream in PHASE7_STREAMS:
-            _, canonical_error = _explicit_phase_records(canonical_replay, stream)
-            _, paper_error = _explicit_phase_records(paper, stream)
+            _, canonical_error = phase7_records(canonical_replay, stream)
+            _, paper_error = phase7_records(paper, stream)
             if canonical_error or paper_error:
                 return {"status": "INCOMPLETE", "stream": stream,
                         "canonical": canonical_error, "paper": paper_error}
-        canonical_facts = canonical_replay.get("parity_phase_facts")
-        # The replay payload also carries the earlier phase streams.  Only
-        # Phase 7 facts belong in this projection; including those other keys
-        # causes a lookup failure against the Phase 7-only stream mapping.
-        explicit_keys = {
-            key for key in PHASE7_STREAMS
-            if isinstance(canonical_facts, Mapping) and key in canonical_facts
+        canonical_streams = {
+            stream: phase7_records(canonical_replay, stream)[0] or []
+            for stream in PHASE7_STREAMS
         }
-        if not explicit_keys:
-            return {"status": "INCOMPLETE", "stream": PHASE7_STREAMS[0], "reason": "canonical_phase7_facts_missing"}
-        canonical_streams = build_phase7_projection(canonical_replay)
-        paper_streams = build_phase7_projection(paper)
-        paper_facts = paper.get("parity_phase_facts")
-        paper_explicit_keys = {
-            key for key in PHASE7_STREAMS
-            if isinstance(paper_facts, Mapping) and key in paper_facts
+        paper_streams = {
+            stream: phase7_records(paper, stream)[0] or []
+            for stream in PHASE7_STREAMS
         }
         def normalize(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
             return [_normalize_phase_record_for_compare(item, session_date) for item in values]
@@ -788,14 +792,14 @@ def _compare_phase7(canonical_path: Path, paper: dict[str, Any], session_date: s
             run_id=f"canonical-{session_date}", producer={"name": "NiftyZoning"},
             scope={"date": session_date},
             payload={"parity_phase_facts": {
-                name: normalize(canonical_streams[name]) for name in explicit_keys
+                name: normalize(canonical_streams[name]) for name in PHASE7_STREAMS
             }},
         )
         paper_artifact = build_phase7_artifact(
             run_id=f"paper-{session_date}", producer={"name": "ftx-paper"},
             scope={"date": session_date},
             payload={"parity_phase_facts": {
-                name: normalize(paper_streams[name]) for name in paper_explicit_keys
+                name: normalize(paper_streams[name]) for name in PHASE7_STREAMS
             }},
         )
         result = compare_phase7_manifests(

@@ -685,7 +685,11 @@ def write_parity_artifact(run_dir: str | Path, payload: Mapping[str, Any]) -> Pa
     root = Path(run_dir)
     root.mkdir(parents=True, exist_ok=True)
     envelope = root / FILENAME
-    envelope.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    metadata = {
+        key: value for key, value in payload.items()
+        if key not in {"decision_substreams", "layers"}
+    }
+    envelope.write_text(json.dumps(metadata, ensure_ascii=True, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     for collection_name, names in (("decision_substreams", PHASE_STREAMS), ("layers", LAYERS)):
         collection = payload[collection_name]
         assert isinstance(collection, Mapping)
@@ -700,12 +704,30 @@ def write_parity_artifact(run_dir: str | Path, payload: Mapping[str, Any]) -> Pa
 
 
 def read_parity_artifact(run_dir: str | Path) -> dict[str, Any]:
-    """Read and validate a persisted unified artifact envelope."""
-    payload = json.loads((Path(run_dir) / FILENAME).read_text(encoding="utf-8"))
+    """Read, hydrate, and validate a persisted unified artifact envelope."""
+    root = Path(run_dir)
+    payload = json.loads((root / FILENAME).read_text(encoding="utf-8"))
     if not isinstance(payload, Mapping):
         raise ValueError("persisted parity artifact must be an object")
-    validate_parity_artifact(payload)
-    return dict(payload)
+    hydrated = dict(payload)
+    for collection_name, names in (("decision_substreams", PHASE_STREAMS), ("layers", LAYERS)):
+        hydrated[collection_name] = {}
+        for name in names:
+            path = root / f"{name}.jsonl"
+            if not path.is_file():
+                raise FileNotFoundError(path)
+            records: list[dict[str, Any]] = []
+            with path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    value = json.loads(line)
+                    if not isinstance(value, dict):
+                        raise ValueError("JSONL parity records must be objects")
+                    records.append(value)
+            hydrated[collection_name][name] = records
+    validate_parity_artifact(hydrated)
+    return hydrated
 
 
 def read_parity_page(
