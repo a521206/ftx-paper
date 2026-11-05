@@ -15,13 +15,16 @@ def test_orderflow_replay_page_has_structured_report_mount() -> None:
     assert "confirm(" not in body
 
 
-def test_orderflow_decisions_page_uses_causal_fact_desk() -> None:
+def test_orderflow_decisions_page_uses_market_state_briefing() -> None:
     client = create_ui_app().test_client()
 
     response = client.get("/decisions?strategy_id=ftx-paper-orderflow")
 
     assert response.status_code == 200
     body = response.get_data(as_text=True)
-    assert "Orderflow / Decision desk" in body
-    assert "ORDERFLOW_FACT" in body
-    assert "Causal fact stream" in body
+    assert "Orderflow · Market context" in body
+    assert "Current interpretation" in body
+    assert "Structural location board" in body
+    assert "Lifecycle" in body
+    assert "Session windows" not in body
+    assert "Diagnostics" not in body

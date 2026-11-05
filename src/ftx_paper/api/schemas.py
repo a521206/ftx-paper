@@ -86,7 +86,7 @@ def openapi_document() -> dict[str, Any]:
                 }}},
              }}}},
             "/api/v1/strategies/ftx-paper-research/decisions": {"get": {"$ref": "#/paths/~1api~1v1~1decisions/get"}},
-            "/api/v1/strategies/ftx-paper-orderflow/decisions": {"get": {"$ref": "#/paths/~1api~1v1~1decisions/get"}},
+            "/api/v1/strategies/ftx-paper-orderflow/decisions": {"get": {"parameters": [{"name": "date", "in": "query", "schema": {"type": "string", "format": "date"}}, {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50}}, {"name": "before", "in": "query", "schema": {"type": "integer", "minimum": 1}}], "responses": {"200": {"description": "Orderflow market-context read model with structural locations and lifecycle transitions"}}}},
             "/api/v1/strategies/ftx-paper-orderflow/facts": {"get": {"parameters": [{"name": "stream", "in": "query", "schema": {"type": "string"}}, {"name": "date", "in": "query", "schema": {"type": "string", "format": "date"}}, {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100}}], "responses": {"200": {"description": "Persisted canonical orderflow facts"}}}},
             "/api/v1/positions": {"get": {"responses": {"200": {"description": "Open positions"}}}},
             "/api/v1/capital": {"get": {"responses": {"200": {"description": "Capital"}}}},

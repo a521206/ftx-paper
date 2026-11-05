@@ -6,6 +6,8 @@ from flask import Flask, jsonify, request
 
 from ftx_paper.strategies.shared.decision_projection import read_strategy_decisions
 
+from .market_context import build_market_context
+
 
 STRATEGY_ID = "ftx-paper-orderflow"
 
@@ -26,7 +28,15 @@ def register_decision_api(app: Flask, store: Any, json_safe: Callable[[Any], Any
             payload, status = error
             return jsonify(payload), status
         assert result is not None
-        return jsonify(json_safe({**result, "strategy_id": STRATEGY_ID, "api": "orderflow"}))
+        context = build_market_context(result["decisions"], result["date"])
+        return jsonify(json_safe({
+            "strategy_id": STRATEGY_ID,
+            "api": "orderflow",
+            "date": result["date"],
+            "context": context,
+            "has_more": result["has_more"],
+            "next_cursor": result["next_cursor"],
+        }))
 
     @app.get(f"/api/v1/strategies/{STRATEGY_ID}/facts")
     def orderflow_facts():
