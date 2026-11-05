@@ -466,7 +466,7 @@ def create_app(store: RuntimeStore, zerodha_auth: Any | None = None, auth_token:
                 for item in statuses
             ]
         status["strategies"] = statuses
-        if status.get("bars_seen") or store.read_events(1):
+        if request.args.get("include_counts", "1") != "0" and (status.get("bars_seen") or store.read_events(1)):
             status["event_counts"] = store.event_counts()
         return jsonify(status)
 

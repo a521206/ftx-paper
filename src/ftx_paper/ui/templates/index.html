@@ -1251,7 +1251,18 @@
     let refreshDelayMs = 5000;
     let refreshInFlight = false;
     let sharedRefreshInFlight = false;
+    const sharedDataCacheKey = 'ftx-paper-ui-shared-data';
     let sharedData = { runtime: {}, broker: {}, strategies: [] };
+    let hasCachedSharedData = false;
+    try {
+      const cached = JSON.parse(sessionStorage.getItem(sharedDataCacheKey) || 'null');
+      if (cached && typeof cached === 'object') {
+        sharedData = { ...sharedData, ...cached };
+        hasCachedSharedData = true;
+      }
+    } catch (_) {
+      sessionStorage.removeItem(sharedDataCacheKey);
+    }
     const replayDetails = new Map();
     let latestData = null;
 
@@ -2291,7 +2302,7 @@
       sharedRefreshInFlight = true;
       const entries = await Promise.allSettled([
         get('/api/v1/health'),
-        get('/api/v1/runtime'),
+        get('/api/v1/runtime?include_counts=0'),
         get('/api/v1/strategies'),
         get('/api/v1/broker/status').catch(() => get('/api/v1/broker/zerodha/status')),
       ]);
@@ -2302,6 +2313,8 @@
       if (runtime.status === 'fulfilled') sharedData.runtime = runtime.value;
       if (strategies.status === 'fulfilled') sharedData.strategies = strategies.value.strategies || [];
       if (broker.status === 'fulfilled') sharedData.broker = broker.value;
+      try { sessionStorage.setItem(sharedDataCacheKey, JSON.stringify(sharedData)); } catch (_) { /* cache is optional */ }
+      hasCachedSharedData = true;
       if (latestData) render({ ...latestData, ...sharedData });
       sharedRefreshInFlight = false;
     }
@@ -2310,7 +2323,8 @@
       if (refreshInFlight) return;
       refreshInFlight = true;
       try {
-        await refreshSharedData();
+        const sharedRefresh = refreshSharedData();
+        if (!hasCachedSharedData) await sharedRefresh;
         if (strategyScopedPages.has(page) && !selectedStrategy) {
           render({
             ...sharedData,
