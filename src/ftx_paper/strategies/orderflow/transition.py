@@ -22,7 +22,9 @@ from .execution_adapter import OrderflowExecutionAdapter, PaperOrderProposal
 from .contextual import build_context_scores
 from .context_access import DecisionContextAccess
 from .hierarchy import RegimePermission, TriggerObservation
+from .interaction_detector import InteractionTransition
 from .lifecycle import SetupOpportunity
+from .location_observation import LocationObservation
 from .opportunity_coordinator import LifecycleFormation, OpportunityCoordinator
 from .state_machine_types import (
     ExecutionConstraints,
@@ -133,6 +135,7 @@ class OrderflowEngine:
     atr_by_session: Mapping[str, float | None] | None = field(default=None, repr=False)
     context: OrderflowState = field(init=False)
     _clock: datetime | None = field(default=None, init=False, repr=False)
+    _pending_observation: OrderflowInput | None = field(default=None, init=False, repr=False)
     _execution_notifications: set[str] = field(default_factory=set, init=False, repr=False)
     _formation_cursor: set[str] = field(default_factory=set, init=False, repr=False)
     _proposal_buffer: ProposalBuffer = field(default_factory=ProposalBuffer, init=False, repr=False)
@@ -257,6 +260,7 @@ class OrderflowEngine:
                 "observation_owner": snapshot_codec.snapshot_value(
                     self.observation_owner.snapshot_state()
                 ),
+                "pending_observation": self._snapshot_pending_observation(),
                 "context_store": snapshot_codec.context_snapshot(context),
                 "location_registry": snapshot_codec.location_snapshot(self.location_registry),
                 "interactions": snapshot_codec.snapshot_value(context.interactions),
@@ -285,6 +289,7 @@ class OrderflowEngine:
                 "pending_bar_events": snapshot_codec.snapshot_value(context.pending_bar_events),
                 "decision_context_evidence": snapshot_codec.snapshot_value(context.decision_context_evidence),
                 "opportunity_identities": snapshot_codec.snapshot_value(context.opportunity_identities),
+                "confirmed_vwap_responses": sorted(context.confirmed_vwap_responses),
                 "published_resolved_responses": snapshot_codec.snapshot_value(
                     context.published_resolved_responses,
                 ),
@@ -348,6 +353,46 @@ class OrderflowEngine:
                 if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
                     raise ValueError(f"orderflow snapshot {name} is invalid")
 
+    def _snapshot_pending_observation(self) -> dict[str, Any] | None:
+        item = self._pending_observation
+        if item is None:
+            return None
+        return {
+            "one_minute": item.one_minute.to_dict(),
+            "atr": snapshot_codec.snapshot_value(item.atr),
+            "five_minute": item.five_minute.to_dict() if item.five_minute is not None else None,
+            "observations_1m": [observation.to_dict() for observation in item.observations_1m],
+            "observations_5m": [observation.to_dict() for observation in item.observations_5m],
+        }
+
+    def _restore_pending_observation(self, raw: Any) -> None:
+        self._pending_observation = None
+        if not isinstance(raw, Mapping):
+            return
+        one_minute = snapshot_codec.restore_aggregate(raw.get("one_minute"))
+        if one_minute is None:
+            raise ValueError("pending orderflow observation must include a one-minute aggregate")
+
+        def observations(key: str) -> tuple[LocationObservation, ...]:
+            return tuple(
+                LocationObservation(**{
+                    **item,
+                    "child_observation_ids": tuple(item["child_observation_ids"]),
+                })
+                for item in raw[key]
+            )
+
+        self._pending_observation = OrderflowInput(
+            one_minute,
+            five_minute=snapshot_codec.restore_aggregate(raw.get("five_minute")),
+            atr=(
+                snapshot_codec.restore_atr(raw["atr"])
+                if "atr" in raw else self.observation_owner.latest_atr
+            ),
+            observations_1m=observations("observations_1m"),
+            observations_5m=observations("observations_5m"),
+        )
+
     def _restore_snapshot_canonical(self, canonical: Mapping[str, Any]) -> None:
         source = canonical.get("source")
         if isinstance(source, Mapping):
@@ -381,6 +426,7 @@ class OrderflowEngine:
         observation_owner = canonical.get("observation_owner")
         if isinstance(observation_owner, Mapping):
             self.observation_owner.restore_state(observation_owner)
+        self._restore_pending_observation(canonical.get("pending_observation"))
         for name in (
             "pending_bar_events", "decision_context_evidence",
             "opportunity_identities", "opportunity_outcomes", "neutral_event_ordinals",
@@ -481,6 +527,7 @@ class OrderflowEngine:
                 stop_atr_buffer=float(constraints.get("stop_atr_buffer", 0.25)),
                 failed_reversal_lockout=bool(constraints.get("failed_reversal_lockout", False)),
             )
+        self.context.confirmed_vwap_responses = set(canonical.get("confirmed_vwap_responses", ()))
         if isinstance(canonical.get("published_resolved_responses"), list):
             self.context.published_resolved_responses = {
                 tuple(item) for item in canonical["published_resolved_responses"]
@@ -582,15 +629,16 @@ class OrderflowEngine:
                 constraints=constraints,
             )
         )
-        next_available_at = coerce_timestamp(next_time)
+        bar_time = item.one_minute.time
         available5 = [
             aggregate for aggregate in available5
-            if aggregate.available_at <= next_available_at
+            if aggregate.available_at <= bar_time
         ]
         available1 = [
             aggregate for aggregate in self.observation_owner.one_minute_aggregates
-            if aggregate.available_at <= next_available_at
+            if aggregate.available_at <= bar_time
         ]
+        completed = self._pending_observation
         new_5m = self._advance_pre_structure(
             item,
             timestamp=timestamp,
@@ -601,21 +649,25 @@ class OrderflowEngine:
             bar_index=bar_index,
             bar_events=bar_events,
         )
-        interaction = self._process_interactions(
-            item,
-            new_5m=new_5m,
-            available1=available1,
-            available5=available5,
-            timestamp=timestamp,
-            bar_events=bar_events,
-        )
-        self._record_phase4(
-            item,
-            available1=available1,
-            available5=available5,
-            timestamp=timestamp,
-            available_at=next_time,
-        )
+        interaction = OrderflowAdvance()
+        if completed is not None and completed.one_minute.available_at <= bar_time:
+            if available5:
+                self.observation_owner.publish_vwap(item, as_of=bar_time)
+            interaction = self._process_interactions(
+                completed,
+                new_5m=new_5m and completed.five_minute is not None,
+                available1=available1,
+                available5=available5,
+                timestamp=timestamp,
+                bar_events=bar_events,
+            )
+            self._record_phase4(
+                completed,
+                available1=available1,
+                available5=available5,
+                timestamp=timestamp,
+                available_at=next_time,
+            )
         self._process_timeouts(
             timestamp=timestamp,
             available_at=next_time,
@@ -662,6 +714,7 @@ class OrderflowEngine:
             accepted_formations=accepted_formations,
             bar_events=bar_events,
         )
+        self._pending_observation = item
         return self._finish_transition(
             available_at=available_at,
             source=source,
@@ -685,6 +738,8 @@ class OrderflowEngine:
             ),
             key=lambda aggregate: (aggregate.available_at, aggregate.timeframe, aggregate.time),
         )
+        if terminal:
+            self.observation_owner.publish_vwap(item, as_of=terminal[-1].available_at)
         self._phase4.source_observations(terminal)
         if item.one_minute in terminal:
             self._phase4.context_location(
@@ -729,23 +784,15 @@ class OrderflowEngine:
                 **self.context.atr_by_session,
                 item.one_minute.session_date: item.atr.value,
             }
-        timestamp = nifty_label(item.one_minute.available_at)
+        # Canonical evaluates the row at its bar label and publishes the
+        # result when that bar completes. Settlement uses this row's open.
+        timestamp = nifty_label(item.one_minute.time)
+        next_time = nifty_label(available_at)
         source, row, available5 = self._ingest_observation(item)
         if regime is not None:
             self.context.regime = regime
         if constraints is not None:
             self.context.execution_constraints = constraints
-        next_aggregate = next(
-            (
-                aggregate for aggregate in self.observation_owner.one_minute_aggregates
-                if aggregate.available_at > available_at
-            ),
-            None,
-        )
-        next_time = (
-            nifty_label(next_aggregate.available_at)
-            if next_aggregate is not None else timestamp
-        )
         if item.prior_value is not None and self.context.continuous is not None:
             self.context.continuous.publish_prior_value(item.prior_value)
         bar_events = list(source.events)
@@ -773,6 +820,12 @@ class OrderflowEngine:
         bar_index: int,
         bar_events: list[dict[str, Any]],
     ) -> bool:
+        self._trace_phase(
+            "session_extrema_publication", timestamp, next_time,
+            lambda: self.opportunity_owner.publish_session_extrema(
+                available5, item.one_minute.session_date, bar_events,
+            ),
+        )
         pre_execution_events: list[dict[str, Any]] = []
         self._trace_phase("pending_execution_settlement", timestamp, next_time, lambda: self._execution_clock.settle_pending(
             index=bar_index,
@@ -845,6 +898,15 @@ class OrderflowEngine:
         bar_events: list[dict[str, Any]],
     ) -> OrderflowAdvance:
         available_at = nifty_label(item.one_minute.available_at)
+        def publish_transition(
+            transition: InteractionTransition,
+            current: Aggregate,
+            events: tuple[dict[str, Any], ...],
+        ) -> None:
+            self.opportunity_owner.apply_interaction_transition(transition, current, bar_events)
+            for event in events:
+                self.context.emit(event, bar_events)
+
         def handle_interactions() -> OrderflowAdvance:
             interaction = self.observation_owner.observe_interactions(
                 item,
@@ -852,11 +914,11 @@ class OrderflowEngine:
                 available1=available1,
                 available5=available5,
                 input_diagnostics=self.context.input_diagnostics,
+                on_transition=publish_transition,
             )
-            for transition in interaction.transitions:
-                self.opportunity_owner.apply_interaction_transition(transition, bar_events)
             for event in interaction.events:
-                self.context.record_event(event)
+                if event["kind"] == "location_observation_gap":
+                    self.context.emit(event, bar_events)
             return interaction
 
         interaction = self._trace_phase(

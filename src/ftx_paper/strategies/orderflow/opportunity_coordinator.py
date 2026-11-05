@@ -21,12 +21,13 @@ from .hierarchy import (
     classify_context_relation,
 )
 from .interactions import (
+    InteractionCloseReason,
     InteractionSnapshot,
     InteractionStatus,
     LocationTemplate,
     candle_identity,
 )
-from .interaction_detector import InteractionDetector
+from .interaction_detector import InteractionDetector, InteractionTransition
 from .lifecycle import (
     Direction,
     OpeningInteractionEvidence,
@@ -228,15 +229,116 @@ class OpportunityCoordinator:
         """Project detector-owned interaction state through the opportunity host."""
         self.host.sync_interaction_snapshot(interaction)
 
+    def publish_session_extrema(
+        self, available5: list[Aggregate], session_date: str, bar_events: list[dict[str, Any]],
+    ) -> None:
+        """End interactions against a replaced session reference before settlement."""
+        context = self.host.context
+        registry = self.host.location_registry
+        atr = context.atr_by_session.get(session_date)
+        if registry is None:
+            return
+        detector = self.host.interaction_detector
+        for record, previous in registry.publish_session_extrema(
+            available5, session_date=session_date, atr=atr,
+        ):
+            aggregate = next(bar for bar in available5 if bar.available_at == record.available_at)
+            if previous is not None and previous.price != record.price:
+                if detector is not None:
+                    for interaction in detector.interactions.values():
+                        if (
+                            interaction.status is not InteractionStatus.ACTIVE
+                            or str(interaction.location) != record.alias
+                        ):
+                            continue
+                        updated = detector.end(
+                            interaction.interaction_id,
+                            available_at=nifty_label(record.available_at),
+                            close_reason=InteractionCloseReason.REFERENCE_REPLACED.value,
+                        )
+                        self.sync_interaction_snapshot(updated)
+                        context.emit({
+                            "kind": "interaction_ended",
+                            "interaction_id": updated.interaction_id,
+                            "location": str(updated.location),
+                            "timeframe": updated.timeframe,
+                            "reference_generation": updated.reference_generation,
+                            "reason": InteractionCloseReason.REFERENCE_REPLACED.value,
+                            "source_observation_id": interaction.reference_provenance.get("source_observation_id"),
+                            "observed_at": aggregate.end_time,
+                            "available_at": aggregate.available_at,
+                        }, bar_events)
+                context.emit({
+                    "kind": "reference_invalidated",
+                    "reference_id": record.alias,
+                    "old_reference_id": previous.location_id,
+                    "old_generation": previous.generation,
+                    "new_reference_id": record.location_id,
+                    "new_generation": record.generation,
+                    "observed_at": record.created_at,
+                    "available_at": record.available_at,
+                }, bar_events)
+            context.emit({
+                "kind": "session_extreme_registered",
+                "location": record.alias,
+                "reference_level": record.price,
+                "observed_at": aggregate.end_time,
+                "available_at": record.available_at,
+                "owner": "5m",
+                "evidence_timeframe": "5m",
+            }, bar_events)
+
     def apply_interaction_transition(
         self,
-        transition: Any,
+        transition: InteractionTransition,
+        current: Aggregate,
         bar_events: list[dict[str, Any]],
     ) -> None:
         """Publish and snapshot one detector transition before evaluation."""
         interaction = transition.interaction
+        self._publish_vwap_response(interaction, current, bar_events)
         self.publish_interaction_context(interaction, bar_events)
         self.sync_interaction_snapshot(interaction)
+
+    def _publish_vwap_response(
+        self, interaction: InteractionSnapshot, current: Aggregate, bar_events: list[dict[str, Any]],
+    ) -> None:
+        """Emit Canonical's VWAP rejection diagnostic from frozen interaction candles."""
+        context = self.host.context
+        interaction_id = interaction.interaction_id
+        if (
+            str(interaction.location) != "VWAP"
+            or interaction_id in context.confirmed_vwap_responses
+            or interaction.pre_contact_side is None
+        ):
+            return
+        for item in interaction.candles[1:]:
+            candle = item.candle
+            confirmed = (
+                interaction.pre_contact_side.value == "BELOW" and candle.close >= interaction.band_low
+            ) or (
+                interaction.pre_contact_side.value == "ABOVE" and candle.close <= interaction.band_high
+            )
+            if not confirmed:
+                continue
+            detector = self.host.interaction_detector
+            source = detector.interactions.get(interaction_id) if detector is not None else None
+            context.emit({
+                "kind": "response_confirmed",
+                "interaction_id": interaction_id,
+                "location": "VWAP",
+                "timeframe": interaction.timeframe,
+                "reference_generation": interaction.reference_generation,
+                "response_status": "CONFIRMED",
+                "response_reason": "causal_vwap_rejection",
+                "source_observation_id": source.reference_provenance.get("source_observation_id") if source else None,
+                "evidence_ids": [nifty_label(candle.time)],
+                "observed_at": candle.end_time,
+                "available_at": candle.available_at,
+                "current_available_at": current.available_at,
+            }, bar_events)
+            context.confirmed_vwap_responses.add(interaction_id)
+            return
 
     def new_formations_for(
         self, clock: datetime | str, *, emitted: set[str],
@@ -533,7 +635,7 @@ class OpportunityCoordinator:
             "short_score": short_score,
         }, bar_events)
         confirmation_evidence = {
-            "context": candle.to_dict(),
+            "context": candle.to_dict(include_labels=False),
             "available_at": candle.available_at,
         }
         ctx.emit({
@@ -728,7 +830,7 @@ class OpportunityCoordinator:
         latest = latest_structure
         new_confirmation_context = latest.time != ctx.last_confirmation_context_time
         confirmation_evidence = {
-            "context": latest.to_dict(),
+            "context": latest.to_dict(include_labels=False),
             "available_at": latest.available_at,
         }
         for interaction in reversed(self.host.structure_interactions()):
@@ -1274,7 +1376,7 @@ class OpportunityCoordinator:
             "short_score": parent.short_score if parent else None,
             "reference_level": life.reference_level,
             "failure_boundary": life.failure_boundary,
-            "context_candle_id": life.context_candle.time if life.context_candle else None,
+            "context_candle_id": nifty_label(life.context_candle.time) if life.context_candle else None,
             "context_candle_reference": candle_reference(life.context_candle) if life.context_candle else None,
             "context_candle_available_at": (
                 life.context_candle.available_at if life.context_candle else None

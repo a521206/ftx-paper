@@ -30,9 +30,7 @@ class Phase4Recorder:
             identity = f"aggregate:{aggregate.timeframe}:{nifty_label(aggregate.time)}"
             if identity in known:
                 continue
-            aggregate_values = aggregate.to_dict()
-            aggregate_values.pop("time_label", None)
-            aggregate_values.pop("end_time_label", None)
+            aggregate_values = aggregate.to_dict(include_labels=False)
             children = tuple(
                 child for child in one_minute
                 if aggregate.timeframe == "5m"

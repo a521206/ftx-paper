@@ -9,6 +9,7 @@ from typing import Sequence
 from .interactions import InteractionSnapshot, InteractionStatus
 from .lifecycle import SetupOpportunity
 from .orderflow_common import Aggregate, canonical_timestamp
+from .timestamps import coerce_timestamp, nifty_label
 
 DEFAULT_OPPORTUNITY_TIMEOUT_UNITS = 6
 
@@ -27,7 +28,10 @@ def advance_opportunity_timeout(opportunity: SetupOpportunity, *, interaction: I
     as_of = canonical_timestamp(as_of)
     snapshots = dict(interaction.synthetic_snapshots).get("5m", ()) if interaction is not None else ()
     active = interaction is not None and interaction.status is InteractionStatus.ACTIVE
-    counted_sources = set(opportunity.timeout_counted_source_ids)
+    counted_sources = {
+        nifty_label(coerce_timestamp(source_id))
+        for source_id in opportunity.timeout_counted_source_ids
+    }
     counted_snapshots = set(opportunity.timeout_counted_snapshot_ids)
     sources: list[str] = []
     snapshots_added: list[str] = []
@@ -57,11 +61,12 @@ def advance_opportunity_timeout(opportunity: SetupOpportunity, *, interaction: I
     for candle in sorted(evidence, key=lambda item: item.available_at):
         if candle.timeframe != "5m" or not opportunity.formation_available_at < candle.available_at <= as_of:
             continue
-        if candle.time in counted_sources:
+        source_id = nifty_label(candle.time)
+        if source_id in counted_sources:
             continue
-        counted_sources.add(candle.time)
-        opportunity.timeout_counted_source_ids.append(candle.time)
-        sources.append(candle.time)
+        counted_sources.add(source_id)
+        opportunity.timeout_counted_source_ids.append(source_id)
+        sources.append(source_id)
         opportunity.timeout_count += 1
         expiry = candle.available_at
         if opportunity.timeout_count >= opportunity.timeout_limit:

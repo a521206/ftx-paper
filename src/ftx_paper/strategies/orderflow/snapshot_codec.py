@@ -21,6 +21,7 @@ from .hierarchy import (
     Permission, PositionManagement, PositionStatus, RegimePermission,
     ResolvedExitRule, StructuralSetup, TradeIntent,
 )
+from .evidence_publication import AtrPublication
 from .interactions import InteractionSnapshot, LocationInteraction
 from .lifecycle import EvidenceRef, LifecycleEvent, SetupOpportunity
 from .location_geometry import LocationBand
@@ -37,6 +38,19 @@ from .timestamps import coerce_timestamp, serialize_utc
 from .templates import Direction, LocationTemplate, TRADE_TEMPLATES
 from .value_publication import PriorSessionValueReference, ValuePublication
 from ftx_paper.risk.trail_stop import TrailConfig, TrailTracker
+
+
+def restore_atr(raw: Any) -> AtrPublication | None:
+    if not isinstance(raw, Mapping):
+        return None
+    return AtrPublication(
+        value=float(raw["value"]) if raw.get("value") is not None else None,
+        observed_at=(coerce_timestamp(raw["observed_at"]) if raw.get("observed_at") else None),
+        available_at=(coerce_timestamp(raw["available_at"]) if raw.get("available_at") else None),
+        source_observation_id=raw.get("source_observation_id"),
+        lineage=tuple(raw.get("lineage", ())),
+        unavailable_reason=raw.get("unavailable_reason"),
+    )
 
 
 def snapshot_value(value: Any) -> Any:

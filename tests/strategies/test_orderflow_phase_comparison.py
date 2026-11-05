@@ -457,3 +457,33 @@ def test_pd_role_context_uses_post_contact_evidence_and_has_context_identity() -
         for item in context.events
     )
     assert "interaction_response" not in context.parity_snapshot()
+
+
+def test_producer_event_identity_matches_canonical_across_timestamp_forms() -> None:
+    event = {
+        "kind": "interaction_context_published",
+        "interaction_id": "NIFTY:2026-10-05:OR_HIGH:1m:2026-10-05T09:19",
+        "observed_at": "2026-10-05T09:19",
+        "available_at": "2026-10-05T09:20",
+    }
+    expected = "niftyzoning:derived:cf89d292bfd75b2f06c553ffc1992287857de59f290180bb73157cb2b3b6caf4"
+    for observed, available in (
+        ("2026-10-05T09:19", "2026-10-05T09:20"),
+        (datetime(2026, 10, 5, 3, 49, tzinfo=timezone.utc),
+         datetime(2026, 10, 5, 3, 50, tzinfo=timezone.utc)),
+    ):
+        context = OrderflowState(
+            location_registry=LocationRegistry("test"),
+            execution_engine=ExecutionEngine(),
+            current_session_date="2026-10-05",
+        )
+        events: list[dict[str, Any]] = []
+        context.emit({**event, "observed_at": observed, "available_at": available}, events)
+        assert events[0]["neutral_event_key"] == expected
+        context.record_event({
+            "kind": "location_interaction_observed",
+            "interaction_id": event["interaction_id"],
+            "observed_at": observed,
+            "available_at": available,
+        })
+        assert context.events[-1]["causal_parent_key"] == expected

@@ -7,8 +7,9 @@ levels, ATR, VWAP, locations, or child observations.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 import hashlib
 from typing import Any
 
@@ -20,7 +21,7 @@ from .timestamps import coerce_timestamp, nifty_label
 from .state_machine_types import LocationRegistry, SessionLevels
 from .value_publication import PriorSessionValueReference, ValuePublication
 from .vwap_location import VwapMeasurement
-from .snapshot_codec import restore_aggregate
+from .snapshot_codec import restore_aggregate, restore_atr
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,25 +110,12 @@ class OrderflowCoordinator:
             if isinstance(item, list) and len(item) == 2
         }
         latest_atr = raw.get("latest_atr")
-        self.latest_atr = self._restore_atr(latest_atr)
+        self.latest_atr = restore_atr(latest_atr)
         latest_value = raw.get("latest_prior_value")
         self.latest_prior_value = self._restore_value(latest_value)
         self.detector.restore_state(
             raw.get("detector", {}),
             source_candles={"1m": self._one_minute, "5m": self._five_minute},
-        )
-
-    @staticmethod
-    def _restore_atr(raw: Any) -> AtrPublication | None:
-        if not isinstance(raw, Mapping):
-            return None
-        return AtrPublication(
-            value=float(raw["value"]) if raw.get("value") is not None else None,
-            observed_at=(coerce_timestamp(raw["observed_at"]) if raw.get("observed_at") else None),
-            available_at=(coerce_timestamp(raw["available_at"]) if raw.get("available_at") else None),
-            source_observation_id=raw.get("source_observation_id"),
-            lineage=tuple(raw.get("lineage", ())),
-            unavailable_reason=raw.get("unavailable_reason"),
         )
 
     @staticmethod
@@ -193,13 +181,15 @@ class OrderflowCoordinator:
             five_id = f"aggregate:{five.timeframe}:{nifty_label(five.time)}"
             if five_id not in {f"aggregate:5m:{nifty_label(bar.time)}" for bar in self._five_minute}:
                 self._five_minute.append(five)
-                if atr is not None:
-                    self.location_registry.publish_session_extrema(
-                        tuple(self._five_minute), session_date=five.session_date, atr=atr,
-                    )
+        return OrderflowAdvance(tuple(events), ())
+
+    def publish_vwap(self, item: OrderflowInput, *, as_of: datetime) -> None:
+        """Publish causally visible VWAP references after session extrema."""
+        one = item.one_minute
+        atr = item.atr.value if item.atr is not None else None
         if atr is not None and self._five_minute:
             for measurement in item.vwap_measurements:
-                if measurement.available_at > one.available_at:
+                if measurement.available_at > as_of:
                     continue
                 vwap_identity = (
                     measurement.timeframe,
@@ -217,7 +207,6 @@ class OrderflowCoordinator:
                     atr=atr,
                 )
                 self._vwap_published.add(vwap_identity)
-        return OrderflowAdvance(tuple(events), ())
 
     def observe_interactions(
         self,
@@ -227,6 +216,7 @@ class OrderflowCoordinator:
         available1: Sequence[Aggregate] | None = None,
         available5: Sequence[Aggregate] | None = None,
         input_diagnostics: list[dict[str, Any]] | None = None,
+        on_transition: Callable[[InteractionTransition, Aggregate, tuple[dict[str, Any], ...]], None] | None = None,
     ) -> OrderflowAdvance:
         """Evaluate location interactions after permission/context processing."""
         one = item.one_minute
@@ -340,7 +330,12 @@ class OrderflowCoordinator:
                 observations=current_observations_1m,
             ))
         for transition in transitions:
-            events.extend(self._transition_events(transition, one))
+            five = item.five_minute
+            current = five if new_five_minute and five is not None and transition.interaction.timeframe == "5m" else one
+            emitted = self._transition_events(transition, current)
+            if on_transition is not None:
+                on_transition(transition, current, emitted)
+            events.extend(emitted)
         return OrderflowAdvance(tuple(events), tuple(transitions))
 
     @staticmethod
@@ -395,7 +390,7 @@ class OrderflowCoordinator:
                 ),
                 "source_observation_id": provenance.source_observation_id if provenance else None,
                 "stage": "OBSERVING_LOCATION",
-                "evidence": [transition.interaction.creation_candle.to_dict()],
+                "evidence": [transition.interaction.creation_candle.to_dict(include_labels=False)],
                 "observed_at": clock.end_time,
                 "available_at": clock.available_at,
             })

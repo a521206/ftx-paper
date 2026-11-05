@@ -73,7 +73,7 @@ class Aggregate:
         if self.available_at < self.end_time:
             raise ValueError("aggregate availability cannot precede completion")
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, *, include_labels: bool = True) -> dict[str, Any]:
         result = {name: getattr(self, name) for name in (
             "timeframe", "source_bar_count",
             "open", "high", "low", "close", "volume", "symbol", "expiry",
@@ -83,9 +83,10 @@ class Aggregate:
             "time": serialize_utc(self.time),
             "end_time": serialize_utc(self.end_time),
             "available_at": serialize_utc(self.available_at),
-            "time_label": nifty_label(self.time),
-            "end_time_label": nifty_label(self.end_time),
         })
+        if include_labels:
+            result["time_label"] = nifty_label(self.time)
+            result["end_time_label"] = nifty_label(self.end_time)
         return result
 
 

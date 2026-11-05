@@ -1,4 +1,8 @@
+import json
+from dataclasses import replace
 from types import SimpleNamespace
+
+import pytest
 
 from ftx_paper.strategies.orderflow.opportunity_replay_host import build_opportunity_coordinator
 from ftx_paper.strategies.orderflow.orderflow_common import Aggregate
@@ -10,6 +14,10 @@ from ftx_paper.strategies.orderflow.coordinator import OrderflowInput
 from ftx_paper.strategies.orderflow.transition import OrderflowEngine
 from ftx_paper.strategies.orderflow.opportunity_coordinator import OpportunityCoordinator
 from ftx_paper.strategies.orderflow.phase4 import ContextPublisher
+from ftx_paper.strategies.orderflow.lifecycle import SetupOpportunity
+from ftx_paper.strategies.orderflow.evidence_publication import AtrPublication
+from ftx_paper.strategies.orderflow.opportunity_timeout import advance_opportunity_timeout
+from ftx_paper.strategies.orderflow.timestamps import coerce_timestamp
 from ftx_paper.strategies.orderflow.execution import AdmissionStatus, IntentStatus
 from ftx_paper.strategies.orderflow.execution_clock import intent_allows_requalification
 
@@ -158,7 +166,7 @@ def test_transition_publishes_current_one_minute_aggregates_to_context() -> None
 
 def test_transition_publishes_ordinary_context_before_structure(monkeypatch) -> None:
     one_minute = Aggregate(
-        "2026-10-01T09:20", "2026-10-01T09:20", "2026-10-01T09:21",
+        "2026-10-01T09:19", "2026-10-01T09:19", "2026-10-01T09:20",
         "1m", 1, 100.0, 101.0, 99.0, 100.5, 100,
         "NIFTY", "", "2026-10-01", "one-minute",
     )
@@ -168,6 +176,7 @@ def test_transition_publishes_ordinary_context_before_structure(monkeypatch) -> 
         "NIFTY", "", "2026-10-01", "five-minute",
     )
     transition = OrderflowEngine(LocationRegistry("test"))
+    transition.context.atr_by_session = {"2026-10-01": 20.0}
     calls: list[str] = []
 
     detector_type = type(transition.observation_owner.detector)
@@ -217,7 +226,18 @@ def test_transition_publishes_ordinary_context_before_structure(monkeypatch) -> 
     )
 
     transition.advance(OrderflowInput(one_minute, five_minute=five_minute))
+    assert "ordinary_context" not in calls
+    assert "observe" not in calls
+    calls.clear()
 
+    next_bar = Aggregate(
+        "2026-10-01T09:20", "2026-10-01T09:20", "2026-10-01T09:21",
+        "1m", 1, 100.5, 102.0, 100.0, 101.5, 100,
+        "NIFTY", "", "2026-10-01", "next-minute",
+    )
+    transition.advance(OrderflowInput(next_bar))
+
+    assert calls.index("ordinary_context") < calls.index("observe")
     assert calls.index("observe") < calls.index("source_observations")
     assert calls.index("observe") < calls.index("context_location")
     assert calls.index("source_observations") < calls.index("structure")
@@ -268,3 +288,74 @@ def test_episode_promotion_is_idempotent_and_invalidates_competitor() -> None:
     assert invalidations == [(competing, "opposing_episode_confirmed")]
     assert [event["kind"] for event in events] == ["episode_confirmed"]
     assert [event["kind"] for event in bar_events] == ["episode_confirmed"]
+
+
+def test_checkpoint_continuation_preserves_pending_completed_bar() -> None:
+    first = Aggregate(
+        "2026-10-01T09:19", "2026-10-01T09:19", "2026-10-01T09:20",
+        "1m", 1, 100.0, 101.0, 99.0, 100.5, 100,
+        "NIFTY", "", "2026-10-01", "first-minute",
+    )
+    original = OrderflowEngine(LocationRegistry("test"))
+    prior = replace(
+        first, time="2026-10-01T09:18", end_time="2026-10-01T09:18",
+        available_at="2026-10-01T09:19", source_fingerprint="prior-minute",
+    )
+    atr = AtrPublication(20.0, prior.time, prior.available_at, "prior-atr", ("prior-source",))
+    original.advance(OrderflowInput(prior, atr=atr))
+    original.advance(OrderflowInput(first))
+    restored = OrderflowEngine(LocationRegistry("test"))
+    restored.restore_snapshot(json.loads(json.dumps(original.snapshot())))
+    assert restored.snapshot() == original.snapshot()
+    following = OrderflowInput(replace(
+        first, time="2026-10-01T09:20", end_time="2026-10-01T09:20",
+        available_at="2026-10-01T09:21", source_fingerprint="second-minute",
+    ))
+    original.advance(following)
+    restored.advance(following)
+    assert restored.snapshot() == original.snapshot()
+
+
+def test_timeout_fallback_does_not_recount_a_projection_source_candle() -> None:
+    candle = Aggregate(
+        "2026-10-01T11:00", "2026-10-01T11:04", "2026-10-01T11:05",
+        "5m", 5, 100.0, 102.0, 99.0, 101.0, 500,
+        "NIFTY", "", "2026-10-01", "counted-source",
+    )
+    life = SetupOpportunity(
+        lifecycle_id="opportunity",
+        direction=Direction.LONG,
+        session_date="2026-10-01",
+        instrument="NIFTY",
+        strategy="orderflow",
+        formation_at=coerce_timestamp("2026-10-01T10:54"),
+        formation_available_at=coerce_timestamp("2026-10-01T10:55"),
+        candidate_id="candidate",
+        parent_context=None,
+        location="SESSION_LOW",
+        reference_level=100.0,
+        context_candle=None,
+        breakout_level=101.0,
+        failure_boundary=99.0,
+        timeout_count=5,
+        timeout_counted_source_ids=["2026-10-01T11:00"],
+    )
+    for source_id in ("2026-10-01T11:00", "2026-10-01T05:30:00.000000Z"):
+        opportunity = replace(life, timeout_counted_source_ids=[source_id])
+        advance = advance_opportunity_timeout(
+            opportunity, interaction=None, evidence=[candle], as_of="2026-10-01T11:05",
+        )
+        assert opportunity.timeout_count == 5
+        assert advance.added_units == 0
+        assert opportunity.timeout_counted_source_ids == [source_id]
+
+
+def test_session_extrema_require_frozen_atr() -> None:
+    engine = OrderflowEngine(LocationRegistry("test"))
+    five = Aggregate(
+        "2026-10-01T09:15", "2026-10-01T09:19", "2026-10-01T09:20",
+        "5m", 5, 100.0, 102.0, 99.0, 101.0, 500,
+        "NIFTY", "", "2026-10-01", "five-minute",
+    )
+    with pytest.raises(ValueError, match="location bands require a frozen ATR"):
+        engine.opportunity_owner.publish_session_extrema([five], five.session_date, [])
