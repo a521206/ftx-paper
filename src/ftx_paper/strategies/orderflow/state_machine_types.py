@@ -493,6 +493,7 @@ class OrderflowState:
         ) + tuple(value for pair in causal_ids for value in pair)
         ordinal = self.neutral_event_ordinals.get(ordinal_key, 0)
         self.neutral_event_ordinals[ordinal_key] = ordinal + 1
+        event_basis["same_clock_ordinal"] = ordinal
         if str(event_data["event_id"]).startswith("replay:"):
             neutral_event_key = "niftyzoning:derived:" + hashlib.sha256(
                 json.dumps(event_basis, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
@@ -500,12 +501,17 @@ class OrderflowState:
         else:
             neutral_event_key = "niftyzoning:event:" + hashlib.sha256(
                 json.dumps(
-                    {"event_id": event_data["event_id"], "basis": event_basis},
+                    {
+                        "event_id": event_data["event_id"],
+                        "basis": {
+                            key: value for key, value in event_basis.items()
+                            if key != "same_clock_ordinal"
+                        },
+                        "lifecycle_sequence": event_data.get("lifecycle_sequence"),
+                    },
                     sort_keys=True, separators=(",", ":"), default=str,
                 ).encode("utf-8")
             ).hexdigest()
-        if ordinal:
-            neutral_event_key = f"{neutral_event_key}:occurrence-{ordinal}"
         event_data.setdefault("neutral_event_key", neutral_event_key)
         parent_ref = next(
             ((name, event_data.get(name)) for name in (
@@ -754,6 +760,7 @@ class OrderflowState:
         ) + tuple(value for pair in causal_ids for value in pair)
         ordinal = self.neutral_event_ordinals.get(ordinal_key, 0)
         self.neutral_event_ordinals[ordinal_key] = ordinal + 1
+        event_basis["same_clock_ordinal"] = ordinal
         if str(payload["event_id"]).startswith("replay:"):
             neutral_event_key = "niftyzoning:derived:" + hashlib.sha256(
                 json.dumps(event_basis, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
@@ -761,12 +768,17 @@ class OrderflowState:
         else:
             neutral_event_key = "niftyzoning:event:" + hashlib.sha256(
                 json.dumps(
-                    {"event_id": payload["event_id"], "basis": event_basis},
+                    {
+                        "event_id": payload["event_id"],
+                        "basis": {
+                            key: value for key, value in event_basis.items()
+                            if key != "same_clock_ordinal"
+                        },
+                        "lifecycle_sequence": payload.get("lifecycle_sequence"),
+                    },
                     sort_keys=True, separators=(",", ":"), default=str,
                 ).encode("utf-8")
             ).hexdigest()
-        if ordinal:
-            neutral_event_key = f"{neutral_event_key}:occurrence-{ordinal}"
         payload.setdefault("neutral_event_key", neutral_event_key)
         parent_ref = next(
             ((name, payload.get(name)) for name in (

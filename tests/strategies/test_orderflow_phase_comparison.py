@@ -449,6 +449,9 @@ def test_pd_role_context_uses_post_contact_evidence_and_has_context_identity() -
     assert role_event["role"] == "SUPPORT"
     assert role_event["context_id"] == f"interaction:{interaction.interaction_id}"
     assert role_event["context_version"] == "v1"
+    assert sum(
+        item["kind"] == "interaction_context_published" for item in events
+    ) == 1
     assert any(
         item["kind"] == "role_context_available"
         for item in context.events

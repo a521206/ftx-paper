@@ -669,13 +669,28 @@ class OrderflowEngine:
         )
 
     def finalize_terminal_evidence(self, item: OrderflowInput) -> None:
-        """Publish the final candle that becomes available after the last decision clock."""
-        self._phase4.source_observations((item.one_minute,))
-        self._phase4.context_location(
-            item, timeframe="1m", observations=item.observations_1m,
+        """Publish every aggregate that closes after the final decision clock."""
+        decision_at = coerce_timestamp(item.one_minute.time)
+        terminal = sorted(
+            (
+                aggregate
+                for timeframe in ("1m", "5m")
+                for aggregate in (
+                    self.observation_owner.one_minute_aggregates
+                    if timeframe == "1m"
+                    else self.observation_owner.five_minute_aggregates
+                )
+                if aggregate.session_date == item.one_minute.session_date
+                and coerce_timestamp(aggregate.available_at) > decision_at
+            ),
+            key=lambda aggregate: (aggregate.available_at, aggregate.timeframe, aggregate.time),
         )
-        if item.five_minute is not None:
-            self._phase4.source_observations((item.five_minute,))
+        self._phase4.source_observations(terminal)
+        if item.one_minute in terminal:
+            self._phase4.context_location(
+                item, timeframe="1m", observations=item.observations_1m,
+            )
+        if item.five_minute is not None and item.five_minute in terminal:
             self._phase4.context_location(
                 item, timeframe="5m", observations=item.observations_5m,
             )

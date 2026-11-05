@@ -1148,7 +1148,6 @@ class ReplayWorker:
             )
         runtime.finalize_terminal_evidence()
 
-        snapshot = runtime.snapshot()
         input_manifest = self.input_manifest(
             session_date, rows=rows, bars=replay_bars, futures_source=futures_source,
         )
@@ -1204,6 +1203,8 @@ class ReplayWorker:
             "extensions": {},
         }
         orderflow_payload = dict(cast(dict[str, Any], runtime.parity_payload(replay_rows)))
+        # Keep replay reports bounded; live recovery persists full snapshots separately.
+        orderflow_payload.pop("input_diagnostics", None)
         orderflow_payload["records"] = list(events)
         orderflow_payload["replay_records"] = _source_replay_records(
             replay_bars, session_date,
@@ -1245,7 +1246,6 @@ class ReplayWorker:
                     "ftx-paper-orderflow": {
                         **report["extensions"]["ftx-paper-orderflow"],
                         "metadata": metadata,
-                        "strategy_snapshot": snapshot,
                     },
                 },
             },

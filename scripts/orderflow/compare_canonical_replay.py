@@ -1185,10 +1185,23 @@ def compare_date(
             if phase35.get("status") == "MATCHED" and canonical_path is not None and paper_replay is not None
             else {"status": "UNAVAILABLE", "stream": "source_observation", "reason": "phase3_5_gate_not_accepted"}
         )
+        if canonical_path is not None and paper_replay is not None:
+            phase45_comparison = _compare_phase45(canonical_path, paper_replay, session_date)
+        else:
+            phase45_comparison = {
+                "status": "INCOMPLETE",
+                "stream": "interaction_response",
+                "reason": "replay_artifact_unavailable",
+            }
         phase45 = (
-            _compare_phase45(canonical_path, paper_replay, session_date)
-            if phase4.get("status") == "MATCHED" and canonical_path is not None and paper_replay is not None
-            else {"status": "UNAVAILABLE", "stream": "interaction_response", "reason": "phase4_gate_not_accepted"}
+            phase45_comparison
+            if phase4.get("status") == "MATCHED"
+            else {
+                "status": "UNAVAILABLE",
+                "stream": "interaction_response",
+                "reason": "phase4_gate_not_accepted",
+                "diagnostic": phase45_comparison,
+            }
         )
         phase6 = (
             _compare_phase6(canonical_path, paper_replay, session_date)
