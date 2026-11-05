@@ -21,7 +21,7 @@ from .execution import ExecutionHost, ExecutionCoordinator, ExecutionState
 from .execution_adapter import OrderflowExecutionAdapter, PaperOrderProposal
 from .contextual import build_context_scores
 from .context_access import DecisionContextAccess
-from .hierarchy import TriggerObservation
+from .hierarchy import RegimePermission, TriggerObservation
 from .lifecycle import SetupOpportunity
 from .opportunity_coordinator import LifecycleFormation, OpportunityCoordinator
 from .state_machine_types import (
@@ -552,8 +552,8 @@ class OrderflowEngine:
         item: OrderflowInput,
         *,
         formations: Sequence[LifecycleFormation] = (),
-        regime: Any = None,
-        regime_publications: Sequence[tuple[str, Any]] = (),
+        regime: RegimePermission | None = None,
+        regime_publications: Sequence[tuple[str, RegimePermission]] = (),
         triggers: Mapping[str, TriggerObservation] | None = None,
         bar_opens: Mapping[str, float] | None = None,
         decision_scores: Mapping[str, tuple[float | None, float | None]] | None = None,
@@ -685,7 +685,7 @@ class OrderflowEngine:
         item: OrderflowInput,
         *,
         available_at: datetime,
-        regime: Any,
+        regime: RegimePermission | None,
         constraints: ExecutionConstraints | None,
     ) -> tuple[
         OrderflowAdvance,
@@ -1046,8 +1046,8 @@ class OrderflowEngine:
         self,
         accepted_formations: Sequence[LifecycleFormation],
         *,
-        regime: Any,
-        regime_publications: Sequence[tuple[str, Any]],
+        regime: RegimePermission | None,
+        regime_publications: Sequence[tuple[str, RegimePermission]],
         triggers: Mapping[str, TriggerObservation] | None,
         bar_opens: Mapping[str, float] | None,
         decision_scores: Mapping[str, tuple[float | None, float | None]] | None,

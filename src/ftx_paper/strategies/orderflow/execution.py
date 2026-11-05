@@ -7,13 +7,14 @@ from copy import copy
 from datetime import datetime
 from enum import StrEnum
 from collections.abc import Mapping
-from typing import Any, Protocol
+from typing import Any, Protocol, Sequence
 
 from .hierarchy import (
     ExitIntent,
     IntentStatus,
     PositionManagement,
     PositionStatus,
+    RegimePermission,
     ResolvedExitRule,
     TradeIntent,
     TriggerObservation,
@@ -1488,6 +1489,7 @@ class ExecutionCoordinator:
             return
         assert setup is not None
         regime = self.context.regime
+        assert regime is not None
         intent = arm_intent(
             intent=TradeIntent(
                 f"intent-{life.lifecycle_id}",
@@ -1657,10 +1659,10 @@ class ExecutionCoordinator:
         formations: tuple[Any, ...],
         *,
         decision_at: str,
-        regime: Any = None,
-        regime_publications: Any = (),
-        triggers: Any = None,
-        bar_opens: Any = None,
+        regime: RegimePermission | None = None,
+        regime_publications: Sequence[tuple[str, RegimePermission]] = (),
+        triggers: Mapping[str, TriggerObservation] | None = None,
+        bar_opens: Mapping[str, float] | None = None,
         decision_scores: Any = None,
         constraints: Any = None,
     ) -> dict[str, list[dict[str, Any]]]:

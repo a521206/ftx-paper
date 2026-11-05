@@ -7,10 +7,10 @@ from enum import StrEnum
 from enum import Enum
 import hashlib
 import json
-from typing import Any, Iterable, Mapping, Sequence, cast
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence, cast
 from datetime import datetime
 
-from .hierarchy import ContextVersionRef, MarketContext, ContextObservation
+from .hierarchy import ContextVersionRef, MarketContext, ContextObservation, RegimePermission
 from .parity_artifacts import PHASE_STREAMS
 from .location_geometry import BAND_ATR_FRACTION, LocationBand
 from .orderflow_common import (
@@ -26,6 +26,9 @@ from .lifecycle import EvidenceRef, LifecycleEvent, LifecycleStage, OpportunityS
 from .opportunity import DirectionalResponse, OpportunityOutcome, OpportunityOutcomeStatus  # noqa: F401
 from .templates import Direction
 from .hierarchy import TriggerObservation
+
+if TYPE_CHECKING:
+    from .execution import ExecutionEngine
 
 _EXECUTION_DIAGNOSTIC_KINDS = frozenset({
     "intent_armed", "trigger_observation", "execution_proposal_created",
@@ -367,9 +370,10 @@ class OrderflowState:
     aggregates: dict[str, list[Aggregate]] = field(default_factory=dict)
     market_contexts: MarketContextStore = field(default_factory=MarketContextStore)
     location_registry: LocationRegistry | None = None
-    regime: Any = None
+    regime: RegimePermission | None = None
     execution_constraints: "ExecutionConstraints" = field(default_factory=lambda: ExecutionConstraints())
-    execution_engine: Any = None
+    # Injected by the transition owner and validated in __post_init__.
+    execution_engine: "ExecutionEngine" = None  # type: ignore[assignment]
     opportunities: dict[str, SetupOpportunity] = field(default_factory=dict)
     execution_proposals: list["CanonicalExecutionProposal"] = field(default_factory=list)
     parity_streams: dict[str, list[dict[str, Any]]] = field(default_factory=dict)

@@ -9,6 +9,7 @@ from ftx_paper.contracts import Instrument
 from ftx_paper.execution.entry_fill import entry_fill_decision
 
 from .execution import AdmissionStatus, IntentStatus
+from .hierarchy import RegimePermission, TriggerObservation
 from .opportunity_coordinator import LifecycleFormation
 from .timestamps import coerce_timestamp
 
@@ -72,9 +73,9 @@ class ExecutionClock:
         self,
         formations: Sequence[LifecycleFormation],
         *,
-        regime: Any,
-        regime_publications: Sequence[tuple[str, Any]],
-        triggers: Mapping[str, Any] | None,
+        regime: RegimePermission | None,
+        regime_publications: Sequence[tuple[str, RegimePermission]],
+        triggers: Mapping[str, TriggerObservation] | None,
         bar_opens: Mapping[str, float] | None,
         decision_scores: Mapping[str, tuple[float | None, float | None]] | None,
         constraints: Any,
