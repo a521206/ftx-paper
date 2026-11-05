@@ -267,7 +267,7 @@ def test_orderflow_snapshot_rejects_transient_execution_proposals() -> None:
 
 
 def test_live_checkpoint_restores_cursor_and_skips_replayed_bar(tmp_path) -> None:
-    instrument = Instrument("NIFTY", "NFO", "FUTURES")
+    instrument = Instrument("NIFTY26NOVFUT", "NFO", "FUTURES", "2026-11-26")
     bar = MarketBar(
         instrument=instrument,
         timestamp=datetime(2026, 10, 1, 4, 0, tzinfo=timezone.utc),

@@ -1388,7 +1388,9 @@ class RuntimeSession:
                 }
                 return
             expired = tuple(self._aggregator.expire(now=time.monotonic()))
-            bundle = self._aggregator.ingest(bar)
+            # The live feed carries the selected dated futures contract, while
+            # the aggregator is keyed to the canonical continuous NIFTY role.
+            bundle = self._aggregator.ingest(virtual_continuous_bar(bar))
             for incomplete in expired:
                 self._record_incomplete(incomplete)
             def execute_exit(action):
