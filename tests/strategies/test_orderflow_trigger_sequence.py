@@ -358,4 +358,22 @@ def test_session_extrema_require_frozen_atr() -> None:
         "NIFTY", "", "2026-10-01", "five-minute",
     )
     with pytest.raises(ValueError, match="location bands require a frozen ATR"):
-        engine.opportunity_owner.publish_session_extrema([five], five.session_date, [])
+        engine.location_registry.publish_session_extrema([five], session_date=five.session_date)
+
+
+def test_session_extrema_publication_waits_for_frozen_atr() -> None:
+    engine = OrderflowEngine(LocationRegistry("test"))
+    five = Aggregate(
+        "2026-10-01T09:15", "2026-10-01T09:19", "2026-10-01T09:20",
+        "5m", 5, 100.0, 102.0, 99.0, 101.0, 500,
+        "NIFTY", "", "2026-10-01", "five-minute",
+    )
+
+    engine.opportunity_owner.publish_session_extrema([five], five.session_date, [])
+    assert engine.location_registry.records == {}
+
+    engine.context.atr_by_session = {five.session_date: 1.0}
+    engine.opportunity_owner.publish_session_extrema([five], five.session_date, [])
+    assert {record.alias for record in engine.location_registry.records.values()} == {
+        "SESSION_HIGH", "SESSION_LOW",
+    }

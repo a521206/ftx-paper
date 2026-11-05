@@ -238,6 +238,11 @@ class OpportunityCoordinator:
         atr = context.atr_by_session.get(session_date)
         if registry is None:
             return
+        # Session extrema are replayed before asynchronous ATR publication can
+        # arrive. Defer them so the next bundle can publish the accumulated
+        # causal extrema with the required frozen band width.
+        if atr is None:
+            return
         detector = self.host.interaction_detector
         for record, previous in registry.publish_session_extrema(
             available5, session_date=session_date, atr=atr,
